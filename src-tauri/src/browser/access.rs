@@ -23,6 +23,15 @@ use tokio::sync::{Mutex, mpsc};
 
 use super::{Browser, ops};
 
+/// 一帧画面。
+#[derive(Debug, Clone)]
+pub struct Frame {
+    /// base64 的 JPEG。直接能塞进 `<img src="data:image/jpeg;base64,...">`。
+    pub data: String,
+    pub width: u32,
+    pub height: u32,
+}
+
 pub struct HostBrowser {
     /// `.app` 的位置。
     app: PathBuf,
@@ -30,6 +39,8 @@ pub struct HostBrowser {
     profile: PathBuf,
     /// 起好的进程。第一次用到时填上。
     inner: Mutex<Option<Arc<Browser>>>,
+    /// 画面出口。面板打开时装上，关闭时摘掉。
+    frames: Arc<Mutex<Option<mpsc::UnboundedSender<Frame>>>>,
 }
 
 impl HostBrowser {
@@ -38,7 +49,46 @@ impl HostBrowser {
             app,
             profile,
             inner: Mutex::new(None),
+            frames: Arc::default(),
         }
+    }
+
+    /// 开始把画面推到 `sink`。
+    ///
+    /// `[取舍]` 用 CDP 的 screencast 而不是自己搬 OSR 的像素。
+    ///
+    /// OSR 给的是 1280×800 的 BGRA，一帧 4MB；screencast 给的是 JPEG，
+    /// 同样内容一帧一两百 KB —— 小二十倍，而且编码由 Chromium 做，
+    /// 我们连共享内存都不用碰。代价是有损压缩，但面板是给人看的，
+    /// 模型要精确像素时走 BrowserScreenshot（那条是 PNG）。
+    pub async fn start_screencast(
+        &self,
+        sink: mpsc::UnboundedSender<Frame>,
+    ) -> Result<(), BrowserUnavailable> {
+        let b = self.get().await?;
+        *self.frames.lock().await = Some(sink);
+        b.cdp(
+            "Page.startScreencast",
+            serde_json::json!({
+                "format": "jpeg",
+                // 60 在文字页面上已经看不出压缩痕迹，再高只是白涨体积。
+                "quality": 60,
+                "maxWidth": 1600,
+                "maxHeight": 1000,
+            }),
+        )
+        .await
+        .map_err(|e| BrowserUnavailable(e.to_string()))?;
+        Ok(())
+    }
+
+    /// 停止推送。面板关掉时调 —— 没人看的时候继续编码 JPEG 是白烧 CPU。
+    pub async fn stop_screencast(&self) {
+        *self.frames.lock().await = None;
+        let Some(b) = self.inner.lock().await.clone() else {
+            return;
+        };
+        let _ = b.cdp("Page.stopScreencast", serde_json::json!({})).await;
     }
 
     /// 拿到浏览器，没起来就起。
@@ -57,9 +107,12 @@ impl HostBrowser {
             .await
             .map_err(|e| BrowserUnavailable(e.to_string()))?;
 
-        // 事件流必须一直有人排空 —— 通道是无界的，帧事件会持续来。
-        // 目前只用来等 Ready，之后面板会接到这里。
+        let browser = Arc::new(browser);
+
+        // 事件流必须一直有人排空 —— 通道是无界的，事件会持续来。
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let acker = Arc::clone(&browser);
+        let frames = Arc::clone(&self.frames);
         tokio::spawn(async move {
             let mut ready = Some(ready_tx);
             while let Some(ev) = rx.recv().await {
@@ -72,8 +125,12 @@ impl HostBrowser {
                     Event::Error { message } => {
                         tracing::warn!(message, "浏览器报错");
                     }
-                    // 帧和加载事件目前没人要，读掉即可。面板做好之后
-                    // 这里转发出去。
+                    Event::Cdp { payload } => {
+                        handle_cdp_event(&acker, &frames, &payload).await;
+                    }
+                    // OSR 的帧元数据现在没人用 —— 画面走 screencast。
+                    // 留着不删是因为它是"渲染还活着"的独立信号，
+                    // screencast 卡住时能用来分清是编码还是渲染的问题。
                     _ => {}
                 }
             }
@@ -86,7 +143,6 @@ impl HostBrowser {
             .map_err(|_| BrowserUnavailable("浏览器 30 秒内没有就绪".into()))?
             .map_err(|_| BrowserUnavailable("浏览器启动过程中退出了".into()))?;
 
-        let browser = Arc::new(browser);
         // console 钩子要在任何导航之前装 —— 页面加载期间的报错最有价值，
         // 那时候没装就永远抓不到。
         if let Err(e) = ops::install_console_hook(&browser).await {
@@ -140,6 +196,48 @@ impl BrowserAccess for HostBrowser {
         .ok()
         .and_then(|v| v["result"]["value"].as_str().map(ToOwned::to_owned))
         .unwrap_or_default()
+    }
+}
+
+/// 处理不带 id 的 CDP 事件。目前只有 screencast 的帧。
+async fn handle_cdp_event(
+    browser: &Arc<Browser>,
+    frames: &Arc<Mutex<Option<mpsc::UnboundedSender<Frame>>>>,
+    payload: &serde_json::Value,
+) {
+    if payload.get("method").and_then(|m| m.as_str()) != Some("Page.screencastFrame") {
+        return;
+    }
+    let params = &payload["params"];
+
+    // `[约束]` 必须 ack，而且要无条件 ack。
+    //
+    // Chromium 只在上一帧被确认后才发下一帧。漏一次 ack，画面就永久停在
+    // 那一帧 —— 而且不报错，看起来像页面卡住了。所以哪怕下面的转发失败
+    // 也要先把这条发出去。
+    if let Some(sid) = params.get("sessionId") {
+        let _ = browser.cdp_no_wait(
+            "Page.screencastFrameAck",
+            serde_json::json!({ "sessionId": sid }),
+        );
+    }
+
+    let Some(sink) = frames.lock().await.clone() else {
+        return; // 面板没开，帧丢掉
+    };
+    let Some(data) = params["data"].as_str() else {
+        return;
+    };
+    let meta = &params["metadata"];
+    let frame = Frame {
+        data: data.to_owned(),
+        width: meta["deviceWidth"].as_f64().unwrap_or_default() as u32,
+        height: meta["deviceHeight"].as_f64().unwrap_or_default() as u32,
+    };
+    // 发失败说明面板那头没了，摘掉出口顺便停推送。
+    if sink.send(frame).is_err() {
+        *frames.lock().await = None;
+        let _ = browser.cdp_no_wait("Page.stopScreencast", serde_json::json!({}));
     }
 }
 

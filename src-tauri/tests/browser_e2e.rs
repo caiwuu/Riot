@@ -277,6 +277,112 @@ async fn 工具层能真的驱动浏览器() {
     assert!(url.starts_with("data:"), "当前地址应当是刚打开的那个：{url}");
 }
 
+/// 探路:CDP 的 screencast 在离屏渲染下能不能出帧。
+///
+/// 如果能，面板的画面通道就不需要共享内存 —— Chromium 直接给 JPEG，
+/// 比原始 BGRA 小二十倍，而且编码是它自己做的。这决定了下一步的架构，
+/// 所以先花一个用例问清楚。
+#[tokio::test]
+async fn screencast_在离屏模式下能出帧() {
+    let Some(app) = bundle() else {
+        eprintln!("跳过：还没打包");
+        return;
+    };
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let browser = Browser::spawn(app, Some(profile("cast")), tx)
+        .await
+        .expect("起浏览器");
+    wait_for(&mut rx, 30, "ready", |e| matches!(e, Event::Ready)).await;
+
+    ops::navigate(
+        &browser,
+        "data:text/html;charset=utf-8,<body style='background:%23c00'><h1>CAST</h1></body>",
+    )
+    .await
+    .expect("导航");
+
+    browser
+        .cdp(
+            "Page.startScreencast",
+            serde_json::json!({
+                "format": "jpeg",
+                "quality": 60,
+                "maxWidth": 1280,
+                "maxHeight": 800,
+            }),
+        )
+        .await
+        .expect("开 screencast");
+
+    // screencastFrame 是不带 id 的 CDP 事件，走事件流。
+    let ev = wait_for(&mut rx, 30, "screencast 帧", |e| {
+        matches!(e, Event::Cdp { payload }
+            if payload.get("method").and_then(|m| m.as_str()) == Some("Page.screencastFrame"))
+    })
+    .await;
+
+    let Event::Cdp { payload } = ev else {
+        unreachable!()
+    };
+    let data = payload["params"]["data"].as_str().expect("帧数据");
+    assert!(data.len() > 500, "帧太小，可能是空白：{} 字节", data.len());
+
+    // JPEG 的 base64 一定以 /9j/ 开头（FF D8 FF）。验一下确实是图，
+    // 而不是某个恰好非空的字符串。
+    assert!(data.starts_with("/9j/"), "应当是 JPEG：{}", &data[..20.min(data.len())]);
+
+    browser.shutdown().await;
+}
+
+/// 画面通道要能**持续**出帧，不是只出一帧。
+///
+/// `[约束]` Chromium 只在上一帧被 ack 之后才发下一帧。漏 ack 的表现是
+/// 画面永久定格在第一帧，而且不报任何错 —— 看起来像页面卡住了。所以
+/// 这条必须断言"至少两帧"，只验一帧的用例挡不住这个 bug。
+#[tokio::test]
+async fn 画面能持续推送而不是只出一帧() {
+    let Some(app) = bundle() else {
+        eprintln!("跳过：还没打包");
+        return;
+    };
+
+    // navigate 是 trait 方法，要 trait 在作用域里。
+    use riot_protocol::browser::BrowserAccess as _;
+    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("cast2"));
+
+    // 页面自己动起来，保证有新帧可推 —— 静止页面 Chromium 不会重复发。
+    let page = "data:text/html;charset=utf-8,\
+        <body style='background:%23111'>\
+        <h1 id=t style='color:%230f0'>0</h1>\
+        <script>let n=0;setInterval(()=>{t.textContent=++n},100)</script>\
+        </body>";
+    host.navigate(page).await.expect("导航");
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    host.start_screencast(tx).await.expect("开 screencast");
+
+    let mut got = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while got.len() < 3 {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!left.is_zero(), "20 秒内只收到 {} 帧", got.len());
+        match tokio::time::timeout(left, rx.recv()).await {
+            Ok(Some(f)) => got.push(f),
+            Ok(None) => panic!("帧通道断了，只收到 {} 帧", got.len()),
+            Err(_) => panic!("等帧超时，只收到 {} 帧", got.len()),
+        }
+    }
+
+    assert!(got[0].width > 0 && got[0].height > 0, "帧要带尺寸");
+    assert!(
+        got.iter().all(|f| f.data.starts_with("/9j/")),
+        "每帧都该是 JPEG"
+    );
+
+    host.stop_screencast().await;
+}
+
 #[tokio::test]
 async fn 改视口之后帧尺寸跟着变() {
     let Some(app) = bundle() else {

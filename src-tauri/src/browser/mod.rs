@@ -234,6 +234,21 @@ impl Browser {
         self.tx.send(line).map_err(|_| BrowserError::NotRunning)
     }
 
+    /// 发一条 CDP 命令，不等响应。
+    ///
+    /// 给那些"响应没有信息量、但频率很高"的调用用 —— 典型是 screencast
+    /// 的逐帧 ack。走 [`Self::cdp`] 的话每帧都要登记一个等待者、收到响应
+    /// 再唤醒，纯属为一个空对象做功。
+    ///
+    /// `[约束]` 仍然要占一个 id。CDP 不接受没有 id 的命令，而复用固定 id
+    /// 会和真正在等结果的调用撞车。
+    pub fn cdp_no_wait(&self, method: &str, params: Value) -> Result<(), BrowserError> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.send(&Command::Cdp {
+            payload: serde_json::json!({ "id": id, "method": method, "params": params }),
+        })
+    }
+
     /// 关闭。先请子进程自己收尾，超时再强杀整棵进程树。
     ///
     /// `[约束]` 强杀那一步不能省。CEF 的 helper 进程不受父进程退出影响，
@@ -282,9 +297,10 @@ async fn route_cdp_response(pending: &Pending, ev: &Event) -> bool {
         Some(waiter) => {
             let _ = waiter.send(payload.clone());
         }
-        // 收到了没人等的响应。通常是调用方超时后响应才姗姗来迟。
-        // 丢掉即可，但要留痕 —— 频繁出现说明 CDP_TIMEOUT 定短了。
-        None => tracing::debug!(id, "CDP 响应没有等待者，丢弃"),
+        // 没人等的响应。两种来源：调用方超时后响应才姗姗来迟，或者
+        // 本来就是 cdp_no_wait 发的。用 trace 而不是 debug —— screencast
+        // 的 ack 每帧一条，debug 级别会把日志冲成一片。
+        None => tracing::trace!(id, "CDP 响应没有等待者，丢弃"),
     }
     true
 }

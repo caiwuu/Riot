@@ -10,6 +10,8 @@
 //! 一次调用吃掉整个上下文，后面几轮全靠压缩苟活。所以这里的每个函数都
 //! 自带上限，而且宁可截断也不放行。
 
+use std::time::Duration;
+
 use serde_json::{Value, json};
 
 use super::{Browser, BrowserError};
@@ -25,13 +27,48 @@ const MAX_CONSOLE: usize = 100;
 
 /// 导航并等页面加载完。
 ///
-/// `[约束]` 必须等 `Page.loadEventFired`，不能发完 `Page.navigate` 就返回。
-/// 单页应用尤其明显:立刻截图会拍到白屏，而模型会认真地分析那张白屏。
+/// `[约束]` 必须等页面真的就绪，不能发完 `Page.navigate` 就返回。
+///
+/// 不等的后果有两层:立刻截图会拍到白屏，而模型会认真地分析那张白屏；
+/// 跨文档导航期间 DevTools agent 会短暂脱离，紧接着发的 CDP 命令会以
+/// `Not attached to an active page` 失败 —— 那个报错完全不像"页面还没好"。
+///
+/// 用轮询 `document.readyState` 而不是订阅 `Page.loadEventFired`:事件走的是
+/// 另一条通道（不带 id 的 CDP 事件），在这一层拿不到；而轮询只需要现成的
+/// 请求/响应，代价是最多多等一个间隔。
 pub async fn navigate(browser: &Browser, url: &str) -> Result<(), BrowserError> {
-    // Page 域要先 enable，否则 loadEventFired 不会送出来。
     browser.cdp("Page.enable", json!({})).await?;
     browser.cdp("Page.navigate", json!({ "url": url })).await?;
-    Ok(())
+    wait_until_ready(browser).await
+}
+
+/// 页面加载的等待上限。超过就照常返回 —— 有些页面（长轮询、埋点）
+/// 永远到不了 complete，为此把整个调用挂死不值得。
+const LOAD_TIMEOUT: Duration = Duration::from_secs(20);
+const POLL_EVERY: Duration = Duration::from_millis(120);
+
+async fn wait_until_ready(browser: &Browser) -> Result<(), BrowserError> {
+    let deadline = tokio::time::Instant::now() + LOAD_TIMEOUT;
+    loop {
+        // 导航切换文档的瞬间这条会失败（agent 正在换）。那不是错误，
+        // 是"还没好"，继续等。
+        if let Ok(r) = browser
+            .cdp(
+                "Runtime.evaluate",
+                json!({ "expression": "document.readyState", "returnByValue": true }),
+            )
+            .await
+            && r["result"]["value"].as_str() == Some("complete")
+        {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            // 不当失败。页面可能只是有个长连接，内容早就渲染好了。
+            tracing::debug!("页面 {LOAD_TIMEOUT:?} 内没到 complete，按已就绪继续");
+            return Ok(());
+        }
+        tokio::time::sleep(POLL_EVERY).await;
+    }
 }
 
 /// 整页截图，返回 PNG 的 base64。
