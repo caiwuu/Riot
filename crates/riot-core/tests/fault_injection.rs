@@ -276,7 +276,7 @@ async fn run_chaos_session(seed: u64) -> Result<(), String> {
 
     let cancel = CancellationToken::new();
     // 一部分 seed 在中途取消，覆盖「中断撞上恢复路径」这种组合。
-    if seed % 7 == 0 {
+    if seed.is_multiple_of(7) {
         let c = cancel.clone();
         tokio::spawn(async move {
             tokio::task::yield_now().await;
