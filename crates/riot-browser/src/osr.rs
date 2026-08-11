@@ -1,41 +1,48 @@
 //! 离屏渲染:页面画在内存缓冲里，不上屏。
 //!
 //! 主应用要的是"把页面显示在自己的面板里"，而 CEF 的原生视图在另一个
-//! 进程,没法直接嵌进 Tauri 的窗口。离屏渲染把这件事变成纯数据传输:
-//! CEF 交给我们像素,我们交给主应用,主应用画在 canvas 上。
+//! 进程，没法直接嵌进 Tauri 的窗口。离屏渲染把这件事变成纯数据传输:
+//! CEF 交给我们像素，我们交给主应用，主应用画在 canvas 上。
 //!
 //! 顺带解决了输入:面板里的点击变成 `send_mouse_click_event`，和真实
 //! 浏览器里的点击走同一条路径 —— 不是合成 DOM 事件那种近似。
 
 use std::cell::Cell;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use cef::rc::Rc;
 use cef::*;
 
-/// 视口尺寸。真实实现里由主应用告知，这里先固定。
-pub const WIDTH: i32 = 1280;
-pub const HEIGHT: i32 = 800;
+use crate::dispatch;
+use crate::protocol::Event;
+
+/// 视口尺寸。
+///
+/// 用原子量而不是 `Cell`:`view_rect` 在 UI 线程被调，而尺寸是主应用通过
+/// `Resize` 命令改的（也在 UI 线程，但中间隔了 post_task）。原子量省掉了
+/// 一层同步推理。
+static VIEW_W: AtomicI32 = AtomicI32::new(1280);
+static VIEW_H: AtomicI32 = AtomicI32::new(800);
+
+pub fn set_view_size(width: i32, height: i32) {
+    // `[约束]` 不接受 0 或负数。CEF 拿到 0 尺寸会认为视口不可见，
+    // 从此不再调 on_paint —— 表现是"拖一下面板页面就死了"，而且不报错。
+    VIEW_W.store(width.max(1), Ordering::Relaxed);
+    VIEW_H.store(height.max(1), Ordering::Relaxed);
+}
 
 cef::wrap_render_handler! {
     pub struct OsrRenderHandler {
-        painted: Cell<u64>,
-        rect_calls: Cell<u64>,
+        seq: Cell<u64>,
     }
 
     impl RenderHandler {
         fn view_rect(&self, _browser: Option<&mut Browser>, rect: Option<&mut Rect>) {
-            // `[约束]` 必须填非零尺寸。给 0 的话 CEF 认为视口不可见，
-            // 永远不会调 on_paint —— 表现是"页面加载了但一帧都收不到"。
             if let Some(r) = rect {
                 r.x = 0;
                 r.y = 0;
-                r.width = WIDTH;
-                r.height = HEIGHT;
-            }
-            let n = self.rect_calls.get() + 1;
-            self.rect_calls.set(n);
-            if n <= 2 {
-                eprintln!("[osr] view_rect 被调用 #{n} —— render handler 已接上");
+                r.width = VIEW_W.load(Ordering::Relaxed);
+                r.height = VIEW_H.load(Ordering::Relaxed);
             }
         }
 
@@ -53,13 +60,12 @@ cef::wrap_render_handler! {
             if type_ != PaintElementType::VIEW {
                 return;
             }
-            let n = self.painted.get() + 1;
-            self.painted.set(n);
-            // 里程碑 1 只证明帧在产出。缓冲区的搬运留给下一步 ——
-            // 那里要连着做节流和编码，现在打日志会把 stdout 冲爆。
-            if n <= 3 || n % 60 == 0 {
-                eprintln!("[osr] frame #{n} {width}x{height}");
-            }
+            let seq = self.seq.get() + 1;
+            self.seq.set(seq);
+
+            // TODO: 把 buffer 搬到共享内存。现在只报元数据 ——
+            // 4MB/帧 走 JSON 是不可行的，见 protocol 模块的说明。
+            Event::Frame { seq, width, height }.emit();
         }
     }
 }
@@ -84,14 +90,19 @@ cef::wrap_client! {
     }
 }
 
-// 诊断用。帧收不到时，最先要分清的是"浏览器没建起来"、"页面没加载"、
-// 还是"渲染回调没接上" —— 这三种的修法完全不同。
 cef::wrap_life_span_handler! {
     pub struct OsrLifeSpan;
 
     impl LifeSpanHandler {
-        fn on_after_created(&self, _browser: Option<&mut Browser>) {
-            eprintln!("[osr] 浏览器已创建");
+        fn on_after_created(&self, browser: Option<&mut Browser>) {
+            // 句柄记在 UI 线程上，之后所有命令都投到这里执行。
+            dispatch::set_browser(browser.map(|b| b.clone()));
+            Event::Ready.emit();
+        }
+
+        fn on_before_close(&self, _browser: Option<&mut Browser>) {
+            // 不清掉的话，句柄会比浏览器活得久，后续命令打在已销毁的对象上。
+            dispatch::set_browser(None);
         }
     }
 }
@@ -103,10 +114,19 @@ cef::wrap_load_handler! {
         fn on_load_end(
             &self,
             _browser: Option<&mut Browser>,
-            _frame: Option<&mut Frame>,
+            frame: Option<&mut Frame>,
             status_code: ::std::os::raw::c_int,
         ) {
-            eprintln!("[osr] 加载完成 status={status_code}");
+            // 只报主框架。iframe 的加载完成对上层没有意义，而且一个页面
+            // 可能有几十个 —— 全报会把事件流冲满。
+            let is_main = frame.as_ref().is_some_and(|f| f.is_main() != 0);
+            if !is_main {
+                return;
+            }
+            let url = frame
+                .map(|f| CefString::from(&f.url()).to_string())
+                .unwrap_or_default();
+            Event::LoadEnd { status: status_code, url }.emit();
         }
 
         fn on_load_error(
@@ -117,11 +137,12 @@ cef::wrap_load_handler! {
             error_text: Option<&CefString>,
             failed_url: Option<&CefString>,
         ) {
-            eprintln!(
-                "[osr] 加载失败 code={error_code:?} text={:?} url={:?}",
-                error_text.map(ToString::to_string),
-                failed_url.map(ToString::to_string),
-            );
+            Event::LoadError {
+                code: error_code.get_raw(),
+                text: error_text.map(ToString::to_string).unwrap_or_default(),
+                url: failed_url.map(ToString::to_string).unwrap_or_default(),
+            }
+            .emit();
         }
     }
 }

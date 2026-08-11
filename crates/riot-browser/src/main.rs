@@ -9,10 +9,13 @@
 //! 浏览器崩了带不倒聊天;开发和生产下浏览器都是 bundle 形态，不会出现
 //! "dev 好好的、打包就 panic"那类只在发版时才暴露的问题。
 
+mod cdp;
+mod dispatch;
 #[cfg(target_os = "macos")]
 mod mac;
 mod osr;
 mod paths;
+mod protocol;
 
 use cef::*;
 
@@ -126,10 +129,7 @@ wrap_browser_process_handler! {
         fn on_context_initialized(&self) {
             // CEF 就绪。建一个离屏浏览器，加载一个固定页面 ——
             // 里程碑 1 只要证明帧能产出，URL 之后由 stdio 协议给。
-            let mut client = osr::OsrClient::new(osr::OsrRenderHandler::new(
-                Default::default(),
-                Default::default(),
-            ));
+            let mut client = osr::OsrClient::new(osr::OsrRenderHandler::new(Default::default()));
 
             let window_info = WindowInfo {
                 windowless_rendering_enabled: 1,
@@ -141,14 +141,23 @@ wrap_browser_process_handler! {
                 ..Default::default()
             };
 
-            // 默认用 data: URL —— 不碰网络就能验证渲染链路。
-            // 排查"收不到帧"时，先分清是渲染没通还是网络没通。
-            let url = std::env::var("RIOT_BROWSER_URL").unwrap_or_else(|_| {
-                "data:text/html,<body style='background:%23222;color:%23eee'><h1>Riot</h1></body>"
-                    .to_owned()
-            });
-            eprintln!("[host] 加载 {url}");
-            let url = CefString::from(url.as_str());
+            // 起来先停在空白页，等主应用发 Navigate。进程一起来就联网是不对的:
+            // 用户可能只是打开了面板，还没决定看什么。
+            //
+            // `[约束]` 空白页用 `data:`，**不要用 `about:blank`**。
+            //
+            // 从 `about:blank` 导航到 https 会让 renderer 进程直接消失，页面
+            // 报 `ERR_ABORTED`，紧接着 CDP 收到
+            // `Inspector.detached / Render process gone`。而同一个导航从
+            // `data:` 空页或任何真实页面出发都完全正常 —— 实测对比过三种起点。
+            //
+            // 看现象很容易误判成"创建后不能导航"或者"Chromium 崩了"，
+            // 而实际只是起始页的选择问题。
+            let url = CefString::from(
+                std::env::var("RIOT_BROWSER_URL")
+                    .unwrap_or_else(|_| "data:text/html,<html><body></body></html>".to_owned())
+                    .as_str(),
+            );
             let browser_settings = BrowserSettings::default();
 
             browser_host_create_browser(
@@ -159,7 +168,10 @@ wrap_browser_process_handler! {
                 None,
                 None,
             );
-            eprintln!("[host] 已请求创建离屏浏览器");
+
+            // 读 stdin 的线程要等 CEF 就绪之后再起 —— 早起的话，命令会
+            // 投到一个还没有浏览器的 UI 线程上，全部以"还没有浏览器"报错。
+            crate::dispatch::spawn_stdin_reader();
         }
     }
 }
