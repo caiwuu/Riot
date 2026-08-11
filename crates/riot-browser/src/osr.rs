@@ -14,7 +14,7 @@ use cef::rc::Rc;
 use cef::*;
 
 use crate::dispatch;
-use crate::protocol::Event;
+use riot_protocol::browser::Event;
 
 /// 视口尺寸。
 ///
@@ -65,7 +65,7 @@ cef::wrap_render_handler! {
 
             // TODO: 把 buffer 搬到共享内存。现在只报元数据 ——
             // 4MB/帧 走 JSON 是不可行的，见 protocol 模块的说明。
-            Event::Frame { seq, width, height }.emit();
+            crate::wire::emit(&Event::Frame { seq, width, height });
         }
     }
 }
@@ -97,7 +97,7 @@ cef::wrap_life_span_handler! {
         fn on_after_created(&self, browser: Option<&mut Browser>) {
             // 句柄记在 UI 线程上，之后所有命令都投到这里执行。
             dispatch::set_browser(browser.map(|b| b.clone()));
-            Event::Ready.emit();
+            crate::wire::emit(&Event::Ready);
         }
 
         fn on_before_close(&self, _browser: Option<&mut Browser>) {
@@ -126,7 +126,7 @@ cef::wrap_load_handler! {
             let url = frame
                 .map(|f| CefString::from(&f.url()).to_string())
                 .unwrap_or_default();
-            Event::LoadEnd { status: status_code, url }.emit();
+            crate::wire::emit(&Event::LoadEnd { status: status_code, url });
         }
 
         fn on_load_error(
@@ -137,12 +137,11 @@ cef::wrap_load_handler! {
             error_text: Option<&CefString>,
             failed_url: Option<&CefString>,
         ) {
-            Event::LoadError {
+            crate::wire::emit(&Event::LoadError {
                 code: error_code.get_raw(),
                 text: error_text.map(ToString::to_string).unwrap_or_default(),
                 url: failed_url.map(ToString::to_string).unwrap_or_default(),
-            }
-            .emit();
+            });
         }
     }
 }

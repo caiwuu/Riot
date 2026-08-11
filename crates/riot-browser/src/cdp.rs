@@ -16,7 +16,7 @@
 use cef::rc::Rc;
 use cef::*;
 
-use crate::protocol::Event;
+use riot_protocol::browser::Event;
 
 cef::wrap_dev_tools_message_observer! {
     pub struct CdpObserver;
@@ -33,11 +33,10 @@ cef::wrap_dev_tools_message_observer! {
             // 但换来的是"坏报文在这里就被发现"，而不是让主应用那边的
             // NDJSON 流吞下一段非法内容。
             match serde_json::from_slice::<serde_json::Value>(bytes) {
-                Ok(payload) => Event::Cdp { payload }.emit(),
-                Err(e) => Event::Error {
+                Ok(payload) => crate::wire::emit(&Event::Cdp { payload }),
+                Err(e) => crate::wire::emit(&Event::Error {
                     message: format!("CDP 报文不是合法 JSON: {e}"),
-                }
-                .emit(),
+                }),
             }
 
             // 1 = 已处理。CEF 不会再调 on_dev_tools_method_result /
@@ -53,10 +52,9 @@ cef::wrap_dev_tools_message_observer! {
             }
             // 非预期的断开要报:之后发出去的 CDP 命令会静默失败，
             // 上层会一直等一个永远不来的响应。
-            Event::Error {
+            crate::wire::emit(&Event::Error {
                 message: "DevTools agent 已断开，CDP 暂时不可用".into(),
-            }
-            .emit();
+            });
         }
     }
 }

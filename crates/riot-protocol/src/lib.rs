@@ -6,6 +6,7 @@
 //!
 //! **TS 类型必须是生成的，不允许手写。** 见 docs/VERIFICATION.md §2
 
+pub mod browser;
 pub mod compact;
 pub mod event;
 pub mod id;
@@ -17,6 +18,7 @@ pub mod runner;
 pub mod tool;
 pub mod web;
 
+pub use browser::{Command as BrowserCommand, Event as BrowserEvent};
 pub use compact::{CompactBudget, CompactResult, Compactor};
 pub use event::{
     AbortSource, AgentError, AgentEvent, CompactStrategy, ProgressPayload, StreamDelta,

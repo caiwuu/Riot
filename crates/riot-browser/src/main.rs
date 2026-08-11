@@ -15,7 +15,7 @@ mod dispatch;
 mod mac;
 mod osr;
 mod paths;
-mod protocol;
+mod wire;
 
 use cef::*;
 

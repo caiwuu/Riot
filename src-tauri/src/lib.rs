@@ -7,6 +7,7 @@
 //! 否则放内核。这条界线不清晰的话，agent 逻辑会慢慢渗进宿主，
 //! 然后就没法脱离 Tauri 做黄金回放了。
 
+pub mod browser;
 pub mod config;
 pub mod fence;
 pub mod kernel;

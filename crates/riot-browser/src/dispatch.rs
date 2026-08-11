@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use cef::*;
 
-use crate::protocol::{Command, Event};
+use riot_protocol::browser::{Command, Event};
 
 /// 是不是正在主动关闭。
 ///
@@ -88,10 +88,9 @@ pub fn spawn_stdin_reader() {
             }
             match serde_json::from_str::<Command>(line) {
                 Ok(cmd) => post_to_ui(cmd),
-                Err(e) => Event::Error {
+                Err(e) => crate::wire::emit(&Event::Error {
                     message: format!("命令解析失败: {e}"),
-                }
-                .emit(),
+                }),
             }
         }
         // 管道断了。让 UI 线程退出消息循环，而不是在这里 exit ——
@@ -124,10 +123,9 @@ fn run_on_ui(cmd: Command) {
     // 先把句柄克隆出来，借用当场结束。见 browser() 的说明。
     let Some(browser) = browser() else {
         if !matches!(cmd, Command::Shutdown) {
-            Event::Error {
+            crate::wire::emit(&Event::Error {
                 message: "还没有浏览器，命令被忽略".into(),
-            }
-            .emit();
+            });
             return;
         }
         quit_message_loop();
@@ -152,19 +150,17 @@ fn run_on_ui(cmd: Command) {
         Command::Cdp { payload } => {
             let Some(host) = browser.host() else { return };
             let Ok(bytes) = serde_json::to_vec(&payload) else {
-                Event::Error {
+                crate::wire::emit(&Event::Error {
                     message: "CDP 载荷无法序列化".into(),
-                }
-                .emit();
+                });
                 return;
             };
             // 返回 0 表示消息没被接受（通常是 JSON 不符合 CDP 的形状）。
             // 静默丢掉会让上层一直等一个永远不来的响应。
             if host.send_dev_tools_message(Some(&bytes)) == 0 {
-                Event::Error {
+                crate::wire::emit(&Event::Error {
                     message: "CDP 消息被拒绝，检查 id/method 字段".into(),
-                }
-                .emit();
+                });
             }
         }
 

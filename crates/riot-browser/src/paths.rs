@@ -68,7 +68,18 @@ pub fn helper_exe(frameworks: &Path) -> PathBuf {
 /// agent 驱动的浏览器一旦带上用户的登录态，一次 prompt injection 就能读走
 /// 邮箱、代码仓库、银行页面里的内容。Codex 的内置浏览器同样明确不支持
 /// 认证和 cookie，要登录得另走扩展 —— 那是刻意的产品边界，不是缺功能。
+///
+/// `[约束]` 一个目录同时只能有一个 Chromium 实例。第二个进程会因为拿不到
+/// profile 锁而**直接退出**，宿主那边看到的是"事件流断了"，完全指不出原因。
+/// 所以宿主可以用 `RIOT_BROWSER_PROFILE` 指定，让每个实例各用各的。
 pub fn cache_dir() -> PathBuf {
+    if let Some(p) = std::env::var_os("RIOT_BROWSER_PROFILE").filter(|s| !s.is_empty()) {
+        return PathBuf::from(p);
+    }
+    default_cache_dir()
+}
+
+fn default_cache_dir() -> PathBuf {
     let base = std::env::var("XDG_CONFIG_HOME")
         .ok()
         .filter(|s| !s.is_empty())
