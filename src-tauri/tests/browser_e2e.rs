@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use riot_host_lib::browser::Browser;
+use riot_host_lib::browser::{Browser, ops};
 use riot_protocol::browser::{Command, Event};
 use tokio::sync::mpsc;
 
@@ -91,26 +91,150 @@ async fn 宿主能驱动浏览器加载页面并跑_cdp() {
 
     // CDP 打在真实页面上。这一条同时验证了发送（send_dev_tools_message）
     // 和接收（DevToolsMessageObserver）两个方向。
-    browser
-        .send(&Command::Cdp {
-            payload: serde_json::json!({
-                "id": 1,
-                "method": "Runtime.evaluate",
-                "params": { "expression": "document.title", "returnByValue": true },
-            }),
-        })
-        .expect("发 CDP");
+    let result = browser
+        .cdp(
+            "Runtime.evaluate",
+            serde_json::json!({ "expression": "document.title", "returnByValue": true }),
+        )
+        .await
+        .expect("CDP 调用");
 
-    let ev = wait_for(&mut rx, 30, "CDP 响应", |e| {
-        matches!(e, Event::Cdp { payload } if payload.get("id") == Some(&serde_json::json!(1)))
+    assert_eq!(
+        result["result"]["value"], "Example Domain",
+        "CDP 应当取回真实页面标题，实际：{result}"
+    );
+
+    browser.shutdown().await;
+}
+
+#[tokio::test]
+async fn cdp_按_id_配对_并发调用不会串() {
+    let Some(app) = bundle() else {
+        eprintln!("跳过：还没打包");
+        return;
+    };
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let browser = Browser::spawn(app, Some(profile("pair")), tx)
+        .await
+        .expect("起浏览器");
+    wait_for(&mut rx, 30, "ready", |e| matches!(e, Event::Ready)).await;
+
+    // `[约束]` 并发发出去的命令，响应必须回到各自的调用方。
+    //
+    // id 一旦撞车，响应就会派给错误的等待者 —— 而那种错乱只在并发时出现，
+    // 单条一条地测永远测不到。这里同时发五条、每条算一个不同的算式，
+    // 谁拿错了结果就对不上。
+    let calls = (1..=5).map(|n| {
+        let b = &browser;
+        async move {
+            let r = b
+                .cdp(
+                    "Runtime.evaluate",
+                    serde_json::json!({
+                        "expression": format!("{n} * 100"),
+                        "returnByValue": true,
+                    }),
+                )
+                .await
+                .expect("CDP 调用");
+            (n, r["result"]["value"].as_i64().expect("数值结果"))
+        }
+    });
+
+    let results = futures::future::join_all(calls).await;
+    for (n, got) in results {
+        assert_eq!(got, n * 100, "第 {n} 条调用拿到了别人的响应");
+    }
+
+    browser.shutdown().await;
+}
+
+#[tokio::test]
+async fn cdp_的错误会翻出来而不是当成成功() {
+    let Some(app) = bundle() else {
+        eprintln!("跳过：还没打包");
+        return;
+    };
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let browser = Browser::spawn(app, Some(profile("cdperr")), tx)
+        .await
+        .expect("起浏览器");
+    wait_for(&mut rx, 30, "ready", |e| matches!(e, Event::Ready)).await;
+
+    // CDP 把错误放在响应体的 `error` 字段里，传输层是成功的。
+    // 不翻出来的话，上层拿到一个没有 result 的对象，只能自己猜哪儿不对。
+    let err = browser
+        .cdp("NoSuch.method", serde_json::json!({}))
+        .await
+        .expect_err("不存在的方法应当报错");
+
+    assert!(
+        matches!(err, riot_host_lib::browser::BrowserError::Cdp { .. }),
+        "应当是 CDP 错误，实际：{err}"
+    );
+
+    browser.shutdown().await;
+}
+
+#[tokio::test]
+async fn 高层操作在真实页面上成立() {
+    let Some(app) = bundle() else {
+        eprintln!("跳过：还没打包");
+        return;
+    };
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let browser = Browser::spawn(app, Some(profile("ops")), tx)
+        .await
+        .expect("起浏览器");
+    wait_for(&mut rx, 30, "ready", |e| matches!(e, Event::Ready)).await;
+
+    // console 钩子要在导航**之前**装。页面加载期间的报错最有价值，
+    // 而那时候如果还没装钩子就永远抓不到了。
+    ops::install_console_hook(&browser).await.expect("装钩子");
+
+    // 用 data: URL 而不是真实站点:这条测的是操作本身，不该被网络波动
+    // 或者某个站改版搞红。
+    // `[约束]` charset 必须写。不写的话 Chromium 按 Latin-1 解，中文全变
+    // 成乱码 —— 而快照里的乱码看起来像是 a11y 提取写错了。
+    //
+    // `[约束]` 里面的 `#` 要写成 `%23`。data: URL 里 `#` 开始 fragment，
+    // 一个字面的 `href='#x'` 会把文档从那里截断，后面的标签根本不进 DOM
+    // —— 现象是"某些元素在快照里神秘消失"。
+    let page = "data:text/html;charset=utf-8,\
+        <html><body>\
+        <h1>Riot 测试页</h1>\
+        <button>提交</button>\
+        <a href='%23x'>帮助链接</a>\
+        <script>console.warn('来自页面的警告');</script>\
+        </body></html>";
+    ops::navigate(&browser, page).await.expect("导航");
+    wait_for(&mut rx, 30, "页面加载完成", |e| {
+        matches!(e, Event::LoadEnd { url, .. } if url.starts_with("data:"))
     })
     .await;
-    let Event::Cdp { payload } = ev else {
-        unreachable!()
-    };
-    assert_eq!(
-        payload["result"]["result"]["value"], "Example Domain",
-        "CDP 应当取回真实页面标题，实际：{payload}"
+
+    // 快照:要能看见可交互元素，且不该被结构性节点淹没。
+    let snap = ops::snapshot(&browser).await.expect("快照");
+    assert!(snap.contains("提交"), "快照里应当有按钮名：{snap}");
+    assert!(snap.contains("帮助链接"), "快照里应当有链接名：{snap}");
+    assert!(
+        !snap.contains("generic"),
+        "结构性节点不该出现在快照里：{snap}"
+    );
+
+    // 截图:PNG 的 base64。只验非空和能解码 —— 像素内容不该被断言，
+    // 那会让用例随字体渲染的细微变化而红。
+    let shot = ops::screenshot(&browser).await.expect("截图");
+    assert!(shot.len() > 1000, "截图太小，可能是白屏：{} 字节", shot.len());
+
+    // console:钩子装在导航前，所以页面脚本里的 warn 应当被抓到。
+    let logs = ops::console(&browser).await.expect("取 console");
+    assert!(
+        logs.iter().any(|l| l.contains("来自页面的警告")),
+        "应当抓到页面加载期间的 console：{logs:?}"
     );
 
     browser.shutdown().await;

@@ -11,13 +11,29 @@
 // 宿主层不参与黄金回放，确定性约束（见 clippy.toml）只针对内核。
 #![allow(clippy::disallowed_methods)]
 
+pub mod ops;
+
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use process_wrap::tokio::{ChildWrapper, CommandWrap};
 use riot_protocol::browser::{Command, Event};
+use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc, oneshot};
+
+/// 单条 CDP 命令的等待上限。
+///
+/// 页面可能卡在一个永远不返回的脚本里，而 CDP 的响应是跟着页面走的。
+/// 没有上限的话，一次 `Runtime.evaluate` 就能把调用它的工具永久挂住。
+const CDP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 等响应的 CDP 请求表。key 是 CDP 的 `id`。
+type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BrowserError {
@@ -28,6 +44,10 @@ pub enum BrowserError {
          开发时先跑 scripts/build-browser.sh 打包 —— CEF 在 macOS 上必须从 .app 启动。"
     )]
     NotBundled(PathBuf),
+    #[error("CDP `{method}` 超过 {}s 没有响应", CDP_TIMEOUT.as_secs())]
+    CdpTimeout { method: String },
+    #[error("CDP `{method}` 返回错误：{message}")]
+    Cdp { method: String, message: String },
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -39,6 +59,8 @@ pub struct Browser {
     /// 命令出口。写在单独的任务里 —— 直接持 `ChildStdin` 的话，
     /// 每个调用点都要拿到可变引用，而它们分布在不同的 async 上下文里。
     tx: mpsc::UnboundedSender<Vec<u8>>,
+    pending: Pending,
+    next_id: AtomicU64,
 }
 
 impl Browser {
@@ -87,11 +109,19 @@ impl Browser {
         let mut stdin = child.stdin().take().expect("stdin 是 piped 的");
 
         // 事件读取。一行一条 NDJSON。
+        let pending: Pending = Arc::default();
+        let routing = Arc::clone(&pending);
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 match serde_json::from_str::<Event>(&line) {
                     Ok(ev) => {
+                        // 带 id 的 CDP 消息是某次调用的响应，交给等它的人；
+                        // 不带 id 的是页面事件（Console、Network 之类），
+                        // 广播出去。两者混在一条流里，靠 id 分。
+                        if route_cdp_response(&routing, &ev).await {
+                            continue;
+                        }
                         if events.send(ev).is_err() {
                             break; // 接收端没了，读下去没意义
                         }
@@ -101,6 +131,9 @@ impl Browser {
                     Err(e) => tracing::warn!(error = %e, line, "浏览器事件解析失败"),
                 }
             }
+            // 进程没了。叫醒所有还在等的调用方，否则它们要各自等满 30 秒
+            // 才超时，而那三十秒里工具看起来只是"卡住"。
+            routing.lock().await.clear();
         });
 
         // CEF 的日志全在 stderr，量很大。转成 debug 级别，默认不显示，
@@ -128,7 +161,66 @@ impl Browser {
             // 子进程会自己走完 CEF 的关闭流程。
         });
 
-        Ok(Self { child, tx })
+        Ok(Self {
+            child,
+            tx,
+            pending,
+            next_id: AtomicU64::new(1),
+        })
+    }
+
+    /// 发一条 CDP 命令并等它的响应。
+    ///
+    /// CDP 的请求/响应靠 `id` 配对，而响应和页面事件混在同一条流里。这里
+    /// 分配 id、登记等待者、由读取任务按 id 唤醒 —— 和内核那边的 JSON-RPC
+    /// 是同一套结构。
+    ///
+    /// `[约束]` id 由这里独占分配。让调用方自己填的话，两个工具撞上同一个
+    /// id 时，响应会被派给错误的等待者 —— 那种错乱只在并发时出现，而且
+    /// 表现为"偶尔拿到别人的结果"。
+    pub async fn cdp(&self, method: &str, params: Value) -> Result<Value, BrowserError> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(id, tx);
+
+        let sent = self.send(&Command::Cdp {
+            payload: serde_json::json!({ "id": id, "method": method, "params": params }),
+        });
+        if let Err(e) = sent {
+            self.pending.lock().await.remove(&id);
+            return Err(e);
+        }
+
+        let reply = match tokio::time::timeout(CDP_TIMEOUT, rx).await {
+            Ok(Ok(v)) => v,
+            // 通道被 drop = 浏览器进程没了。
+            Ok(Err(_)) => {
+                return Err(BrowserError::NotRunning);
+            }
+            Err(_) => {
+                // 登记项要撤掉，否则进程活着但没人取的等待者会一直堆着。
+                self.pending.lock().await.remove(&id);
+                return Err(BrowserError::CdpTimeout {
+                    method: method.to_owned(),
+                });
+            }
+        };
+
+        // CDP 的错误在响应体里，不是传输错误。不翻出来的话，上层拿到一个
+        // 没有 result 的对象，只能自己猜是哪儿不对。
+        if let Some(err) = reply.get("error") {
+            let message = err
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("未知错误")
+                .to_owned();
+            return Err(BrowserError::Cdp {
+                method: method.to_owned(),
+                message,
+            });
+        }
+
+        Ok(reply.get("result").cloned().unwrap_or(Value::Null))
     }
 
     /// 发一条命令。
@@ -171,6 +263,29 @@ impl Browser {
         )
         .await;
     }
+}
+
+/// 这条消息是不是某次 CDP 调用的响应；是的话唤醒等待者并返回 `true`。
+///
+/// 返回 `false` 的两种情况都要继续走事件流:根本不是 CDP 消息，或者是
+/// 没有 `id` 的 CDP **事件**（Console、Network 那些推送）。响应和事件混在
+/// 同一条流里，`id` 是唯一的区分依据。
+async fn route_cdp_response(pending: &Pending, ev: &Event) -> bool {
+    let Event::Cdp { payload } = ev else {
+        return false;
+    };
+    let Some(id) = payload.get("id").and_then(Value::as_u64) else {
+        return false;
+    };
+    match pending.lock().await.remove(&id) {
+        Some(waiter) => {
+            let _ = waiter.send(payload.clone());
+        }
+        // 收到了没人等的响应。通常是调用方超时后响应才姗姗来迟。
+        // 丢掉即可，但要留痕 —— 频繁出现说明 CDP_TIMEOUT 定短了。
+        None => tracing::debug!(id, "CDP 响应没有等待者，丢弃"),
+    }
+    true
 }
 
 /// `.app` 里那个可执行文件的位置。
