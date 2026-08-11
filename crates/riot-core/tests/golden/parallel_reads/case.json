@@ -1,0 +1,10 @@
+{
+  "description": "同一条消息里三个 tool_use，tool_result 必须按调用顺序回灌",
+  "prompt": "读 a b c",
+  "tools": {
+    "Read": {
+      "outcome": "ok",
+      "text": "内容"
+    }
+  }
+}

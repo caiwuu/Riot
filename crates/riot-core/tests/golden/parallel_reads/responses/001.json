@@ -1,0 +1,33 @@
+[
+  {
+    "event": "message",
+    "role": "assistant",
+    "id": "msg_a1",
+    "content": [
+      {
+        "type": "tool_use",
+        "id": "tu_1",
+        "name": "Read",
+        "input": {
+          "path": "a"
+        }
+      },
+      {
+        "type": "tool_use",
+        "id": "tu_2",
+        "name": "Read",
+        "input": {
+          "path": "b"
+        }
+      },
+      {
+        "type": "tool_use",
+        "id": "tu_3",
+        "name": "Read",
+        "input": {
+          "path": "c"
+        }
+      }
+    ]
+  }
+]

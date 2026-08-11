@@ -1,0 +1,4 @@
+{"type":"request_start","turn":0,"model":"test-model"}
+{"type":"request_start","turn":0,"model":"test-model","after":"output_limit_recovery"}
+{"type":"message","role":"assistant","id":"msg_a1","content":[{"type":"text","text":"写完了。"}]}
+{"type":"done","reason":{"reason":"completed"}}

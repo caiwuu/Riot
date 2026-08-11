@@ -1,0 +1,368 @@
+//! OpenAI 兼容 Provider。
+//!
+//! DeepSeek、Kimi、Qwen、vLLM、Ollama、OpenRouter 都是这套接口，换的只是
+//! base URL 和模型名。
+//!
+//! 重试、退避、看门狗全部复用 Anthropic 那边的实现 —— 那些逻辑跟具体
+//! 厂商的报文格式无关，只跟 HTTP 状态码有关。这一层只负责报文形状。
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_stream::stream;
+use async_trait::async_trait;
+use futures::StreamExt;
+use riot_protocol::message::Message;
+use riot_protocol::provider::{
+    Provider, ProviderError, ProviderEvent, ProviderRequest, ProviderStream,
+};
+use riot_protocol::tool::Clock;
+use tokio_util::sync::CancellationToken;
+
+use super::decode::StreamDecoder;
+use super::request::{RetryContext, build_request};
+use crate::anthropic::request::SystemSection;
+use crate::retry::{GiveUpReason, RequestSource, RetryDecision, RetryPolicy, decide};
+use crate::sse::SseParser;
+use crate::transport::{ByteStream, HttpError, HttpRequest, HttpTransport};
+use crate::watchdog::{DEFAULT_IDLE, with_idle_watchdog};
+
+#[derive(Debug, Clone)]
+pub struct OpenAiConfig {
+    /// 不带路径，例如 `https://api.deepseek.com`。
+    pub base_url: String,
+    pub api_key: String,
+    /// 连续过载时切过去的模型。
+    pub fallback_model: Option<String>,
+    pub idle_timeout: Duration,
+    pub retry: RetryPolicy,
+    /// 采样参数。top_k 在这个协议下**不发送**，见 [`crate::SamplingParams`]。
+    pub sampling: crate::SamplingParams,
+}
+
+impl Default for OpenAiConfig {
+    fn default() -> Self {
+        Self {
+            base_url: "https://api.deepseek.com".into(),
+            api_key: String::new(),
+            fallback_model: None,
+            idle_timeout: DEFAULT_IDLE,
+            retry: RetryPolicy::default(),
+            sampling: crate::SamplingParams::default(),
+        }
+    }
+}
+
+impl OpenAiConfig {
+    pub fn deepseek(api_key: impl Into<String>) -> Self {
+        Self {
+            base_url: "https://api.deepseek.com".into(),
+            api_key: api_key.into(),
+            ..Default::default()
+        }
+    }
+}
+
+const OVERLOAD_BEFORE_FALLBACK: u32 = 3;
+
+pub struct OpenAiProvider {
+    transport: Arc<dyn HttpTransport>,
+    clock: Arc<dyn Clock>,
+    system: Vec<SystemSection>,
+    config: OpenAiConfig,
+    source: RequestSource,
+}
+
+impl OpenAiProvider {
+    pub fn new(
+        transport: Arc<dyn HttpTransport>,
+        clock: Arc<dyn Clock>,
+        system: Vec<SystemSection>,
+        config: OpenAiConfig,
+    ) -> Self {
+        Self {
+            transport,
+            clock,
+            system,
+            config,
+            source: RequestSource::Foreground,
+        }
+    }
+
+    pub fn as_background(mut self) -> Self {
+        self.source = RequestSource::Background;
+        self
+    }
+}
+
+#[derive(Clone)]
+struct Endpoint {
+    base_url: String,
+    api_key: String,
+}
+
+fn build_http_request(
+    wire: &super::wire::WireRequest,
+    endpoint: &Endpoint,
+) -> Result<HttpRequest, HttpError> {
+    let body = serde_json::to_vec(wire)
+        .map_err(|e| HttpError::transport(format!("请求序列化失败: {e}")))?;
+
+    Ok(HttpRequest {
+        url: format!(
+            "{}/v1/chat/completions",
+            endpoint.base_url.trim_end_matches('/')
+        ),
+        headers: vec![
+            ("content-type".into(), "application/json".into()),
+            ("accept".into(), "text/event-stream".into()),
+            (
+                "authorization".into(),
+                format!("Bearer {}", endpoint.api_key),
+            ),
+        ],
+        body,
+    })
+}
+
+#[async_trait]
+impl Provider for OpenAiProvider {
+    fn stream(&self, req: ProviderRequest, cancel: CancellationToken) -> ProviderStream {
+        let transport = Arc::clone(&self.transport);
+        let clock = Arc::clone(&self.clock);
+        let system = self.system.clone();
+        let source = self.source;
+        let policy = self.config.retry;
+        let idle = self.config.idle_timeout;
+        let fallback_model = self.config.fallback_model.clone();
+        let sampling = self.config.sampling;
+        let endpoint = Endpoint {
+            base_url: self.config.base_url.clone(),
+            api_key: self.config.api_key.clone(),
+        };
+
+        Box::pin(stream! {
+            let mut retry_ctx = RetryContext::initial();
+            let mut attempt = 0u32;
+            let mut overload_streak = 0u32;
+
+            'attempts: loop {
+                if cancel.is_cancelled() {
+                    return;
+                }
+
+                let mut wire = build_request(&req, &system, &retry_ctx);
+                wire.temperature = sampling.temperature;
+                wire.top_p = sampling.top_p;
+                // top_k 刻意不注入：OpenAI 官方端点会以 400 拒绝未知参数
+                let http_req = match build_http_request(&wire, &endpoint) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        yield ProviderEvent::Error(ProviderError::Transport {
+                            message: e.to_string(),
+                        });
+                        return;
+                    }
+                };
+
+                // ── 请求阶段：还没吐过事件，可以重试 ──────────
+                let byte_stream = match transport.post_sse(http_req, cancel.child_token()).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        // OpenAI 系用 503 表示过载，没有 Anthropic 的 529
+                        let overloaded = matches!(e.status, Some(503) | Some(529));
+                        if overloaded {
+                            overload_streak += 1;
+                        }
+
+                        if overloaded
+                            && overload_streak >= OVERLOAD_BEFORE_FALLBACK
+                            && let Some(fb) = fallback_model.clone()
+                            && retry_ctx.model_override.as_deref() != Some(fb.as_str())
+                        {
+                            tracing::warn!(model = %fb, "连续过载，降级");
+                            retry_ctx = RetryContext::fallback_to(fb);
+                            overload_streak = 0;
+                            attempt += 1;
+                            continue 'attempts;
+                        }
+
+                        let ctx = e.failure_context(source, false, attempt);
+                        match decide(&policy, &ctx, attempt as u64) {
+                            RetryDecision::Retry { after } => {
+                                clock.sleep_ms(after.as_millis() as u64).await;
+                                attempt += 1;
+                                continue 'attempts;
+                            }
+                            RetryDecision::GiveUp(reason) => {
+                                yield ProviderEvent::Error(map_giveup(reason, &e));
+                                return;
+                            }
+                        }
+                    }
+                };
+
+                // ── 流阶段：不再重试 ─────────────────────────
+                // 理由见 anthropic/provider.rs 的模块文档 —— UI 已经渲染了
+                // 吐出去的内容，重试会让同一段文字出现两次。
+                let decoded = decode_stream(byte_stream);
+                let guarded = with_idle_watchdog(decoded, idle, Arc::clone(&clock));
+                futures::pin_mut!(guarded);
+
+                while let Some(ev) = guarded.next().await {
+                    if cancel.is_cancelled() {
+                        return;
+                    }
+                    yield ev;
+                }
+                return;
+            }
+        })
+    }
+
+    fn count_tokens(&self, messages: &[Message]) -> u32 {
+        // 本地粗估，理由同 Anthropic 那边：真实计数要一次额外往返。
+        // 中文在 DeepSeek 的分词下大约 1.5 字符/token，用 4 字节/token
+        // 估是偏保守的 —— 保守会让我们压缩得早一点，那个方向是安全的。
+        let bytes: usize = messages
+            .iter()
+            .map(|m| serde_json::to_string(m).map(|s| s.len()).unwrap_or(0))
+            .sum();
+        (bytes / 4) as u32
+    }
+}
+
+fn decode_stream(
+    mut bytes: ByteStream,
+) -> impl futures_core::Stream<Item = ProviderEvent> + Send {
+    stream! {
+        let mut parser = SseParser::new();
+        let mut decoder = StreamDecoder::new();
+
+        while let Some(chunk) = bytes.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    for sse in parser.push(&bytes) {
+                        for ev in decoder.push(&sse) {
+                            yield ev;
+                        }
+                    }
+                }
+                Err(e) => {
+                    // 半条消息也要吐出去 —— 用户至少能看到模型说到哪了
+                    for ev in decoder.finish() {
+                        yield ev;
+                    }
+                    yield ProviderEvent::Error(ProviderError::Transport {
+                        message: format!("读取响应流失败: {e}"),
+                    });
+                    return;
+                }
+            }
+        }
+
+        if let Some(sse) = parser.finish() {
+            for ev in decoder.push(&sse) {
+                yield ev;
+            }
+        }
+        for ev in decoder.finish() {
+            yield ev;
+        }
+    }
+}
+
+fn map_giveup(reason: GiveUpReason, e: &HttpError) -> ProviderError {
+    match reason {
+        GiveUpReason::AuthUnrecoverable => ProviderError::Auth {
+            message: format!("凭证无效：{}", e.body),
+        },
+        GiveUpReason::SubscriptionRateLimit => ProviderError::RetriesExhausted {
+            message: format!("已达用量上限：{}", e.body),
+        },
+        GiveUpReason::BackgroundOverload => ProviderError::RetriesExhausted {
+            message: "服务过载，后台任务已跳过".into(),
+        },
+        GiveUpReason::Exhausted => ProviderError::RetriesExhausted {
+            message: e.to_string(),
+        },
+        GiveUpReason::ServerSaidNo | GiveUpReason::NotRetryable => match e.status {
+            Some(401) | Some(403) => ProviderError::Auth {
+                message: if e.body.is_empty() {
+                    "API key 无效或已过期".to_owned()
+                } else {
+                    e.body.clone()
+                },
+            },
+            // OpenAI 系用 400 + 特定文案表示上下文超长。各家措辞不同，
+            // 这里认几个最常见的。认不出来就当普通错误 —— 那样主循环
+            // 不会尝试压缩恢复，但至少不会误判。
+            Some(400) if is_context_overflow(&e.body) => ProviderError::ContextOverflow {
+                used: 0,
+                limit: 0,
+            },
+            // 服务端明确拒绝（参数错误、内容策略）。**没有重试过** ——
+            // 报"重试耗尽"会让用户以为是网络问题，往错误的方向排查。
+            Some(_) => ProviderError::Refused {
+                message: e.to_string(),
+            },
+            None => ProviderError::Transport {
+                message: e.to_string(),
+            },
+        },
+    }
+}
+
+fn is_context_overflow(body: &str) -> bool {
+    let b = body.to_ascii_lowercase();
+    b.contains("context length")
+        || b.contains("context_length_exceeded")
+        || b.contains("maximum context")
+        || b.contains("too long")
+}
+
+#[cfg(test)]
+mod giveup_tests {
+    use super::*;
+
+    fn http(status: Option<u16>, body: &str) -> HttpError {
+        HttpError {
+            status,
+            retry_after_secs: None,
+            x_should_retry: None,
+            body: body.into(),
+            transport: status.is_none(),
+        }
+    }
+
+    #[test]
+    fn 参数错误映射为拒绝_不是重试耗尽() {
+        // 400 根本没有重试过。报"重试耗尽"会让用户以为是网络问题，
+        // 往完全错误的方向排查。
+        let e = http(Some(400), r#"{"error":{"message":"bad model name"}}"#);
+        match map_giveup(GiveUpReason::NotRetryable, &e) {
+            ProviderError::Refused { message } => {
+                assert!(message.contains("bad model name"))
+            }
+            other => panic!("400 应该是 Refused，得到 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn 没有状态码的放弃仍然是传输错误() {
+        let e = http(None, "");
+        assert!(matches!(
+            map_giveup(GiveUpReason::NotRetryable, &e),
+            ProviderError::Transport { .. }
+        ));
+    }
+
+    #[test]
+    fn 上下文超长的_400_仍然可恢复() {
+        let e = http(Some(400), "This model's maximum context length is 65536");
+        assert!(matches!(
+            map_giveup(GiveUpReason::NotRetryable, &e),
+            ProviderError::ContextOverflow { .. }
+        ));
+    }
+}

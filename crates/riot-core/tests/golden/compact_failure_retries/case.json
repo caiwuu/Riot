@@ -1,0 +1,5 @@
+{
+  "description": "压缩失败不终止会话，仍然重试一次；失败时不应发出 Compacted 事件",
+  "prompt": "继续",
+  "compactor_fails_first": 1
+}

@@ -1,0 +1,37 @@
+{
+  "name": "riot",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "gen:schema": "cargo run -p riot-protocol --bin gen_schema",
+    "gen:types": "json2ts --input schemas/protocol.json --output src/bridge/generated.ts --bannerComment \"/* 由 schemas/protocol.json 生成，勿手改。改 crates/riot-protocol 里的 Rust 类型后跑 pnpm gen */\" --additionalProperties false",
+    "gen": "pnpm gen:schema && pnpm gen:types",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "highlight.js": "^11.11.1",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "remark-gfm": "^4.0.1",
+    "zustand": "^5.0.8"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "@tauri-apps/plugin-dialog": "^2.7.2",
+    "@tauri-apps/plugin-opener": "^2.5.4",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "json-schema-to-typescript": "^15.0.4",
+    "typescript": "^5.9.0",
+    "vite": "^7.0.0"
+  }
+}

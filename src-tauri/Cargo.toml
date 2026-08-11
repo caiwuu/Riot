@@ -1,0 +1,44 @@
+[package]
+name = "riot-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Tauri 宿主：窗口、内核进程监管、PTY、文件系统"
+
+[lib]
+# Tauri v2 把逻辑放 lib.rs、main.rs 只做薄壳，为的是 mobile target 能复用入口。
+name = "riot_host_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6", features = [] }
+
+[dependencies]
+riot-core.workspace = true
+riot-permissions.workspace = true
+riot-protocol.workspace = true
+riot-providers.workspace = true
+riot-runtime.workspace = true
+riot-tools.workspace = true
+
+tauri = { version = "2.11", features = [] }
+tauri-plugin-dialog = "2.7"
+tauri-plugin-opener = "2.5"
+
+anyhow.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+process-wrap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+tempfile.workspace = true

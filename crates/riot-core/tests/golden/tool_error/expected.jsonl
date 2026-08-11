@@ -1,0 +1,6 @@
+{"type":"request_start","turn":0,"model":"test-model"}
+{"type":"message","role":"assistant","id":"msg_a1","content":[{"type":"tool_use","id":"tu_1","name":"Read","input":{"path":"missing.rs"}}]}
+{"type":"message","role":"user","id":"golden_results","content":[{"type":"tool_result","tool_use_id":"tu_1","content":{"type":"text","text":"文件不存在。先用 Glob 确认路径再读。"},"is_error":true}],"meta":{"synthetic":true}}
+{"type":"request_start","turn":1,"model":"test-model","after":"next_turn"}
+{"type":"message","role":"assistant","id":"msg_a2","content":[{"type":"text","text":"这个文件不存在。"}]}
+{"type":"done","reason":{"reason":"completed"}}

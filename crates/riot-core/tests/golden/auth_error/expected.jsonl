@@ -1,0 +1,3 @@
+{"type":"request_start","turn":0,"model":"test-model"}
+{"type":"message","role":"system","id":"msg_1","level":"error","text":"认证失败：401 Unauthorized"}
+{"type":"done","reason":{"reason":"error","error":{"kind":"provider","message":"认证失败：401 Unauthorized","retryable":false}}}

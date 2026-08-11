@@ -1,0 +1,11 @@
+{
+  "description": "yield 出 tool_use 之后中断，tool_result 仍然要配齐",
+  "prompt": "跑个长任务",
+  "tools": {
+    "Bash": {
+      "outcome": "ok",
+      "text": "done"
+    }
+  },
+  "cancel_after_events": 2
+}

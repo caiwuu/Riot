@@ -1,0 +1,5 @@
+{"type":"request_start","turn":0,"model":"test-model"}
+{"type":"compacted","before_tokens":18,"after_tokens":9,"strategy":"full_summary"}
+{"type":"request_start","turn":0,"model":"test-model","after":"reactive_compact_retry"}
+{"type":"message","role":"system","id":"msg_1","level":"error","text":"上下文溢出：用了 199000，上限 180000"}
+{"type":"done","reason":{"reason":"error","error":{"kind":"context_exhausted","used":199000,"limit":180000}}}

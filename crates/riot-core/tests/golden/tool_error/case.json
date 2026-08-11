@@ -1,0 +1,10 @@
+{
+  "description": "工具失败转成 is_error 的 tool_result，模型据此改口",
+  "prompt": "读 missing.rs",
+  "tools": {
+    "Read": {
+      "outcome": "failed",
+      "error_for_model": "文件不存在。先用 Glob 确认路径再读。"
+    }
+  }
+}

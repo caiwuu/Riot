@@ -1,0 +1,27 @@
+[package]
+name = "riot-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+riot-protocol = { workspace = true }
+schemars = { workspace = true }
+
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+futures-core = { workspace = true }
+pin-project-lite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

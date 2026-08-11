@@ -1,0 +1,13 @@
+[
+  {
+    "event": "message",
+    "role": "assistant",
+    "id": "msg_a1",
+    "content": [
+      {
+        "type": "text",
+        "text": "写完了。"
+      }
+    ]
+  }
+]

@@ -1,0 +1,11 @@
+{
+  "description": "模型一直要求调工具，轮数上限必须兜住",
+  "prompt": "无限循环",
+  "max_turns": 2,
+  "tools": {
+    "Read": {
+      "outcome": "ok",
+      "text": "x"
+    }
+  }
+}

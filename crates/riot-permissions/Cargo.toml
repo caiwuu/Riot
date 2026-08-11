@@ -1,0 +1,27 @@
+[package]
+name = "riot-permissions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "权限决策链、敏感操作检查与路径围栏"
+
+[dependencies]
+riot-protocol = { workspace = true }
+
+async-trait = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+shell-words = { workspace = true }
+thiserror = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-bash = { workspace = true }
+tracing = { workspace = true }
+
+[features]
+# 让下游测试能用权限替身。生产构建不带。
+testing = []
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

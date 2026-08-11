@@ -1,0 +1,23 @@
+[package]
+name = "riot-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+# 只要 Stream trait 本身，不要 futures 那一大坨组合子 ——
+# protocol 是依赖图的叶子，编译时间会被所有 crate 放大。
+futures-core = { workspace = true }
+nanoid = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+serde_json = { workspace = true }

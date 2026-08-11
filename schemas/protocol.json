@@ -1,0 +1,2507 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProtocolRoot",
+  "description": "把所有顶层类型收进一个 root，让生成的 schema 共享同一份 `$defs`。\n这样下游的 TS 生成器能产出一个类型互相引用的完整文件。",
+  "type": "object",
+  "properties": {
+    "agent_event": {
+      "$ref": "#/$defs/AgentEvent"
+    },
+    "message": {
+      "$ref": "#/$defs/Message"
+    },
+    "permission_ask": {
+      "$ref": "#/$defs/PermissionAsk"
+    },
+    "permission_response": {
+      "$ref": "#/$defs/PermissionResponse"
+    },
+    "provider_event": {
+      "$ref": "#/$defs/ProviderEvent"
+    },
+    "rpc_notification": {
+      "$ref": "#/$defs/RpcNotification"
+    },
+    "rpc_request": {
+      "$ref": "#/$defs/RpcRequest"
+    },
+    "rpc_response": {
+      "$ref": "#/$defs/RpcResponse"
+    }
+  },
+  "required": [
+    "agent_event",
+    "message",
+    "rpc_request",
+    "rpc_response",
+    "rpc_notification",
+    "permission_ask",
+    "permission_response",
+    "provider_event"
+  ],
+  "$defs": {
+    "AbortSource": {
+      "oneOf": [
+        {
+          "description": "用户按 Esc。",
+          "type": "string",
+          "const": "user"
+        },
+        {
+          "description": "用户中途插话。UI **不**显示\"已中断\"文案 ——\n后续排队消息自带上下文，提示反而是噪声。",
+          "type": "string",
+          "const": "user_interjection"
+        },
+        {
+          "description": "同批兄弟工具失败导致的级联取消。",
+          "type": "string",
+          "const": "sibling_failure"
+        },
+        {
+          "description": "权限被拒且需要结束整轮。",
+          "type": "string",
+          "const": "permission_denied"
+        },
+        {
+          "description": "进程关闭。",
+          "type": "string",
+          "const": "shutdown"
+        }
+      ]
+    },
+    "AgentError": {
+      "oneOf": [
+        {
+          "description": "上下文溢出且所有压缩手段都失败了。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "context_exhausted"
+            },
+            "limit": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "used": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "used",
+            "limit"
+          ]
+        },
+        {
+          "description": "压缩连续失败触发熔断。",
+          "type": "object",
+          "properties": {
+            "attempts": {
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "compact_circuit_open"
+            }
+          },
+          "required": [
+            "kind",
+            "attempts"
+          ]
+        },
+        {
+          "description": "Provider 层不可恢复错误（重试耗尽、认证失败等）。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "provider"
+            },
+            "message": {
+              "type": "string"
+            },
+            "retryable": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "message",
+            "retryable"
+          ]
+        },
+        {
+          "description": "内核内部错误（含被捕获的 panic）。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "internal"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ]
+        }
+      ]
+    },
+    "AgentEvent": {
+      "oneOf": [
+        {
+          "description": "一轮 API 请求开始。UI 用于显示 spinner。\n\n`after` 说明这一轮是**为什么**开始的。它同时服务两个目的：UI 可以显示\n\"正在重试（上下文已压缩）\" 而不是干转圈；黄金回放靠它区分\"模型正常\n要求继续\"和\"因错误在重试\"—— 没有这个字段，两者产生的事件序列\n完全一样，恢复逻辑写错了测试也发现不了。",
+          "type": "object",
+          "properties": {
+            "after": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Transition"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "model": {
+              "type": "string"
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "request_start"
+            }
+          },
+          "required": [
+            "type",
+            "turn",
+            "model"
+          ]
+        },
+        {
+          "description": "流式增量。高频（每秒可能上百条），仅用于打字机效果。\n\n**不进 transcript，黄金回放测试也会忽略它** —— 断言 Delta\n会让用例极其脆弱，改一点流式切分逻辑就全红。",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "delta"
+            }
+          },
+          "$ref": "#/$defs/StreamDelta",
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "一条完整消息。可持久化、可回放、可送回模型。",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "message"
+            }
+          },
+          "$ref": "#/$defs/Message",
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "工具执行进度。不进 transcript。",
+          "type": "object",
+          "properties": {
+            "payload": {
+              "$ref": "#/$defs/ProgressPayload"
+            },
+            "tool_use_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "progress"
+            }
+          },
+          "required": [
+            "type",
+            "tool_use_id",
+            "payload"
+          ]
+        },
+        {
+          "description": "权限请求。内核在此暂停，等宿主回应。\n\n等待必须带超时和取消，超时默认 **deny**。见 ARCHITECTURE.md §12.4",
+          "type": "object",
+          "properties": {
+            "detail": {
+              "$ref": "#/$defs/PermissionAsk"
+            },
+            "request_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "permission_request"
+            }
+          },
+          "required": [
+            "type",
+            "request_id",
+            "detail"
+          ]
+        },
+        {
+          "description": "某个权限请求已经**不需要回答了** —— 超时或被取消。\n\n用户回答产生的关闭不走这条:那种情况下界面自己就把弹窗收了。\n这条专门覆盖\"没人回答\"的那一半 —— 请求在宿主侧已经作废，界面\n却不知道，弹窗会一直挂着。用户过一会儿点了\"允许\",什么都不会\n发生（宿主早已按拒绝处理并继续往下走了），而界面表现得像成功了。\n\n等待上限缩到 60 秒之后这条路径变得常见,不能再靠 `Done` 兜底。",
+          "type": "object",
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/DecisionReason"
+            },
+            "request_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "permission_resolved"
+            }
+          },
+          "required": [
+            "type",
+            "request_id",
+            "reason"
+          ]
+        },
+        {
+          "description": "上下文压缩发生。",
+          "type": "object",
+          "properties": {
+            "after_tokens": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "before_tokens": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "strategy": {
+              "$ref": "#/$defs/CompactStrategy"
+            },
+            "type": {
+              "type": "string",
+              "const": "compacted"
+            }
+          },
+          "required": [
+            "type",
+            "before_tokens",
+            "after_tokens",
+            "strategy"
+          ]
+        },
+        {
+          "description": "终止。\n\n**必须是流的最后一个事件，且必须出现。** 即使内核 panic 被捕获，\n也要合成一条 `Done { reason: Error }`。消费者依赖这一点做资源清理；\n缺失会导致 UI 永远转圈。由 INV-4 断言保证。",
+          "type": "object",
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/TerminalReason"
+            },
+            "type": {
+              "type": "string",
+              "const": "done"
+            }
+          },
+          "required": [
+            "type",
+            "reason"
+          ]
+        }
+      ]
+    },
+    "AskPreview": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "command"
+            }
+          },
+          "required": [
+            "kind",
+            "command",
+            "cwd"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "diff": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "file_edit"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "path",
+            "diff"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "file_write"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "path",
+            "bytes"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "network_fetch"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "url"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "plain"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ]
+        }
+      ]
+    },
+    "AssistantContent": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "signature": {
+              "description": "签名与模型绑定。换模型前必须剥离，否则 API 400。\n由 INV-9 断言保证。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "thinking"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "input": true,
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "tool_use"
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "name",
+            "input"
+          ]
+        }
+      ]
+    },
+    "Attachment": {
+      "oneOf": [
+        {
+          "description": "项目记忆文件（AGENTS.md 等）。包在 system-reminder 里注入首条 user 消息。",
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "memory"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "path",
+            "content"
+          ]
+        },
+        {
+          "description": "压缩后重注入的工作集文件。",
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "restored_file"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "path",
+            "content"
+          ]
+        },
+        {
+          "description": "环境快照：cwd、git 状态、平台。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "environment"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ]
+        },
+        {
+          "description": "给模型的带外提示，不是用户说的话。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "system_reminder"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "image"
+            },
+            "media_type": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "media_type",
+            "data"
+          ]
+        }
+      ]
+    },
+    "CompactStrategy": {
+      "oneOf": [
+        {
+          "description": "大结果落盘，消息里留预览。无信息损失。",
+          "type": "string",
+          "const": "spill"
+        },
+        {
+          "description": "单消息内并行工具结果合计超预算，按 id 替换。",
+          "type": "string",
+          "const": "aggregate_budget"
+        },
+        {
+          "description": "旧 tool_result 清成占位符。仅在 prompt cache 大概率已冷时执行。",
+          "type": "string",
+          "const": "micro_compact"
+        },
+        {
+          "description": "LLM 全量总结。最后手段。",
+          "type": "string",
+          "const": "full_summary"
+        }
+      ]
+    },
+    "DecisionReason": {
+      "description": "决策理由。UI 的解释、日志、遥测共用同一份数据。\n\n没有理由的决策无法调试 —— 用户报\"为什么它问我这个\"时，\n你需要能立刻回答。",
+      "oneOf": [
+        {
+          "description": "匹配到显式规则。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "rule"
+            },
+            "pattern": {
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/$defs/RuleSource"
+            }
+          },
+          "required": [
+            "kind",
+            "source",
+            "pattern"
+          ]
+        },
+        {
+          "description": "由权限模式决定。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "mode"
+            },
+            "mode": {
+              "$ref": "#/$defs/PermissionMode"
+            }
+          },
+          "required": [
+            "kind",
+            "mode"
+          ]
+        },
+        {
+          "description": "hook 做出的决策。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "hook"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ]
+        },
+        {
+          "description": "LLM 分类器判定。",
+          "type": "object",
+          "properties": {
+            "confidence": {
+              "type": "number",
+              "format": "float"
+            },
+            "kind": {
+              "type": "string",
+              "const": "classifier"
+            }
+          },
+          "required": [
+            "kind",
+            "confidence"
+          ]
+        },
+        {
+          "description": "敏感操作安全检查。**对 bypass 模式免疫。**",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "safety_check"
+            },
+            "safety": {
+              "$ref": "#/$defs/SafetyKind"
+            }
+          },
+          "required": [
+            "kind",
+            "safety"
+          ]
+        },
+        {
+          "description": "OS 沙箱已提供硬边界，策略层放行。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "sandbox"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "命中内置白名单（官方文档站之类）。\n\n不复用 `Rule` 是因为这不是用户配的规则 —— 用户在\"为什么它没问我\"\n里看到一条自己从没写过的规则会更困惑。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "preapproved"
+            },
+            "what": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "what"
+          ]
+        },
+        {
+          "description": "工具要为某个具体目标征求同意 —— 没有任何规则命中，是默认行为。\n\n典型场景是 WebFetch 抓一个陌生域名：工具想问\"这个站可以吗\"，\n但这不构成安全发现，也不是用户写过的规则。\n\n`[约束]` 不能复用 `Rule` 顶替。理由和 `Preapproved` 一样（用户会\n在解释里看到一条自己没写过的规则），但后果更严重 —— 决策链靠这个\n变体区分\"可被 bypass 压过的例行询问\"和\"必须坚持的询问\"。冒充成\n`Rule` 会让「全部放行」对这类工具彻底失效，见\n[`chain::decide`](../../riot_permissions/chain/fn.decide.html) 第 3 步。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "consent"
+            },
+            "what": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "what"
+          ]
+        },
+        {
+          "description": "静态分析看不懂这次调用，所以问一句。**不是**说它危险。\n\nBash 的命令分析是主要来源：`echo $HOME` 里的变量展开、\n`$(git rev-parse HEAD)` 里的命令替换、`for` 循环 —— 分析器无法\n断定它们最终会执行什么，于是保守地问。\n\n`[约束]` 和 [`DecisionReason::SafetyCheck`] 的区别是**不确定性**\n与**危险**之别，而这个区别决定了「全部放行」管不管用。这类判定\n在正常开发里触发得极其频繁（模型干活必然用变量和管道），标成\n安全发现的话，「全部放行」会变成一个几乎无法工作的模式 ——\n用户开着它，却在 `echo $HOME` 上被拦住。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "unverifiable"
+            },
+            "what": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "what"
+          ]
+        },
+        {
+          "description": "用户在弹窗里的选择。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "user_choice"
+            },
+            "remembered": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "remembered"
+          ]
+        },
+        {
+          "description": "无人应答超时。**默认 deny，不是 allow。**",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "timeout"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "Message": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/UserContent"
+              }
+            },
+            "id": {
+              "type": "string"
+            },
+            "meta": {
+              "$ref": "#/$defs/MessageMeta"
+            },
+            "role": {
+              "type": "string",
+              "const": "user"
+            }
+          },
+          "required": [
+            "role",
+            "id",
+            "content"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AssistantContent"
+              }
+            },
+            "id": {
+              "type": "string"
+            },
+            "meta": {
+              "$ref": "#/$defs/MessageMeta"
+            },
+            "role": {
+              "type": "string",
+              "const": "assistant"
+            },
+            "usage": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Usage"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "role",
+            "id",
+            "content"
+          ]
+        },
+        {
+          "description": "仅展示给用户，**不送回模型**。\n\n违反这条会污染上下文，并且模型会开始把系统提示当成用户指令。\n由 INV-7 断言保证。",
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "level": {
+              "$ref": "#/$defs/SystemLevel"
+            },
+            "role": {
+              "type": "string",
+              "const": "system"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "role",
+            "id",
+            "level",
+            "text"
+          ]
+        }
+      ]
+    },
+    "MessageMeta": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "description": "该消息由哪个 agent 产生。None = 主 agent。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "is_api_error": {
+          "description": "API 错误产生的消息。**这类消息上绝不能跑 stop hooks**，\n否则会形成 error → hook 注入 → 重试 → error 的死循环。\n由 INV-6 断言保证。",
+          "type": "boolean"
+        },
+        "model_origin": {
+          "description": "产生这条消息的模型。thinking signature 与模型绑定，\n降级换模型时要靠这个字段找出需要剥离签名的消息。\n由 INV-9 断言保证。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "synthetic": {
+          "description": "是否为系统合成（而非模型产出或用户输入）。",
+          "type": "boolean"
+        }
+      }
+    },
+    "OutputStream": {
+      "type": "string",
+      "enum": [
+        "stdout",
+        "stderr"
+      ]
+    },
+    "PermissionAsk": {
+      "description": "发给 UI 的权限请求详情。",
+      "type": "object",
+      "properties": {
+        "preview": {
+          "description": "结构化预览：diff、命令、URL。UI 据此渲染。",
+          "$ref": "#/$defs/AskPreview"
+        },
+        "reason": {
+          "$ref": "#/$defs/DecisionReason"
+        },
+        "suggestions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PermissionUpdate"
+          }
+        },
+        "summary": {
+          "description": "给用户看的一句话描述，如 \"运行 npm test\"。",
+          "type": "string"
+        },
+        "tool_name": {
+          "type": "string"
+        },
+        "tool_use_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool_use_id",
+        "tool_name",
+        "summary",
+        "preview",
+        "suggestions",
+        "reason"
+      ]
+    },
+    "PermissionMode": {
+      "oneOf": [
+        {
+          "description": "默认：写操作询问。",
+          "type": "string",
+          "const": "default"
+        },
+        {
+          "description": "工作区内编辑自动通过。",
+          "type": "string",
+          "const": "acceptEdits"
+        },
+        {
+          "description": "只读规划模式。",
+          "type": "string",
+          "const": "plan"
+        },
+        {
+          "description": "全部放行 —— 但敏感操作安全检查仍然生效。",
+          "type": "string",
+          "const": "bypassPermissions"
+        },
+        {
+          "description": "什么都不问，安全检查也一并放行。\n\n`[约束]` 这是本产品能给出的最弱保护，只有显式的 deny 规则还拦得住。\n它存在的理由是长任务：用户要离开电脑，而每一次询问都会把任务\n停在那里等一个不在场的人。\n\n和 [`PermissionMode::BypassPermissions`] 的区别就是那层分层免疫 ——\n放行模式仍然守着 SSH 密钥、shell 启动脚本这些能换来持久执行权的\n目标，这个模式连它们一起交出去。UI 上必须写清这一点。",
+          "type": "string",
+          "const": "unattended"
+        },
+        {
+          "description": "ask 一律转 deny（无人值守场景）。",
+          "type": "string",
+          "const": "dontAsk"
+        }
+      ]
+    },
+    "PermissionResponse": {
+      "description": "宿主对权限请求的应答。",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "decision": {
+              "type": "string",
+              "const": "allow"
+            },
+            "remember": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/PermissionUpdate"
+              }
+            }
+          },
+          "required": [
+            "decision"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "decision": {
+              "type": "string",
+              "const": "deny"
+            },
+            "message": {
+              "description": "用户可以说明理由，会作为 tool_result 喂回模型。",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "decision"
+          ]
+        }
+      ]
+    },
+    "PermissionUpdate": {
+      "description": "结构化的\"永久同意\"。",
+      "oneOf": [
+        {
+          "description": "加一条规则，如 `Bash(npm run *)`。",
+          "type": "object",
+          "properties": {
+            "decision": {
+              "$ref": "#/$defs/RuleDecision"
+            },
+            "pattern": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "scope": {
+              "$ref": "#/$defs/UpdateScope"
+            },
+            "tool": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "add_rule"
+            }
+          },
+          "required": [
+            "type",
+            "tool",
+            "decision",
+            "scope"
+          ]
+        },
+        {
+          "description": "切换权限模式。",
+          "type": "object",
+          "properties": {
+            "mode": {
+              "$ref": "#/$defs/PermissionMode"
+            },
+            "scope": {
+              "$ref": "#/$defs/UpdateScope"
+            },
+            "type": {
+              "type": "string",
+              "const": "set_mode"
+            }
+          },
+          "required": [
+            "type",
+            "mode",
+            "scope"
+          ]
+        },
+        {
+          "description": "把目录加入工作区围栏。",
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "scope": {
+              "$ref": "#/$defs/UpdateScope"
+            },
+            "type": {
+              "type": "string",
+              "const": "add_working_directory"
+            }
+          },
+          "required": [
+            "type",
+            "path",
+            "scope"
+          ]
+        }
+      ]
+    },
+    "ProgressPayload": {
+      "oneOf": [
+        {
+          "description": "一行输出（Bash 的 stdout/stderr 流式）。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "line"
+            },
+            "stream": {
+              "$ref": "#/$defs/OutputStream"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "stream",
+            "text"
+          ]
+        },
+        {
+          "description": "已知总量的进度。",
+          "type": "object",
+          "properties": {
+            "done": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "fraction"
+            },
+            "label": {
+              "type": "string"
+            },
+            "total": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "done",
+            "total",
+            "label"
+          ]
+        },
+        {
+          "description": "无法量化的状态更新。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "status"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ]
+        },
+        {
+          "description": "子 agent 的嵌套事件（套娃显示）。",
+          "type": "object",
+          "properties": {
+            "event": {
+              "$ref": "#/$defs/AgentEvent"
+            },
+            "kind": {
+              "type": "string",
+              "const": "nested"
+            }
+          },
+          "required": [
+            "kind",
+            "event"
+          ]
+        }
+      ]
+    },
+    "ProviderError": {
+      "oneOf": [
+        {
+          "description": "上下文溢出。可恢复：压缩后重试。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "context_overflow"
+            },
+            "limit": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "used": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "used",
+            "limit"
+          ]
+        },
+        {
+          "description": "输出 token 耗尽。可恢复：调低 max_output_tokens 后重试。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "output_limit"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "附件过大。可恢复：剥离媒体后重试。",
+          "type": "object",
+          "properties": {
+            "bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "media_too_large"
+            }
+          },
+          "required": [
+            "kind",
+            "bytes"
+          ]
+        },
+        {
+          "description": "重试耗尽。不可恢复 —— provider 内部已经试过了。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "retries_exhausted"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "auth"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "transport"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ]
+        },
+        {
+          "description": "模型拒绝服务（内容策略等）。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "refused"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ]
+        }
+      ]
+    },
+    "ProviderEvent": {
+      "description": "Provider 流里的一个事件。\n\n可序列化是为了黄金回放：用例把模型响应存成 JSON，测试时原样喂回主循环。",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
+              "const": "delta"
+            }
+          },
+          "$ref": "#/$defs/StreamDelta",
+          "required": [
+            "event"
+          ]
+        },
+        {
+          "description": "一条完整的助手消息。",
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
+              "const": "message"
+            }
+          },
+          "$ref": "#/$defs/Message",
+          "required": [
+            "event"
+          ]
+        },
+        {
+          "description": "用量更新。累计值，用 [`Usage::merge`] 合并。",
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
+              "const": "usage"
+            }
+          },
+          "$ref": "#/$defs/Usage",
+          "required": [
+            "event"
+          ]
+        },
+        {
+          "description": "出错。**流在此结束**，不会再有后续事件。",
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
+              "const": "error"
+            }
+          },
+          "$ref": "#/$defs/ProviderError",
+          "required": [
+            "event"
+          ]
+        }
+      ]
+    },
+    "RpcError": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/RpcErrorCode"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ]
+    },
+    "RpcErrorCode": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "session_not_found",
+            "invalid_params",
+            "internal"
+          ]
+        },
+        {
+          "description": "该会话已有一轮在运行。",
+          "type": "string",
+          "const": "turn_in_progress"
+        }
+      ]
+    },
+    "RpcNotification": {
+      "description": "内核 → 宿主，单向推送。",
+      "oneOf": [
+        {
+          "description": "会话事件。**这是唯一的会话事件载体。**",
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "object",
+              "properties": {
+                "event": {
+                  "$ref": "#/$defs/AgentEvent"
+                },
+                "session_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session_id",
+                "event"
+              ]
+            },
+            "event": {
+              "type": "string",
+              "const": "event.agent"
+            }
+          },
+          "required": [
+            "event",
+            "data"
+          ]
+        },
+        {
+          "description": "内核级错误。fatal 时宿主应重启内核。",
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "object",
+              "properties": {
+                "fatal": {
+                  "type": "boolean"
+                },
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "message",
+                "fatal"
+              ]
+            },
+            "event": {
+              "type": "string",
+              "const": "event.kernel_error"
+            }
+          },
+          "required": [
+            "event",
+            "data"
+          ]
+        }
+      ]
+    },
+    "RpcRequest": {
+      "description": "宿主 → 内核。有返回值。",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "session.create"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "cwd": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "cwd",
+                "model"
+              ]
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "session.resume"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "session_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session_id"
+              ]
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "session.list"
+            }
+          },
+          "required": [
+            "method"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "session.delete"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "session_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session_id"
+              ]
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "turn.submit"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "content": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/UserContent"
+                  }
+                },
+                "session_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session_id",
+                "content"
+              ]
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "description": "中断当前轮。",
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "turn.interrupt"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "interjection": {
+                  "description": "用户插话时为 true —— UI 不显示\"已中断\"文案。",
+                  "type": "boolean"
+                },
+                "session_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session_id",
+                "interjection"
+              ]
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "description": "运行中排队消息。会在工具结果全部就位后 drain，\n绝不能插在 tool_use 和 tool_result 之间（INV-2）。",
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "turn.queue_message"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "content": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/UserContent"
+                  }
+                },
+                "session_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session_id",
+                "content"
+              ]
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "permission.respond"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "request_id": {
+                  "type": "string"
+                },
+                "response": {
+                  "$ref": "#/$defs/PermissionResponse"
+                }
+              },
+              "required": [
+                "request_id",
+                "response"
+              ]
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "config.set_mode"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "$ref": "#/$defs/PermissionMode"
+                },
+                "session_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session_id",
+                "mode"
+              ]
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "tools.list"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "session_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session_id"
+              ]
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "description": "健康检查。宿主定期调用，无应答则重启内核。",
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "kernel.ping"
+            }
+          },
+          "required": [
+            "method"
+          ]
+        }
+      ]
+    },
+    "RpcResponse": {
+      "description": "内核 → 宿主，对 [`RpcRequest`] 的应答。",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "object",
+              "properties": {
+                "session_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session_id"
+              ]
+            },
+            "result": {
+              "type": "string",
+              "const": "session_created"
+            }
+          },
+          "required": [
+            "result",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "object",
+              "properties": {
+                "messages": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Message"
+                  }
+                }
+              },
+              "required": [
+                "messages"
+              ]
+            },
+            "result": {
+              "type": "string",
+              "const": "session_resumed"
+            }
+          },
+          "required": [
+            "result",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "object",
+              "properties": {
+                "sessions": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/SessionSummary"
+                  }
+                }
+              },
+              "required": [
+                "sessions"
+              ]
+            },
+            "result": {
+              "type": "string",
+              "const": "session_list"
+            }
+          },
+          "required": [
+            "result",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "object",
+              "properties": {
+                "turn_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "turn_id"
+              ]
+            },
+            "result": {
+              "type": "string",
+              "const": "turn_started"
+            }
+          },
+          "required": [
+            "result",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "object",
+              "properties": {
+                "tools": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/ToolInfo"
+                  }
+                }
+              },
+              "required": [
+                "tools"
+              ]
+            },
+            "result": {
+              "type": "string",
+              "const": "tools_list"
+            }
+          },
+          "required": [
+            "result",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "object",
+              "properties": {
+                "version": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "version"
+              ]
+            },
+            "result": {
+              "type": "string",
+              "const": "pong"
+            }
+          },
+          "required": [
+            "result",
+            "data"
+          ]
+        },
+        {
+          "description": "无返回数据的成功。",
+          "type": "object",
+          "properties": {
+            "result": {
+              "type": "string",
+              "const": "ok"
+            }
+          },
+          "required": [
+            "result"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "object",
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/RpcError"
+                }
+              },
+              "required": [
+                "error"
+              ]
+            },
+            "result": {
+              "type": "string",
+              "const": "error"
+            }
+          },
+          "required": [
+            "result",
+            "data"
+          ]
+        }
+      ]
+    },
+    "RuleDecision": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "ask",
+        "deny"
+      ]
+    },
+    "RuleSource": {
+      "oneOf": [
+        {
+          "description": "组织策略。优先级最高，用户不可覆盖。",
+          "type": "string",
+          "const": "policy"
+        },
+        {
+          "description": "命令行参数。",
+          "type": "string",
+          "const": "cli_arg"
+        },
+        {
+          "description": "会话内用户亲手点的\"总是允许\"。\n\n排在配置文件（Local/Project/User）之前：用户刚刚对着具体的命令\n做了决定，那个决定比他半年前写的配置更能代表当前意图。",
+          "type": "string",
+          "const": "session"
+        },
+        {
+          "description": "项目本地未提交配置。",
+          "type": "string",
+          "const": "local"
+        },
+        {
+          "description": "项目提交进版本库的配置。",
+          "type": "string",
+          "const": "project"
+        },
+        {
+          "description": "用户全局配置。",
+          "type": "string",
+          "const": "user"
+        }
+      ]
+    },
+    "SafetyKind": {
+      "oneOf": [
+        {
+          "description": "写 .git/ 目录。",
+          "type": "string",
+          "const": "git_internals"
+        },
+        {
+          "description": "SSH 配置与密钥。",
+          "type": "string",
+          "const": "ssh_config"
+        },
+        {
+          "description": "shell 启动脚本（.zshrc 等）—— 改这些等于取得持久化执行权。",
+          "type": "string",
+          "const": "shell_rc"
+        },
+        {
+          "description": "本应用自己的配置目录。",
+          "type": "string",
+          "const": "agent_config"
+        },
+        {
+          "description": "疑似凭证文件。",
+          "type": "string",
+          "const": "credentials"
+        },
+        {
+          "description": "命令里检测到注入模式。",
+          "type": "string",
+          "const": "command_injection"
+        },
+        {
+          "description": "命令 AST 解析失败或含不认识的结构。",
+          "type": "string",
+          "const": "unparseable_command"
+        }
+      ]
+    },
+    "SessionSummary": {
+      "type": "object",
+      "properties": {
+        "cwd": {
+          "type": "string"
+        },
+        "message_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updated_at_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "session_id",
+        "cwd",
+        "updated_at_ms",
+        "message_count"
+      ]
+    },
+    "StreamDelta": {
+      "description": "流式增量的种类。\n\n`[约束]` tag 必须是 `kind`，不能是 `type`。\n\n`AgentEvent::Delta` 是 newtype variant，serde 的 internally-tagged 表示会把\n这里的字段**摊平**到 AgentEvent 那一层。两边都叫 `type` 的话，序列化产物是\n`{\"type\":\"delta\",\"type\":\"text\",...}` —— 重复 key，反序列化直接报\n`duplicate field`，前端一个 token 都收不到。\n\n由 `every_event_variant_roundtrips` 断言。",
+      "oneOf": [
+        {
+          "description": "助手文本增量。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "text"
+            },
+            "message_id": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "message_id",
+            "text"
+          ]
+        },
+        {
+          "description": "思考过程增量。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "thinking"
+            },
+            "message_id": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "message_id",
+            "text"
+          ]
+        },
+        {
+          "description": "工具参数增量。\n\n这里刻意只传原始字符串片段，**不做增量 JSON 解析** ——\n每个 delta 都 parse 是 O(n²)，大工具参数下很明显。\n完整参数在 Message 事件里给出。见 ARCHITECTURE.md §11.3",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "tool_input"
+            },
+            "partial_json": {
+              "type": "string"
+            },
+            "tool_use_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "tool_use_id",
+            "partial_json"
+          ]
+        }
+      ]
+    },
+    "SystemLevel": {
+      "type": "string",
+      "enum": [
+        "info",
+        "warning",
+        "error"
+      ]
+    },
+    "TerminalReason": {
+      "description": "终止原因。\n\n在 TS 版本里这是 AsyncGenerator 的 return 值，控制流与数据流分离。\nRust 的 `async_stream::stream!` 要求块返回 `()`，所以降级成事件变体。\n好处是终止原因现在可序列化、可持久化、可被回放测试断言。\n详见 ARCHITECTURE.md §4.2",
+      "oneOf": [
+        {
+          "description": "模型说完了，没有待执行的工具。",
+          "type": "object",
+          "properties": {
+            "reason": {
+              "type": "string",
+              "const": "completed"
+            }
+          },
+          "required": [
+            "reason"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "reason": {
+              "type": "string",
+              "const": "max_turns"
+            }
+          },
+          "required": [
+            "reason",
+            "limit"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "by": {
+              "$ref": "#/$defs/AbortSource"
+            },
+            "reason": {
+              "type": "string",
+              "const": "aborted"
+            }
+          },
+          "required": [
+            "reason",
+            "by"
+          ]
+        },
+        {
+          "description": "中断发生时有工具正在执行，已全部取消并补齐 tool_result。",
+          "type": "object",
+          "properties": {
+            "cancelled": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "reason": {
+              "type": "string",
+              "const": "aborted_tools"
+            }
+          },
+          "required": [
+            "reason",
+            "cancelled"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string",
+              "const": "stop_hook_prevented"
+            }
+          },
+          "required": [
+            "reason",
+            "message"
+          ]
+        },
+        {
+          "description": "不可恢复错误。可恢复的错误不会走到这里 —— 它们被扣留并触发恢复循环。\n见 ARCHITECTURE.md §5.4",
+          "type": "object",
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/AgentError"
+            },
+            "reason": {
+              "type": "string",
+              "const": "error"
+            }
+          },
+          "required": [
+            "reason",
+            "error"
+          ]
+        }
+      ]
+    },
+    "ToolInfo": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "user_facing_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "user_facing_name",
+        "enabled"
+      ]
+    },
+    "ToolResultContent": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ]
+        },
+        {
+          "description": "结果过大已落盘，模型收到路径与预览。",
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "preview": {
+              "type": "string"
+            },
+            "total_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "spilled"
+            }
+          },
+          "required": [
+            "type",
+            "path",
+            "preview",
+            "total_bytes"
+          ]
+        },
+        {
+          "description": "历史清理后的占位符（microcompact 产物）。",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "cleared"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "string"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "image"
+            }
+          },
+          "required": [
+            "type",
+            "media_type",
+            "data"
+          ]
+        }
+      ]
+    },
+    "Transition": {
+      "description": "一轮结束后为什么继续。\n\n`[约束]` 每次主循环 `continue` 之前必须设置它，并带进下一个\n[`AgentEvent::RequestStart`]。这是把「恢复路径」变成可观测行为的唯一手段。\n\n放在 protocol 而不是 core，是因为前端也要用 —— 用户需要知道\n「转了 30 秒是因为在压缩上下文」，而不是以为卡住了。",
+      "oneOf": [
+        {
+          "description": "模型给了 tool_use，执行完继续。",
+          "type": "string",
+          "const": "next_turn"
+        },
+        {
+          "description": "上下文溢出，压缩后重试。",
+          "type": "string",
+          "const": "reactive_compact_retry"
+        },
+        {
+          "description": "输出 token 耗尽，调低上限后重试。",
+          "type": "string",
+          "const": "output_limit_recovery"
+        },
+        {
+          "description": "stop hook 拦下了结束，注入内容后继续。",
+          "type": "string",
+          "const": "stop_hook_blocking"
+        },
+        {
+          "description": "接近预算，注入提醒后继续。",
+          "type": "string",
+          "const": "token_budget_nudge"
+        }
+      ]
+    },
+    "UpdateScope": {
+      "oneOf": [
+        {
+          "description": "仅本次会话。",
+          "type": "string",
+          "const": "session"
+        },
+        {
+          "description": "写入项目本地配置。",
+          "type": "string",
+          "const": "local"
+        },
+        {
+          "description": "写入项目配置（会提交进版本库）。",
+          "type": "string",
+          "const": "project"
+        },
+        {
+          "description": "写入用户全局配置。",
+          "type": "string",
+          "const": "user"
+        }
+      ]
+    },
+    "Usage": {
+      "description": "Token 用量。\n\n注意：流式 API 报的是**累计值不是增量**。`message_delta` 里的\ninput/cache 字段可能回 0，直接覆盖会抹掉 `message_start` 的真值。\n累加时用 [`Usage::merge`]，它对这些字段做了 `> 0` 守卫。",
+      "type": "object",
+      "properties": {
+        "cache_creation_tokens": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "cache_read_tokens": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "input_tokens": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_tokens",
+        "cache_read_tokens"
+      ]
+    },
+    "UserContent": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "content": {
+              "$ref": "#/$defs/ToolResultContent"
+            },
+            "is_error": {
+              "type": "boolean"
+            },
+            "tool_use_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "tool_result"
+            }
+          },
+          "required": [
+            "type",
+            "tool_use_id",
+            "content",
+            "is_error"
+          ]
+        },
+        {
+          "description": "文件引用、图片、系统提醒。展开时机由上下文管理层决定。",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "attachment"
+            }
+          },
+          "$ref": "#/$defs/Attachment",
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    }
+  }
+}

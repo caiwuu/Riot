@@ -1,0 +1,4 @@
+{
+  "description": "模型直接回答，没有 tool_use，循环一轮结束",
+  "prompt": "你好"
+}

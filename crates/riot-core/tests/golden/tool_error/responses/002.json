@@ -1,0 +1,13 @@
+[
+  {
+    "event": "message",
+    "role": "assistant",
+    "id": "msg_a2",
+    "content": [
+      {
+        "type": "text",
+        "text": "这个文件不存在。"
+      }
+    ]
+  }
+]

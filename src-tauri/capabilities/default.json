@@ -1,0 +1,34 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗口能力集。自定义命令在 build.rs 里声明，这里逐个放行 —— 声明「存在」和授予「可用」是两件事。",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-set-title",
+    "core:window:allow-start-dragging",
+    "dialog:default",
+    "opener:default",
+    "opener:allow-reveal-item-in-dir",
+
+    "allow-subscribe-session",
+    "allow-send-turn",
+    "allow-interrupt",
+    "allow-respond-permission",
+    "allow-set-permission-mode",
+    "allow-get-config",
+    "allow-set-config",
+    "allow-set-api-key",
+    "allow-add-project",
+    "allow-create-session",
+    "allow-list-sessions",
+    "allow-get-history",
+    "allow-delete-session",
+    "allow-rename-session",
+    "allow-remove-project",
+    "allow-test-connection",
+    "allow-test-search-backend",
+    "allow-list-models",
+    "allow-set-session-sampling"
+  ]
+}

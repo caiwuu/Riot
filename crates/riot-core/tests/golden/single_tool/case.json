@@ -1,0 +1,10 @@
+{
+  "description": "一次工具调用，结果回灌后模型总结结束",
+  "prompt": "读一下 a.rs",
+  "tools": {
+    "Read": {
+      "outcome": "ok",
+      "text": "fn main() {}"
+    }
+  }
+}

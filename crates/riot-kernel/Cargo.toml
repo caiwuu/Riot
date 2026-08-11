@@ -1,0 +1,12 @@
+[package]
+name = "riot-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+riot-protocol = { workspace = true }
+riot-core = { workspace = true }
+tokio = { workspace = true }
+tracing-subscriber = { workspace = true }

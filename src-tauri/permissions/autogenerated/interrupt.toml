@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-interrupt"
+description = "Enables the interrupt command without any pre-configured scope."
+commands.allow = ["interrupt"]
+
+[[permission]]
+identifier = "deny-interrupt"
+description = "Denies the interrupt command without any pre-configured scope."
+commands.deny = ["interrupt"]

@@ -1,0 +1,730 @@
+/* 由 schemas/protocol.json 生成，勿手改。改 crates/riot-protocol 里的 Rust 类型后跑 pnpm gen */
+
+export type AgentEvent =
+  | {
+      after?: Transition | null;
+      model: string;
+      turn: number;
+      type: "request_start";
+    }
+  | StreamDelta
+  | Message
+  | {
+      payload: ProgressPayload;
+      tool_use_id: string;
+      type: "progress";
+    }
+  | {
+      detail: PermissionAsk;
+      request_id: string;
+      type: "permission_request";
+    }
+  | {
+      reason: DecisionReason;
+      request_id: string;
+      type: "permission_resolved";
+    }
+  | {
+      after_tokens: number;
+      before_tokens: number;
+      strategy: CompactStrategy;
+      type: "compacted";
+    }
+  | {
+      reason: TerminalReason;
+      type: "done";
+    };
+/**
+ * 一轮结束后为什么继续。
+ *
+ * `[约束]` 每次主循环 `continue` 之前必须设置它，并带进下一个
+ * [`AgentEvent::RequestStart`]。这是把「恢复路径」变成可观测行为的唯一手段。
+ *
+ * 放在 protocol 而不是 core，是因为前端也要用 —— 用户需要知道
+ * 「转了 30 秒是因为在压缩上下文」，而不是以为卡住了。
+ */
+export type Transition =
+  "next_turn" | "reactive_compact_retry" | "output_limit_recovery" | "stop_hook_blocking" | "token_budget_nudge";
+/**
+ * 流式增量。高频（每秒可能上百条），仅用于打字机效果。
+ *
+ * **不进 transcript，黄金回放测试也会忽略它** —— 断言 Delta
+ * 会让用例极其脆弱，改一点流式切分逻辑就全红。
+ */
+export type StreamDelta = {
+  type: "delta";
+} & (
+  | {
+      kind: "text";
+      message_id: string;
+      text: string;
+    }
+  | {
+      kind: "thinking";
+      message_id: string;
+      text: string;
+    }
+  | {
+      kind: "tool_input";
+      partial_json: string;
+      tool_use_id: string;
+    }
+);
+/**
+ * 一条完整消息。可持久化、可回放、可送回模型。
+ */
+export type Message = {
+  type: "message";
+} & (
+  | {
+      content: UserContent[];
+      id: string;
+      meta?: MessageMeta;
+      role: "user";
+    }
+  | {
+      content: AssistantContent[];
+      id: string;
+      meta?: MessageMeta;
+      role: "assistant";
+      usage?: Usage | null;
+    }
+  | {
+      id: string;
+      level: SystemLevel;
+      role: "system";
+      text: string;
+    }
+);
+export type UserContent =
+  | {
+      text: string;
+      type: "text";
+    }
+  | {
+      content: ToolResultContent;
+      is_error: boolean;
+      tool_use_id: string;
+      type: "tool_result";
+    }
+  | Attachment;
+export type ToolResultContent =
+  | {
+      text: string;
+      type: "text";
+    }
+  | {
+      path: string;
+      preview: string;
+      total_bytes: number;
+      type: "spilled";
+    }
+  | {
+      type: "cleared";
+    }
+  | {
+      data: string;
+      media_type: string;
+      type: "image";
+    };
+/**
+ * 文件引用、图片、系统提醒。展开时机由上下文管理层决定。
+ */
+export type Attachment = {
+  type: "attachment";
+} & (
+  | {
+      content: string;
+      kind: "memory";
+      path: string;
+    }
+  | {
+      content: string;
+      kind: "restored_file";
+      path: string;
+    }
+  | {
+      kind: "environment";
+      text: string;
+    }
+  | {
+      kind: "system_reminder";
+      text: string;
+    }
+  | {
+      data: string;
+      kind: "image";
+      media_type: string;
+    }
+);
+export type AssistantContent =
+  | {
+      text: string;
+      type: "text";
+    }
+  | {
+      /**
+       * 签名与模型绑定。换模型前必须剥离，否则 API 400。
+       * 由 INV-9 断言保证。
+       */
+      signature?: string | null;
+      text: string;
+      type: "thinking";
+    }
+  | {
+      id: string;
+      input: unknown;
+      name: string;
+      type: "tool_use";
+    };
+export type SystemLevel = "info" | "warning" | "error";
+export type ProgressPayload =
+  | {
+      kind: "line";
+      stream: OutputStream;
+      text: string;
+    }
+  | {
+      done: number;
+      kind: "fraction";
+      label: string;
+      total: number;
+    }
+  | {
+      kind: "status";
+      text: string;
+    }
+  | {
+      event: AgentEvent;
+      kind: "nested";
+    };
+export type OutputStream = "stdout" | "stderr";
+/**
+ * 决策理由。UI 的解释、日志、遥测共用同一份数据。
+ *
+ * 没有理由的决策无法调试 —— 用户报"为什么它问我这个"时，
+ * 你需要能立刻回答。
+ */
+export type DecisionReason =
+  | {
+      kind: "rule";
+      pattern: string;
+      source: RuleSource;
+    }
+  | {
+      kind: "mode";
+      mode: PermissionMode;
+    }
+  | {
+      kind: "hook";
+      name: string;
+    }
+  | {
+      confidence: number;
+      kind: "classifier";
+    }
+  | {
+      kind: "safety_check";
+      safety: SafetyKind;
+    }
+  | {
+      kind: "sandbox";
+    }
+  | {
+      kind: "preapproved";
+      what: string;
+    }
+  | {
+      kind: "consent";
+      what: string;
+    }
+  | {
+      kind: "unverifiable";
+      what: string;
+    }
+  | {
+      kind: "user_choice";
+      remembered: boolean;
+    }
+  | {
+      kind: "timeout";
+    };
+export type RuleSource = "policy" | "cli_arg" | "session" | "local" | "project" | "user";
+export type PermissionMode = "default" | "acceptEdits" | "plan" | "bypassPermissions" | "unattended" | "dontAsk";
+export type SafetyKind =
+  | "git_internals"
+  | "ssh_config"
+  | "shell_rc"
+  | "agent_config"
+  | "credentials"
+  | "command_injection"
+  | "unparseable_command";
+/**
+ * 结构化的"永久同意"。
+ */
+export type PermissionUpdate =
+  | {
+      decision: RuleDecision;
+      pattern?: string | null;
+      scope: UpdateScope;
+      tool: string;
+      type: "add_rule";
+    }
+  | {
+      mode: PermissionMode;
+      scope: UpdateScope;
+      type: "set_mode";
+    }
+  | {
+      path: string;
+      scope: UpdateScope;
+      type: "add_working_directory";
+    };
+export type RuleDecision = "allow" | "ask" | "deny";
+export type UpdateScope = "session" | "local" | "project" | "user";
+export type CompactStrategy = "spill" | "aggregate_budget" | "micro_compact" | "full_summary";
+/**
+ * 终止原因。
+ *
+ * 在 TS 版本里这是 AsyncGenerator 的 return 值，控制流与数据流分离。
+ * Rust 的 `async_stream::stream!` 要求块返回 `()`，所以降级成事件变体。
+ * 好处是终止原因现在可序列化、可持久化、可被回放测试断言。
+ * 详见 ARCHITECTURE.md §4.2
+ */
+export type TerminalReason =
+  | {
+      reason: "completed";
+    }
+  | {
+      limit: number;
+      reason: "max_turns";
+    }
+  | {
+      by: AbortSource;
+      reason: "aborted";
+    }
+  | {
+      cancelled: number;
+      reason: "aborted_tools";
+    }
+  | {
+      message: string;
+      reason: "stop_hook_prevented";
+    }
+  | {
+      error: AgentError;
+      reason: "error";
+    };
+export type AbortSource = "user" | "user_interjection" | "sibling_failure" | "permission_denied" | "shutdown";
+export type AgentError =
+  | {
+      kind: "context_exhausted";
+      limit: number;
+      used: number;
+    }
+  | {
+      attempts: number;
+      kind: "compact_circuit_open";
+    }
+  | {
+      kind: "provider";
+      message: string;
+      retryable: boolean;
+    }
+  | {
+      kind: "internal";
+      message: string;
+    };
+export type Message1 =
+  | {
+      content: UserContent[];
+      id: string;
+      meta?: MessageMeta;
+      role: "user";
+    }
+  | {
+      content: AssistantContent[];
+      id: string;
+      meta?: MessageMeta;
+      role: "assistant";
+      usage?: Usage | null;
+    }
+  | {
+      id: string;
+      level: SystemLevel;
+      role: "system";
+      text: string;
+    };
+/**
+ * 宿主对权限请求的应答。
+ */
+export type PermissionResponse =
+  | {
+      decision: "allow";
+      remember?: PermissionUpdate[];
+    }
+  | {
+      decision: "deny";
+      /**
+       * 用户可以说明理由，会作为 tool_result 喂回模型。
+       */
+      message?: string | null;
+    };
+/**
+ * Provider 流里的一个事件。
+ *
+ * 可序列化是为了黄金回放：用例把模型响应存成 JSON，测试时原样喂回主循环。
+ */
+export type ProviderEvent = StreamDelta1 | Message2 | Usage1 | ProviderError;
+/**
+ * 流式增量的种类。
+ *
+ * `[约束]` tag 必须是 `kind`，不能是 `type`。
+ *
+ * `AgentEvent::Delta` 是 newtype variant，serde 的 internally-tagged 表示会把
+ * 这里的字段**摊平**到 AgentEvent 那一层。两边都叫 `type` 的话，序列化产物是
+ * `{"type":"delta","type":"text",...}` —— 重复 key，反序列化直接报
+ * `duplicate field`，前端一个 token 都收不到。
+ *
+ * 由 `every_event_variant_roundtrips` 断言。
+ */
+export type StreamDelta1 = {
+  event: "delta";
+} & (
+  | {
+      kind: "text";
+      message_id: string;
+      text: string;
+    }
+  | {
+      kind: "thinking";
+      message_id: string;
+      text: string;
+    }
+  | {
+      kind: "tool_input";
+      partial_json: string;
+      tool_use_id: string;
+    }
+);
+/**
+ * 一条完整的助手消息。
+ */
+export type Message2 = {
+  event: "message";
+} & (
+  | {
+      content: UserContent[];
+      id: string;
+      meta?: MessageMeta;
+      role: "user";
+    }
+  | {
+      content: AssistantContent[];
+      id: string;
+      meta?: MessageMeta;
+      role: "assistant";
+      usage?: Usage | null;
+    }
+  | {
+      id: string;
+      level: SystemLevel;
+      role: "system";
+      text: string;
+    }
+);
+/**
+ * 出错。**流在此结束**，不会再有后续事件。
+ */
+export type ProviderError = {
+  event: "error";
+} & (
+  | {
+      kind: "context_overflow";
+      limit: number;
+      used: number;
+    }
+  | {
+      kind: "output_limit";
+    }
+  | {
+      bytes: number;
+      kind: "media_too_large";
+    }
+  | {
+      kind: "retries_exhausted";
+      message: string;
+    }
+  | {
+      kind: "auth";
+      message: string;
+    }
+  | {
+      kind: "transport";
+      message: string;
+    }
+  | {
+      kind: "refused";
+      message: string;
+    }
+);
+/**
+ * 内核 → 宿主，单向推送。
+ */
+export type RpcNotification =
+  | {
+      data: {
+        event: AgentEvent;
+        session_id: string;
+      };
+      event: "event.agent";
+    }
+  | {
+      data: {
+        fatal: boolean;
+        message: string;
+      };
+      event: "event.kernel_error";
+    };
+/**
+ * 宿主 → 内核。有返回值。
+ */
+export type RpcRequest =
+  | {
+      method: "session.create";
+      params: {
+        cwd: string;
+        model: string;
+      };
+    }
+  | {
+      method: "session.resume";
+      params: {
+        session_id: string;
+      };
+    }
+  | {
+      method: "session.list";
+    }
+  | {
+      method: "session.delete";
+      params: {
+        session_id: string;
+      };
+    }
+  | {
+      method: "turn.submit";
+      params: {
+        content: UserContent[];
+        session_id: string;
+      };
+    }
+  | {
+      method: "turn.interrupt";
+      params: {
+        /**
+         * 用户插话时为 true —— UI 不显示"已中断"文案。
+         */
+        interjection: boolean;
+        session_id: string;
+      };
+    }
+  | {
+      method: "turn.queue_message";
+      params: {
+        content: UserContent[];
+        session_id: string;
+      };
+    }
+  | {
+      method: "permission.respond";
+      params: {
+        request_id: string;
+        response: PermissionResponse;
+      };
+    }
+  | {
+      method: "config.set_mode";
+      params: {
+        mode: PermissionMode;
+        session_id: string;
+      };
+    }
+  | {
+      method: "tools.list";
+      params: {
+        session_id: string;
+      };
+    }
+  | {
+      method: "kernel.ping";
+    };
+/**
+ * 内核 → 宿主，对 [`RpcRequest`] 的应答。
+ */
+export type RpcResponse =
+  | {
+      data: {
+        session_id: string;
+      };
+      result: "session_created";
+    }
+  | {
+      data: {
+        messages: Message1[];
+      };
+      result: "session_resumed";
+    }
+  | {
+      data: {
+        sessions: SessionSummary[];
+      };
+      result: "session_list";
+    }
+  | {
+      data: {
+        turn_id: string;
+      };
+      result: "turn_started";
+    }
+  | {
+      data: {
+        tools: ToolInfo[];
+      };
+      result: "tools_list";
+    }
+  | {
+      data: {
+        version: string;
+      };
+      result: "pong";
+    }
+  | {
+      result: "ok";
+    }
+  | {
+      data: {
+        error: RpcError;
+      };
+      result: "error";
+    };
+export type RpcErrorCode = ("session_not_found" | "invalid_params" | "internal") | "turn_in_progress";
+
+/**
+ * 把所有顶层类型收进一个 root，让生成的 schema 共享同一份 `$defs`。
+ * 这样下游的 TS 生成器能产出一个类型互相引用的完整文件。
+ */
+export interface ProtocolRoot {
+  agent_event: AgentEvent;
+  message: Message1;
+  permission_ask: PermissionAsk;
+  permission_response: PermissionResponse;
+  provider_event: ProviderEvent;
+  rpc_notification: RpcNotification;
+  rpc_request: RpcRequest;
+  rpc_response: RpcResponse;
+}
+export interface MessageMeta {
+  /**
+   * 该消息由哪个 agent 产生。None = 主 agent。
+   */
+  agent_id?: string | null;
+  /**
+   * API 错误产生的消息。**这类消息上绝不能跑 stop hooks**，
+   * 否则会形成 error → hook 注入 → 重试 → error 的死循环。
+   * 由 INV-6 断言保证。
+   */
+  is_api_error?: boolean;
+  /**
+   * 产生这条消息的模型。thinking signature 与模型绑定，
+   * 降级换模型时要靠这个字段找出需要剥离签名的消息。
+   * 由 INV-9 断言保证。
+   */
+  model_origin?: string | null;
+  /**
+   * 是否为系统合成（而非模型产出或用户输入）。
+   */
+  synthetic?: boolean;
+}
+/**
+ * Token 用量。
+ *
+ * 注意：流式 API 报的是**累计值不是增量**。`message_delta` 里的
+ * input/cache 字段可能回 0，直接覆盖会抹掉 `message_start` 的真值。
+ * 累加时用 [`Usage::merge`]，它对这些字段做了 `> 0` 守卫。
+ */
+export interface Usage {
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  input_tokens: number;
+  output_tokens: number;
+}
+/**
+ * 发给 UI 的权限请求详情。
+ */
+export interface PermissionAsk {
+  /**
+   * 结构化预览：diff、命令、URL。UI 据此渲染。
+   */
+  preview:
+    | {
+        command: string;
+        cwd: string;
+        kind: "command";
+      }
+    | {
+        diff: string;
+        kind: "file_edit";
+        path: string;
+      }
+    | {
+        bytes: number;
+        kind: "file_write";
+        path: string;
+      }
+    | {
+        kind: "network_fetch";
+        url: string;
+      }
+    | {
+        kind: "plain";
+        text: string;
+      };
+  reason: DecisionReason;
+  suggestions: PermissionUpdate[];
+  /**
+   * 给用户看的一句话描述，如 "运行 npm test"。
+   */
+  summary: string;
+  tool_name: string;
+  tool_use_id: string;
+}
+/**
+ * Token 用量。
+ *
+ * 注意：流式 API 报的是**累计值不是增量**。`message_delta` 里的
+ * input/cache 字段可能回 0，直接覆盖会抹掉 `message_start` 的真值。
+ * 累加时用 [`Usage::merge`]，它对这些字段做了 `> 0` 守卫。
+ */
+export interface Usage1 {
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  input_tokens: number;
+  output_tokens: number;
+}
+export interface SessionSummary {
+  cwd: string;
+  message_count: number;
+  session_id: string;
+  title?: string | null;
+  updated_at_ms: number;
+}
+export interface ToolInfo {
+  enabled: boolean;
+  name: string;
+  user_facing_name: string;
+}
+export interface RpcError {
+  code: RpcErrorCode;
+  message: string;
+}

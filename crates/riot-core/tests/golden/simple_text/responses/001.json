@@ -1,0 +1,25 @@
+[
+  {
+    "event": "delta",
+    "kind": "text",
+    "message_id": "msg_a1",
+    "text": "你"
+  },
+  {
+    "event": "delta",
+    "kind": "text",
+    "message_id": "msg_a1",
+    "text": "好"
+  },
+  {
+    "event": "message",
+    "role": "assistant",
+    "id": "msg_a1",
+    "content": [
+      {
+        "type": "text",
+        "text": "你好"
+      }
+    ]
+  }
+]

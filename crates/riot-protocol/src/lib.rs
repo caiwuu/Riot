@@ -1,0 +1,49 @@
+//! Riot 协议层：宿主、内核、前端三方共享的契约。
+//!
+//! 这个 crate 是依赖图的叶子 —— 它不依赖 workspace 内任何其它 crate。
+//! 所有类型都 derive [`schemars::JsonSchema`]，构建时生成 JSON Schema
+//! 与 TypeScript 类型定义。
+//!
+//! **TS 类型必须是生成的，不允许手写。** 见 docs/VERIFICATION.md §2
+
+pub mod compact;
+pub mod event;
+pub mod id;
+pub mod message;
+pub mod permission;
+pub mod provider;
+pub mod rpc;
+pub mod runner;
+pub mod tool;
+pub mod web;
+
+pub use compact::{CompactBudget, CompactResult, Compactor};
+pub use event::{
+    AbortSource, AgentError, AgentEvent, CompactStrategy, ProgressPayload, StreamDelta,
+    TerminalReason, Transition,
+};
+pub use id::{
+    AgentId, IdGenerator, MessageId, NanoIdGenerator, RequestId, SessionId, ToolUseId, TurnId,
+};
+pub use message::{
+    AssistantContent, Attachment, Message, MessageMeta, SystemLevel, ToolResultContent, Usage,
+    UserContent,
+};
+pub use permission::{
+    AskPreview, DecisionReason, PermissionAsk, PermissionContext, PermissionMode,
+    PermissionResponse, PermissionResult, PermissionRule, PermissionUpdate, RuleDecision,
+    RuleSource, SafetyKind, UpdateScope,
+};
+pub use provider::{
+    Provider, ProviderError, ProviderEvent, ProviderRequest, ProviderStream, ThinkingConfig,
+    ToolSpec,
+};
+pub use rpc::{RpcEnvelope, RpcError, RpcErrorCode, RpcNotification, RpcRequest, RpcResponse};
+pub use tool::{
+    Clock, FileMeta, FileState, FileStateCache, FileSystem, FileView, InterruptBehavior,
+    ProcessOutput, ProcessRunner, ProcessSpec, ProgressSink, PromptContext, ResultBudget, Tool,
+    ToolContext, ToolOutcome, UiPayload, ValidationError,
+};
+pub use web::{
+    DistillRequest, NoWeb, SearchHit, SearchQuery, WebAccess, WebError, WebRequest, WebResponse,
+};

@@ -1,0 +1,17 @@
+[
+  {
+    "event": "message",
+    "role": "assistant",
+    "id": "msg_a1",
+    "content": [
+      {
+        "type": "tool_use",
+        "id": "tu_1",
+        "name": "Bash",
+        "input": {
+          "cmd": "sleep 10"
+        }
+      }
+    ]
+  }
+]

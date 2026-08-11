@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Tauri 的 bundler 会对 .app/Contents/MacOS/ 下的每一个二进制应用 hardened
+  runtime，包括随包分发的内核。没有这个文件的话签出来是空 entitlement 集合，
+  结果是公证失败（tauri#11992）或子进程启动即崩。
+
+  Rust 写的内核不需要 allow-jit —— 那是 Node/V8、Python 的问题。但如果 agent
+  要能启动用户装的 Node/Python 工具链，就还得加 allow-jit 和
+  allow-unsigned-executable-memory。
+
+  构建后验证：
+    codesign -dv --entitlements - "target/release/bundle/macos/Riot.app/Contents/MacOS/Riot"
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.inherit</key>
+    <true/>
+</dict>
+</plist>

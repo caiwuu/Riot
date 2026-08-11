@@ -1,0 +1,42 @@
+[package]
+name = "riot-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "工具注册表、并发分批调度与执行管线"
+
+[dependencies]
+riot-permissions = { workspace = true }
+riot-protocol = { workspace = true }
+
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+encoding_rs = { workspace = true }
+futures = { workspace = true }
+futures-core = { workspace = true }
+htmd = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+regex-lite = "0.1.9"
+
+[features]
+# 让下游测试能用工具替身。生产构建不带。
+testing = []
+
+[dev-dependencies]
+async-trait = { workspace = true }
+# core 只在测试里用：验证真实调度器接进主循环后配对成立。
+# 生产依赖方向仍是 protocol ← core 与 protocol ← tools，无环。
+riot-core = { workspace = true }
+# 自引用打开 testing feature，这样 `cargo test -p riot-tools` 不用
+# 额外带 --features 就能跑集成测试 —— 本地和 CI 的命令保持一致。
+riot-tools = { path = ".", features = ["testing"] }
+pretty_assertions = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

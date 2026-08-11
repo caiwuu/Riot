@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>贪吃蛇</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #1e1e2e;
+      font-family: system-ui, sans-serif;
+      color: #cdd6f4;
+    }
+    .wrap { text-align: center; }
+    h1 { font-size: 1.6rem; margin-bottom: 12px; color: #cba6f7; }
+    .score { margin-bottom: 12px; font-size: 1.1rem; }
+    .score b { color: #a6e3a1; }
+    canvas {
+      background: #11111b;
+      border: 2px solid #45475a;
+      border-radius: 8px;
+      display: block;
+      margin: 0 auto;
+    }
+    .tip { margin-top: 12px; font-size: 0.95rem; color: #9399b2; }
+    .btn {
+      margin-top: 12px;
+      padding: 8px 20px;
+      font-size: 1rem;
+      border: none;
+      border-radius: 6px;
+      background: #89b4fa;
+      color: #11111b;
+      cursor: pointer;
+    }
+    .btn:hover { background: #74a3f0; }
+    .gameover {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(17, 17, 27, 0.95);
+      padding: 24px 32px;
+      border-radius: 10px;
+      border: 2px solid #f38ba8;
+      display: none;
+      z-index: 10;
+    }
+    .gameover.show { display: block; }
+    .gameover h2 { color: #f38ba8; margin-bottom: 10px; }
+    .gameover p { margin-bottom: 10px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>🐍 贪吃蛇</h1>
+    <div class="score">得分：<b id="score">0</b></div>
+    <div style="position: relative; display: inline-block;">
+      <canvas id="canvas" width="400" height="400"></canvas>
+      <div id="gameover" class="gameover">
+        <h2>游戏结束</h2>
+        <p>最终得分：<b id="final">0</b></p>
+        <button class="btn" onclick="restart()">再来一局</button>
+      </div>
+    </div>
+    <div class="tip">方向键 / WASD 控制移动，空格暂停</div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const scoreEl = document.getElementById('score');
+    const finalEl = document.getElementById('final');
+    const gameoverEl = document.getElementById('gameover');
+
+    const GRID = 20;       // 20x20 格子
+    const CELL = canvas.width / GRID;
+
+    let snake, dir, nextDir, food, score, over, paused;
+    let timer = null;
+    const TICK = 150;      // 每帧间隔 ms
+
+    function init() {
+      snake = [{ x: 10, y: 10 }, { x: 9, y: 10 }, { x: 8, y: 10 }];
+      dir = { x: 1, y: 0 };
+      nextDir = { x: 1, y: 0 };
+      score = 0;
+      over = false;
+      paused = false;
+      scoreEl.textContent = score;
+      gameoverEl.classList.remove('show');
+      placeFood();
+      draw();
+    }
+
+    function placeFood() {
+      while (true) {
+        const f = {
+          x: Math.floor(Math.random() * GRID),
+          y: Math.floor(Math.random() * GRID)
+        };
+        if (!snake.some(s => s.x === f.x && s.y === f.y)) {
+          food = f;
+          return;
+        }
+      }
+    }
+
+    function tick() {
+      // 应用最新方向（不允许 180° 掉头）
+      if (!(nextDir.x === -dir.x && nextDir.y === -dir.y)) {
+        dir = { ...nextDir };
+      }
+      const head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
+
+      // 撞墙
+      if (head.x < 0 || head.x >= GRID || head.y < 0 || head.y >= GRID) {
+        return gameOver();
+      }
+      // 撞自己
+      if (snake.some(s => s.x === head.x && s.y === head.y)) {
+        return gameOver();
+      }
+
+      snake.unshift(head);
+      if (head.x === food.x && head.y === food.y) {
+        score++;
+        scoreEl.textContent = score;
+        placeFood();
+      } else {
+        snake.pop();
+      }
+      draw();
+    }
+
+    function gameOver() {
+      over = true;
+      clearInterval(timer);
+      timer = null;
+      finalEl.textContent = score;
+      gameoverEl.classList.add('show');
+    }
+
+    function restart() {
+      init();
+      if (!timer) timer = setInterval(tick, TICK);
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      // 格子线（淡）
+      ctx.strokeStyle = '#1f2331';
+      ctx.lineWidth = 1;
+      for (let i = 1; i < GRID; i++) {
+        ctx.beginPath();
+        ctx.moveTo(i * CELL, 0);
+        ctx.lineTo(i * CELL, canvas.height);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(0, i * CELL);
+        ctx.lineTo(canvas.width, i * CELL);
+        ctx.stroke();
+      }
+      // 蛇
+      snake.forEach((seg, i) => {
+        const isHead = i === 0;
+        ctx.fillStyle = isHead ? '#a6e3a1' : '#89dceb';
+        ctx.fillRect(seg.x * CELL + 1, seg.y * CELL + 1, CELL - 2, CELL - 2);
+      });
+      // 食物
+      ctx.fillStyle = '#f38ba8';
+      ctx.beginPath();
+      ctx.arc(food.x * CELL + CELL / 2, food.y * CELL + CELL / 2, CELL / 2 - 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    document.addEventListener('keydown', (e) => {
+      const map = {
+        ArrowUp: { x: 0, y: -1 }, KeyW: { x: 0, y: -1 },
+        ArrowDown: { x: 0, y: 1 }, KeyS: { x: 0, y: 1 },
+        ArrowLeft: { x: -1, y: 0 }, KeyA: { x: -1, y: 0 },
+        ArrowRight: { x: 1, y: 0 }, KeyD: { x: 1, y: 0 }
+      };
+      if (map[e.code]) {
+        e.preventDefault();
+        // 不允许和当前方向直接反向
+        const nd = map[e.code];
+        if (!(nd.x === -dir.x && nd.y === -dir.y)) {
+          nextDir = nd;
+        }
+      }
+      // 空格暂停/继续
+      if (e.code === 'Space') {
+        e.preventDefault();
+        togglePause();
+      }
+      // 回车再来一局
+      if (e.code === 'Enter' && over) {
+        restart();
+      }
+    });
+
+    function togglePause() {
+      if (over) return;
+      paused = !paused;
+      if (paused) {
+        clearInterval(timer);
+        timer = null;
+      } else if (!timer) {
+        timer = setInterval(tick, TICK);
+      }
+    }
+
+    init();
+    timer = setInterval(tick, TICK);
+  </script>
+</body>
+</html>

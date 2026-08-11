@@ -1,0 +1,82 @@
+[workspace]
+resolver = "2"
+# src-tauri 与内核共享 workspace，为的是协议类型由编译器保证一致 ——
+# 宿主和内核 depend 同一个 riot-protocol，对不上直接编译失败。
+members = ["crates/*", "src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.88"
+
+[workspace.dependencies]
+riot-protocol = { path = "crates/riot-protocol" }
+riot-core = { path = "crates/riot-core" }
+riot-tools = { path = "crates/riot-tools" }
+riot-providers = { path = "crates/riot-providers" }
+riot-permissions = { path = "crates/riot-permissions" }
+riot-store = { path = "crates/riot-store" }
+riot-runtime = { path = "crates/riot-runtime" }
+
+# 依赖版本在此统一，成员 crate 一律用 { workspace = true }
+anyhow = "1"
+async-stream = "0.3"
+async-trait = "0.1"
+# 网页字符集。国内不少站点仍是 GBK/GB18030，按 UTF-8 硬解出来整页乱码
+# 而且不报错 —— 模型会认真总结一堆替换字符。
+encoding_rs = "0.8"
+futures = "0.3"
+futures-core = "0.3"
+# HTML → Markdown。turndown.js 的 Rust 对应实现，和 Claude Code 用的是
+# 同一套规则思路。
+htmd = "0.5"
+nanoid = "0.4"
+pin-project-lite = "0.2"
+# 进程树管理。Tauri 官方 sidecar 不做这件事（见 ARCHITECTURE.md §2.3），
+# 靠 Job Object / 进程组让 OS 保证子树跟着父进程一起死。
+#
+# [约束] 不要加 default-features = false —— job-object(Windows) 和
+# process-group(Unix) 都在 default 里，关掉它们等于把这个依赖的意义关掉了。
+process-wrap = { version = "9", features = ["tokio1"] }
+# 真实 HTTP。用 rustls 而不是 native-tls：后者在 Linux 上要系统装 openssl，
+# 在 CI 和用户机器上都是一类反复出现的构建失败。
+#
+# gzip/brotli 是给 WebFetch 用的：真实网页普遍压缩，不开这两个特性
+# reqwest 不会发 Accept-Encoding，抓一个文档站要多传好几倍字节。
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "stream",
+    "http2",
+    "gzip",
+    "brotli",
+] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "fs", "io-util"] }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["rt"] }
+# Bash 命令的 AST 分析。见 ARCHITECTURE.md §9.3 —— 只允许白名单里的
+# 节点类型，遇到不认识的结构直接 Ask，不做"看起来安全"的推断。
+tree-sitter = "0.26"
+tree-sitter-bash = "0.25"
+# URL 解析。抓取工具的准入检查是安全边界，手写解析器在这里是不可接受的风险。
+url = "2"
+# tree-sitter 解析失败时的降级分词。倾向 Ask，不倾向放行。
+shell-words = "1.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# dev
+pretty_assertions = "1"
+tempfile = "3"
+
+# 依赖用优化编译，自己的代码不优化 —— 显著改善 debug 构建的运行速度
+[profile.dev]
+debug = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = false

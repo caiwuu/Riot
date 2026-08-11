@@ -1,0 +1,8 @@
+[
+  {
+    "event": "error",
+    "kind": "context_overflow",
+    "used": 199000,
+    "limit": 180000
+  }
+]

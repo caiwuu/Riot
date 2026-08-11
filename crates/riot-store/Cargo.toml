@@ -1,0 +1,9 @@
+[package]
+name = "riot-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+riot-protocol = { workspace = true }

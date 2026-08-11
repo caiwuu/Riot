@@ -1,0 +1,7 @@
+[
+  {
+    "event": "error",
+    "kind": "auth",
+    "message": "401 Unauthorized"
+  }
+]

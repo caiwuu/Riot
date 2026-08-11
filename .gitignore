@@ -1,0 +1,19 @@
+/target
+**/*.rs.bk
+node_modules
+dist
+.DS_Store
+.env
+.env.local
+*.db
+*.db-journal
+
+# tauri-build 生成的 capability schema，首次 build 后才存在
+src-tauri/gen/
+# externalBin 产物，由构建脚本从 cargo 输出拷入
+src-tauri/binaries/
+
+# 注意 schemas/protocol.json 和 src/bridge/generated.ts 都**进**版本库。
+# CI 会跑 `pnpm gen && git diff --exit-code` —— 改了 Rust 协议类型却忘了
+# 重新生成，立刻红。顺带让前端不装 Rust 工具链也能 typecheck。
+.mutate-backup/

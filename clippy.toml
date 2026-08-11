@@ -1,0 +1,34 @@
+# 非确定性 API 禁用清单。
+#
+# 黄金回放测试要求内核行为完全确定，这些 API 会破坏确定性。
+# 需要使用时必须写 #[allow(clippy::disallowed_methods)] 并注明理由 ——
+# 豁免点是可见、可 review 的，这正是目的。
+#
+# 这份清单是 workspace 级的，所以也会命中 src-tauri。宿主层不参与黄金回放，
+# 它的职责恰恰是操作真实的进程、时钟和文件系统，因此那边的模块普遍在文件顶部
+# 带 allow。review 时看的是**理由**是否成立，不是有没有 allow：
+#   - 「这是宿主层，要操作真实 OS」→ 成立
+#   - 「这是构建期代码生成器」→ 成立
+#   - 「注入 mock 会让安全检查失去意义」→ 成立（见 src-tauri/src/fence.rs）
+#   - 「加 trait 太麻烦了」→ 不成立
+#
+# 详见 docs/VERIFICATION.md §4.2
+
+disallowed-methods = [
+    { path = "std::time::SystemTime::now", reason = "使用注入的 Clock trait" },
+    { path = "std::time::Instant::now", reason = "使用注入的 Clock trait" },
+    { path = "tokio::time::sleep", reason = "使用注入的 Clock trait" },
+    { path = "tokio::time::timeout", reason = "使用 Clock::timeout" },
+    { path = "std::fs::read_to_string", reason = "使用注入的 FileSystem trait" },
+    { path = "std::fs::write", reason = "使用注入的 FileSystem trait" },
+    { path = "std::fs::metadata", reason = "使用注入的 FileSystem trait" },
+    { path = "tokio::fs::read_to_string", reason = "使用注入的 FileSystem trait" },
+    { path = "tokio::fs::write", reason = "使用注入的 FileSystem trait" },
+    { path = "std::process::Command::new", reason = "使用注入的 ProcessRunner trait" },
+    { path = "tokio::process::Command::new", reason = "使用注入的 ProcessRunner trait" },
+    { path = "rand::random", reason = "使用注入的 IdGenerator trait" },
+]
+
+disallowed-types = [
+    { path = "futures::stream::FuturesUnordered", reason = "并行工具结果必须保序，用 FuturesOrdered。见 ARCHITECTURE.md §7.3" },
+]
