@@ -26,6 +26,10 @@ const COMMANDS: &[&str] = &[
     "test_search_backend",
     "list_models",
     "set_session_sampling",
+    "browser_open",
+    "browser_close",
+    "browser_navigate",
+    "browser_input",
 ];
 
 fn main() {

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-browser-input"
+description = "Enables the browser_input command without any pre-configured scope."
+commands.allow = ["browser_input"]
+
+[[permission]]
+identifier = "deny-browser-input"
+description = "Denies the browser_input command without any pre-configured scope."
+commands.deny = ["browser_input"]

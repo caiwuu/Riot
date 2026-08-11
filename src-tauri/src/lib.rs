@@ -27,6 +27,8 @@ pub enum HostError {
     Kernel(#[from] kernel::KernelError),
     #[error(transparent)]
     Fence(#[from] fence::FenceError),
+    #[error("浏览器不可用：{0}")]
+    Browser(riot_protocol::browser::BrowserUnavailable),
     #[error("会话不存在。先用 create_session 建一个（每个会话绑定一个项目目录）。")]
     NoSession,
     #[error("这个会话还没有订阅事件流")]
@@ -149,6 +151,70 @@ async fn set_api_key(
         .ok_or_else(|| HostError::Provider(format!("找不到 provider「{provider_id}」")))?;
     config::save_key(&p.api_key_env, &key)?;
     Ok(config::ConfigStatus::of(config))
+}
+
+// ── 内置浏览器面板 ────────────────────────────────────
+//
+// `[约束]` 面板发起的操作**不过权限链**。
+//
+// 权限系统管的是"模型能不能做这件事"。面板上的点击、输入、地址栏跳转都是
+// **用户自己**在操作 —— 为用户的鼠标弹一个"是否允许点击"的窗，既没有意义
+// 也会立刻把人逼去开「全部放行」。模型走 Browser* 工具，那条照常受管。
+
+/// 打开面板:开始把画面推给前端。
+#[tauri::command]
+async fn browser_open(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    on_frame: Channel<browser::access::Frame>,
+) -> HostResult<()> {
+    let b = state.panel_browser(&session_id).await?;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+    // 帧从 tokio 通道转到 Tauri 的 Channel。中间这一跳是必要的:
+    // Channel 不是 Clone 到处传的东西，而帧的产生方在另一个任务里。
+    tokio::spawn(async move {
+        while let Some(f) = rx.recv().await {
+            if on_frame.send(f).is_err() {
+                break; // 前端不听了
+            }
+        }
+    });
+
+    b.start_screencast(tx).await.map_err(HostError::Browser)
+}
+
+/// 关闭面板。停止编码 —— 没人看的时候继续推是白烧 CPU 和电。
+#[tauri::command]
+async fn browser_close(state: tauri::State<'_, AppState>, session_id: String) -> HostResult<()> {
+    // 会话已经没了也算成功:用户关窗口时两件事同时发生，报错没有意义。
+    if let Ok(b) = state.panel_browser(&session_id).await {
+        b.stop_screencast().await;
+    }
+    Ok(())
+}
+
+/// 地址栏跳转。用户自己输的，不问权限。
+#[tauri::command]
+async fn browser_navigate(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    url: String,
+) -> HostResult<()> {
+    use riot_protocol::browser::BrowserAccess as _;
+    let b = state.panel_browser(&session_id).await?;
+    b.navigate(&url).await.map_err(HostError::Browser)
+}
+
+/// 把面板上的输入打到页面里。
+#[tauri::command]
+async fn browser_input(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    input: browser::access::Input,
+) -> HostResult<()> {
+    let b = state.panel_browser(&session_id).await?;
+    b.send_input(input).await.map_err(HostError::Browser)
 }
 
 /// 把一个目录加进项目列表（验证它存在、可 canonicalize），返回规范化的根。
@@ -291,6 +357,10 @@ pub fn run() {
             respond_permission,
             set_permission_mode,
             set_session_sampling,
+            browser_open,
+            browser_close,
+            browser_navigate,
+            browser_input,
             get_config,
             set_config,
             set_api_key,

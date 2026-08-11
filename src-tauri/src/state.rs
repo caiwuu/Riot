@@ -264,6 +264,22 @@ impl AppState {
         doomed
     }
 
+    /// 某个会话的面板浏览器。
+    ///
+    /// 没打包浏览器时报错而不是静默成功 —— 面板点开一片黑却没有任何提示，
+    /// 是最难查的那种。
+    pub async fn panel_browser(
+        &self,
+        id: &str,
+    ) -> HostResult<Arc<crate::browser::access::HostBrowser>> {
+        self.session(id)
+            .await?
+            .panel_browser()
+            .ok_or_else(|| HostError::Browser(riot_protocol::browser::BrowserUnavailable(
+                "这个构建没有内置浏览器。开发时先跑 scripts/build-browser.sh。".into(),
+            )))
+    }
+
     async fn session(&self, id: &str) -> HostResult<Arc<Session>> {
         self.0
             .sessions

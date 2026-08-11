@@ -61,7 +61,12 @@ pub struct Session {
     ///
     /// 每个会话一个独立 profile:同一个数据目录不能有两个 Chromium 实例，
     /// 共用的话第二个会话一用浏览器就报"不可用"。
-    browser: Arc<dyn riot_protocol::browser::BrowserAccess>,
+    ///
+    /// 存具体类型而不是 `dyn BrowserAccess`:面板要用的 screencast 和输入
+    /// 转发是**界面**的需求，不该塞进给工具用的那个 trait。两者的读者
+    /// 不同，混在一起会让工具层看到一堆它永远不该调的方法。
+    /// `None` = 没打包浏览器。
+    browser: Option<Arc<crate::browser::access::HostBrowser>>,
     history: Mutex<Vec<Message>>,
     /// 当前这一轮的取消令牌。没有正在跑的轮次时是 None。
     running: Mutex<Option<CancellationToken>>,
@@ -111,23 +116,31 @@ impl PendingAsks {
 ///
 /// 没打包浏览器时装 `NoBrowser` —— 工具会明确说"用不了"，而不是让宿主
 /// 在启动时就失败。浏览器是可选能力，缺了它聊天和文件操作照常。
-fn make_browser(id: &SessionId) -> Arc<dyn riot_protocol::browser::BrowserAccess> {
-    let Some(app) = crate::browser::access::locate_app() else {
-        tracing::info!("没找到打包好的浏览器，Browser* 工具将不可用");
-        return Arc::new(riot_protocol::browser::NoBrowser);
-    };
+fn make_browser(id: &SessionId) -> Option<Arc<crate::browser::access::HostBrowser>> {
+    let app = crate::browser::access::locate_app().or_else(|| {
+        tracing::info!("没找到打包好的浏览器，Browser* 工具和面板都不可用");
+        None
+    })?;
     let profile = crate::config::config_path()
         .parent()
         .unwrap_or(std::path::Path::new("."))
         .join("browser-profiles")
         .join(id.as_str());
-    Arc::new(crate::browser::access::HostBrowser::new(app, profile))
+    Some(Arc::new(crate::browser::access::HostBrowser::new(app, profile)))
 }
 
 impl Session {
-    /// 这个会话的浏览器能力。
+    /// 给工具用的浏览器能力。没打包时是 `NoBrowser`，工具会明说用不了。
     fn browser(&self) -> Arc<dyn riot_protocol::browser::BrowserAccess> {
-        Arc::clone(&self.browser)
+        match &self.browser {
+            Some(b) => Arc::clone(b) as Arc<dyn riot_protocol::browser::BrowserAccess>,
+            None => Arc::new(riot_protocol::browser::NoBrowser),
+        }
+    }
+
+    /// 给面板用的浏览器。`None` = 这个构建没带浏览器。
+    pub fn panel_browser(&self) -> Option<Arc<crate::browser::access::HostBrowser>> {
+        self.browser.clone()
     }
 
     pub fn new(id: SessionId, cwd: std::path::PathBuf) -> Self {

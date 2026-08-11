@@ -24,12 +24,32 @@ use tokio::sync::{Mutex, mpsc};
 use super::{Browser, ops};
 
 /// 一帧画面。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Frame {
     /// base64 的 JPEG。直接能塞进 `<img src="data:image/jpeg;base64,...">`。
     pub data: String,
     pub width: u32,
     pub height: u32,
+}
+
+/// 面板转发过来的一次输入。
+///
+/// 坐标是**页面坐标**（相对视口左上角，CSS 像素）。面板负责把自己的
+/// DOM 坐标换算过来 —— 它知道自己的缩放比例，这一层不知道。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Input {
+    /// 按下并抬起。合成一次完整点击，而不是让前端发两条 —— 中间要是
+    /// 丢了一条，页面会停在"按住"状态，后续所有交互都不对。
+    Click { x: f64, y: f64, button: String },
+    Move { x: f64, y: f64 },
+    Scroll { x: f64, y: f64, delta_y: f64 },
+    /// 输入文本。走 insertText 而不是逐字符 keyDown ——
+    /// 中文、emoji 这些没有对应键码，逐字符发根本发不出来。
+    Text { text: String },
+    /// 功能键（Enter、Backspace、方向键之类）。
+    Key { key: String },
 }
 
 pub struct HostBrowser {
@@ -79,6 +99,64 @@ impl HostBrowser {
         )
         .await
         .map_err(|e| BrowserUnavailable(e.to_string()))?;
+        Ok(())
+    }
+
+    /// 把面板上的一次输入打到页面里。
+    ///
+    /// `[取舍]` 走 CDP 的 `Input.*` 而不是在页面里合成 DOM 事件。
+    ///
+    /// 合成事件（`element.dispatchEvent(new MouseEvent(...))`）拿不到
+    /// `isTrusted`，很多库会忽略它；也走不通原生控件（`<select>` 的下拉、
+    /// 文件选择、拖拽）。`Input.*` 是从浏览器输入栈的顶端进去的，页面
+    /// 分辨不出和真人操作的区别。
+    pub async fn send_input(&self, input: Input) -> Result<(), BrowserUnavailable> {
+        let b = self.get().await?;
+        let calls: Vec<(&str, serde_json::Value)> = match input {
+            Input::Click { x, y, button } => vec![
+                ("Input.dispatchMouseEvent", serde_json::json!({
+                    "type": "mousePressed", "x": x, "y": y,
+                    "button": button, "clickCount": 1,
+                })),
+                ("Input.dispatchMouseEvent", serde_json::json!({
+                    "type": "mouseReleased", "x": x, "y": y,
+                    "button": button, "clickCount": 1,
+                })),
+            ],
+            Input::Move { x, y } => vec![(
+                "Input.dispatchMouseEvent",
+                serde_json::json!({ "type": "mouseMoved", "x": x, "y": y }),
+            )],
+            Input::Scroll { x, y, delta_y } => vec![(
+                "Input.dispatchMouseEvent",
+                serde_json::json!({
+                    "type": "mouseWheel", "x": x, "y": y,
+                    "deltaX": 0, "deltaY": delta_y,
+                }),
+            )],
+            Input::Text { text } => vec![(
+                "Input.insertText",
+                serde_json::json!({ "text": text }),
+            )],
+            Input::Key { key } => {
+                let code = key_code(&key);
+                vec![
+                    ("Input.dispatchKeyEvent", serde_json::json!({
+                        "type": "keyDown", "key": key, "windowsVirtualKeyCode": code,
+                    })),
+                    ("Input.dispatchKeyEvent", serde_json::json!({
+                        "type": "keyUp", "key": key, "windowsVirtualKeyCode": code,
+                    })),
+                ]
+            }
+        };
+
+        for (method, params) in calls {
+            // 不等响应。输入事件是连续流，逐个等往返会让打字有明显延迟，
+            // 而它们的响应本来就是空的。
+            b.cdp_no_wait(method, params)
+                .map_err(|e| BrowserUnavailable(e.to_string()))?;
+        }
         Ok(())
     }
 
@@ -196,6 +274,32 @@ impl BrowserAccess for HostBrowser {
         .ok()
         .and_then(|v| v["result"]["value"].as_str().map(ToOwned::to_owned))
         .unwrap_or_default()
+    }
+}
+
+/// 功能键的 Windows 虚拟键码。
+///
+/// `[约束]` 这几个键必须带键码。只发 `key` 字符串的话，Chromium 收得到
+/// 事件但不会执行默认行为 —— 回车不提交表单、退格不删字符。看起来像
+/// "按了没反应"，而事件其实是送到了的。
+///
+/// 只列常用的。列表外的键当普通文本处理，那对单字符键是对的。
+fn key_code(key: &str) -> u32 {
+    match key {
+        "Enter" => 13,
+        "Backspace" => 8,
+        "Tab" => 9,
+        "Escape" => 27,
+        "ArrowLeft" => 37,
+        "ArrowUp" => 38,
+        "ArrowRight" => 39,
+        "ArrowDown" => 40,
+        "Delete" => 46,
+        "Home" => 36,
+        "End" => 35,
+        "PageUp" => 33,
+        "PageDown" => 34,
+        _ => 0,
     }
 }
 

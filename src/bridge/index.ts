@@ -243,6 +243,65 @@ export function removeProject(root: string): Promise<string[]> {
   return invoke<string[]>("remove_project", { root });
 }
 
+/* ── 内置浏览器面板 ─────────────────────────── */
+
+/** 一帧画面。`data` 是 base64 的 JPEG，直接能当 img 的 src。 */
+export interface BrowserFrame {
+  data: string;
+  width: number;
+  height: number;
+}
+
+/**
+ * 面板发给页面的输入。
+ *
+ * 坐标是**页面坐标**（相对视口左上角的 CSS 像素）。面板负责把自己的 DOM
+ * 坐标换算过来 —— 它知道当前缩放比例，宿主不知道。
+ */
+export type BrowserInput =
+  | { kind: "click"; x: number; y: number; button: string }
+  | { kind: "move"; x: number; y: number }
+  | { kind: "scroll"; x: number; y: number; deltaY: number }
+  | { kind: "text"; text: string }
+  | { kind: "key"; key: string };
+
+/**
+ * 打开面板，开始接收画面。
+ *
+ * 返回的 unsubscribe 只停止本地分发；要让宿主停止编码必须调
+ * {@link closeBrowser} —— 没人看的时候继续推是白烧 CPU。
+ */
+export function openBrowser(
+  sessionId: string,
+  onFrame: (f: BrowserFrame) => void,
+): Subscription {
+  let active = true;
+  const channel = new Channel<BrowserFrame>();
+  channel.onmessage = (f) => {
+    if (active) onFrame(f);
+  };
+  invoke("browser_open", { sessionId, onFrame: channel }).catch((e: unknown) => {
+    if (active) console.error("打开浏览器面板失败", e);
+  });
+  return {
+    unsubscribe() {
+      active = false;
+    },
+  };
+}
+
+export function closeBrowser(sessionId: string): Promise<void> {
+  return invoke("browser_close", { sessionId });
+}
+
+export function browserNavigate(sessionId: string, url: string): Promise<void> {
+  return invoke("browser_navigate", { sessionId, url });
+}
+
+export function browserInput(sessionId: string, input: BrowserInput): Promise<void> {
+  return invoke("browser_input", { sessionId, input });
+}
+
 /** 在系统文件管理器（访达/资源管理器）里显示这个目录。 */
 export async function revealInFinder(path: string): Promise<void> {
   const { revealItemInDir } = await import("@tauri-apps/plugin-opener");

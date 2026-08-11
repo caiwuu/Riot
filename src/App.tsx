@@ -21,6 +21,7 @@ import {
   setSessionSampling,
   setWindowTitle,
 } from "./bridge";
+import { BrowserPanel } from "./components/BrowserPanel";
 import { ConfirmDialog, type ConfirmRequest } from "./components/ConfirmDialog";
 import { Markdown } from "./components/Markdown";
 import { PermissionDialog } from "./components/PermissionDialog";
@@ -52,6 +53,7 @@ export function App() {
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
+  const [showBrowser, setShowBrowser] = useState(false);
 
   useEffect(() => {
     // 必须 catch。没有它的话，任何一次失败都表现为永远停在"启动中" ——
@@ -242,17 +244,30 @@ export function App() {
 
       <div className="main">
         {activeSession ? (
-          <Chat
-            key={activeSession.id}
-            sessionId={activeSession.id}
-            config={config}
-            workspace={activeSession.root}
-            initialSampling={activeSession.sampling}
-            initialMode={activeSession.mode}
-            onConfig={setConfig}
-            onOpenSettings={() => setShowSettings(true)}
-            onFirstMessage={onFirstMessage}
-          />
+          // 浏览器面板和对话左右分栏，共享同一个会话。
+          // 这正是它存在的意义 —— 你和模型看同一个页面。
+          <div className={showBrowser ? "split" : undefined}>
+            <Chat
+              key={activeSession.id}
+              sessionId={activeSession.id}
+              config={config}
+              workspace={activeSession.root}
+              initialSampling={activeSession.sampling}
+              initialMode={activeSession.mode}
+              onConfig={setConfig}
+              onOpenSettings={() => setShowSettings(true)}
+              onFirstMessage={onFirstMessage}
+              onToggleBrowser={() => setShowBrowser((v) => !v)}
+              browserOpen={showBrowser}
+            />
+            {showBrowser ? (
+              <BrowserPanel
+                key={activeSession.id}
+                sessionId={activeSession.id}
+                onClose={() => setShowBrowser(false)}
+              />
+            ) : null}
+          </div>
         ) : (
           <Welcome
             projects={projects}
@@ -563,6 +578,8 @@ function Chat({
   onConfig,
   onOpenSettings,
   onFirstMessage,
+  onToggleBrowser,
+  browserOpen,
 }: {
   sessionId: string;
   config: ConfigStatus;
@@ -572,6 +589,8 @@ function Chat({
   onConfig: (s: ConfigStatus) => void;
   onOpenSettings: () => void;
   onFirstMessage: (sessionId: string, text: string) => void;
+  onToggleBrowser: () => void;
+  browserOpen: boolean;
 }) {
   const session = useSession(sessionId);
   const empty =
@@ -594,6 +613,8 @@ function Chat({
       onSend={send}
       onStop={session.stop}
       onOpenSettings={onOpenSettings}
+      onToggleBrowser={onToggleBrowser}
+      browserOpen={browserOpen}
     />
   );
 
@@ -809,6 +830,8 @@ function Composer({
   onSend,
   onStop,
   onOpenSettings,
+  onToggleBrowser,
+  browserOpen,
 }: {
   sessionId: string;
   busy: boolean;
@@ -821,6 +844,8 @@ function Composer({
   onSend: (t: string) => void;
   onStop: () => void;
   onOpenSettings: () => void;
+  onToggleBrowser: () => void;
+  browserOpen: boolean;
 }) {
   const [draft, setDraftRaw] = useState(() => drafts.get(sessionId) ?? "");
   const [mode, setMode] = useState<PermissionMode>(
@@ -1000,6 +1025,14 @@ function Composer({
             inherited={activeProvider?.sampling ?? {}}
             onChange={changeSampling}
           />
+          <button
+            type="button"
+            className={browserOpen ? "pill active" : "pill"}
+            onClick={onToggleBrowser}
+            title="内置浏览器"
+          >
+            浏览器
+          </button>
           <span className="bar-spacer" />
           {tokens.input + tokens.output > 0 ? (
             <span className="usage" title="本会话累计 token（输入 / 输出）">
