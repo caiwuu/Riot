@@ -1,4 +1,7 @@
-/target
+# 不锚定根目录：riot-browser 是独立 workspace，有自己的 target。
+target/
+# CEF 打包产物（几百 MB，由 scripts/build-browser.sh 现生成）
+crates/riot-browser/target/bundle/
 **/*.rs.bk
 node_modules
 dist

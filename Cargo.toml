@@ -4,6 +4,17 @@ resolver = "2"
 # 宿主和内核 depend 同一个 riot-protocol，对不上直接编译失败。
 members = ["crates/*", "src-tauri"]
 
+# `[约束]` riot-browser 刻意**不进**这个 workspace。
+#
+# 它依赖 `cef`，而 cef 的 build.rs 要下载并编译 355MB 的 Chromium 二进制
+# 分发包。进了 workspace 的话，`cargo build --workspace`、CI、以及任何只想
+# 改一行提示词的人，都得先扛下那个下载。
+#
+# 隔离的代价是它有自己的 Cargo.lock 和 target 目录，得单独构建
+# （见 scripts/build-browser.sh）。换来的是主应用的构建路径完全不受
+# CEF 影响 —— 浏览器这块出问题，聊天照常能编能跑。
+exclude = ["crates/riot-browser"]
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"

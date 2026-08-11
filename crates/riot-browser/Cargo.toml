@@ -1,0 +1,51 @@
+# `[约束]` 独立 workspace，不属于仓库根的那个。
+#
+# 理由见根 Cargo.toml 的 `exclude` 注释：cef 会拖来几百 MB 的 Chromium，
+# 不能让它污染主应用的构建路径。
+[workspace]
+
+[package]
+name = "riot-browser"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.88"
+description = "跑 CEF 的浏览器宿主子进程。主应用通过 stdio 驱动它。"
+publish = false
+
+# 浏览器进程：主应用 spawn 的就是它。
+[[bin]]
+name = "riot-browser"
+path = "src/main.rs"
+
+# CEF 的子进程（renderer / GPU / utility 共用这一个可执行文件，
+# 由命令行上的 --type= 区分）。必须是独立二进制。
+[[bin]]
+name = "riot-browser-helper"
+path = "src/bin/helper.rs"
+
+[package.metadata.cef.bundle]
+helper_name = "riot-browser-helper"
+
+[dependencies]
+cef = { version = "151.3", features = ["build-util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSEvent",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+] }
+
+[profile.dev]
+debug = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
