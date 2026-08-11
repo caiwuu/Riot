@@ -6,6 +6,7 @@
 //! - [`path`] —— 路径解析与围栏复查。执行时再查一遍防 TOCTOU。
 //! - [`precondition`] —— 先读后写协议。
 
+pub mod browser;
 pub mod bash;
 pub mod edit;
 pub mod glob;
@@ -45,7 +46,7 @@ pub fn builtin() -> Vec<Arc<dyn Tool>> {
     // 用 WebFetch 去读时不该再发一次请求。
     let page_cache = Arc::new(web::PageCache::default());
 
-    vec![
+    let mut tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(Read),
         Arc::new(Edit),
         Arc::new(Write),
@@ -54,7 +55,11 @@ pub fn builtin() -> Vec<Arc<dyn Tool>> {
         Arc::new(Glob),
         Arc::new(WebSearch),
         Arc::new(WebFetch::new(page_cache)),
-    ]
+    ];
+    // 浏览器工具单独一组:它们依赖宿主注入 BrowserAccess，没注入时
+    // 会明确说"用不了"，而不是悄悄换个行为。
+    tools.extend(browser::tools());
+    tools
 }
 
 #[cfg(test)]

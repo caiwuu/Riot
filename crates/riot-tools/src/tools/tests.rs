@@ -31,6 +31,7 @@ fn harness(fs: MemFs) -> Harness {
         fs: Arc::clone(&fs) as Arc<_>,
         proc: Arc::new(super::super::testing::NullProc),
         web: Arc::new(riot_protocol::web::NoWeb),
+        browser: Arc::new(riot_protocol::browser::NoBrowser),
         clock: Arc::new(super::super::testing::FixedClock::default()),
     };
 

@@ -42,6 +42,7 @@ fn harness(web: FakeWeb) -> Harness {
         fs: Arc::new(NullFs),
         proc: Arc::new(NullProc),
         web: Arc::clone(&web) as Arc<_>,
+        browser: Arc::new(riot_protocol::browser::NoBrowser),
         clock: Arc::clone(&clock) as Arc<_>,
     };
 

@@ -23,6 +23,7 @@
 //! [`riot_protocol::web::WebAccess`] 后面，由宿主装配。
 
 pub mod cache;
+pub mod consent;
 pub mod date;
 pub mod fetch;
 pub mod markdown;

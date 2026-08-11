@@ -279,6 +279,11 @@ pub struct ToolContext {
     /// 默认是 [`crate::web::NoWeb`]（一律拒绝）—— 宿主没装配就等于没网，
     /// 而不是悄悄用上某个兜底后端。
     pub web: Arc<dyn crate::web::WebAccess>,
+    /// 注入的浏览器能力。只有 Browser* 系列工具用。
+    ///
+    /// 默认是 [`crate::browser::NoBrowser`]（一律说"用不了"）—— 和 web
+    /// 同理，宿主没装配就该明说，不该悄悄换个行为。
+    pub browser: Arc<dyn crate::browser::BrowserAccess>,
     /// 注入的时间源。
     ///
     /// WebFetch 的响应缓存要判 TTL，工具耗时统计也要它。不能用

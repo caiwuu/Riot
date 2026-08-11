@@ -240,6 +240,43 @@ async fn 高层操作在真实页面上成立() {
     browser.shutdown().await;
 }
 
+/// 工具层走完整条链路:注册表 → BrowserAccess → 子进程 → CDP。
+///
+/// 中间每一环都在不同的 crate 里，靠 trait 对象连起来 —— 装配漏一环
+/// 不会有编译错误，只会在运行时变成"工具说浏览器不可用"。
+#[tokio::test]
+async fn 工具层能真的驱动浏览器() {
+    let Some(app) = bundle() else {
+        eprintln!("跳过：还没打包");
+        return;
+    };
+
+    let profile = profile("tools");
+    let browser: std::sync::Arc<dyn riot_protocol::browser::BrowserAccess> =
+        std::sync::Arc::new(riot_host_lib::browser::access::HostBrowser::new(app, profile));
+
+    // 惰性启动:这一刻进程还没起。第一次调用才起。
+    let page = "data:text/html;charset=utf-8,\
+        <html><body><button>点我</button>\
+        <script>console.error('页面报错了');</script></body></html>";
+    browser.navigate(page).await.expect("导航");
+
+    let snap = browser.snapshot().await.expect("快照");
+    assert!(snap.contains("点我"), "快照要能看见按钮：{snap}");
+
+    let logs = browser.console().await.expect("console");
+    assert!(
+        logs.iter().any(|l| l.contains("页面报错了")),
+        "要抓到加载期间的报错：{logs:?}"
+    );
+
+    let shot = browser.screenshot().await.expect("截图");
+    assert!(shot.len() > 1000, "截图应当是有内容的 base64");
+
+    let url = browser.current_url().await;
+    assert!(url.starts_with("data:"), "当前地址应当是刚打开的那个：{url}");
+}
+
 #[tokio::test]
 async fn 改视口之后帧尺寸跟着变() {
     let Some(app) = bundle() else {

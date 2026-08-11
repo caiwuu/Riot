@@ -41,6 +41,7 @@ fn harness(proc: FakeProc) -> Harness {
         ),
         proc: Arc::clone(&proc) as Arc<_>,
         web: Arc::new(riot_protocol::web::NoWeb),
+        browser: Arc::new(riot_protocol::browser::NoBrowser),
         clock: Arc::new(crate::testing::FixedClock::default()),
     };
 

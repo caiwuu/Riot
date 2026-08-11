@@ -56,6 +56,12 @@ const ASK_TIMEOUT_RANGE: std::ops::RangeInclusive<u64> = 5..=3600;
 pub struct Session {
     pub id: SessionId,
     pub cwd: std::path::PathBuf,
+    /// 这个会话的浏览器。惰性启动 —— 大多数会话不碰它，不该为它们
+    /// 付六个进程几百 MB 的常驻代价。见 browser::access。
+    ///
+    /// 每个会话一个独立 profile:同一个数据目录不能有两个 Chromium 实例，
+    /// 共用的话第二个会话一用浏览器就报"不可用"。
+    browser: Arc<dyn riot_protocol::browser::BrowserAccess>,
     history: Mutex<Vec<Message>>,
     /// 当前这一轮的取消令牌。没有正在跑的轮次时是 None。
     running: Mutex<Option<CancellationToken>>,
@@ -101,11 +107,35 @@ impl PendingAsks {
     }
 }
 
+/// 给一个会话装配浏览器能力。
+///
+/// 没打包浏览器时装 `NoBrowser` —— 工具会明确说"用不了"，而不是让宿主
+/// 在启动时就失败。浏览器是可选能力，缺了它聊天和文件操作照常。
+fn make_browser(id: &SessionId) -> Arc<dyn riot_protocol::browser::BrowserAccess> {
+    let Some(app) = crate::browser::access::locate_app() else {
+        tracing::info!("没找到打包好的浏览器，Browser* 工具将不可用");
+        return Arc::new(riot_protocol::browser::NoBrowser);
+    };
+    let profile = crate::config::config_path()
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("browser-profiles")
+        .join(id.as_str());
+    Arc::new(crate::browser::access::HostBrowser::new(app, profile))
+}
+
 impl Session {
+    /// 这个会话的浏览器能力。
+    fn browser(&self) -> Arc<dyn riot_protocol::browser::BrowserAccess> {
+        Arc::clone(&self.browser)
+    }
+
     pub fn new(id: SessionId, cwd: std::path::PathBuf) -> Self {
+        let browser = make_browser(&id);
         Self {
             id,
             cwd,
+            browser,
             history: Mutex::new(Vec::new()),
             running: Mutex::new(None),
             pending_asks: Arc::new(PendingAsks::default()),
@@ -228,6 +258,7 @@ impl Session {
             clock,
         )
         .with_web(web)
+        .with_browser(self.browser())
         .with_gate(gate)
     }
 

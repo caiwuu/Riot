@@ -53,6 +53,8 @@ pub struct Scheduler {
     /// 默认值是"没网"而不是某个兜底客户端：忘了装配的表现应该是
     /// WebFetch 明确报"联网未启用"，而不是它悄悄用上了一条没人审过的出口。
     web: Arc<dyn riot_protocol::web::WebAccess>,
+    /// 注入的浏览器能力。默认 NoBrowser —— 没装配就明说用不了。
+    browser: Arc<dyn riot_protocol::browser::BrowserAccess>,
     /// `web` 是宿主装的还是默认的。只给 [`Self::has_web`] 用 ——
     /// trait object 之间没法比较"是不是同一个默认值"。
     web_injected: bool,
@@ -85,6 +87,7 @@ impl Scheduler {
             ids,
             clock,
             web: Arc::new(riot_protocol::web::NoWeb),
+            browser: Arc::new(riot_protocol::browser::NoBrowser),
             web_injected: false,
             gate: None,
         }
@@ -92,6 +95,14 @@ impl Scheduler {
 
     pub fn with_gate(mut self, gate: Arc<dyn PermissionGate>) -> Self {
         self.gate = Some(gate);
+        self
+    }
+
+    pub fn with_browser(
+        mut self,
+        browser: Arc<dyn riot_protocol::browser::BrowserAccess>,
+    ) -> Self {
+        self.browser = browser;
         self
     }
 
@@ -132,6 +143,7 @@ impl ToolRunner for Scheduler {
         let file_state = Arc::clone(&self.file_state);
         let clock = Arc::clone(&self.clock);
         let web = Arc::clone(&self.web);
+        let browser = Arc::clone(&self.browser);
         let ids = Arc::clone(&self.ids);
         let cwd = self.prompt_ctx.cwd.clone();
         let gate = self.gate.clone();
@@ -173,6 +185,7 @@ impl ToolRunner for Scheduler {
                             file_state: Arc::clone(&file_state),
                             clock: Arc::clone(&clock),
                             web: Arc::clone(&web),
+                            browser: Arc::clone(&browser),
                             cwd: cwd.clone(),
                         },
                         ctx.session_id.clone(),
@@ -248,6 +261,7 @@ struct ToolDeps {
     file_state: Arc<dyn FileStateCache>,
     clock: Arc<dyn riot_protocol::tool::Clock>,
     web: Arc<dyn riot_protocol::web::WebAccess>,
+    browser: Arc<dyn riot_protocol::browser::BrowserAccess>,
     cwd: std::path::PathBuf,
 }
 
@@ -359,6 +373,7 @@ async fn run_one(
         fs: deps.fs,
         proc: deps.proc,
         web: deps.web,
+        browser: deps.browser,
         clock: deps.clock,
     };
 

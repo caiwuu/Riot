@@ -16,8 +16,7 @@
 use async_trait::async_trait;
 use riot_protocol::message::ToolResultContent;
 use riot_protocol::permission::{
-    DecisionReason, PermissionContext, PermissionResult, PermissionUpdate, RuleDecision,
-    UpdateScope,
+    PermissionContext, PermissionResult,
 };
 use riot_protocol::tool::{
     InterruptBehavior, PromptContext, ResultBudget, Tool, ToolContext, ToolOutcome, UiPayload,
@@ -132,62 +131,9 @@ impl Tool for WebFetch {
             return PermissionResult::Passthrough;
         };
 
-        let content = weburl::permission_content(&u);
-        let rules = riot_permissions::RuleSet::new(ctx.rules.clone());
-
-        for (want, build) in [
-            (RuleDecision::Deny, 0u8),
-            (RuleDecision::Ask, 1),
-            (RuleDecision::Allow, 2),
-        ] {
-            let Some(r) = rules.content_rule(
-                WEB_FETCH,
-                &content,
-                want,
-                riot_permissions::MatchMode::Raw,
-            ) else {
-                continue;
-            };
-            let reason = DecisionReason::Rule {
-                source: r.source,
-                pattern: r.pattern.clone().unwrap_or_default(),
-            };
-            return match build {
-                0 => PermissionResult::Deny {
-                    message: format!("已配置规则禁止抓取 {content}。"),
-                    reason,
-                },
-                1 => PermissionResult::Ask {
-                    message: format!("是否允许抓取 {}？", u.host_str().unwrap_or_default()),
-                    suggestions: suggestions(&content),
-                    reason,
-                },
-                _ => PermissionResult::Allow {
-                    updated_input: None,
-                    reason,
-                },
-            };
-        }
-
-        // 官方文档站免确认。不这么做的话，用户查第三个文档时就会直接开
-        // "全部允许"，那比这份白名单危险得多。
-        if preapproved::is_preapproved(u.host_str().unwrap_or_default(), u.path()) {
-            return PermissionResult::Allow {
-                updated_input: None,
-                reason: DecisionReason::Preapproved { what: content },
-            };
-        }
-
-        // 没有规则命中，也不在白名单 —— 问一次。
-        //
-        // 理由必须是 `Consent` 而不是 `Rule`：这里根本没有规则，冒充成
-        // 规则会让决策链以为"用户明确要求问这个域名"，于是「全部放行」
-        // 对 WebFetch 永久失效。见 chain::decide 第 3 步。
-        PermissionResult::Ask {
-            message: format!("是否允许抓取 {}？", u.host_str().unwrap_or_default()),
-            suggestions: suggestions(&content),
-            reason: DecisionReason::Consent { what: content },
-        }
+        // 判定和内置浏览器共用一份。用户信任的是站点，不是工具 ——
+        // 各写一份会让同一个域名被问两遍。见 consent 模块。
+        super::consent::decide_for_domain(WEB_FETCH, &u, ctx)
     }
 
     async fn validate_input(
@@ -286,14 +232,6 @@ impl Tool for WebFetch {
     }
 }
 
-fn suggestions(content: &str) -> Vec<PermissionUpdate> {
-    vec![PermissionUpdate::AddRule {
-        tool: WEB_FETCH.to_owned(),
-        pattern: Some(content.to_owned()),
-        decision: RuleDecision::Allow,
-        scope: UpdateScope::Session,
-    }]
-}
 
 /// 把网络错误翻译成模型能据此改变行为的话。
 ///

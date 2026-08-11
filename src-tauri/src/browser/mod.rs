@@ -11,6 +11,7 @@
 // 宿主层不参与黄金回放，确定性约束（见 clippy.toml）只针对内核。
 #![allow(clippy::disallowed_methods)]
 
+pub mod access;
 pub mod ops;
 
 use std::collections::HashMap;

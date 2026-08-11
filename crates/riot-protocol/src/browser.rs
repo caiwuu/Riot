@@ -19,8 +19,77 @@
 //! 165MB/s —— 光是序列化就吃满一个核。帧走单独的共享内存，这里只传
 //! "第几帧、多大"。见 [`Event::Frame`]。
 
+use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+/// 工具层能对浏览器做的事。
+///
+/// 和 [`crate::web::WebAccess`] 同一个路子:工具层只描述**要什么**，真正
+/// 起进程、说 CDP、管生命周期都在宿主。这样 `riot-tools` 不用知道 CEF
+/// 的存在，也就不用把那 355MB 的依赖拖进自己的构建。
+///
+/// 返回的字符串已经是给模型看的形状 —— 截断、过滤、整形都在实现里做完。
+/// 工具层再加工一遍只会让"到底谁负责控制体积"这件事说不清。
+#[async_trait]
+pub trait BrowserAccess: Send + Sync {
+    /// 导航到一个地址并等加载完成。
+    async fn navigate(&self, url: &str) -> Result<(), BrowserUnavailable>;
+
+    /// 整页截图，返回 **base64 编码**的 PNG。
+    ///
+    /// 不解码成字节是刻意的:CDP 给的就是 base64，而工具要塞进内容块的
+    /// 也是 base64。中间解一次再编一次纯属白做，对一张几百 KB 的图还要
+    /// 多两次全量拷贝。
+    async fn screenshot(&self) -> Result<String, BrowserUnavailable>;
+
+    /// 页面的可访问性快照，已经整形成文本。
+    async fn snapshot(&self) -> Result<String, BrowserUnavailable>;
+
+    /// 页面 console 里累积的消息。
+    async fn console(&self) -> Result<Vec<String>, BrowserUnavailable>;
+
+    /// 当前地址。没有页面时返回空串。
+    async fn current_url(&self) -> String;
+}
+
+/// 浏览器用不了。
+///
+/// 只有一个变体是刻意的:工具层对失败原因**不做分支**，它唯一能做的就是
+/// 把话原样转给模型。分成"没打包 / 起不来 / 崩了"几种，只会诱导工具层去
+/// 写一堆各自处理的分支，而那些分支的行为其实完全一样。
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{0}")]
+pub struct BrowserUnavailable(pub String);
+
+/// 没有浏览器的占位实现。
+///
+/// `[约束]` 默认必须是它，而不是某个"尽力而为"的兜底。宿主忘了装配的
+/// 表现应该是工具明确说"浏览器没起来"，而不是悄悄降级成别的行为。
+pub struct NoBrowser;
+
+#[async_trait]
+impl BrowserAccess for NoBrowser {
+    async fn navigate(&self, _url: &str) -> Result<(), BrowserUnavailable> {
+        Err(unavailable())
+    }
+    async fn screenshot(&self) -> Result<String, BrowserUnavailable> {
+        Err(unavailable())
+    }
+    async fn snapshot(&self) -> Result<String, BrowserUnavailable> {
+        Err(unavailable())
+    }
+    async fn console(&self) -> Result<Vec<String>, BrowserUnavailable> {
+        Err(unavailable())
+    }
+    async fn current_url(&self) -> String {
+        String::new()
+    }
+}
+
+fn unavailable() -> BrowserUnavailable {
+    BrowserUnavailable("这个版本没有内置浏览器，或者它没能启动。".into())
+}
 
 /// 主应用发给浏览器进程的命令。
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
