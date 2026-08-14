@@ -129,6 +129,114 @@ async fn 宿主能驱动浏览器加载页面并跑_cdp() {
     browser.shutdown().await;
 }
 
+/// 进程没了之后，句柄要说得出自己废了。
+///
+/// 这是崩溃自愈的地基（见 `HostBrowser::get`）。没有这个信号的话，长期
+/// 持有句柄的一方分不出"这条命令没发出去"和"这个进程已经不在了" ——
+/// 于是 CEF 崩一次就等于整个会话的浏览器永久不可用，用户唯一的出路是
+/// 重启应用。
+#[tokio::test]
+async fn 进程退出后句柄不再声称自己活着() {
+    let Some(app) = bundle() else {
+        eprintln!("跳过：还没打包");
+        return;
+    };
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let browser = Browser::spawn(app, Some(profile("alive")), tx)
+        .await
+        .expect("起浏览器");
+    wait_for(&mut rx, 30, "ready", |e| matches!(e, Event::Ready)).await;
+    assert!(browser.alive(), "刚就绪就说自己没了");
+
+    // 一个标签页都不开:那条路上子进程会直接退出消息循环，不必等 CEF
+    // 逐页销毁 —— 这个用例要的只是"进程走掉"。
+    browser.send(&Command::Shutdown).expect("发关闭");
+
+    // 事件流断掉 = 子进程的 stdout 到了 EOF。存活标志在那之前一步翻，
+    // 所以收到 None 的时候它已经是 false 了，不用睡着等。
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while rx.recv().await.is_some() {}
+    })
+    .await
+    .expect("等进程退出超时");
+
+    assert!(
+        !browser.alive(),
+        "进程都退了还说自己活着 —— 上层会一直拿着这个死句柄，永远不重开"
+    );
+
+    // 命令也要当场失败。通道本身还开着（写任务停在等下一条命令上），所以
+    // 光看 `tx.send` 的话这一条会"发送成功"然后消失 —— 而调用方据此去等一个
+    // 永远不来的 `TabOpened`，白等满十秒。
+    let err = browser
+        .send(&Command::OpenTab { tab: 99 })
+        .expect_err("死句柄不该收命令");
+    assert!(
+        matches!(err, riot_host_lib::browser::BrowserError::NotRunning),
+        "要说得出是进程没了，而不是别的毛病：{err}"
+    );
+}
+
+/// 浏览器崩掉之后，下一次调用要自己把它重开。
+///
+/// `[前提]` 只能单独跑:它 SIGKILL 掉机器上所有 riot-browser 进程，
+/// 而这个文件里别的用例各自也有一个。所以挂了 `#[ignore]` ——
+/// `cargo test --test browser_e2e -- --ignored 崩掉之后` 单独验。
+///
+/// 这一条盯着的是「浏览器崩一次，整个会话的浏览器就永久废了」:那个进程
+/// 句柄一旦填进槽位就没有别的地方会清它，交出死句柄的结果是面板和模型的
+/// 每个 Browser* 工具都报"浏览器进程未运行"，而用户唯一的出路是重启应用。
+#[tokio::test]
+#[ignore = "会杀掉机器上所有 riot-browser，只能单独跑"]
+async fn 崩掉之后下一次调用会自己重开() {
+    let Some(app) = bundle() else {
+        eprintln!("跳过：还没打包");
+        return;
+    };
+    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("heal"));
+
+    let before = host.open_tab().await.expect("开第一页");
+    assert_eq!(before.tabs.len(), 1);
+
+    // 模拟崩溃。走 SIGKILL 而不是发 Shutdown —— 后者是优雅退出，而这里
+    // 要复现的正是"来不及说一声就没了"。
+    let killed = std::process::Command::new("pkill")
+        .args(["-9", "-f", "riot-browser"])
+        .status()
+        .expect("发 pkill");
+    assert!(killed.success(), "没杀到任何 riot-browser 进程");
+
+    // 等它察觉。SIGKILL 之后 stdout 的 EOF 要走一趟内核，不是同步的。
+    //
+    // 拿 `state` 当观测点:它刻意**不**重开进程（那是每秒一次的轮询，
+    // 见它的文档），崩掉之后回的是空清单 —— 面板据此显示「正在启动」的
+    // 占位，而不是一排点不动的幻影标签。
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if host.state().await.expect("查状态").tabs.is_empty() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "进程都被杀了，这一层还以为标签页在"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // 真正的那一下。
+    let after = host.open_tab().await.expect("崩掉之后要能自己重开");
+    assert_eq!(
+        after.tabs.len(),
+        1,
+        "清单里只该有新开的那一页 —— 旧号在新进程里不存在，留着的话面板上每一下点击都会静默失败"
+    );
+    assert_ne!(
+        after.tabs[0].id, before.tabs[0].id,
+        "号不能从头再发：新页和刚消失的那页同号，按号索引的表分不出两者"
+    );
+}
+
 #[tokio::test]
 async fn cdp_按_id_配对_并发调用不会串() {
     let Some(app) = bundle() else {

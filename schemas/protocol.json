@@ -283,6 +283,19 @@
           ]
         },
         {
+          "description": "上下文压缩**开始**。界面据此说明这几十秒在干什么。\n\n`[约束]` 必须在压缩动作之前发，而不是完成后连同 [`Self::Compacted`]\n一起报。摘要式压缩要真调一次模型，几十秒里界面上只有那个转圈动画\n在动 —— 和\"模型正在回答\"一模一样，用户看到的是应答莫名变慢，\n而不是\"系统在做一件必要的事\"。这条事件是那段时间唯一的解释。\n\n不进 transcript（见 [`Self::is_durable`]）:它描述的是一个瞬时状态，\n落盘之后重放历史会长出一个永远停在\"压缩中\"的幽灵 —— 而\"压缩过\"\n这件事已经由 [`Self::Compacted`] 和压缩边界记下了。\n\n刻意不带 token 数。压缩前后的规模由 [`Self::Compacted`] 报，那时\n两个数才都有意义;这里只回答\"为什么在等\"。",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "compacting"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
           "description": "上下文压缩发生。",
           "type": "object",
           "properties": {

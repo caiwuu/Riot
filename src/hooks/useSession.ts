@@ -86,6 +86,17 @@ export interface SessionState {
   streamingPlan: string | null;
   busy: boolean;
   /**
+   * 宿主正在压缩上下文。
+   *
+   * 压缩要真调一次模型做摘要，几十秒 —— 而那段时间界面上原本只有那三个点，
+   * 和"模型正在回答"分不出来，用户看到的是应答莫名变慢。
+   *
+   * 宿主不发"压缩结束"，只发压缩**成功**的 `compacted`。失败的那一半
+   * （摘要请求本身出错）没有事件，所以这个标志必须由后续动作清掉，
+   * 见 handle 里 `request_start` 和 `done` 的处理。
+   */
+  compacting: boolean;
+  /**
    * 待回答的权限请求，按到达顺序排队，弹窗每次只显示队首那个。
    *
    * `[约束]` 必须是队列而不是单个槽位。调度器会把并发安全的工具放在
@@ -125,6 +136,7 @@ export function useSession(
     thinking: "",
     streamingPlan: null,
     busy: false,
+    compacting: false,
     asks: [],
     tokens: { input: 0, output: 0 },
     hostMode: null,
@@ -202,6 +214,8 @@ export function useSession(
       setState((s) => ({
         ...s,
         busy: false,
+        // 收不到事件了，那个"压缩中"再也不会有人来清。
+        compacting: false,
         items: [
           ...s.items,
           {
@@ -236,7 +250,9 @@ export function useSession(
         case "request_start":
           toolJsonById.current.clear();
           busyRef.current = true;
-          setState((s) => ({ ...s, busy: true, streamingPlan: null }));
+          // 请求开始意味着压缩这一段结束了 —— 成功如此，失败也如此
+          // （失败没有事件，只有日志，但轮次照常用完整历史往下走）。
+          setState((s) => ({ ...s, busy: true, streamingPlan: null, compacting: false }));
           break;
 
         case "message": {
@@ -309,12 +325,19 @@ export function useSession(
           setState((s) => ({ ...s, hostMode: event.mode }));
           break;
 
+        case "compacting":
+          // 这段时间界面上只有那三个点在动。不说的话用户以为是模型变慢了，
+          // 而实际上系统在做一件必要的事。
+          setState((s) => ({ ...s, compacting: true }));
+          break;
+
         case "compacted":
           // 不提示的话，用户看到的是回答突然变快了、模型偶尔忘了远处的
           // 细节 —— 而他不知道发生过什么。
           flush();
           setState((s) => ({
             ...s,
+            compacting: false,
             items: [
               ...s.items,
               {
@@ -834,7 +857,16 @@ function applyDone(s: SessionState, event: Extract<AgentEvent, { type: "done" }>
   // 这一轮结束了，还排着队的权限请求已经没有意义 —— 它们对应的工具
   // 调用要么被中断要么已超时。留着的话，用户下一轮开口前会先被一个
   // 属于上一轮的弹窗拦住。
-  return { ...s, items, busy: false, streaming: "", thinking: "", streamingPlan: null, asks: [] };
+  return {
+    ...s,
+    items,
+    busy: false,
+    compacting: false,
+    streaming: "",
+    thinking: "",
+    streamingPlan: null,
+    asks: [],
+  };
 }
 
 /**

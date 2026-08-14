@@ -1266,6 +1266,19 @@ pre {
   animation-delay: 0.4s;
 }
 
+/* 带说明的等待。三个点单独出现时表示"模型在回答"，配上文字才说得清
+   这次等的是别的事（目前只有上下文压缩）。 */
+.wait-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wait-note-text {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
 @keyframes blink {
   0%,
   60%,

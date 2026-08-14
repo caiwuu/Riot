@@ -116,6 +116,47 @@ wrap_app! {
     struct HostApp;
 
     impl App {
+        /// 在 CEF 解析命令行之前，关掉会把无窗口浏览器弄崩的 Chrome 功能。
+        ///
+        /// `[约束]` `ImmersiveReadAnything`（Chromium 151 默认开启）必须禁用。
+        /// 它给每次页面加载挂一个 `ReadAnythingSoftNavigationObserver`，SPA
+        /// 软导航（一次点击引发 pushState + DOM 变化，Discourse 点进帖子就是
+        /// 这个形状）触发时，它去取 WebContents 上 Chrome 标签条挂的
+        /// `tabs::TabInterface` —— 这里的浏览器没有标签条，取出来是空，而那个
+        /// getter 不判空直接解引用，**整个浏览器进程 SIGSEGV**。
+        ///
+        /// 症状极难倒推：点一下帖子，面板"回到新标签页"（进程没了，宿主惰性
+        /// 重开），崩溃报告的栈全在 CEF 内部，一个字不提阅读模式；同一页面
+        /// 光加载不点不崩，data: 页面上点烂了也不崩（pushState 对 data: 不可
+        /// 用，凑不齐软导航的条件）。面板的点击和模型工具的点击走的是同一条
+        /// 输入注入，所以两边都踩得中。
+        ///
+        /// 禁用整个 feature 而不是绕着走：观察者在 feature 检查后第一步就崩，
+        /// 而"阅读模式"这套 UI 在无窗口模式下本来就无处安放。
+        fn on_before_command_line_processing(
+            &self,
+            _process_type: Option<&CefString>,
+            command_line: Option<&mut CommandLine>,
+        ) {
+            let Some(cl) = command_line else { return };
+            let key = CefString::from("disable-features");
+            // 合并而不是覆盖。同名开关取后写的那份，直接 append 会把外部
+            // 传进来的清单顶掉；反过来漏了合并，我们这份就被 CEF 稍后追加
+            // 自家清单（LensOverlay 那些）时接不上 —— CEF 是按"已有值 +
+            // 自家值"拼的，链条断在哪一环都等于没禁。
+            let mut features = String::from("ImmersiveReadAnything");
+            if cl.has_switch(Some(&key)) != 0 {
+                let existing = CefString::from(&cl.switch_value(Some(&key))).to_string();
+                if !existing.is_empty() {
+                    features = format!("{existing},{features}");
+                }
+            }
+            cl.append_switch_with_value(
+                Some(&key),
+                Some(&CefString::from(features.as_str())),
+            );
+        }
+
         fn browser_process_handler(&self) -> Option<BrowserProcessHandler> {
             Some(HostProcessHandler::new())
         }

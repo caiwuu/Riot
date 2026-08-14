@@ -104,9 +104,10 @@ impl Compactor for ClearOldResults {
             };
         }
 
-        // 估算方式和 Provider::count_tokens 保持一致（4 字节 ≈ 1 token）。
-        // 用不同的口径会让"压缩后仍然超预算"这个判断出现漂移。
-        let after = before.saturating_sub((freed_bytes / 4) as u32);
+        // 换算走 protocol 里那个共享函数 —— 和 Provider::count_tokens 同一个
+        // 口径。各写一遍 `/ 4` 会漂移，而漂移的表现是"压缩后仍然超预算"这个
+        // 判断时对时错。
+        let after = before.saturating_sub(riot_protocol::provider::estimate_tokens(freed_bytes));
 
         tracing::info!(cleared, freed_bytes, before, after, "清理了旧工具结果");
 

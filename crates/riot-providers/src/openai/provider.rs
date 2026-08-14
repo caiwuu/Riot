@@ -20,7 +20,7 @@ use riot_protocol::tool::Clock;
 use tokio_util::sync::CancellationToken;
 
 use super::decode::StreamDecoder;
-use super::request::{RetryContext, build_request};
+use super::request::{RetryContext, build_request, wire_bytes};
 use crate::anthropic::request::SystemSection;
 use crate::retry::{GiveUpReason, RequestSource, RetryDecision, RetryPolicy, decide};
 use crate::sse::SseParser;
@@ -235,13 +235,8 @@ impl Provider for OpenAiProvider {
 
     fn count_tokens(&self, messages: &[Message]) -> u32 {
         // 本地粗估，理由同 Anthropic 那边：真实计数要一次额外往返。
-        // 中文在 DeepSeek 的分词下大约 1.5 字符/token，用 4 字节/token
-        // 估是偏保守的 —— 保守会让我们压缩得早一点，那个方向是安全的。
-        let bytes: usize = messages
-            .iter()
-            .map(|m| serde_json::to_string(m).map(|s| s.len()).unwrap_or(0))
-            .sum();
-        (bytes / 4) as u32
+        // 量的是**发出去的那份**，见 trait 上那条约束。
+        riot_protocol::provider::estimate_tokens(wire_bytes(messages))
     }
 }
 

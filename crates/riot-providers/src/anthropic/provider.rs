@@ -30,7 +30,7 @@ use riot_protocol::tool::Clock;
 use tokio_util::sync::CancellationToken;
 
 use super::decode::StreamDecoder;
-use super::request::{RetryContext, SystemSection, build_request};
+use super::request::{RetryContext, SystemSection, build_request, wire_bytes};
 use crate::retry::{GiveUpReason, RequestSource, RetryDecision, RetryPolicy, decide};
 use crate::sse::SseParser;
 use crate::transport::{HttpError, HttpRequest, HttpTransport};
@@ -244,13 +244,8 @@ impl Provider for AnthropicProvider {
         // 本地粗估。真实计数要调 /v1/messages/count_tokens，
         // 但那是一次额外的网络往返 —— 只在压缩决策临界时才值得。
         //
-        // 4 字符 ≈ 1 token 对英文偏准，对中文偏保守（实际约 1.5 字符/token）。
-        // 保守是对的方向：低估会让我们压缩得太晚，然后撞上真正的溢出。
-        let bytes: usize = messages
-            .iter()
-            .map(|m| serde_json::to_string(m).map(|s| s.len()).unwrap_or(0))
-            .sum();
-        (bytes / 4) as u32
+        // 量的是**发出去的那份**，见 trait 上那条约束。
+        riot_protocol::provider::estimate_tokens(wire_bytes(messages))
     }
 }
 

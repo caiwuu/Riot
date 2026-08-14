@@ -61,6 +61,21 @@ pub enum AgentEvent {
         reason: DecisionReason,
     },
 
+    /// 上下文压缩**开始**。界面据此说明这几十秒在干什么。
+    ///
+    /// `[约束]` 必须在压缩动作之前发，而不是完成后连同 [`Self::Compacted`]
+    /// 一起报。摘要式压缩要真调一次模型，几十秒里界面上只有那个转圈动画
+    /// 在动 —— 和"模型正在回答"一模一样，用户看到的是应答莫名变慢，
+    /// 而不是"系统在做一件必要的事"。这条事件是那段时间唯一的解释。
+    ///
+    /// 不进 transcript（见 [`Self::is_durable`]）:它描述的是一个瞬时状态，
+    /// 落盘之后重放历史会长出一个永远停在"压缩中"的幽灵 —— 而"压缩过"
+    /// 这件事已经由 [`Self::Compacted`] 和压缩边界记下了。
+    ///
+    /// 刻意不带 token 数。压缩前后的规模由 [`Self::Compacted`] 报，那时
+    /// 两个数才都有意义;这里只回答"为什么在等"。
+    Compacting,
+
     /// 上下文压缩发生。
     Compacted {
         before_tokens: u32,
@@ -91,7 +106,10 @@ impl AgentEvent {
 
     /// 该事件是否进 transcript / 参与黄金回放断言。
     pub fn is_durable(&self) -> bool {
-        !matches!(self, AgentEvent::Delta(_) | AgentEvent::Progress { .. })
+        !matches!(
+            self,
+            AgentEvent::Delta(_) | AgentEvent::Progress { .. } | AgentEvent::Compacting
+        )
     }
 }
 
@@ -260,6 +278,24 @@ mod tests {
         assert!(done.is_durable() && done.is_done());
     }
 
+    /// 「压缩中」是瞬时状态，不进 transcript。
+    ///
+    /// 落盘的话，重放历史会长出一个永远停在"压缩中"的幽灵 —— 那条压缩
+    /// 早就结束了，而清掉它的信号（后续的 `RequestStart`）是不落盘的。
+    /// 压缩**成功**这件事由 `Compacted` 记，它照常持久。
+    #[test]
+    fn compacting_is_not_durable() {
+        assert!(!AgentEvent::Compacting.is_durable());
+        assert!(
+            AgentEvent::Compacted {
+                before_tokens: 100,
+                after_tokens: 10,
+                strategy: CompactStrategy::FullSummary,
+            }
+            .is_durable()
+        );
+    }
+
     /// 每个变体都要能原样往返。
     ///
     /// 这条测试存在的理由是一个真实踩到的坑：`Delta(StreamDelta)` 是 newtype
@@ -308,6 +344,9 @@ mod tests {
                     text: "工作中".into(),
                 },
             },
+            // 无字段变体:internally-tagged 下它序列化成一个只有 tag 的对象，
+            // 而前端按 `type` 分派 —— 表示错了就是一条永远匹配不上的事件。
+            AgentEvent::Compacting,
             AgentEvent::Compacted {
                 before_tokens: 100,
                 after_tokens: 10,

@@ -1042,6 +1042,9 @@ impl Session {
         cancel: CancellationToken,
     ) -> Option<Vec<Message>> {
         let before = provider.count_tokens(history);
+        // 先说一声再动手。下面那次总结是一个真实的模型调用，几十秒 ——
+        // 期间界面上只有那三个点在动，和"模型正在回答"分不出来。
+        let _ = sink.send(AgentEvent::Compacting);
         let summary =
             match riot_core::summarize::summarize_history(provider, model, history, cancel).await {
                 Ok(s) => s,

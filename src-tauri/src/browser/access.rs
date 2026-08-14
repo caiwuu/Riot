@@ -335,8 +335,8 @@ impl HostBrowser {
     /// 这个返回值判断该不该真的发关闭命令。
     async fn forget_tab(&self, tab: TabId) -> bool {
         // 不走 `get()`:这条路是被事件驱动的，进程要是已经没了，为它再起一个
-        // 完全说不通。
-        let Some(b) = self.inner.lock().await.clone() else {
+        // 完全说不通 —— 整份清单会由 [`Self::forget_crashed`] 一起清掉。
+        let Some(b) = self.live().await else {
             return false;
         };
 
@@ -375,12 +375,49 @@ impl HostBrowser {
         true
     }
 
+    /// 进程崩了 —— 把这一层记着的、属于它的东西全丢掉。
+    ///
+    /// [`Self::forget_tab`] 的整份版本。由 [`Self::get`] 在重开之前调用。
+    ///
+    /// `[约束]` 标签页清单必须清空。那些号在新进程里一个都不存在，留着的话
+    /// 面板会显示一排幻影标签，而发给它们的每条命令都在子进程那边以
+    /// "标签页不存在"被丢掉 —— 和 [`Self::forget_tab`] 文档里说的是同一种
+    /// 卡死，只是这次整份清单都是死的。
+    ///
+    /// `[约束]` 不能碰 `view`。它记的是**面板**的尺寸，和进程没关系 ——
+    /// 清掉的话，重开后的第一页会停在子进程那个 1280×800 的初值上（前端只在
+    /// 尺寸变化时才发 resize，而崩溃前后面板尺寸没变），画面带黑边、字被缩小，
+    /// 一直到用户拖一下窗口才纠正。见 [`Self::view`]。
+    ///
+    /// 同理不碰 `frames`:面板还开着，画面出口照旧有效。新页开出来时
+    /// [`Self::stream`] 会照它把 screencast 接上，画面自己就回来了。
+    async fn forget_crashed(&self) {
+        {
+            let mut tabs = self.tabs.lock().await;
+            tabs.order.clear();
+            tabs.active = 0;
+            // `next` 刻意不重置。号只增不减 —— 从 1 重新发的话，新进程的
+            // 1 号和刚消失的 1 号同号，而那些按号索引的表（等待者、抓包、
+            // 拦截规则）分不出两者。
+        }
+        // 等 `TabOpened` 的人永远等不到了 —— 那条事件本该由旧进程的事件流
+        // 送来。drop 掉唤醒端让它们立刻拿到"浏览器进程退出了"，而不是各自
+        // 等满 10 秒（见 [`Self::spawn_tab`] 里那个 `Ok(Err(_))` 分支）。
+        self.opening.lock().await.clear();
+        // 画面没有出处了。不清的话，重开后第一次 [`Self::stream`] 会先对
+        // 一个属于死进程的号发 stopScreencast。
+        *self.streaming.lock().await = None;
+        self.taps.lock().await.clear();
+        self.intercept.lock().await.clear();
+        *self.snap_refs.lock().await = None;
+    }
+
     /// 页面自己要求开一页（`target="_blank"`、`window.open()`）。
     ///
     /// 浏览器进程只报告，开页在这里做 —— 标签页号由这一层分配，见
     /// [`Event::PopupRequested`]。
     async fn open_popup(&self, source: TabId, url: &str, background: bool) {
-        let Some(b) = self.inner.lock().await.clone() else {
+        let Some(b) = self.live().await else {
             return;
         };
 
@@ -434,9 +471,14 @@ impl HostBrowser {
     ///
     /// `[约束]` 不能为了回答这个把浏览器起起来。面板每秒问一次，而这条命令
     /// 在浏览器还没起来的时候也会被问到（面板刚挂上、screencast 还在启动）
-    /// —— 那时候起进程等于把「惰性启动」这个取舍作废掉。
+    /// —— 那时候起进程等于把「惰性启动」这个取舍作废掉。崩掉之后同理:重开
+    /// 由真实动作驱动（用户点一下面板、模型调一次工具），不由这条每秒一次的
+    /// 轮询驱动 —— 否则一个起不来的浏览器会变成每秒一次的 spawn 风暴。
+    ///
+    /// 于是崩掉之后这里回的是空清单，和"还没起来"同一个形状 —— 面板据此
+    /// 显示那个「正在启动」的占位标签，而不是一排点不动的幻影标签页。
     pub async fn state(&self) -> Result<PanelState, BrowserUnavailable> {
-        let Some(b) = self.inner.lock().await.clone() else {
+        let Some(b) = self.live().await else {
             return Ok(PanelState::default());
         };
         let (order, active) = {
@@ -761,7 +803,7 @@ impl HostBrowser {
     /// 停止推送。面板关掉时调 —— 没人看的时候继续编码 JPEG 是白烧 CPU。
     pub async fn stop_screencast(&self) {
         *self.frames.lock().await = None;
-        let Some(b) = self.inner.lock().await.clone() else {
+        let Some(b) = self.live().await else {
             return;
         };
         // 停的是"正在推的那一页"，不是"当前活动页"。切标签失败或者正好
@@ -772,15 +814,44 @@ impl HostBrowser {
         let _ = b.cdp(tab, "Page.stopScreencast", serde_json::json!({})).await;
     }
 
-    /// 拿到浏览器，没起来就起。
+    /// 活着的浏览器，`None` = 没起来，或者起过但已经不在了。
+    ///
+    /// 那些"不为它起进程"的路径都走这里 —— 信息性查询（[`Self::state`]、
+    /// `current_url`）和事件驱动的清理（[`Self::forget_tab`]）。直接读
+    /// `inner` 的话，进程崩掉之后拿到的是个死句柄:面板会照旧显示一排
+    /// 幻影标签页，而点它们的每条命令都静默失败。
+    async fn live(&self) -> Option<Arc<Browser>> {
+        self.inner.lock().await.clone().filter(|b| b.alive())
+    }
+
+    /// 拿到浏览器，没起来就起，崩了就重开。
     ///
     /// `[约束]` 整个过程持锁。并发的两次工具调用都发现"还没起"的话，会
     /// 各起一个进程 —— 而它们指向同一个 profile 目录，第二个拿不到锁直接
     /// 退出，表现为"偶尔有个工具报浏览器不可用"。
+    ///
+    /// `[约束]` 崩掉的句柄必须换掉，不能只是照旧交出去。CEF 会崩（渲染
+    /// 一个恶意页面、显存耗尽、被系统的内存压力杀掉），而这个槽位一旦填上
+    /// 就没有别的地方会清它 —— 交出死句柄的结果是这个会话的浏览器永久
+    /// 不可用（面板、模型的每个 Browser* 工具全部报"浏览器进程未运行"），
+    /// 而用户唯一的出路是新建会话或者重启应用。
+    ///
+    /// `[取舍]` 重开是惰性的:等下一次真的用到才做，而不是收到"进程没了"
+    /// 就立刻拉起来。崩溃常常发生在没人看的时候（面板关着、模型早就转去
+    /// 改代码了），那时候拉起六个进程几百 MB 纯属白付 —— 和这一层
+    /// 「第一次用到才起」是同一条取舍。也因此这里不需要退避:重开由真实
+    /// 调用驱动，起来就崩的循环最多跟着调用频率转，不会自己打满 CPU。
     async fn get(&self) -> Result<Arc<Browser>, BrowserUnavailable> {
         let mut slot = self.inner.lock().await;
         if let Some(b) = slot.as_ref() {
-            return Ok(Arc::clone(b));
+            if b.alive() {
+                return Ok(Arc::clone(b));
+            }
+            // 丢掉死句柄，然后照常往下走 —— 下面那段起进程的代码不必知道
+            // 这是首次启动还是崩溃之后的重开。
+            tracing::warn!("浏览器进程已经不在了，重开一个");
+            *slot = None;
+            self.forget_crashed().await;
         }
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -916,8 +987,8 @@ impl BrowserAccess for HostBrowser {
     }
 
     async fn current_url(&self) -> String {
-        // 没起来就不要为了这个把它起起来 —— 这是个信息性查询。
-        let Some(b) = self.inner.lock().await.clone() else {
+        // 没起来（或者崩了）就不要为了这个把它起起来 —— 这是个信息性查询。
+        let Some(b) = self.live().await else {
             return String::new();
         };
         let id = self.tabs.lock().await.active;
@@ -1857,6 +1928,91 @@ mod tests {
             panic!("应当是 Scroll");
         };
         assert_eq!((x, y, delta_x, delta_y), (1.0, 2.0, 40.0, -120.0));
+    }
+
+    /// 摆一个"用过一阵子"的 `HostBrowser`，但不真的起进程。
+    ///
+    /// `new` 是惰性的（第一次用到才 spawn），所以路径不存在无所谓 ——
+    /// 这几个用例测的是崩溃之后这一层怎么收拾自己记着的状态。
+    fn 用过的() -> Arc<HostBrowser> {
+        let host = HostBrowser::new(
+            PathBuf::from("/nonexistent/riot-browser.app"),
+            PathBuf::from("/nonexistent/profile"),
+        );
+        {
+            let mut tabs = host.tabs.try_lock().expect("刚建好，没人抢");
+            tabs.order = vec![1, 2, 3];
+            tabs.active = 2;
+            tabs.next = 4;
+        }
+        host
+    }
+
+    /// 崩溃之后，按标签页号存的东西必须一个不留。
+    ///
+    /// 盯着的是"面板上有标签、点了全都没反应"这一类:那些号在新进程里
+    /// 一个都不存在，发过去的每条命令都在子进程那边被丢掉，而没有任何一条
+    /// 报错说得出"那些页早就没了"。
+    #[tokio::test]
+    async fn 崩溃清理丢掉所有标签页号() {
+        let host = 用过的();
+        *host.streaming.lock().await = Some(2);
+        host.taps.lock().await.insert(1, crate::browser::taps::EventTaps::default());
+        host.intercept.lock().await.insert(1, Vec::new());
+        *host.snap_refs.lock().await = Some((1, HashMap::new()));
+
+        host.forget_crashed().await;
+
+        {
+            let tabs = host.tabs.lock().await;
+            assert!(tabs.order.is_empty(), "幻影标签页会让面板上每一下点击都静默失败");
+            assert_eq!(tabs.active, 0, "0 不是合法的号，正是「什么都没打开」");
+        }
+        assert!(host.streaming.lock().await.is_none());
+        assert!(host.taps.lock().await.is_empty());
+        assert!(host.intercept.lock().await.is_empty());
+        assert!(host.snap_refs.lock().await.is_none());
+    }
+
+    /// 标签页号不能从头再发。
+    ///
+    /// 重发的话，新进程的 1 号和刚刚消失的 1 号同号 —— 那些按号索引的表
+    /// （等待者、抓包、拦截规则）分不出两者，旧页的延迟事件会落到新页上。
+    #[tokio::test]
+    async fn 崩溃清理之后号接着往下发() {
+        let host = 用过的();
+        host.forget_crashed().await;
+        assert_eq!(host.tabs.lock().await.next, 4);
+    }
+
+    /// 面板尺寸要留着。
+    ///
+    /// 清掉的话，重开后的第一页会停在子进程那个 1280×800 的初值上 ——
+    /// 前端只在尺寸**变化**时才发 resize，而崩溃前后面板尺寸没变，于是
+    /// 没有任何一次 resize 来纠正它:画面带黑边、页面里的字被缩小，
+    /// 一直到用户拖一下窗口。
+    #[tokio::test]
+    async fn 崩溃清理不碰面板尺寸() {
+        let host = 用过的();
+        *host.view.lock().await = Some((800, 600, 2.0));
+        host.forget_crashed().await;
+        assert_eq!(*host.view.lock().await, Some((800, 600, 2.0)));
+    }
+
+    /// 等开页的人要立刻收到坏消息。
+    ///
+    /// 那条 `TabOpened` 本该由已经没了的那个进程送来，永远不会到。不叫醒
+    /// 的话它们各自等满 10 秒，而那十秒里"新建标签页"这个按钮只是僵着。
+    #[tokio::test]
+    async fn 崩溃清理叫醒等开页的人() {
+        let host = 用过的();
+        let (tx, rx) = oneshot::channel();
+        host.opening.lock().await.insert(9, tx);
+
+        host.forget_crashed().await;
+
+        assert!(rx.await.is_err(), "唤醒端要被丢掉，等待者才会立刻失败");
+        assert!(host.opening.lock().await.is_empty());
     }
 
     /// 历史两头的按钮要是灰的。

@@ -272,6 +272,24 @@ fn build_tools(tools: &[ToolSpec]) -> Vec<WireTool> {
     out
 }
 
+/// 这些消息发出去有多少字节。
+///
+/// `[约束]` 走 [`build_messages`] 而不是直接量 `Message` —— 那是
+/// [`riot_protocol::provider::Provider::count_tokens`] 那条约束的落地方式。
+/// 复用组装（而不是另写一遍"哪些字段会发"）是刻意的:两套规则各自演化，
+/// 迟早有一天线协议改了而估算没跟上，而那种偏差没有任何报错，只会表现成
+/// 压缩时机变得莫名其妙。
+///
+/// 用 [`RetryContext::initial`]:重试那几个开关只影响模型名、输出上限和
+/// 断点位置，对字节数的影响可以忽略，而估算发生在决定要不要压缩的时候 ——
+/// 那时还没有任何重试上下文。
+pub fn wire_bytes(messages: &[Message]) -> usize {
+    build_messages(messages, &RetryContext::initial())
+        .iter()
+        .map(|m| serde_json::to_string(m).map(|s| s.len()).unwrap_or(0))
+        .sum()
+}
+
 fn build_messages(messages: &[Message], retry: &RetryContext) -> Vec<WireMessage> {
     let mut out: Vec<WireMessage> = messages
         .iter()

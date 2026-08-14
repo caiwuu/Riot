@@ -1000,6 +1000,7 @@ function Chat({
             thinking={session.thinking}
             streamingPlan={session.streamingPlan}
             busy={session.busy}
+            compacting={session.compacting}
             {...(planAsk ? { planAsk } : {})}
             onAnswerPlan={(r) => planAsk && void session.answer(r, planAsk.requestId)}
           />
@@ -1027,6 +1028,7 @@ function Transcript({
   thinking,
   streamingPlan,
   busy,
+  compacting,
   planAsk,
   onAnswerPlan,
 }: {
@@ -1035,6 +1037,8 @@ function Transcript({
   thinking: string;
   streamingPlan: string | null;
   busy: boolean;
+  /** 宿主正在压缩上下文。见 useSession 里同名字段。 */
+  compacting: boolean;
   /** 待批准的计划（ExitPlanMode 的询问）。内联在对话流末尾。 */
   planAsk?: { requestId: string; detail: PermissionAsk };
   onAnswerPlan?: (r: PermissionResponse) => void;
@@ -1083,7 +1087,19 @@ function Transcript({
             onAnswer={onAnswerPlan}
           />
         ) : null}
-        {busy && !streaming && !thinking && streamingPlan === null && !planAsk ? <Dots /> : null}
+        {/*
+         * 压缩中的提示优先于其他一切，而且不看 busy。
+         *
+         * 不看 busy 是因为手动 `/compact` 不占 busy（那条路不开轮次）。
+         * 优先是因为它回答的正是"为什么在等" —— 反应式压缩发生在一轮
+         * 中间，那时屏幕上可能还留着上一段流式文本，光秃秃的三个点
+         * 混在里面看不出和平时有什么不同。
+         */}
+        {compacting ? (
+          <Dots label="正在压缩上下文…" />
+        ) : busy && !streaming && !thinking && streamingPlan === null && !planAsk ? (
+          <Dots />
+        ) : null}
 
         <div ref={endRef} />
       </div>
@@ -1181,12 +1197,26 @@ function CopyMsg({ text }: { text: string }) {
   );
 }
 
-function Dots() {
-  return (
+/**
+ * 等待指示。
+ *
+ * `label` 说明这次等的是什么。没有它的时候（模型正在应答）不需要文字 ——
+ * 那是最常见的等待，用户认得。有具体原因时必须写出来:同一个动画表示
+ * 两件事，用户只能按最常见的那个理解。
+ */
+function Dots({ label }: { label?: string }) {
+  const dots = (
     <div className="dots">
       <span />
       <span />
       <span />
+    </div>
+  );
+  if (!label) return dots;
+  return (
+    <div className="wait-note" role="status">
+      {dots}
+      <span className="wait-note-text">{label}</span>
     </div>
   );
 }

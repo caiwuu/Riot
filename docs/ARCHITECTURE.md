@@ -238,6 +238,11 @@ pub enum AgentEvent {
     /// 权限请求。内核在此暂停,等宿主回 PermissionResponse。
     PermissionRequest { request_id: RequestId, detail: PermissionAsk },
 
+    /// 上下文压缩开始。不进 transcript —— 它是瞬时状态。
+    /// 摘要压缩要真调一次模型,这条事件是那几十秒的唯一解释:
+    /// 没有它,界面上的等待动画和"模型正在回答"一模一样。
+    Compacting,
+
     /// 上下文压缩发生。UI 可提示用户。
     Compacted { before_tokens: u32, after_tokens: u32, strategy: CompactStrategy },
 

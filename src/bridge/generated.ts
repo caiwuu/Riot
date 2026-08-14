@@ -25,6 +25,9 @@ export type AgentEvent =
       type: "permission_resolved";
     }
   | {
+      type: "compacting";
+    }
+  | {
       after_tokens: number;
       before_tokens: number;
       strategy: CompactStrategy;

@@ -214,6 +214,10 @@ pub fn run_agent(
                                 target_tokens: current / 2,
                                 current_tokens: current,
                             };
+                            // 说一声再压。阶梯压缩器的重档要真调一次模型，
+                            // 而这条路上用户刚发出一句话、什么都还没看到 ——
+                            // 不说的话那几十秒和"模型不理人"没有区别。
+                            yield AgentEvent::Compacting;
                             match deps.compactor.compact(state.messages.clone(), budget).await {
                                 CompactResult::Compacted {
                                     messages,

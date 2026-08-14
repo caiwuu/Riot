@@ -108,6 +108,20 @@ pub fn build_request(
     }
 }
 
+/// 这些消息发出去有多少字节。
+///
+/// `[约束]` 走 [`convert_messages`] 而不是直接量 `Message` —— 那是
+/// [`riot_protocol::provider::Provider::count_tokens`] 那条约束的落地方式。
+/// 复用转换（而不是另写一遍"哪些字段会发"）是刻意的:两套规则各自演化，
+/// 迟早有一天线协议改了而估算没跟上，而那种偏差没有任何报错，只会表现成
+/// 压缩时机变得莫名其妙。
+pub fn wire_bytes(messages: &[Message]) -> usize {
+    convert_messages(messages)
+        .iter()
+        .map(|m| serde_json::to_string(m).map(|s| s.len()).unwrap_or(0))
+        .sum()
+}
+
 pub fn convert_messages(messages: &[Message]) -> Vec<WireMessage> {
     let mut out = Vec::new();
 

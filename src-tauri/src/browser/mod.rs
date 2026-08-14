@@ -7,6 +7,12 @@
 //! 这里的职责和 [`crate::kernel::supervisor`] 是同一类:spawn、包进程组、
 //! 收发 NDJSON、崩了能重启。约定也照抄那边 —— 两套进程监管用不同的思路
 //! 会让"进程为什么没退干净"这类问题每次都要重新查一遍。
+//!
+//! 只有"崩了怎么办"这一条不一样。内核崩了立刻按退避序列拉起来:那是每个
+//! 会话都要用的东西，不在就什么都干不了。浏览器是可选能力，而且崩溃常常
+//! 发生在没人看的时候 —— 所以这一层只负责让句柄说得出自己废了
+//! （[`Browser::alive`]），真正的重开等到下一次用到才做，由
+//! [`access::HostBrowser::get`] 驱动。
 
 // 宿主层不参与黄金回放，确定性约束（见 clippy.toml）只针对内核。
 #![allow(clippy::disallowed_methods)]
@@ -20,7 +26,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use process_wrap::tokio::{ChildWrapper, CommandWrap};
@@ -64,6 +70,11 @@ pub struct Browser {
     tx: mpsc::UnboundedSender<Vec<u8>>,
     pending: Pending,
     next_id: AtomicU64,
+    /// 进程还在没有。管道断掉时由收发任务翻过来，见 [`Self::alive`]。
+    ///
+    /// `[约束]` 不能用 `child.try_wait()` 代替。那个要 `&mut self`，而这个
+    /// 句柄是被 `Arc` 共享的 —— 拿不到可变引用。
+    alive: Arc<AtomicBool>,
 }
 
 impl Browser {
@@ -111,9 +122,14 @@ impl Browser {
         let stderr = child.stderr().take().expect("stderr 是 piped 的");
         let mut stdin = child.stdin().take().expect("stdin 是 piped 的");
 
+        // 进程一死，两条管道都会断。哪一条先断不确定 —— stdout 读到 EOF 和
+        // stdin 写失败是同一件事的两个侧面，所以两边都翻这个标志。
+        let alive = Arc::new(AtomicBool::new(true));
+
         // 事件读取。一行一条 NDJSON。
         let pending: Pending = Arc::default();
         let routing = Arc::clone(&pending);
+        let reader_alive = Arc::clone(&alive);
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -134,8 +150,16 @@ impl Browser {
                     Err(e) => tracing::warn!(error = %e, line, "浏览器事件解析失败"),
                 }
             }
-            // 进程没了。叫醒所有还在等的调用方，否则它们要各自等满 30 秒
-            // 才超时，而那三十秒里工具看起来只是"卡住"。
+            // 进程没了。
+            //
+            // 先记下来再叫醒等待者:反过来的话，被唤醒的一方拿着
+            // `NotRunning` 去问「进程还在吗」会得到"在" —— 于是它按
+            // "偶发失败"处理，而实际上这个句柄已经永久废了。
+            //
+            // 叫醒是必须的，否则它们要各自等满 30 秒才超时，而那三十秒里
+            // 工具看起来只是"卡住"。
+            reader_alive.store(false, Ordering::Relaxed);
+            tracing::warn!("浏览器进程的事件流断了，这个句柄之后一律报「未运行」");
             routing.lock().await.clear();
         });
 
@@ -151,6 +175,7 @@ impl Browser {
 
         // 命令出口。
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let writer_alive = Arc::clone(&alive);
         tokio::spawn(async move {
             while let Some(buf) = rx.recv().await {
                 if stdin.write_all(&buf).await.is_err() {
@@ -162,6 +187,10 @@ impl Browser {
             }
             // 循环结束 = 通道关了或管道断了。drop stdin 制造 EOF，
             // 子进程会自己走完 CEF 的关闭流程。
+            //
+            // 通道关了那种情况是 [`Self::shutdown`] 主动 drop 了 `tx`，那时
+            // 句柄本来就被消费掉了 —— 标志翻不翻都没人再看。
+            writer_alive.store(false, Ordering::Relaxed);
         });
 
         Ok(Self {
@@ -169,6 +198,7 @@ impl Browser {
             tx,
             pending,
             next_id: AtomicU64::new(1),
+            alive,
         })
     }
 
@@ -188,6 +218,14 @@ impl Browser {
         method: &str,
         params: Value,
     ) -> Result<Value, BrowserError> {
+        // `[约束]` 进程没了就别再登记等待者。读取任务只在断开的那一刻清一次
+        // `pending`，之后登记进去的没有任何人会来叫醒 —— 每一条调用都干等满
+        // [`CDP_TIMEOUT`]。那 30 秒里面板只是"卡住"，而且一次崩溃之后**每条**
+        // 调用都要各付一遍。
+        if !self.alive() {
+            return Err(BrowserError::NotRunning);
+        }
+
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
@@ -233,11 +271,28 @@ impl Browser {
         Ok(reply.get("result").cloned().unwrap_or(Value::Null))
     }
 
+    /// 进程还在没有。
+    ///
+    /// `[约束]` 长期持有这个句柄的一方必须查它。子进程崩掉之后句柄不会
+    /// 自己失效 —— 它照样能拿在手里，只是每条命令都以
+    /// [`BrowserError::NotRunning`] 失败。分不出"这次没发出去"和"这个句柄
+    /// 已经废了"的话，一次崩溃就等于整个会话的浏览器永久不可用，而唯一的
+    /// 出路是重启应用。见 [`access::HostBrowser::get`]。
+    pub fn alive(&self) -> bool {
+        self.alive.load(Ordering::Relaxed)
+    }
+
     /// 发一条命令。
     ///
     /// 不等回应 —— 协议是异步的，结果通过事件流回来。想要"发了之后拿结果"
     /// 的语义，得在 CDP 那一层按 `id` 配对，那是上层的事。
     pub fn send(&self, cmd: &Command) -> Result<(), BrowserError> {
+        // 通道本身还开着不代表命令送得到:写任务此刻可能正停在等下一条命令上，
+        // 要等它真的往一根断掉的管道里写才发现。少了这一道，死进程上的第一条
+        // 命令会"发送成功"然后消失 —— 而调用方据此去等一个永远不来的事件。
+        if !self.alive() {
+            return Err(BrowserError::NotRunning);
+        }
         let mut line = serde_json::to_vec(cmd)?;
         line.push(b'\n');
         self.tx.send(line).map_err(|_| BrowserError::NotRunning)

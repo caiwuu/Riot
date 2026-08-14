@@ -29,7 +29,35 @@ pub trait Provider: Send + Sync {
     fn stream(&self, req: ProviderRequest, cancel: CancellationToken) -> ProviderStream;
 
     /// 估算消息序列的 token 数。上下文管理层用它决定何时压缩。
+    ///
+    /// `[约束]` 算的必须是**发出去的那份**，不是历史本身。两者差得远:历史
+    /// 里有一大堆按设计不进请求的东西 —— `System` 消息、思考内容（DeepSeek
+    /// 带上会 400）、消息 id 和 usage、以及视觉兼容路径下那张只给界面看的
+    /// 图（模型收到的是文字转述，见 [`crate::message::ToolResultContent`]）。
+    /// 按历史算的话，几张截图就能凭空变出几万个 token —— 实测有会话报到
+    /// 十万的时候，其中四成多是根本不会发出去的图片 base64。代价是用户在
+    /// 实际只用掉一半窗口的时候就被压一次，而每次压缩都是一次有损的历史
+    /// 改写加一次真实的模型调用。
     fn count_tokens(&self, messages: &[Message]) -> u32;
+}
+
+/// 一个 token 折多少字节。
+///
+/// 4 字节对英文偏准，对中文偏保守（3 字节一个汉字，实际约 1.5 字符/token，
+/// 所以这么算高估一成左右）。保守是对的方向:低估会让压缩来得太晚，
+/// 然后撞上真正的溢出。
+const BYTES_PER_TOKEN: usize = 4;
+
+/// 字节数 → token 估算。
+///
+/// `[约束]` 所有需要这个换算的地方都必须走这里。散在各处的 `/ 4` 会漂移，
+/// 而漂移的表现是"压缩后仍然超预算"这类判断时对时错 —— 见
+/// [`Provider::count_tokens`] 与压缩器里对 `after` 的推算。
+#[must_use]
+pub const fn estimate_tokens(bytes: usize) -> u32 {
+    // 饱和转换:u32 装不下的字节数在这里没有意义，夹住比回绕安全。
+    let t = bytes / BYTES_PER_TOKEN;
+    if t > u32::MAX as usize { u32::MAX } else { t as u32 }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

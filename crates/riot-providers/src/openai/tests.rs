@@ -11,7 +11,7 @@ use riot_protocol::provider::{ProviderEvent, ProviderRequest, ThinkingConfig, To
 use pretty_assertions::assert_eq;
 
 use super::decode::StreamDecoder;
-use super::request::{RetryContext, build_request, convert_messages};
+use super::request::{RetryContext, build_request, convert_messages, wire_bytes};
 use super::wire::WireMessage;
 use crate::sse::SseEvent;
 
@@ -298,6 +298,111 @@ fn 思考内容不回传() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+// ── token 估算 ────────────────────────────────────────
+//
+// 这一组盯着的是「压缩来得太早」。估算量的必须是发出去的那份:按历史算的话，
+// 一张只给界面看的截图能凭空变出几万个 token，用户在实际只用掉一半窗口的
+// 时候就被压一次，而每次压缩都是一次有损的历史改写加一次真实的模型调用。
+
+/// 视觉兼容路径下那张图不占模型预算。
+///
+/// 主模型收不了图时，图片走辅助模型转成文字（见 vision 模块），
+/// `DescribedImage` 里的 base64 只留给界面显示 —— provider 一个字节都不发。
+/// 早先的估算按整条消息的 JSON 算，于是这张图既不进请求、又照样吃掉预算:
+/// 实测一个会话报"96,737 token"的时候，其中 44% 是这种根本不存在的用量。
+#[test]
+fn 转述图的_base64_不计入估算() {
+    let base64 = "A".repeat(100_000);
+    let described = |data: String| {
+        vec![Message::User {
+            id: MessageId::from_raw("u1"),
+            content: vec![UserContent::ToolResult {
+                tool_use_id: ToolUseId::from_raw("call_1"),
+                content: ToolResultContent::DescribedImage {
+                    media_type: "image/jpeg".into(),
+                    data,
+                    path: None,
+                    text: "页面上是一张登录表单".into(),
+                },
+                is_error: false,
+            }],
+            meta: MessageMeta::default(),
+        }]
+    };
+
+    let with_image = wire_bytes(&described(base64));
+    let without = wire_bytes(&described(String::new()));
+    assert_eq!(
+        with_image, without,
+        "base64 不随请求发出去，就不能算进预算"
+    );
+    assert!(with_image < 200, "只该剩下那句转述：{with_image} 字节");
+}
+
+/// 思考内容不占预算 —— 它按协议要求根本不回传（见 `思考内容不回传`）。
+#[test]
+fn 思考内容不计入估算() {
+    let thinking = |text: &str| {
+        vec![Message::Assistant {
+            id: MessageId::from_raw("a1"),
+            content: vec![
+                AssistantContent::Thinking {
+                    text: text.into(),
+                    signature: None,
+                },
+                AssistantContent::Text {
+                    text: "答案是 42".into(),
+                },
+            ],
+            usage: None,
+            meta: MessageMeta::default(),
+        }]
+    };
+
+    assert_eq!(
+        wire_bytes(&thinking(&"想".repeat(10_000))),
+        wire_bytes(&thinking("")),
+        "推理过程不回传，就不能算进预算"
+    );
+}
+
+/// 只给用户看的系统提醒不占预算。
+#[test]
+fn system_消息不计入估算() {
+    let msgs = vec![Message::System {
+        id: MessageId::from_raw("s1"),
+        level: riot_protocol::message::SystemLevel::Warning,
+        text: "上次请求失败了".repeat(100),
+    }];
+    assert_eq!(wire_bytes(&msgs), 0, "System 消息不进请求");
+}
+
+/// 消息 id 和 usage 不占预算。
+///
+/// 它们是本地簿记，线协议里没有对应字段。一条消息二三十字节，几百条就是
+/// 上万个凭空多出来的 token。
+#[test]
+fn 消息_id_和_usage_不计入估算() {
+    let plain = wire_bytes(&[Message::Assistant {
+        id: MessageId::from_raw("a1"),
+        content: vec![AssistantContent::Text { text: "答案".into() }],
+        usage: None,
+        meta: MessageMeta::default(),
+    }]);
+    let bookkept = wire_bytes(&[Message::Assistant {
+        id: MessageId::from_raw("msg_01JQRSTUVWXYZ0123456789"),
+        content: vec![AssistantContent::Text { text: "答案".into() }],
+        usage: Some(riot_protocol::message::Usage {
+            input_tokens: 12345,
+            output_tokens: 6789,
+            cache_read_tokens: 4096,
+            cache_creation_tokens: 2048,
+        }),
+        meta: MessageMeta::default(),
+    }]);
+    assert_eq!(plain, bookkept, "本地簿记不该影响预算");
 }
 
 #[test]
