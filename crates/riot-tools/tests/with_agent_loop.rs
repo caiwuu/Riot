@@ -63,6 +63,8 @@ fn deps(tools: Vec<Arc<dyn Tool>>, responses: Vec<Vec<ProviderEvent>>) -> AgentD
         clock: Arc::new(MockClock::new(0)),
         ids: Arc::new(SeqIdGenerator::default()),
         tools: Arc::new(test_scheduler(tools)) as Arc<dyn ToolRunner>,
+        queue: Arc::new(riot_core::state::NoQueue),
+        stop_gate: Arc::new(riot_core::state::NoStopGate),
     }
 }
 
@@ -84,6 +86,7 @@ fn initial() -> AgentState {
         attempted_reactive_compact: false,
         compact_failure_streak: 0,
         max_output_tokens_override: None,
+        stop_hook_blocks: 0,
         transition: None,
     }
 }

@@ -81,7 +81,10 @@ async fn eventually(limit: Duration, mut cond: impl FnMut() -> bool) -> bool {
 /// 读到空串。这类竞态在快速循环里才显形，单跑一次永远看不到。
 async fn read_child_pid(path: &Path) -> Option<u32> {
     let mut found = None;
-    eventually(Duration::from_secs(3), || {
+    // 10 秒不是"这一步要花这么久"，是给满载的机器留余量：全量测试并行
+    // 跑时，一个新起的 shell 拿到 CPU 可能要好几秒。条件一满足就立刻
+    // 返回，所以放宽只影响失败路径的等待时间。
+    eventually(Duration::from_secs(10), || {
         found = std::fs::read_to_string(path)
             .ok()
             .and_then(|s| s.trim().parse::<u32>().ok());

@@ -1,6 +1,6 @@
 # Riot 架构设计
 
-> 一个 Rust 实现的 AI coding agent 桌面端。设计基线是对 Claude Code 源码的分析(见 `AGENT_DESIGN.md`)与 OpenAI Codex 桌面端的架构逆向。
+> 一个 Rust 实现的 AI coding agent 桌面端。设计基线是对 Claude Code 与 OpenAI Codex 桌面端的架构分析。
 >
 > 本文档面向的读者是**实现者(主要是 AI)**。凡是标注 `[约束]` 的段落是硬性要求,不得因为"这样写更简洁"而偏离;凡是标注 `[取舍]` 的段落说明了为什么不选另一条路,改动前请先理解原因。
 
@@ -150,16 +150,17 @@ Riot/
 │   ├── riot-tools/            # 工具实现
 │   ├── riot-providers/        # 模型适配层
 │   ├── riot-permissions/      # 权限决策 + Bash AST 分析
-│   ├── riot-store/            # SQLite 持久化
-│   └── riot-kernel/           # 内核二进制入口(阶段 B 启用)
+│   ├── riot-store/            # JSONL transcript 持久化
+│   ├── riot-mcp/              # MCP 客户端
+│   ├── riot-runtime/          # 文件系统 / 进程 / 网络的真实实现
+│   ├── riot-kernel/           # 内核二进制入口(阶段 B 启用)
+│   └── riot-browser/          # CEF 离屏浏览器（独立 workspace）
 ├── src-tauri/                    # Tauri 宿主
 ├── src/                          # React UI
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   └── VERIFICATION.md
-└── tests/
-    ├── golden/                   # 黄金回放用例
-    └── fixtures/                 # mock 模型响应
+└── crates/riot-core/tests/golden/  # 黄金回放用例
 ```
 
 ### 3.1 依赖方向
@@ -169,9 +170,10 @@ protocol  ←  core  ←  kernel
     ↑         ↑
     │         ├── tools ── permissions
     │         ├── providers
-    │         └── store
+    │         ├── store
+    │         └── mcp
     │
-  src-tauri ──┘
+  src-tauri ── runtime
 ```
 
 `[约束]` **依赖方向不可逆。**具体禁令:
@@ -1564,7 +1566,7 @@ loop {
 
 ## 14. TS→Rust 翻译对照
 
-给实现者的速查表。左列是 `AGENT_DESIGN.md` 里的 TS 形态,右列是本项目的 Rust 形态。
+给实现者的速查表。左列是 Claude Code 一类实现里的 TS 形态,右列是本项目的 Rust 形态。
 
 | TS 形态 | Rust 形态 | 备注 |
 |---------|-----------|------|

@@ -12,6 +12,7 @@
 //! 编译器会指着每一个没填的字段。
 
 pub mod anthropic;
+pub mod endpoint;
 pub mod http;
 pub mod openai;
 pub mod retry;

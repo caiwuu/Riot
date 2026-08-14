@@ -42,9 +42,31 @@ if ! command -v bundle-cef-app >/dev/null 2>&1; then
   cargo install cef --version "^151.3" --bin bundle-cef-app --locked
 fi
 
+# [约束] 先删掉旧 bundle，不要原地覆盖。
+#
+# 原地覆盖一个正在被加载的 Mach-O 会把 dyld 卡死:进程停在 _dyld_start，
+# 状态 UE（不可中断地退出中），SIGKILL 也收不掉。更糟的是它会传染 ——
+# 之后每一次启动这个二进制都卡在同一个地方，表现是"浏览器起不来"，而
+# stdout/stderr 一个字都没有（main 都没进）。清掉重建换的是新 inode，
+# 老进程各自抱着老文件慢慢死，不影响新的。
+rm -rf "$OUT/riot-browser.app"
+
 bundle-cef-app riot-browser \
   --output "$OUT" \
   --identifier "dev.riot.browser" \
   --display-name "Riot Browser"
+
+# 不要在 Dock、启动台和 ⌘-Tab 里露脸。
+#
+# [约束] 这一步 bundle-cef-app 不管:它只给 CEF 的五个 helper 加了
+# LSUIElement，主 bundle 按普通应用打。而这个进程恰恰也没有窗口 ——
+# 它是纯离屏渲染的，画面通过 stdio 交给主应用。不加的话 Dock 里会多出一个
+# riot-browser 图标，用户只开了 Riot 却看到两个东西，点那个图标还什么都不弹。
+#
+# 走 plist 而不是运行时改 activation policy:LaunchServices 在进程加载前就
+# 读它，图标一次都不会出现；而且这正是 Chromium 自家 helper 用的办法，
+# 和 CEF 的兼容性有现成的证据。
+plutil -replace LSUIElement -bool true \
+  "$OUT/riot-browser.app/Contents/Info.plist"
 
 echo "打包完成: $OUT/riot-browser.app"

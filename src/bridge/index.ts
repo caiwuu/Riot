@@ -37,14 +37,42 @@ export interface ProviderConfig {
   id: string;
   name: string;
   protocol: Protocol;
+  /** 接口主机，可以带前缀路径。 */
   baseUrl: string;
+  /**
+   * 接口路径，如 `/v1/chat/completions`。空 = 按主机猜。
+   *
+   * 可配置的理由:各家的根路径对不上。智谱的对话在
+   * `/api/paas/v4/chat/completions`（带 /v1 就 404），而它的完整模型清单偏偏在
+   * `/api/paas/v4/v1/models`。猜错的表现是一个 404，报错里没有任何线索指向路径。
+   */
+  apiPath?: string;
   /** 读 key 的环境变量名，同时是 auth.json 里的存储键。 */
   apiKeyEnv: string;
   /** 已添加的模型（手动或从 /models 接口挑的）。 */
-  models: string[];
+  models: ModelConfig[];
   fallbackModel?: string | null;
   /** 这个服务方的采样参数。会话可以临时覆盖单个字段。 */
   sampling: Sampling;
+}
+
+/**
+ * 一个模型的配置。
+ *
+ * 能力和采样参数属于模型，不属于服务方 —— 同一家同时有视觉模型和纯文本模型
+ * 是常态（智谱的 glm-4.6v 能看图、glm-5.2 不能）。按服务方记的话，为了把前者
+ * 配成视觉兼容模型就得给整家打开，于是和后者聊天时截图也会被当成图片发出去，
+ * 服务方回一句「messages.content.type 参数非法」——而那句话完全不指向截图。
+ */
+export interface ModelConfig {
+  /** 发给服务方的模型名。 */
+  id: string;
+  /** 显示名。空 = 直接显示 id。 */
+  name?: string;
+  /** 能收图片。 */
+  vision?: boolean;
+  /** 这个模型的采样参数。空字段继承 provider 的。 */
+  sampling?: Sampling;
 }
 
 /** 联网能力。抓取和搜索分开开关。 */
@@ -59,6 +87,26 @@ export interface WebConfig {
   distillModel: string;
 }
 
+/**
+ * 一个 MCP 服务器（stdio 传输）。
+ *
+ * `id` 进工具名（`mcp__<id>__…`）和权限规则 —— 改了它等于换了一批工具名，
+ * 用户点过的"总是允许"全部失配。
+ */
+export interface McpServerConfig {
+  /** 稳定标识，只能用字母数字、- 和 _。 */
+  id: string;
+  /** 显示名。空 = 显示 id。 */
+  name?: string;
+  /** 启动命令，如 `npx`、`uvx` 或可执行文件路径。 */
+  command: string;
+  args?: string[];
+  /** 附加环境变量（API key 之类）。 */
+  env?: Record<string, string>;
+  /** 关掉 = 进程停掉、工具消失，但配置留着。 */
+  enabled?: boolean;
+}
+
 /** 应用配置，整个结构持久化到 config.json。 */
 export interface AppConfig {
   providers: ProviderConfig[];
@@ -70,7 +118,20 @@ export interface AppConfig {
   defaultMode?: PermissionMode | null;
   /** 权限弹窗等多久算超时（秒）。超时按拒绝处理，宿主侧夹在 5–3600。 */
   askTimeoutSecs: number;
+  /** 单轮最多自主往返多少步。到顶停下等用户。宿主侧夹在 1–1000。 */
+  maxTurns: number;
   web: WebConfig;
+  /** MCP 服务器。连接是应用级的（会话共享），工具每轮快照。 */
+  mcpServers: McpServerConfig[];
+  /** 历史估算超过这个 token 数时自动摘要压缩。宿主侧夹在 8k–1M。 */
+  compactThresholdTokens: number;
+  /**
+   * 视觉兼容模型，格式 `providerId/model`。
+   *
+   * 主模型收不了图片时，用它把图片转成文字再交给主模型。空 = 不转，
+   * 截图工具会直接说去配一下。
+   */
+  visionModel: string;
 }
 
 /** 侧边栏里的一个会话。会话从创建起绑定 root，永不改变。 */
@@ -83,6 +144,10 @@ export interface SessionInfo {
   sampling: Sampling;
   /** 宿主侧的当前权限模式。UI 显示必须以它为准，不能拿全局默认值顶替。 */
   mode: PermissionMode;
+  /** 会话级 Python 虚拟环境（venv 根目录）。null = 宿主默认环境。 */
+  pythonVenv: string | null;
+  /** 会话级追加的系统提示词。null = 只用内置提示词。 */
+  systemPrompt: string | null;
 }
 
 export interface ConfigStatus {
@@ -156,9 +221,132 @@ export function subscribeSession(
  *
  * 立刻返回，不等这一轮跑完 —— 整轮可能要几分钟，等待期间用户按不了停止键。
  * 结果全部走事件流。
+ *
+ * 返回排队条目 id：上一轮还在跑时消息进插话队列（排队面板靠这个 id
+ * 跟踪它，内核注入后回流的消息也用同一个 id）；`null` = 直接开轮了。
  */
-export function sendTurn(sessionId: string, text: string): Promise<string> {
-  return invoke<string>("send_turn", { sessionId, text });
+export function sendTurn(
+  sessionId: string,
+  text: string,
+  images: ImageInput[] = [],
+  /** 输入框里选中的文件引用（那些块），项目内相对路径。 */
+  refs: string[] = [],
+): Promise<string | null> {
+  return invoke<string | null>("send_turn", { sessionId, text, images, refs });
+}
+
+/** 一条斜杠命令。模板正文留在宿主，展开走 slashExpand。 */
+export interface SlashCommand {
+  name: string;
+  description: string;
+  argumentHint?: string;
+  /** `builtin` / `global` / `project`。 */
+  source: string;
+}
+
+/** 可用的斜杠命令（内置 + 项目 + 全局）。root 为 null 时只列内置和全局。 */
+export function slashCommands(root: string | null): Promise<SlashCommand[]> {
+  return invoke<SlashCommand[]>("slash_commands", { root });
+}
+
+/** `@` 补全菜单的文件搜索。返回项目内相对路径，最多十来条。 */
+export function searchFiles(sessionId: string, query: string): Promise<string[]> {
+  return invoke<string[]>("search_files", { sessionId, query });
+}
+
+/** 配置里的一条 hook。error 非空时这条是"配置文件有问题"的提示。 */
+export interface HookInfo {
+  event: string;
+  matcher: string;
+  command: string;
+  timeoutSecs: number;
+  /** `global` / `project`。 */
+  source: string;
+  error?: string;
+}
+
+/** hooks.json 里配了什么（含解析失败的文件）。 */
+export function hooksList(root: string | null): Promise<HookInfo[]> {
+  return invoke<HookInfo[]>("hooks_list", { root });
+}
+
+/**
+ * 展开一条自定义命令：`/name args` → 发给模型的 prompt。
+ * null = 没这条命令，或它是内置命令（按 name 特判执行）。
+ */
+export function slashExpand(
+  sessionId: string,
+  name: string,
+  args: string,
+): Promise<string | null> {
+  return invoke<string | null>("slash_expand", { sessionId, name, args });
+}
+
+/** 手动压缩会话历史（`/compact`）。完成时走事件流的 compacted。 */
+export function compactSession(sessionId: string): Promise<void> {
+  return invoke("session_compact", { sessionId });
+}
+
+/** 排队面板的一条插话摘要。images 是图片张数（全量 base64 回传太重）。 */
+export interface QueuedSummary {
+  id: string;
+  text: string;
+  images: number;
+  refs: string[];
+}
+
+/** 当前排着的插话。切回会话时重建排队面板用。 */
+export function queueList(sessionId: string): Promise<QueuedSummary[]> {
+  return invoke<QueuedSummary[]>("queue_list", { sessionId });
+}
+
+/** 删一条排队插话。false = 条目已经不在（被注入或早被删了）。 */
+export function queueRemove(sessionId: string, entryId: string): Promise<boolean> {
+  return invoke<boolean>("queue_remove", { sessionId, entryId });
+}
+
+/** 撤回一条排队插话，拿回原始输入（放回输入框编辑）。 */
+export function queueTake(
+  sessionId: string,
+  entryId: string,
+): Promise<{ text: string; images: ImageInput[]; refs: string[] } | null> {
+  return invoke<{ text: string; images: ImageInput[]; refs: string[] } | null>("queue_take", {
+    sessionId,
+    entryId,
+  });
+}
+
+/** 随消息附上的一张图。data 是 base64，不含 `data:` 前缀。 */
+export interface ImageInput {
+  mediaType: string;
+  data: string;
+}
+
+/** 读一个图片文件（拖进来的、或从对话框选的）。太大或类型不认时 reject。 */
+export function readImage(path: string): Promise<ImageInput & { name: string }> {
+  return invoke("read_image", { path });
+}
+
+/**
+ * 弹系统的文件选择框，返回绝对路径。
+ *
+ * 只回路径不回内容:选中的非图片文件在输入框里变成 `@` 引用块，内容由
+ * 宿主在发送时按上限读取（见 src-tauri 的 mentions）。这里读内容的话，
+ * 一个几 MB 的文件会先在前端过一遍内存、再走一次 IPC，而它多半还要被
+ * 截断。
+ */
+export async function pickFiles(imagesOnly = false): Promise<string[]> {
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  // 分开写而不是塞一个 undefined：tsconfig 开了 exactOptionalPropertyTypes，
+  // 显式的 undefined 和"不传"是两件事。
+  const picked = imagesOnly
+    ? await open({
+        multiple: true,
+        filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "gif", "webp"] }],
+      })
+    : await open({ multiple: true });
+  if (!picked) return [];
+  return Array.isArray(picked) ? picked : [picked];
 }
 
 /** 中断当前轮。内核会补齐所有悬空的 tool_result，见 invariants::check_tool_pairing。 */
@@ -178,6 +366,19 @@ export function respondPermission(
 /** 会话级采样覆盖。空字段继承 provider 的设置；下一轮生效。 */
 export function setSessionSampling(sessionId: string, sampling: Sampling): Promise<void> {
   return invoke("set_session_sampling", { sessionId, sampling });
+}
+
+/**
+ * 会话的 Python 虚拟环境。空字符串清除；下一轮生效。
+ * 宿主会验证目录里有没有 `bin/python`，不像 venv 时 reject。
+ */
+export function setSessionPythonVenv(sessionId: string, path: string): Promise<void> {
+  return invoke("set_session_python_venv", { sessionId, path });
+}
+
+/** 会话级追加的系统提示词（附在内置提示词之后）。空字符串清除；下一轮生效。 */
+export function setSessionSystemPrompt(sessionId: string, prompt: string): Promise<void> {
+  return invoke("set_session_system_prompt", { sessionId, prompt });
 }
 
 export function setPermissionMode(
@@ -205,6 +406,57 @@ export function listModels(providerId: string): Promise<string[]> {
   return invoke<string[]>("list_models", { providerId });
 }
 
+/* ── MCP 与 Skills ─────────────────────────── */
+
+/** 一个 MCP 服务器此刻的连接状态。 */
+export interface McpServerStatus {
+  id: string;
+  state: "connecting" | "connected" | "failed";
+  /** connected 时是服务器自报的名字和版本；failed 时是错误原因。 */
+  detail: string;
+  /** 对外的完整工具名（`mcp__…`）。 */
+  tools: string[];
+}
+
+/** MCP 服务器的连接状态。设置页轮询它显示状态点和工具数。 */
+export function mcpStatus(): Promise<McpServerStatus[]> {
+  return invoke<McpServerStatus[]>("mcp_status");
+}
+
+/** 手动重连一个 MCP 服务器。 */
+export function mcpRestart(serverId: string): Promise<void> {
+  return invoke("mcp_restart", { serverId });
+}
+
+/** 当前 MCP 服务器的标准 JSON（`{"mcpServers": {...}}`，各家 README 的通用格式）。 */
+export function mcpExportJson(): Promise<string> {
+  return invoke<string>("mcp_export_json");
+}
+
+/**
+ * 用标准 JSON 整体替换 MCP 服务器配置。宿主负责解析与校验；
+ * 支持 Claude Desktop / Cursor / Cline / VS Code 的形状。
+ */
+export function mcpImportJson(raw: string): Promise<ConfigStatus> {
+  return invoke<ConfigStatus>("mcp_import_json", { raw });
+}
+
+/** 一个技能（或一个解析失败的 SKILL.md，带原因）。 */
+export interface SkillInfo {
+  name: string;
+  description: string;
+  /** SKILL.md 的完整路径。 */
+  path: string;
+  source: "global" | "project";
+  /** 解析失败的原因。没有 = 可用。 */
+  error?: string | null;
+}
+
+/** 当前可用的技能清单。`root` 传当前会话的项目根；null 只列全局。 */
+export function skillsList(root: string | null): Promise<SkillInfo[]> {
+  return invoke<SkillInfo[]>("skills_list", { root });
+}
+
 /** 登记一个项目目录（验证并规范化），返回 canonical 根。不创建会话。 */
 export function addProject(path: string): Promise<string> {
   return invoke<string>("add_project", { path });
@@ -220,9 +472,14 @@ export function listSessions(): Promise<SessionInfo[]> {
   return invoke<SessionInfo[]>("list_sessions");
 }
 
-/** 一个会话的完整历史，切回时重建对话流。 */
-export function getHistory(sessionId: string): Promise<Message[]> {
-  return invoke<Message[]>("get_history", { sessionId });
+/**
+ * 一个会话的完整历史 + 此刻是否有轮子在跑。切回会话时重建对话流。
+ *
+ * 忙碌状态跟着历史一起回：分两次问会在中间留一个窗口，那一瞬间界面
+ * 显示空闲（没有停止键），而模型正在干活。
+ */
+export function getHistory(sessionId: string): Promise<{ messages: Message[]; busy: boolean }> {
+  return invoke<{ messages: Message[]; busy: boolean }>("get_history", { sessionId });
 }
 
 /** 删除会话（正在跑的轮子会被中断）。幂等。 */
@@ -261,9 +518,35 @@ export interface BrowserFrame {
 export type BrowserInput =
   | { kind: "click"; x: number; y: number; button: string }
   | { kind: "move"; x: number; y: number }
-  | { kind: "scroll"; x: number; y: number; deltaY: number }
+  /** 两个轴都要发。页面通常比面板宽，只发 deltaY 的话右边那截永远看不到。 */
+  | { kind: "scroll"; x: number; y: number; deltaX: number; deltaY: number }
   | { kind: "text"; text: string }
+  /** 输入法正在组字，text 是还没上屏的临时内容；空串表示取消。 */
+  | { kind: "compose"; text: string }
   | { kind: "key"; key: string };
+
+/** 标签栏上的一页。 */
+export interface TabInfo {
+  id: number;
+  /** 页面地址。空 = 停在空白页，也就是"新标签页"。 */
+  url: string;
+  /** 页面标题。加载完之前是空的。 */
+  title: string;
+  canBack: boolean;
+  canForward: boolean;
+}
+
+/**
+ * 面板要显示的全部状态。
+ *
+ * 标签栏和工具栏一起回:它们描述的是同一个时刻。分两条查询的话，切标签的
+ * 瞬间会出现"标签栏已经高亮了新页、地址栏还是旧页"这种自相矛盾的中间态。
+ */
+export interface PanelState {
+  tabs: TabInfo[];
+  /** 当前显示的那一页。没有标签页时是 0。 */
+  active: number;
+}
 
 /**
  * 打开面板，开始接收画面。
@@ -274,15 +557,26 @@ export type BrowserInput =
 export function openBrowser(
   sessionId: string,
   onFrame: (f: BrowserFrame) => void,
+  /**
+   * 浏览器就绪时的标签栏状态。
+   *
+   * 有它才不用等下一次定时同步 —— 浏览器起来要一秒，再叠一个轮询间隔的话，
+   * 用户看到的是"开了面板、空等两秒、才冒出一个标签页"。
+   */
+  onReady?: (s: PanelState) => void,
 ): Subscription {
   let active = true;
   const channel = new Channel<BrowserFrame>();
   channel.onmessage = (f) => {
     if (active) onFrame(f);
   };
-  invoke("browser_open", { sessionId, onFrame: channel }).catch((e: unknown) => {
-    if (active) console.error("打开浏览器面板失败", e);
-  });
+  invoke<PanelState>("browser_open", { sessionId, onFrame: channel })
+    .then((s) => {
+      if (active) onReady?.(s);
+    })
+    .catch((e: unknown) => {
+      if (active) console.error("打开浏览器面板失败", e);
+    });
   return {
     unsubscribe() {
       active = false;
@@ -298,8 +592,108 @@ export function browserNavigate(sessionId: string, url: string): Promise<void> {
   return invoke("browser_navigate", { sessionId, url });
 }
 
+/** 在历史里走一步：-1 后退，+1 前进。返回当前页走完之后的状态。 */
+export function browserHistory(sessionId: string, delta: number): Promise<TabInfo> {
+  return invoke<TabInfo>("browser_history", { sessionId, delta });
+}
+
+export function browserReload(sessionId: string): Promise<void> {
+  return invoke("browser_reload", { sessionId });
+}
+
+/** 标签栏 + 工具栏的状态。页面自己跳转时只能靠问，没有通知。 */
+export function browserState(sessionId: string): Promise<PanelState> {
+  return invoke<PanelState>("browser_state", { sessionId });
+}
+
+/** 新开一个标签页并切过去。 */
+export function browserNewTab(sessionId: string): Promise<PanelState> {
+  return invoke<PanelState>("browser_new_tab", { sessionId });
+}
+
+/** 关一个标签页。关掉最后一个时宿主会补一个新的空白页。 */
+export function browserCloseTab(sessionId: string, tab: number): Promise<PanelState> {
+  return invoke<PanelState>("browser_close_tab", { sessionId, tab });
+}
+
+/** 切到某个标签页。画面、工具栏和模型的浏览器工具都跟着它。 */
+export function browserSelectTab(sessionId: string, tab: number): Promise<PanelState> {
+  return invoke<PanelState>("browser_select_tab", { sessionId, tab });
+}
+
+/**
+ * 告诉宿主画面区现在多大（CSS 像素）以及屏幕的像素密度，页面视口会跟着变。
+ *
+ * 尺寸不同步的话，帧的比例和面板的比例对不上，画面周围会留出黑边 —— 而且
+ * 页面是被整体缩小塞进来的，字会小到看不清。
+ *
+ * 密度不同步的话，尺寸和比例都是对的，只是糊:帧按一倍出，面板要按两倍铺，
+ * 中间那次放大让所有文字的边缘发虚。
+ */
+export function browserResize(
+  sessionId: string,
+  width: number,
+  height: number,
+  scale: number,
+): Promise<void> {
+  return invoke("browser_resize", { sessionId, width, height, scale });
+}
+
 export function browserInput(sessionId: string, input: BrowserInput): Promise<void> {
   return invoke("browser_input", { sessionId, input });
+}
+
+/** 本会话已授权的渗透 scope（host 列表）。给 scope 管理面板看。 */
+export function browserScopeList(sessionId: string): Promise<string[]> {
+  return invoke<string[]>("browser_scope_list", { sessionId });
+}
+
+/** 撤销一个渗透 scope 授权。之后对该目标的侵入性动作会重新要求授权。 */
+export function browserScopeRevoke(sessionId: string, host: string): Promise<void> {
+  return invoke("browser_scope_revoke", { sessionId, host });
+}
+
+/* ── 底部终端面板 ───────────────────────────── */
+
+/**
+ * 宿主推来的终端事件。
+ *
+ * `data` 是 base64 的原始字节 —— 输出的 chunk 边界随时可能切在一个 UTF-8
+ * 序列中间，按字符串传会把半个字变成替换符。解码成 Uint8Array 交给 xterm，
+ * 它自带跨 chunk 的解码器。
+ */
+export type TermEvent = { kind: "data"; data: string } | { kind: "exit" };
+
+/**
+ * 开一个终端：在 `root` 目录起用户的默认 shell。返回终端 id。
+ *
+ * `root` 传 null 或目录不存在时退回家目录 —— 终端还是要开，只是位置
+ * 不理想。开不出来（PTY 分配失败）才 reject。
+ */
+export function termOpen(
+  root: string | null,
+  cols: number,
+  rows: number,
+  onEvent: (ev: TermEvent) => void,
+): Promise<number> {
+  const channel = new Channel<TermEvent>();
+  channel.onmessage = onEvent;
+  return invoke<number>("term_open", { root, cols, rows, onEvent: channel });
+}
+
+/** 键盘输入原样打进 shell。`data` 是 xterm 的 onData 给的串（含控制序列）。 */
+export function termWrite(id: number, data: string): Promise<void> {
+  return invoke("term_write", { id, data });
+}
+
+/** 终端区尺寸变了，PTY 跟着变 —— 不同步的话 shell 按旧宽度折行。 */
+export function termResize(id: number, cols: number, rows: number): Promise<void> {
+  return invoke("term_resize", { id, cols, rows });
+}
+
+/** 关一个终端（杀掉 shell）。幂等。 */
+export function termClose(id: number): Promise<void> {
+  return invoke("term_close", { id });
 }
 
 /** 在系统文件管理器（访达/资源管理器）里显示这个目录。 */
@@ -340,4 +734,35 @@ export function testSearchBackend(baseUrl: string): Promise<string> {
 export async function setWindowTitle(title: string): Promise<void> {
   const { getCurrentWindow } = await import("@tauri-apps/api/window");
   await getCurrentWindow().setTitle(title);
+}
+
+/**
+ * 窗口是否处于系统全屏。
+ *
+ * macOS Overlay 标题栏的红绿灯只在窗口态占左上角；进全屏它们消失，
+ * 侧栏收起时那 84px 让位就成了空白。尺寸变化时重问一次 —— Tauri 没有
+ * 单独的 fullscreen 事件，resize 覆盖进/出全屏。
+ */
+export function subscribeFullscreen(cb: (full: boolean) => void): () => void {
+  let stopped = false;
+  let unlisten: (() => void) | undefined;
+  void (async () => {
+    try {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      const win = getCurrentWindow();
+      const emit = async () => {
+        if (stopped) return;
+        cb(await win.isFullscreen());
+      };
+      await emit();
+      unlisten = await win.onResized(() => void emit());
+      if (stopped) unlisten();
+    } catch {
+      // 不在 Tauri 里（纯浏览器、组件测试）就当没全屏。
+    }
+  })();
+  return () => {
+    stopped = true;
+    unlisten?.();
+  };
 }

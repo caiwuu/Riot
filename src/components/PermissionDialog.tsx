@@ -1,6 +1,7 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
-import type { PermissionAsk, PermissionResponse } from "../bridge";
+import type { PermissionAsk, PermissionMode, PermissionResponse } from "../bridge";
+import { Markdown } from "./Markdown";
 
 interface Props {
   ask: PermissionAsk;
@@ -75,6 +76,116 @@ export function PermissionDialog({ ask, pendingCount, onAnswer }: Props) {
             允许一次
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** 批准后切到哪个档，按钮上要写清楚 —— 这是批准动作的一部分，不是细节。 */
+const APPROVE_LABEL: Partial<Record<PermissionMode, { label: string; sub: string }>> = {
+  acceptEdits: { label: "批准，自动接受编辑", sub: "文件修改直接放行，命令仍询问" },
+  default: { label: "批准，逐步确认", sub: "每个写操作都再问一次" },
+};
+
+/**
+ * 计划还在往 tool_input 里写的时候用。外观跟批准卡同一套，
+ * 没有按钮 —— 写完才轮到用户审。
+ */
+export function PlanDraft({ text }: { text: string }) {
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [text]);
+
+  return (
+    <div className="plan-card plan-draft" role="status" aria-label="正在撰写计划">
+      <div className="plan-card-head">
+        <span className="plan-card-badge">计划</span>
+        <span className="plan-card-title">正在撰写…</span>
+      </div>
+      <div className="plan-body" ref={bodyRef}>
+        {text ? <Markdown text={text} /> : null}
+        <span className="plan-caret" aria-hidden />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 计划批准卡（对照 Claude Code 的 "Ready to code?"，但**长在对话流里**）。
+ *
+ * 内联而不是弹窗：计划在模型侦察几分钟之后才到，弹窗会突然糊在脸上；
+ * 而它本来就是对话的一部分 —— 跟在 ExitPlanMode 的工具卡后面，随流
+ * 滚动，答完就地消失、工具卡随之落定结果。
+ *
+ * 三个交互决策：计划按 Markdown 渲染（它是要读的文档）；批准按钮按
+ * 执行档分两个（批准之后再逐个确认编辑，等于把刚做的决定再问一遍，
+ * 所以"自动接受编辑"是主选项）；打回可以带反馈 —— 不带的话模型只
+ * 知道"被拒了"，不知道往哪改。
+ */
+export function PlanApprovalCard({
+  ask,
+  onAnswer,
+}: {
+  ask: PermissionAsk;
+  onAnswer: (r: PermissionResponse) => void;
+}) {
+  const [feedback, setFeedback] = useState("");
+  const modes = ask.suggestions.flatMap((s) => (s.type === "set_mode" ? [s.mode] : []));
+  const plan = ask.preview.kind === "plain" ? ask.preview.text : "";
+
+  const approve = (mode: PermissionMode) => {
+    const chosen = ask.suggestions.find((s) => s.type === "set_mode" && s.mode === mode);
+    onAnswer({ decision: "allow", remember: chosen ? [chosen] : [] });
+  };
+
+  return (
+    <div className="plan-card" role="region" aria-label="计划批准">
+      <div className="plan-card-head">
+        <span className="plan-card-badge">计划</span>
+        <span className="plan-card-title">审阅后选择怎么执行</span>
+      </div>
+
+      <div className="plan-body">
+        <Markdown text={plan || "（计划为空）"} />
+      </div>
+
+      <textarea
+        className="plan-feedback"
+        value={feedback}
+        onChange={(e) => setFeedback(e.target.value)}
+        placeholder="要打回的话，告诉它往哪改（可留空）"
+        rows={2}
+        spellCheck={false}
+      />
+
+      <div className="plan-card-actions">
+        <button
+          className="btn-deny"
+          onClick={() =>
+            onAnswer({
+              decision: "deny",
+              ...(feedback.trim() ? { message: feedback.trim() } : {}),
+            })
+          }
+        >
+          打回，继续规划
+        </button>
+        <span className="plan-card-spacer" />
+        {modes.map((m, i) => {
+          const label = APPROVE_LABEL[m] ?? { label: `批准（${m}）`, sub: "" };
+          return (
+            <button
+              key={m}
+              className={i === 0 ? "btn-allow" : "btn-allow-always"}
+              onClick={() => approve(m)}
+            >
+              {label.label}
+              {label.sub ? <span className="allow-always-sub">{label.sub}</span> : null}
+            </button>
+          );
+        })}
       </div>
     </div>
   );

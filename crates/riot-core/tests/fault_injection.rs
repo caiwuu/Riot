@@ -139,6 +139,111 @@ async fn 启动前就取消也要发出_done() {
     ));
 }
 
+/// 下游不理会取消令牌时，停止键还得管用。
+///
+/// `[约束]` 主循环**不能**把"停得下来"寄托在 provider 和工具的礼貌上。
+/// 它们都拿到了子令牌、约定要检查，但约定只是约定：一个漏检的实现、
+/// 一次卡在首字节上的慢请求，都会让停止键变成装饰品 —— 用户按了，
+/// 界面照转，而没有任何报错能解释这件事。停止是用户对系统最基本的
+/// 控制权，必须由主循环兜底。
+// 这一组用真实时钟：测的就是"按下停止之后，墙上时钟走过几秒里
+// 系统有没有反应"。换成注入的 Clock，一个立即返回的 mock 会让
+// 「主循环在等一个永远不来的下游」这件事测不出来。
+#[allow(clippy::disallowed_methods)]
+mod ignores_cancel {
+    use super::*;
+    use async_trait::async_trait;
+    use riot_protocol::provider::{Provider, ProviderRequest, ProviderStream, ToolSpec};
+    use riot_protocol::runner::{BatchStream, ToolCall, ToolRunner};
+    use std::time::Duration;
+
+    /// 一个开了流就再也不出声、也不看取消令牌的服务方。
+    struct DeafProvider;
+
+    #[async_trait]
+    impl Provider for DeafProvider {
+        fn stream(&self, _req: ProviderRequest, _cancel: CancellationToken) -> ProviderStream {
+            Box::pin(futures::stream::pending())
+        }
+        fn count_tokens(&self, _messages: &[Message]) -> u32 {
+            0
+        }
+    }
+
+    /// 一个跑起来就不回头的工具执行器。
+    struct DeafTools;
+
+    impl ToolRunner for DeafTools {
+        fn specs(&self) -> Vec<ToolSpec> {
+            vec![ToolSpec {
+                name: "Read".into(),
+                description: "装聋".into(),
+                input_schema: serde_json::json!({ "type": "object" }),
+            }]
+        }
+        fn run_batch(&self, _calls: Vec<ToolCall>, _ctx: riot_core::state::BatchContext) -> BatchStream {
+            Box::pin(futures::stream::pending())
+        }
+    }
+
+    async fn done_within(
+        deps: riot_core::state::AgentDeps,
+        cancel: CancellationToken,
+    ) -> Vec<AgentEvent> {
+        // 先让轮子跑起来，再取消 —— 这才是"用户点停止"的时序。
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            c.cancel();
+        });
+        tokio::time::timeout(Duration::from_secs(3), collect(state(4), deps, cancel))
+            .await
+            .expect("停止键必须停得下来 —— 主循环还在等一个永远不来的下游")
+    }
+
+    #[tokio::test]
+    async fn 服务方不理取消也要停下() {
+        let deps = mock_deps_with(
+            Arc::new(DeafProvider),
+            Arc::new(ScriptedToolRunner::new(Default::default())),
+            Arc::new(FakeCompactor::default()),
+        );
+        let events = done_within(deps, CancellationToken::new()).await;
+        assert!(
+            matches!(
+                events.last(),
+                Some(AgentEvent::Done { reason: TerminalReason::Aborted { .. } })
+            ),
+            "该以用户中断收场，实际：{:?}",
+            events.last()
+        );
+    }
+
+    #[tokio::test]
+    async fn 工具不理取消也要停下_且补齐配对() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            riot_protocol::provider::ProviderEvent::Message(
+                riot_core::testing::assistant_tool_use("msg_a1", "tu_1", "Read", serde_json::json!({})),
+            ),
+        ]]));
+        let deps = mock_deps_with(provider, Arc::new(DeafTools), Arc::new(FakeCompactor::default()));
+        let events = done_within(deps, CancellationToken::new()).await;
+
+        assert!(
+            matches!(
+                events.last(),
+                Some(AgentEvent::Done { reason: TerminalReason::Aborted { .. } })
+            ),
+            "该以用户中断收场，实际：{:?}",
+            events.last()
+        );
+        // 丢下没跑完的工具就走，也必须给每个 tool_use 补一个结果 ——
+        // 缺一个，下次带着这段历史发请求就是 400。
+        invariants::check_tool_pairing(&transcript(&events));
+        assert!(invariants::take_violations().is_empty());
+    }
+}
+
 /// 模型吐了半个 tool_use 就撞上输出上限。
 ///
 /// `[约束]` 那半个 tool_use **绝不能**进 transcript。它永远等不到 tool_result，

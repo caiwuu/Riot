@@ -20,3 +20,6 @@ src-tauri/binaries/
 # CI 会跑 `pnpm gen && git diff --exit-code` —— 改了 Rust 协议类型却忘了
 # 重新生成，立刻红。顺带让前端不装 Rust 工具链也能 typecheck。
 .mutate-backup/
+
+# 本地设计笔记，不进公开仓库
+AGENT_DESIGN.md

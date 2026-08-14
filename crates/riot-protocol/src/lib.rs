@@ -9,6 +9,7 @@
 pub mod browser;
 pub mod compact;
 pub mod event;
+pub mod hook;
 pub mod id;
 pub mod message;
 pub mod permission;
@@ -16,10 +17,13 @@ pub mod provider;
 pub mod rpc;
 pub mod runner;
 pub mod tool;
+pub mod vision;
 pub mod web;
 
 pub use browser::{
-    BrowserAccess, BrowserUnavailable, Command as BrowserCommand, Event as BrowserEvent, NoBrowser,
+    Action as BrowserAction, BrowserAccess, BrowserUnavailable, Command as BrowserCommand,
+    Event as BrowserEvent, InteractError, InterceptOp, Nav as BrowserNav, NetQuery, NoBrowser,
+    Target as BrowserTarget, WaitCondition,
 };
 pub use compact::{CompactBudget, CompactResult, Compactor};
 pub use event::{
@@ -48,6 +52,7 @@ pub use tool::{
     ProcessOutput, ProcessRunner, ProcessSpec, ProgressSink, PromptContext, ResultBudget, Tool,
     ToolContext, ToolOutcome, UiPayload, ValidationError,
 };
+pub use vision::{DescribeRequest, NoVision, VisionAccess, VisionError};
 pub use web::{
     DistillRequest, NoWeb, SearchHit, SearchQuery, WebAccess, WebError, WebRequest, WebResponse,
 };

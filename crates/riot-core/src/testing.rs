@@ -599,6 +599,8 @@ pub fn mock_deps_with(
         clock: Arc::new(MockClock::default()),
         ids: Arc::new(SeqIdGenerator::default()),
         tools,
+        queue: Arc::new(crate::state::NoQueue),
+        stop_gate: Arc::new(crate::state::NoStopGate),
     }
 }
 
@@ -618,6 +620,73 @@ pub fn assistant_tool_use(
         }],
         usage: None,
         meta: MessageMeta::default(),
+    }
+}
+
+/// 跑轮中插话的脚本队列。
+///
+/// 每次 `drain` 弹出一个批次（可以是空批次，用来跳过一个 drain 点）。
+/// 主循环的 drain 点顺序是固定的：每轮工具结果就位后一次、模型正常
+/// 收尾前一次 —— 测试按这个顺序摆批次，就能精确控制"插话到达的时机"。
+pub struct ScriptedQueue {
+    batches: std::sync::Mutex<std::collections::VecDeque<Vec<Message>>>,
+    drains: AtomicUsize,
+}
+
+impl ScriptedQueue {
+    pub fn new(batches: Vec<Vec<Message>>) -> Self {
+        Self {
+            batches: std::sync::Mutex::new(batches.into()),
+            drains: AtomicUsize::new(0),
+        }
+    }
+
+    /// 主循环一共 drain 了几次。
+    pub fn drain_count(&self) -> usize {
+        self.drains.load(Ordering::SeqCst)
+    }
+}
+
+impl crate::state::InputQueue for ScriptedQueue {
+    fn drain(&self) -> Vec<Message> {
+        self.drains.fetch_add(1, Ordering::SeqCst);
+        self.batches
+            .lock()
+            .expect("batches poisoned")
+            .pop_front()
+            .unwrap_or_default()
+    }
+}
+
+/// 收尾闸的脚本替身。每次 `check` 弹出一个预设裁决，弹完了默认放行。
+pub struct ScriptedStopGate {
+    decisions: std::sync::Mutex<std::collections::VecDeque<crate::state::StopDecision>>,
+    /// 每次 check 收到的 blocks_so_far，供断言"计数有没有透传"。
+    seen: std::sync::Mutex<Vec<u32>>,
+}
+
+impl ScriptedStopGate {
+    pub fn new(decisions: Vec<crate::state::StopDecision>) -> Self {
+        Self {
+            decisions: std::sync::Mutex::new(decisions.into()),
+            seen: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn seen(&self) -> Vec<u32> {
+        self.seen.lock().expect("seen poisoned").clone()
+    }
+}
+
+#[async_trait]
+impl crate::state::StopGate for ScriptedStopGate {
+    async fn check(&self, blocks_so_far: u32) -> crate::state::StopDecision {
+        self.seen.lock().expect("seen poisoned").push(blocks_so_far);
+        self.decisions
+            .lock()
+            .expect("decisions poisoned")
+            .pop_front()
+            .unwrap_or(crate::state::StopDecision::Allow)
     }
 }
 

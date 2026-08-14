@@ -127,51 +127,14 @@ wrap_browser_process_handler! {
 
     impl BrowserProcessHandler {
         fn on_context_initialized(&self) {
-            // CEF 就绪。建一个离屏浏览器，加载一个固定页面 ——
-            // 里程碑 1 只要证明帧能产出，URL 之后由 stdio 协议给。
-            let mut client = osr::OsrClient::new(osr::OsrRenderHandler::new(Default::default()));
-
-            let window_info = WindowInfo {
-                windowless_rendering_enabled: 1,
-                // `[约束]` 离屏渲染只有 Alloy 这套 runtime style 支持。
-                // 用默认的 Chrome style 不会报错，它会正常创建浏览器、
-                // 正常加载页面，只是 on_paint 一次都不调 —— 表现为
-                // "什么都对，就是收不到帧"。
-                runtime_style: RuntimeStyle::ALLOY,
-                ..Default::default()
-            };
-
-            // 起来先停在空白页，等主应用发 Navigate。进程一起来就联网是不对的:
-            // 用户可能只是打开了面板，还没决定看什么。
+            // CEF 就绪，但**不建浏览器**。开哪些标签页由主应用决定 ——
+            // 这里自己开一个就等于替它做主，而它可能正要恢复上次的几个页面，
+            // 于是第一个页面永远是多出来的那个。
             //
-            // `[约束]` 空白页用 `data:`，**不要用 `about:blank`**。
-            //
-            // 从 `about:blank` 导航到 https 会让 renderer 进程直接消失，页面
-            // 报 `ERR_ABORTED`，紧接着 CDP 收到
-            // `Inspector.detached / Render process gone`。而同一个导航从
-            // `data:` 空页或任何真实页面出发都完全正常 —— 实测对比过三种起点。
-            //
-            // 看现象很容易误判成"创建后不能导航"或者"Chromium 崩了"，
-            // 而实际只是起始页的选择问题。
-            let url = CefString::from(
-                std::env::var("RIOT_BROWSER_URL")
-                    .unwrap_or_else(|_| "data:text/html,<html><body></body></html>".to_owned())
-                    .as_str(),
-            );
-            let browser_settings = BrowserSettings::default();
-
-            browser_host_create_browser(
-                Some(&window_info),
-                Some(&mut client),
-                Some(&url),
-                Some(&browser_settings),
-                None,
-                None,
-            );
-
-            // 读 stdin 的线程要等 CEF 就绪之后再起 —— 早起的话，命令会
-            // 投到一个还没有浏览器的 UI 线程上，全部以"还没有浏览器"报错。
+            // 读 stdin 的线程要等 CEF 就绪之后再起 —— 早起的话，命令会投到
+            // 一个还没有 UI 线程消息循环的地方。
             crate::dispatch::spawn_stdin_reader();
+            crate::wire::emit(&riot_protocol::browser::Event::Ready);
         }
     }
 }

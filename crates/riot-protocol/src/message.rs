@@ -127,9 +127,31 @@ pub enum ToolResultContent {
     },
     /// 历史清理后的占位符（microcompact 产物）。
     Cleared,
+    /// 图片结果。`data` 是**给模型的那份**：产出方（截图、读图）会先把
+    /// 大图压到适合视觉模型的尺寸再放进来 —— 一张整页截图直接进上下文
+    /// 能吃掉小半个窗口，而模型判断布局并不需要原始分辨率。
     Image {
+        /// `data` 的类型（压缩产物通常是 image/jpeg），不一定等于原图类型。
         media_type: String,
         data: String,
+        /// 原图的位置：截图落盘的文件，或被读的图片本身。界面优先按它
+        /// 显示原图（清晰、可另存）；`None` 表示没落成盘，界面显示
+        /// `data` 里的压缩图兜底。模型不用这个字段。
+        path: Option<PathBuf>,
+    },
+    /// 图片 + 它的文字转述。主模型收不了图时（视觉兼容，见 vision 模块）
+    /// 的产物：**模型只读 `text`**（转述代替图片，provider 不发图），
+    /// 图片本体留给界面贴出来 —— 用户看得见图，而不是看见一段写给模型的
+    /// 转述文字。
+    DescribedImage {
+        /// `data` 的类型（压缩产物通常是 image/jpeg），不一定等于原图类型。
+        media_type: String,
+        /// 压缩图。界面在 `path` 缺失时用它兜底显示。
+        data: String,
+        /// 原图位置，语义同 [`Image::path`](ToolResultContent::Image)。
+        path: Option<PathBuf>,
+        /// 给模型的转述，自带"当作亲眼所见"的使用指示。
+        text: String,
     },
 }
 
@@ -149,6 +171,16 @@ pub enum Attachment {
     },
     /// 压缩后重注入的工作集文件。
     RestoredFile {
+        path: PathBuf,
+        content: String,
+    },
+    /// 用户在消息里用 `@路径` 点名的文件。
+    ///
+    /// 和 `RestoredFile` 分开是因为读者不同：那个是"你之前读过"，
+    /// 这个是"用户现在让你看"。界面也靠它在用户气泡下列出引用了哪些
+    /// 文件 —— 混进 SystemReminder 的话，切回会话就只剩一段光秃秃的
+    /// 提醒文本，看不出用户当时附了什么。
+    UserFile {
         path: PathBuf,
         content: String,
     },

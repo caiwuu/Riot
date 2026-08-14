@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-slash-expand"
+description = "Enables the slash_expand command without any pre-configured scope."
+commands.allow = ["slash_expand"]
+
+[[permission]]
+identifier = "deny-slash-expand"
+description = "Denies the slash_expand command without any pre-configured scope."
+commands.deny = ["slash_expand"]

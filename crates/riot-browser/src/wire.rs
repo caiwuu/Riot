@@ -37,6 +37,7 @@ mod tests {
         // NDJSON 的前提是一条消息一行。多行会把流切错位，而且错位之后
         // 后面每一条都解析失败，看起来像协议整个坏了。
         let line = serde_json::to_string(&Event::Frame {
+            tab: 1,
             seq: 7,
             width: 1280,
             height: 800,

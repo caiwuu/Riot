@@ -31,6 +31,11 @@ use crate::watchdog::{DEFAULT_IDLE, with_idle_watchdog};
 pub struct OpenAiConfig {
     /// 不带路径，例如 `https://api.deepseek.com`。
     pub base_url: String,
+    /// 对话接口的路径。空 = 按 base 猜（见 [`crate::endpoint::api_url`]）。
+    ///
+    /// 可配置的理由:各家的根路径对不上，猜不全。智谱的对话在
+    /// `/api/paas/v4/chat/completions`，中转和自建网关的花样更多。
+    pub api_path: String,
     pub api_key: String,
     /// 连续过载时切过去的模型。
     pub fallback_model: Option<String>,
@@ -44,6 +49,9 @@ impl Default for OpenAiConfig {
     fn default() -> Self {
         Self {
             base_url: "https://api.deepseek.com".into(),
+            // 空 = 按 base 猜。默认不写死路径:写死之后"用户没配"和
+            // "用户配的正好等于默认值"就分不开了。
+            api_path: String::new(),
             api_key: String::new(),
             fallback_model: None,
             idle_timeout: DEFAULT_IDLE,
@@ -98,6 +106,7 @@ impl OpenAiProvider {
 #[derive(Clone)]
 struct Endpoint {
     base_url: String,
+    api_path: String,
     api_key: String,
 }
 
@@ -109,9 +118,12 @@ fn build_http_request(
         .map_err(|e| HttpError::transport(format!("请求序列化失败: {e}")))?;
 
     Ok(HttpRequest {
-        url: format!(
-            "{}/v1/chat/completions",
-            endpoint.base_url.trim_end_matches('/')
+        // 路径优先用用户配的；空着才按 base 猜。见 endpoint 模块。
+        url: crate::endpoint::api_url_with(
+            &endpoint.base_url,
+            &endpoint.api_path,
+            "v1",
+            "chat/completions",
         ),
         headers: vec![
             ("content-type".into(), "application/json".into()),
@@ -138,6 +150,7 @@ impl Provider for OpenAiProvider {
         let sampling = self.config.sampling;
         let endpoint = Endpoint {
             base_url: self.config.base_url.clone(),
+            api_path: self.config.api_path.clone(),
             api_key: self.config.api_key.clone(),
         };
 

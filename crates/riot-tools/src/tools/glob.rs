@@ -4,23 +4,23 @@
 //! "项目里的 Python 文件在哪"只能靠 `Bash(find ...)`—— 那要过一遍命令权限
 //! 弹窗，还绕开了 .gitignore。
 //!
-//! 底层同样是 ripgrep（`--files`），理由和 Grep 一致：gitignore 处理和
-//! 并行遍历不值得自己写一遍。参数走 argv，不经过 shell。
+//! 底层是 ripgrep 的遍历库（`ignore`），不是它的二进制 —— 理由见
+//! [`super::search`] 的模块文档。
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use riot_protocol::permission::{PermissionContext, PermissionResult};
 use riot_protocol::tool::{
-    ProcessSpec, PromptContext, ResultBudget, Tool, ToolContext, ToolOutcome, UiPayload,
-    ValidationError,
+    PromptContext, ResultBudget, Tool, ToolContext, ToolOutcome, UiPayload, ValidationError,
 };
 use serde::Deserialize;
 
-use super::path;
+use super::{path, search};
 
-/// 遍历超时。理由同 Grep：ripgrep 很快，超时基本意味着走进了网络盘。
-const TIMEOUT_MS: u64 = 30_000;
+/// 一次遍历最多看多少个文件。理由同 Grep：超过这个数说明范围没圈对。
+const MAX_FILES: usize = 100_000;
 
 /// 返回给模型的路径条数上限。
 ///
@@ -30,7 +30,7 @@ const MAX_RESULTS: usize = 300;
 
 /// 愿意为排序花掉的 stat 次数。
 ///
-/// 超过这个数就退回字典序 —— 几千次 stat 的耗时会盖过 ripgrep 本身，
+/// 超过这个数就退回字典序 —— 几千次 stat 的耗时会盖过遍历本身，
 /// 而结果多到这个程度时模型该做的是缩小 pattern，不是仔细读列表。
 const STAT_BUDGET: usize = 1000;
 
@@ -137,47 +137,32 @@ impl Tool for Glob {
             None => ctx.cwd.clone(),
         };
 
-        let spec = ProcessSpec {
-            program: "rg".to_owned(),
-            args: build_args(&parsed, &root),
-            cwd: ctx.cwd.clone(),
-            env: Vec::new(),
-            timeout_ms: Some(TIMEOUT_MS),
+        // 遍历是同步的重活，扔给阻塞线程池（理由同 Grep）。
+        let cancel = ctx.cancel.clone();
+        let deadline = search::Deadline::new(Arc::clone(&ctx.clock), search::TIME_BUDGET_SECS);
+        let pattern = parsed.pattern.clone();
+        let walked = tokio::task::spawn_blocking(move || {
+            search::walk(&root, Some(&pattern), MAX_FILES, &cancel, &deadline)
+        })
+        .await;
+
+        let walked = match walked {
+            Ok(Ok(w)) => w,
+            Ok(Err(e)) => return ToolOutcome::failed(e),
+            Err(e) => return ToolOutcome::failed(format!("遍历没能完成：{e}")),
         };
 
-        let out = match ctx.proc.run(spec, ctx.cancel.clone()).await {
-            Ok(o) => o,
-            Err(e) => return ToolOutcome::failed(spawn_hint(&e)),
-        };
-
-        if out.timed_out {
-            return ToolOutcome::failed(format!(
-                "遍历超过 {}s 未完成。请用 `path` 缩小范围。",
-                TIMEOUT_MS / 1000
-            ));
-        }
-
-        // ripgrep 的退出码：0 有匹配，1 无匹配，2 出错。
-        //
-        // `[约束]` 1 不是失败。"没找到"是一个有效答案 —— 报成失败会让模型
-        // 换个参数把同一件事再做一遍，而正确的下一步是换个思路或接受它。
-        match out.exit_code {
-            1 => return ToolOutcome::ok_text(no_match_text(&parsed)),
-            0 => {}
-            _ => return ToolOutcome::failed(rg_error_hint(&out.stderr)),
-        }
-
-        let mut files: Vec<String> = out
-            .stdout
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(str::to_owned)
-            .collect();
-
-        if files.is_empty() {
+        // `[约束]` "没找到"不是失败。报成失败会让模型换个参数把同一件事
+        // 再做一遍，而正确的下一步是换个思路或接受它。
+        if walked.files.is_empty() {
             return ToolOutcome::ok_text(no_match_text(&parsed));
         }
+
+        let mut files: Vec<String> = walked
+            .files
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
 
         let total = files.len();
         let by_mtime = sort_by_mtime(&mut files, &ctx).await;
@@ -242,29 +227,6 @@ async fn sort_by_mtime(files: &mut [String], ctx: &ToolContext) -> bool {
     true
 }
 
-fn build_args(input: &Input, root: &std::path::Path) -> Vec<String> {
-    vec![
-        // 只列文件，不搜内容。
-        "--files".into(),
-        // `[约束]` --no-config 不能省。用户的 RIPGREP_CONFIG_PATH 里可能有
-        // 改变遍历行为的开关，那会让同一次查找在不同机器上给出不同结果。
-        "--no-config".into(),
-        "--color=never".into(),
-        // 点开头的目录也要进。`.github/workflows/*.yml`、`.cargo/config.toml`
-        // 都是用户会问起的文件，默认跳过它们这个工具会显得时灵时不灵。
-        "--hidden".into(),
-        "--glob".into(),
-        input.pattern.clone(),
-        // `[约束]` 排除 .git 必须排在用户 pattern **之后**。ripgrep 里后写的
-        // glob 优先级更高 —— 顺序反过来的话 `**/*` 会把 .git 重新放进来，
-        // 结果是一堆 object 文件淹没真正的答案。
-        "--glob".into(),
-        "!.git/".into(),
-        // `--` 之后全是路径。搜索根可能以 `-` 开头。
-        "--".into(),
-        root.to_string_lossy().into_owned(),
-    ]
-}
 
 fn no_match_text(input: &Input) -> String {
     let where_ = input.path.as_deref().unwrap_or("工作目录");
@@ -276,22 +238,7 @@ fn no_match_text(input: &Input) -> String {
     )
 }
 
-fn spawn_hint(e: &std::io::Error) -> String {
-    match e.kind() {
-        std::io::ErrorKind::NotFound => {
-            "找不到 ripgrep（rg）。请先安装它，或者改用 Bash 里的 find。".to_owned()
-        }
-        _ => format!("启动查找失败：{e}"),
-    }
-}
 
-fn rg_error_hint(stderr: &str) -> String {
-    let first = stderr.lines().next().unwrap_or("").trim();
-    if first.is_empty() {
-        return "查找失败，没有更多信息。".to_owned();
-    }
-    format!("查找失败：{first}")
-}
 
 fn schema_hint(e: &serde_json::Error) -> String {
     let raw = e.to_string();

@@ -1,8 +1,22 @@
-import { memo, useState } from "react";
+import { memo, useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 
+import { readImage } from "../bridge";
 import type { Item } from "../hooks/useSession";
 
 type Tool = Extract<Item, { kind: "tool" }>;
+
+/** TodoWrite 输入里的一项。宽松解析 —— 界面拿到什么画什么。 */
+interface TodoInput {
+  content?: string;
+  status?: string;
+  activeForm?: string;
+}
+
+function todosOf(t: Tool): TodoInput[] {
+  const i = t.input as Record<string, unknown>;
+  return Array.isArray(i?.todos) ? (i.todos as TodoInput[]) : [];
+}
 
 /**
  * 一次工具调用。
@@ -14,12 +28,19 @@ type Tool = Extract<Item, { kind: "tool" }>;
  * memo：流式输出时 transcript 每帧重渲染，历史工具卡片不该跟着刷。
  */
 export const ToolCard = memo(function ToolCard({ tool }: { tool: Tool }) {
-  const [open, setOpen] = useState(false);
+  const [userToggle, setUserToggle] = useState<boolean | null>(null);
+  // 图片结果（截图、读图）默认展开：截图的意义就是给人看，藏在"展开"
+  // 后面的话用户不知道图已经在这里了，会转头让模型"把图贴出来"。
+  // 任务清单同理 —— 它存在的意义就是让用户看到进度。
+  // 文本结果维持默认折叠 —— 一次 cargo build 的输出会把对话冲走。
+  const open =
+    userToggle ??
+    (Boolean(tool.resultImage || tool.resultImagePath) || tool.name === "TodoWrite");
   const detail = renderDetail(tool);
 
   return (
     <div className={`tool tool-${tool.status}`}>
-      <button className="tool-head" onClick={() => setOpen(!open)} type="button">
+      <button className="tool-head" onClick={() => setUserToggle(!open)} type="button">
         <span className="tool-icon">{icon(tool.status)}</span>
         <span className="tool-name">{tool.name}</span>
         <span className="tool-summary">{summarize(tool)}</span>
@@ -41,8 +62,26 @@ function icon(s: Tool["status"]): string {
 function summarize(t: Tool): string {
   const i = t.input as Record<string, unknown>;
   const str = (k: string) => (typeof i?.[k] === "string" ? (i[k] as string) : "");
+  const num = (k: string) => (typeof i?.[k] === "number" ? (i[k] as number) : 0);
+  // 点击/输入的三种定位（ref/selector/text）挑给出的那个显示。
+  const target = (textKey = "text") => {
+    if (typeof i?.ref === "number") return `[${i.ref as number}]`;
+    if (str("selector")) return `\`${str("selector")}\``;
+    if (str(textKey)) return `“${str(textKey)}”`;
+    return "元素";
+  };
 
   switch (t.name) {
+    case "Task": {
+      const kind = str("subagent_type") || "general-purpose";
+      return `${kind === "explore" ? "侦察" : "执行"} · ${str("description") || "子任务"}`;
+    }
+    case "TodoWrite": {
+      const todos = todosOf(t);
+      const done = todos.filter((x) => x.status === "completed").length;
+      const doing = todos.find((x) => x.status === "in_progress");
+      return `${done}/${todos.length} 完成${doing?.activeForm ? ` · ${doing.activeForm}` : ""}`;
+    }
     case "Bash":
       return str("command");
     case "Read":
@@ -51,6 +90,64 @@ function summarize(t: Tool): string {
       return short(str("path") || str("file_path"));
     case "Grep":
       return `${str("pattern")}${str("path") ? ` 在 ${short(str("path"))}` : ""}`;
+    case "BrowserNavigate":
+      return short(str("url"), 80);
+    case "BrowserClick": {
+      const verb = i?.double === true ? "双击" : i?.right === true ? "右键" : "点击";
+      return `${verb} ${target()}`;
+    }
+    case "BrowserType":
+      return `在 ${target("target_text")} 输入 ${str("text").slice(0, 40)}${i?.submit === true ? " ⏎" : ""}`;
+    case "BrowserKey":
+      return `按 ${str("key")}`;
+    case "BrowserScroll": {
+      const d = num("delta_y");
+      return d < 0 ? `向上 ${Math.round(-d)}px` : `向下 ${Math.round(d)}px`;
+    }
+    case "BrowserHover":
+      return `悬停 ${target()}`;
+    case "BrowserSelect":
+      return `${target()} 选 ${str("value")}`;
+    case "BrowserDrag":
+      return "拖拽元素";
+    case "BrowserWaitFor": {
+      if (str("selector")) return `等 \`${str("selector")}\` 出现`;
+      if (str("selector_gone")) return `等 \`${str("selector_gone")}\` 消失`;
+      if (str("text")) return `等文本 “${str("text")}”`;
+      if (str("url_contains")) return `等地址含 “${str("url_contains")}”`;
+      if (i?.network_idle === true) return "等网络空闲";
+      return "等待条件";
+    }
+    case "BrowserGo":
+      return { back: "后退", forward: "前进", reload: "刷新" }[str("direction")] ?? "历史导航";
+    case "BrowserTabs":
+      return `标签页: ${str("action") || "list"}`;
+    case "BrowserEvaluate":
+      return `执行 JS: ${str("expression").slice(0, 60)}`;
+    case "BrowserCookies":
+      return "读 Cookie";
+    case "BrowserNetwork":
+      return `抓包: ${str("action") || "list"}${str("filter") ? ` (${str("filter")})` : ""}`;
+    case "BrowserReplay":
+      return `重放 ${str("method") || "GET"} ${short(str("url"), 60)}`;
+    case "BrowserIntercept":
+      return `拦截: ${str("action")}${str("url_pattern") ? ` \`${str("url_pattern")}\`` : ""}`;
+    case "BrowserSecrets":
+      return "扫描密钥泄露";
+    case "BrowserDiscover":
+      return "枚举表单/链接";
+    case "BrowserFuzz":
+      return `fuzz ${short(str("url"), 60)}`;
+    case "BrowserUpload": {
+      const n = Array.isArray(i?.paths) ? (i.paths as unknown[]).length : 0;
+      return `上传 ${n} 个文件`;
+    }
+    case "BrowserCrawl":
+      return `爬取 ${short(str("url"), 60)}`;
+    case "BrowserReport": {
+      const n = Array.isArray(i?.findings) ? (i.findings as unknown[]).length : 0;
+      return `生成渗透报告（${n} 条发现）`;
+    }
     default:
       return Object.entries(i ?? {})
         .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
@@ -66,6 +163,27 @@ function summarize(t: Tool): string {
 function renderDetail(t: Tool): React.ReactNode {
   const i = t.input as Record<string, unknown>;
   const str = (k: string) => (typeof i?.[k] === "string" ? (i[k] as string) : "");
+
+  // 任务清单：从 tool_use 的输入渲染（清单在输入里；结果只是一句固定
+  // 确认，显示它反而是噪音）。
+  if (t.name === "TodoWrite") {
+    const todos = todosOf(t);
+    if (todos.length === 0) return null;
+    return (
+      <ul className="todo-list">
+        {todos.map((x, n) => (
+          <li key={n} className={`todo-item ${x.status ?? "pending"}`}>
+            <span className="todo-mark" aria-hidden>
+              {x.status === "completed" ? "✓" : x.status === "in_progress" ? "◐" : "○"}
+            </span>
+            <span className="todo-text">
+              {x.status === "in_progress" ? (x.activeForm ?? x.content) : x.content}
+            </span>
+          </li>
+        ))}
+      </ul>
+    );
+  }
 
   const parts: React.ReactNode[] = [];
 
@@ -103,6 +221,17 @@ function renderDetail(t: Tool): React.ReactNode {
     }
   }
 
+  // 结果里的图（截图、读图）贴出来 —— 这就是用户点开想看的东西
+  if (t.resultImage || t.resultImagePath) {
+    parts.push(
+      <ShotImage
+        key="img"
+        {...(t.resultImagePath !== undefined ? { path: t.resultImagePath } : {})}
+        {...(t.resultImage !== undefined ? { fallback: t.resultImage } : {})}
+      />,
+    );
+  }
+
   // 运行中显示实时输出；结束后最终结果更权威（实时行只是进度侧影）
   const live = t.output.length > 0 ? t.output.join("\n") : "";
   const result = t.status === "running" ? live : t.result || live;
@@ -115,6 +244,91 @@ function renderDetail(t: Tool): React.ReactNode {
   }
 
   return parts.length ? parts : null;
+}
+
+/**
+ * 工具结果里的图。
+ *
+ * 消息里只带压缩图（给模型的那份，看布局够、看文字糊），原图在磁盘上 ——
+ * 先显示压缩图占住位置，按路径把原图读回来后无缝换上。原图读不回来
+ * （被清理、超上限）就一直用压缩图，不报错:图能看就行。
+ *
+ * 整页截图是极端长图，卡片里按容器宽显示、限高纵向滚；点击开查看器
+ * 看大图。
+ */
+function ShotImage({ path, fallback }: { path?: string; fallback?: string }) {
+  const [src, setSrc] = useState<string | undefined>(fallback);
+  const [viewer, setViewer] = useState(false);
+
+  useEffect(() => {
+    if (!path) return;
+    let alive = true;
+    readImage(path)
+      .then((img) => {
+        if (alive) setSrc(`data:${img.mediaType};base64,${img.data}`);
+      })
+      .catch(() => {
+        // 原图没了就用压缩图，什么都没有才隐藏。
+      });
+    return () => {
+      alive = false;
+    };
+  }, [path]);
+
+  if (!src) return null;
+  return (
+    <>
+      <div className="tool-shot-wrap">
+        <img
+          className="tool-shot"
+          src={src}
+          alt="工具结果图片"
+          onClick={() => setViewer(true)}
+        />
+      </div>
+      {viewer ? <ShotViewer src={src} onClose={() => setViewer(false)} /> : null}
+    </>
+  );
+}
+
+/**
+ * 图片查看器:全屏遮罩，原尺寸（超宽时缩到视口宽）显示，长图纵向滚动。
+ *
+ * portal 到 body —— 卡片在带 overflow 的滚动容器里，fixed 遮罩留在原地
+ * 会被裁掉。
+ */
+function ShotViewer({ src, onClose }: { src: string; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return createPortal(
+    // 点空白处（遮罩本身）关闭；点图不关，方便拖滚动条。
+    <div
+      className="shot-viewer"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <button className="shot-viewer-close" onClick={onClose} type="button" aria-label="关闭">
+        <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
+          <path
+            d="M2 2l8 8M10 2L2 10"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+          />
+        </svg>
+      </button>
+      <img src={src} alt="工具结果图片（原图）" />
+    </div>,
+    document.body,
+  );
 }
 
 /** 长路径留尾部 —— 文件名比目录前缀有用得多。 */

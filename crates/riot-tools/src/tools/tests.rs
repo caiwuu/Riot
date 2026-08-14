@@ -25,6 +25,7 @@ fn harness(fs: MemFs) -> Harness {
         session_id: SessionId::from_raw("s1"),
         tool_use_id: ToolUseId::from_raw("t1"),
         cwd: "/work".into(),
+        artifacts_dir: "/artifacts".into(),
         cancel: CancellationToken::new(),
         progress: riot_protocol::tool::ProgressSink::new(ToolUseId::from_raw("t1"), tx),
         file_state: Arc::clone(&state) as Arc<_>,
@@ -32,6 +33,7 @@ fn harness(fs: MemFs) -> Harness {
         proc: Arc::new(super::super::testing::NullProc),
         web: Arc::new(riot_protocol::web::NoWeb),
         browser: Arc::new(riot_protocol::browser::NoBrowser),
+        vision: Arc::new(riot_protocol::vision::NoVision),
         clock: Arc::new(super::super::testing::FixedClock::default()),
     };
 
@@ -169,6 +171,134 @@ async fn 二进制文件被拒绝() {
 
     assert!(!is_ok(&out));
     assert!(text_of(&out).contains("二进制"));
+}
+
+// ── Read:图片 ─────────────────────────────────────
+
+/// 换掉替身的图片能力。默认的 NoVision 只够测"没配"那条路。
+fn with_vision(mut h: Harness, v: super::super::testing::FakeVision) -> Harness {
+    h.ctx.vision = Arc::new(v);
+    h
+}
+
+/// 模型自己能看图时，图片原样进结果，一个字节不差。
+#[tokio::test]
+async fn 能看图的模型读图片拿到图片块() {
+    let png = b"\x89PNG\r\n\x1a\n-fake-bytes";
+    let h = with_vision(
+        harness(base_fs().with_file("/work/shot.png", png)),
+        super::super::testing::FakeVision::Direct,
+    );
+    let out = read(&h, serde_json::json!({ "path": "shot.png" })).await;
+
+    let ToolOutcome::Ok { model_content, .. } = &out else {
+        panic!("应当成功：{}", text_of(&out));
+    };
+    let riot_protocol::message::ToolResultContent::Image { media_type, data, path } =
+        model_content
+    else {
+        panic!("应当是图片内容块：{model_content:?}");
+    };
+    assert_eq!(media_type, "image/png");
+    use base64::Engine as _;
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD.decode(data).expect("合法 base64"),
+        png,
+        "假 PNG 解不开，压缩要原样放行 —— 字节不能有任何加工"
+    );
+    assert_eq!(
+        path.as_deref(),
+        Some(std::path::Path::new("/work/shot.png")),
+        "要带上原文件路径，界面按它显示原图"
+    );
+    // `[约束]` 图片不进文件状态缓存。记了的话 Edit 会以为"读过全文"，
+    // 给二进制开了一条被改写的路。
+    assert!(
+        h.state.get(std::path::Path::new("/work/shot.png")).is_none(),
+        "图片不该写 file_state"
+    );
+}
+
+/// 扩展名大小写不敏感，jpg 映射到 image/jpeg。
+#[tokio::test]
+async fn 大写的_jpg_扩展名也认() {
+    let h = with_vision(
+        harness(base_fs().with_file("/work/S.JPG", b"\xFF\xD8\xFF-fake")),
+        super::super::testing::FakeVision::Direct,
+    );
+    let out = read(&h, serde_json::json!({ "path": "S.JPG" })).await;
+
+    let ToolOutcome::Ok {
+        model_content: riot_protocol::message::ToolResultContent::Image { media_type, .. },
+        ..
+    } = &out
+    else {
+        panic!("应当是图片内容块：{}", text_of(&out));
+    };
+    assert_eq!(media_type, "image/jpeg");
+}
+
+/// 看不了图的模型拿到转述文字，而且要说清描述的是哪个文件；
+/// 图片本体留给界面贴出来。
+///
+/// `[约束]` 这条路必须**不返回纯图片**。返回了的话图片会在 provider 层被
+/// 吞掉，模型只知道"有张图"，然后自己去 shell 里想办法。
+#[tokio::test]
+async fn 看不了图时读图片返回转述文字() {
+    let h = with_vision(
+        harness(base_fs().with_file("/work/shot.png", b"\x89PNG-fake")),
+        super::super::testing::FakeVision::Describe("（转述）两栏布局，左边是导航".into()),
+    );
+    let out = read(&h, serde_json::json!({ "path": "shot.png" })).await;
+
+    let ToolOutcome::Ok { model_content, .. } = &out else {
+        panic!("应当成功：{}", text_of(&out));
+    };
+    let riot_protocol::message::ToolResultContent::DescribedImage { data, text, .. } =
+        model_content
+    else {
+        panic!("应当是带转述的图片：{model_content:?}");
+    };
+    assert!(text.contains("shot.png"), "要说清描述的是哪个文件：{text}");
+    assert!(text.contains("两栏布局"), "要带上转述内容：{text}");
+    use base64::Engine as _;
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD.decode(data).expect("合法 base64"),
+        b"\x89PNG-fake",
+        "图片本体要留给界面显示"
+    );
+}
+
+/// 没配视觉兼容时要报"配一下"，不能落进普通的二进制报错。
+///
+/// `[约束]` 能力边界必须被表达出来（见 riot_protocol::vision 模块注释）:
+/// 模型收到"二进制文件"只会换个歪路子接着试，收到"去设置里配"才会停。
+#[tokio::test]
+async fn 没配视觉兼容时读图片报未配置() {
+    // harness 默认就是 NoVision
+    let h = harness(base_fs().with_file("/work/shot.png", b"\x89PNG-fake"));
+    let out = read(&h, serde_json::json!({ "path": "shot.png" })).await;
+
+    assert!(!is_ok(&out));
+    let t = text_of(&out);
+    assert!(t.contains("视觉兼容"), "要指向设置项：{t}");
+    assert!(!t.contains("二进制"), "不该落进二进制报错：{t}");
+    assert!(t.contains("shell"), "要拦住 shell 解码的歪路：{t}");
+}
+
+/// 超大图片明确拒绝，并给出下一步。
+#[tokio::test]
+async fn 超大图片被拒并给出下一步() {
+    let h = with_vision(
+        harness(base_fs().with_file("/work/huge.png", vec![0u8; 3_500_001])),
+        super::super::testing::FakeVision::Direct,
+    );
+    let out = read(&h, serde_json::json!({ "path": "huge.png" })).await;
+
+    assert!(!is_ok(&out));
+    let t = text_of(&out);
+    assert!(t.contains("上限"), "{t}");
+    assert!(t.contains("缩小"), "要给出下一步：{t}");
 }
 
 #[tokio::test]

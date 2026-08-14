@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-browser-new-tab"
+description = "Enables the browser_new_tab command without any pre-configured scope."
+commands.allow = ["browser_new_tab"]
+
+[[permission]]
+identifier = "deny-browser-new-tab"
+description = "Denies the browser_new_tab command without any pre-configured scope."
+commands.deny = ["browser_new_tab"]

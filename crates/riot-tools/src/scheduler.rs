@@ -55,6 +55,9 @@ pub struct Scheduler {
     web: Arc<dyn riot_protocol::web::WebAccess>,
     /// 注入的浏览器能力。默认 NoBrowser —— 没装配就明说用不了。
     browser: Arc<dyn riot_protocol::browser::BrowserAccess>,
+    /// 图片能力。默认 [`riot_protocol::vision::NoVision`]（模型不收图片、
+    /// 也没有兼容模型）。
+    vision: Arc<dyn riot_protocol::vision::VisionAccess>,
     /// `web` 是宿主装的还是默认的。只给 [`Self::has_web`] 用 ——
     /// trait object 之间没法比较"是不是同一个默认值"。
     web_injected: bool,
@@ -65,6 +68,16 @@ pub struct Scheduler {
     /// 生产路径必须调 [`Scheduler::with_gate`]，`session.rs` 里有一个
     /// 测试盯着这一点。
     gate: Option<Arc<dyn PermissionGate>>,
+    /// 工具产物（截图原图等）的落盘目录。宿主按会话装配；默认指向
+    /// 系统临时目录，写不进时工具自行降级。
+    artifacts_dir: std::path::PathBuf,
+    /// 延迟加载状态。None = 不启用，全部工具直接可见。
+    ///
+    /// 启用时未被发现的延迟工具既不进 [`ToolRunner::specs`]，也不可
+    /// 直接调用 —— 模型没见过 schema，编出来的参数不可信。
+    deferred: Option<Arc<crate::tools::tool_search::DeferredPool>>,
+    /// PostToolUse 检查点（用户配置的 hooks）。默认 NoToolHooks —— 零开销。
+    hooks: Arc<dyn riot_protocol::hook::ToolHooks>,
 }
 
 impl Scheduler {
@@ -88,9 +101,33 @@ impl Scheduler {
             clock,
             web: Arc::new(riot_protocol::web::NoWeb),
             browser: Arc::new(riot_protocol::browser::NoBrowser),
+            vision: Arc::new(riot_protocol::vision::NoVision),
             web_injected: false,
             gate: None,
+            artifacts_dir: std::env::temp_dir().join("riot-artifacts"),
+            deferred: None,
+            hooks: Arc::new(riot_protocol::hook::NoToolHooks),
         }
+    }
+
+    /// 装上 PostToolUse 检查点（用户配置的 hooks）。
+    pub fn with_hooks(mut self, hooks: Arc<dyn riot_protocol::hook::ToolHooks>) -> Self {
+        self.hooks = hooks;
+        self
+    }
+
+    /// 启用延迟加载。池由装配方（session）在超过阈值时构建。
+    pub fn with_deferred(
+        mut self,
+        pool: Arc<crate::tools::tool_search::DeferredPool>,
+    ) -> Self {
+        self.deferred = Some(pool);
+        self
+    }
+
+    pub fn with_artifacts_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.artifacts_dir = dir;
+        self
     }
 
     pub fn with_gate(mut self, gate: Arc<dyn PermissionGate>) -> Self {
@@ -103,6 +140,14 @@ impl Scheduler {
         browser: Arc<dyn riot_protocol::browser::BrowserAccess>,
     ) -> Self {
         self.browser = browser;
+        self
+    }
+
+    pub fn with_vision(
+        mut self,
+        vision: Arc<dyn riot_protocol::vision::VisionAccess>,
+    ) -> Self {
+        self.vision = vision;
         self
     }
 
@@ -132,7 +177,14 @@ impl Scheduler {
 
 impl ToolRunner for Scheduler {
     fn specs(&self) -> Vec<ToolSpec> {
-        self.registry.specs(&self.prompt_ctx)
+        let specs = self.registry.specs(&self.prompt_ctx);
+        let Some(pool) = &self.deferred else {
+            return specs;
+        };
+        // 未发现的延迟工具不进请求。specs 每轮请求都会重算（agent loop
+        // 每次组请求都调它），所以本轮中途 ToolSearch 发现的工具，
+        // 下一次请求就带上完整定义。
+        specs.into_iter().filter(|s| !pool.is_hidden(&s.name)).collect()
     }
 
     fn run_batch(&self, calls: Vec<ToolCall>, ctx: BatchContext) -> BatchStream {
@@ -144,9 +196,13 @@ impl ToolRunner for Scheduler {
         let clock = Arc::clone(&self.clock);
         let web = Arc::clone(&self.web);
         let browser = Arc::clone(&self.browser);
+        let vision = Arc::clone(&self.vision);
         let ids = Arc::clone(&self.ids);
         let cwd = self.prompt_ctx.cwd.clone();
         let gate = self.gate.clone();
+        let artifacts_dir = self.artifacts_dir.clone();
+        let deferred = self.deferred.clone();
+        let hooks = Arc::clone(&self.hooks);
 
         Box::pin(stream! {
             let total = calls.len();
@@ -186,7 +242,11 @@ impl ToolRunner for Scheduler {
                             clock: Arc::clone(&clock),
                             web: Arc::clone(&web),
                             browser: Arc::clone(&browser),
+                            vision: Arc::clone(&vision),
                             cwd: cwd.clone(),
+                            artifacts_dir: artifacts_dir.clone(),
+                            deferred: deferred.clone(),
+                            hooks: Arc::clone(&hooks),
                         },
                         ctx.session_id.clone(),
                         sibling.child_token(),
@@ -226,6 +286,17 @@ impl ToolRunner for Scheduler {
                                 is_error: done.is_error,
                             });
                             side_messages.extend(sides);
+                            // hook 反馈以带外提示进对话：它是自动化检查说的话，
+                            // 不是用户说的 —— synthetic + system-reminder 双标记。
+                            for text in done.hook_feedback {
+                                side_messages.push(Message::User {
+                                    id: MessageId::from_raw(ids.next_id("msg")),
+                                    content: vec![UserContent::Attachment(
+                                        riot_protocol::message::Attachment::SystemReminder { text },
+                                    )],
+                                    meta: MessageMeta { synthetic: true, ..Default::default() },
+                                });
+                            }
                         }
                     }
                 }
@@ -262,7 +333,12 @@ struct ToolDeps {
     clock: Arc<dyn riot_protocol::tool::Clock>,
     web: Arc<dyn riot_protocol::web::WebAccess>,
     browser: Arc<dyn riot_protocol::browser::BrowserAccess>,
+    vision: Arc<dyn riot_protocol::vision::VisionAccess>,
     cwd: std::path::PathBuf,
+    artifacts_dir: std::path::PathBuf,
+    /// 延迟加载状态。None = 不启用。
+    deferred: Option<Arc<crate::tools::tool_search::DeferredPool>>,
+    hooks: Arc<dyn riot_protocol::hook::ToolHooks>,
 }
 
 struct Done {
@@ -274,6 +350,8 @@ struct Done {
     cascades: bool,
     /// 它是被取消/级联掉的，没有真正执行。
     cascaded: bool,
+    /// PostToolUse hooks 的反馈段落。收集侧包成 system-reminder。
+    hook_feedback: Vec<String>,
 }
 
 async fn run_one(
@@ -306,8 +384,30 @@ async fn run_one(
             is_error: true,
             cascades: false,
             cascaded: false,
+            hook_feedback: Vec::new(),
         };
     };
+
+    // 还没加载的延迟工具不执行（fail-closed）：模型只见过名字没见过
+    // schema，编出来的参数不可信。放在权限闸**之前** —— 为一个不该
+    // 执行的调用弹授权窗，只会把用户也拖进这个错误。
+    if let Some(pool) = &deps.deferred
+        && pool.is_hidden(&call.name)
+    {
+        return Done {
+            id: call.id,
+            name: call.name.clone(),
+            outcome: ToolOutcome::failed(format!(
+                "`{}` 还没加载，参数定义未知。先调用 ToolSearch（query 用 \
+                 \"select:{}\"）取回它的定义，下一步再用它。",
+                call.name, call.name
+            )),
+            is_error: true,
+            cascades: false,
+            cascaded: false,
+            hook_feedback: Vec::new(),
+        };
+    }
 
     let cascades = tool.cascades_on_failure();
 
@@ -322,6 +422,7 @@ async fn run_one(
             is_error: true,
             cascades: false,
             cascaded: true,
+            hook_feedback: Vec::new(),
         };
     }
 
@@ -345,6 +446,7 @@ async fn run_one(
                     // 读取也一起废掉 —— 那些结果模型还用得上。
                     cascades: false,
                     cascaded: false,
+                    hook_feedback: Vec::new(),
                 };
             }
         }
@@ -360,6 +462,7 @@ async fn run_one(
             is_error: true,
             cascades: false,
             cascaded: true,
+            hook_feedback: Vec::new(),
         };
     }
 
@@ -367,6 +470,7 @@ async fn run_one(
         session_id,
         tool_use_id: call.id.clone(),
         cwd: deps.cwd,
+        artifacts_dir: deps.artifacts_dir,
         cancel: cancel.clone(),
         progress: ProgressSink::new(call.id.clone(), progress_tx),
         file_state: deps.file_state,
@@ -374,11 +478,27 @@ async fn run_one(
         proc: deps.proc,
         web: deps.web,
         browser: deps.browser,
+        vision: deps.vision,
         clock: deps.clock,
     };
 
+    // hook 要看 input，而 execute 拿走了它 —— 只在真装了 hooks 时才付
+    // 这份克隆（Write 的 input 可能是整个文件）。
+    let hook_input = deps.hooks.enabled().then(|| input.clone());
+
     let outcome = execute_guarded(tool, input, ctx, &call.name).await;
     let is_error = !matches!(outcome, ToolOutcome::Ok { .. });
+
+    // PostToolUse hooks：执行完了让用户配置的检查点看一眼。
+    // 取消的调用不问 —— 没执行过的东西没什么可检查的。
+    let hook_feedback = match (&outcome, hook_input) {
+        (ToolOutcome::Cancelled, _) | (_, None) => Vec::new(),
+        (_, Some(hin)) => {
+            deps.hooks
+                .post_tool_use(&call.name, &hin, &outcome_preview(&outcome), is_error)
+                .await
+        }
+    };
 
     Done {
         id: call.id,
@@ -387,6 +507,24 @@ async fn run_one(
         is_error,
         cascades,
         cascaded: false,
+        hook_feedback,
+    }
+}
+
+/// 给 hook 看的结果预览。图片给占位符 —— hook 是 shell 脚本，
+/// 喂 base64 只会撑爆它的 stdin。
+fn outcome_preview(outcome: &ToolOutcome) -> String {
+    match outcome {
+        ToolOutcome::Ok { model_content, .. } => match model_content {
+            ToolResultContent::Text { text } => text.clone(),
+            ToolResultContent::Spilled { preview, .. } => preview.clone(),
+            ToolResultContent::Cleared => String::new(),
+            ToolResultContent::Image { .. } | ToolResultContent::DescribedImage { .. } => {
+                "(图片结果)".into()
+            }
+        },
+        ToolOutcome::Failed { error_for_model, .. } => error_for_model.clone(),
+        ToolOutcome::Cancelled => String::new(),
     }
 }
 
@@ -506,6 +644,122 @@ mod tests {
     }
 
     // ── 测试 ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn posttooluse_的反馈作为带外提示进对话() {
+        // hook 说了话却没人转达，等于这个功能不存在 —— 而它编译得过、
+        // 跑得起来，只是模型永远收不到检查结果。
+        struct Feedback;
+        #[async_trait::async_trait]
+        impl riot_protocol::hook::ToolHooks for Feedback {
+            async fn post_tool_use(
+                &self,
+                tool: &str,
+                _input: &serde_json::Value,
+                _output_preview: &str,
+                _is_error: bool,
+            ) -> Vec<String> {
+                vec![format!("{tool} 跑完了，记得跑 fmt")]
+            }
+        }
+
+        let s = scheduler(vec![Arc::new(FakeTool::read_only("Echo"))]).with_hooks(Arc::new(Feedback));
+        let events = run(&s, vec![call("t1", "Echo")]).await;
+        let o = outcome(&events);
+
+        // 反馈**不能**混进 tool_result（那会篡改工具输出），要独立成一条
+        // synthetic 的 system-reminder 消息。
+        assert_eq!(result_pairs(o).len(), 1, "工具结果照常只有一条");
+        let side = o.side_messages.first().expect("该有一条 hook 反馈消息");
+        match side {
+            Message::User { content, meta, .. } => {
+                assert!(meta.synthetic, "hook 说的话不是用户说的，必须标 synthetic");
+                let ok = content.iter().any(|c| matches!(
+                    c,
+                    UserContent::Attachment(riot_protocol::message::Attachment::SystemReminder { text })
+                        if text.contains("记得跑 fmt")
+                ));
+                assert!(ok, "反馈内容丢了：{content:?}");
+            }
+            other => panic!("hook 反馈该是 User 消息：{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn 没装_hooks_时不产生额外消息() {
+        // 默认路径的回归护栏：绝大多数用户没有 hooks，一条多余的
+        // system-reminder 就是每轮都付的上下文税。
+        let s = scheduler(vec![Arc::new(FakeTool::read_only("Echo"))]);
+        let events = run(&s, vec![call("t1", "Echo")]).await;
+        assert!(outcome(&events).side_messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn 未加载的延迟工具被拦_发现后放行() {
+        struct DeferredFake;
+        #[async_trait::async_trait]
+        impl Tool for DeferredFake {
+            fn name(&self) -> &str {
+                "mcp__x__y"
+            }
+            fn input_schema(&self) -> schemars::Schema {
+                schemars::json_schema!({ "type": "object" })
+            }
+            fn prompt(&self, _: &PromptContext) -> String {
+                "外部工具".into()
+            }
+            fn describe(&self, _: &serde_json::Value) -> String {
+                "d".into()
+            }
+            fn should_defer(&self) -> bool {
+                true
+            }
+            async fn call(&self, _: serde_json::Value, _: ToolContext) -> ToolOutcome {
+                ToolOutcome::ok_text("ran")
+            }
+        }
+
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(DeferredFake)];
+        let discovered = Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
+        let pctx = PromptContext {
+            cwd: "/w".into(),
+            platform: "t".into(),
+            sibling_tools: Vec::new(),
+            today: "2026年8月".into(),
+        };
+        let pool = Arc::new(crate::tools::tool_search::DeferredPool::new(
+            &tools,
+            &pctx,
+            Arc::clone(&discovered),
+        ));
+        let s = scheduler(tools).with_deferred(Arc::clone(&pool));
+
+        // 未发现：不进 specs（这正是省上下文的地方）
+        assert!(
+            s.specs().iter().all(|sp| sp.name != "mcp__x__y"),
+            "未发现的延迟工具不该进请求"
+        );
+
+        // 未发现：直接调用被拦，报错要指路到 ToolSearch ——
+        // 模型没见过 schema，编出来的参数不可信（fail-closed）。
+        let events = run(&s, vec![call("t1", "mcp__x__y")]).await;
+        let pairs = result_pairs(outcome(&events));
+        assert!(
+            pairs[0].1.contains("ToolSearch") && pairs[0].1.contains("select:mcp__x__y"),
+            "报错要教模型下一步怎么做：{}",
+            pairs[0].1
+        );
+
+        // 发现之后：specs 有它、调用放行。
+        discovered.write().expect("锁").insert("mcp__x__y".into());
+        assert!(
+            s.specs().iter().any(|sp| sp.name == "mcp__x__y"),
+            "发现之后要进请求"
+        );
+        let events = run(&s, vec![call("t2", "mcp__x__y")]).await;
+        let pairs = result_pairs(outcome(&events));
+        assert_eq!(pairs[0].1, "ran", "发现之后调用要正常执行");
+    }
 
     #[tokio::test(start_paused = true)]
     async fn 结果按调用顺序返回_哪怕完成顺序相反() {

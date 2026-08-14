@@ -367,10 +367,22 @@ fn convert_tool_result_content(c: &ToolResultContent) -> serde_json::Value {
         ToolResultContent::Cleared => {
             serde_json::json!([{ "type": "text", "text": "[结果已清理以节省上下文]" }])
         }
-        ToolResultContent::Image { media_type, data } => serde_json::json!([{
+        // `path` 指向落盘的原图，是给界面的 —— 发给模型的只有 `data`
+        // 里的压缩图（产出方已压好，见 riot-tools 的 shrink 模块）。
+        ToolResultContent::Image {
+            media_type,
+            data,
+            path: _,
+        } => serde_json::json!([{
             "type": "image",
             "source": { "type": "base64", "media_type": media_type, "data": data },
         }]),
+        // 转述代替图片：这个变体只在"当时的模型看不了图"的会话里产生，
+        // 图片是给界面的，模型这边自始至终只有文字。中途切到能看图的模型
+        // 也照发文字 —— 对话前文都建立在这段转述上，换成图反而变了口径。
+        ToolResultContent::DescribedImage { text, .. } => {
+            serde_json::json!([{ "type": "text", "text": text }])
+        }
     }
 }
 
@@ -386,6 +398,12 @@ fn convert_attachment(a: &riot_protocol::message::Attachment) -> serde_json::Val
         Attachment::RestoredFile { path, content } => {
             format!(
                 "<system-reminder>\n压缩前你读过 {}：\n{content}\n</system-reminder>",
+                path.display()
+            )
+        }
+        Attachment::UserFile { path, content } => {
+            format!(
+                "<system-reminder>\n用户在消息里引用了 {}，内容如下：\n{content}\n</system-reminder>",
                 path.display()
             )
         }

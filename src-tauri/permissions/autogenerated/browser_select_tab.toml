@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-browser-select-tab"
+description = "Enables the browser_select_tab command without any pre-configured scope."
+commands.allow = ["browser_select_tab"]
+
+[[permission]]
+identifier = "deny-browser-select-tab"
+description = "Denies the browser_select_tab command without any pre-configured scope."
+commands.deny = ["browser_select_tab"]

@@ -16,10 +16,20 @@
 use cef::rc::Rc;
 use cef::*;
 
-use riot_protocol::browser::Event;
+use riot_protocol::browser::{Event, TabId};
 
+// 一个标签页的 CDP 回向通道。
+//
+// `[约束]` 每个标签页一个观察者，而且要记住自己的号。CEF 回调里给的
+// `browser` 参数认不出标签页（号是我们自己发的），而报文不标明来源的话，
+// 主应用没法把响应派给正确的等待者 —— 多标签并发时会拿到别的页面的结果。
+//
+// 文档注释只能写在宏外面:宏的匹配规则不接受 struct 前面的 `#[doc]`，
+// 报出来是 `no rules expected #`，和注释本身看起来毫无关系。
 cef::wrap_dev_tools_message_observer! {
-    pub struct CdpObserver;
+    pub struct CdpObserver {
+        tab: TabId,
+    }
 
     impl DevToolsMessageObserver {
         fn on_dev_tools_message(
@@ -33,7 +43,7 @@ cef::wrap_dev_tools_message_observer! {
             // 但换来的是"坏报文在这里就被发现"，而不是让主应用那边的
             // NDJSON 流吞下一段非法内容。
             match serde_json::from_slice::<serde_json::Value>(bytes) {
-                Ok(payload) => crate::wire::emit(&Event::Cdp { payload }),
+                Ok(payload) => crate::wire::emit(&Event::Cdp { tab: self.tab, payload }),
                 Err(e) => crate::wire::emit(&Event::Error {
                     message: format!("CDP 报文不是合法 JSON: {e}"),
                 }),

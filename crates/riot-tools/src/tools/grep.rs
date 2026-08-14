@@ -1,29 +1,29 @@
 //! Grep 工具。
 //!
-//! 底层是 ripgrep。选它而不是自己实现,是因为 gitignore 处理、编码嗅探、
-//! 多线程遍历这些东西的工程量远超"匹配正则"本身。
+//! 底层是 ripgrep 的**库**（`grep-searcher` / `ignore`），不是它的
+//! 二进制 —— 理由见 [`super::search`] 的模块文档：桌面应用不能假设
+//! 用户装了 rg、而且它恰好在 PATH 里。
 //!
-//! 参数通过 argv 传给子进程,**不经过 shell**。这不是实现细节 —— 它意味着
-//! 模型给的 pattern 里就算有 `$(...)` 或 `;` 也只是普通字符。走 shell 的话
-//! 每一个搜索词都得先做一遍转义,而漏掉一处就是命令注入。
+//! 顺带解决了命令注入这一整类问题：没有子进程，模型给的 pattern 里
+//! 有 `$(...)` 还是 `;` 都只是正则字符，不需要任何转义。
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use riot_protocol::permission::{PermissionContext, PermissionResult};
 use riot_protocol::tool::{
-    ProcessSpec, PromptContext, ResultBudget, Tool, ToolContext, ToolOutcome, UiPayload,
-    ValidationError,
+    PromptContext, ResultBudget, Tool, ToolContext, ToolOutcome, UiPayload, ValidationError,
 };
 use serde::Deserialize;
 
-use super::path;
+use super::{path, search};
 
-/// 搜索超时。
+/// 一次搜索最多看多少个文件。
 ///
-/// ripgrep 很快,超过这个时间基本意味着搜到了不该搜的地方
-/// (挂载的网络盘、巨大的 node_modules)。
-const TIMEOUT_MS: u64 = 30_000;
+/// 超过这个数说明范围没圈对（搜到了 node_modules 或者整个 home）。
+/// 带着已有结果收工，并让模型知道结果不完整。
+const MAX_FILES: usize = 100_000;
 
 /// 返回给模型的字符上限。
 const MAX_CHARS: usize = 30_000;
@@ -178,47 +178,55 @@ impl Tool for Grep {
             None => ctx.cwd.clone(),
         };
 
-        let spec = ProcessSpec {
-            program: "rg".to_owned(),
-            args: build_args(&parsed, &root),
-            cwd: ctx.cwd.clone(),
-            env: Vec::new(),
-            timeout_ms: Some(TIMEOUT_MS),
+        // 遍历和搜索是同步的重活（几万次 stat + 读文件），扔给阻塞
+        // 线程池 —— 占着 async 线程搜一个大仓库，界面上就是整个应用卡住。
+        let cancel = ctx.cancel.clone();
+        let deadline = search::Deadline::new(Arc::clone(&ctx.clock), search::TIME_BUDGET_SECS);
+        let mode = match parsed.output_mode {
+            OutputMode::Content => search::Mode::Content {
+                context: parsed.context_lines.unwrap_or(0),
+            },
+            OutputMode::FilesWithMatches => search::Mode::FilesWithMatches,
+            OutputMode::Count => search::Mode::Count,
+        };
+        let glob = parsed.glob.clone();
+        let pattern = parsed.pattern.clone();
+        let ci = parsed.case_insensitive;
+
+        let found = tokio::task::spawn_blocking(move || {
+            let walked = search::walk(&root, glob.as_deref(), MAX_FILES, &cancel, &deadline)?;
+            let mut found = search::grep(&walked.files, &pattern, ci, mode, &cancel, &deadline)?;
+            found.cut_short |= walked.cut_short;
+            Ok::<_, String>(found)
+        })
+        .await;
+
+        let found = match found {
+            Ok(Ok(f)) => f,
+            Ok(Err(e)) => return ToolOutcome::failed(e),
+            // 阻塞任务 panic 了。这是代码错误，但工具层不能跟着崩。
+            Err(e) => return ToolOutcome::failed(format!("搜索没能完成：{e}")),
         };
 
-        let out = match ctx.proc.run(spec, ctx.cancel.clone()).await {
-            Ok(o) => o,
-            Err(e) => return ToolOutcome::failed(spawn_hint(&e)),
-        };
-
-        if out.timed_out {
-            return ToolOutcome::failed(format!(
-                "搜索超过 {}s 未完成。请用 `path` 缩小范围，或者加上 `glob` 过滤文件类型。",
-                TIMEOUT_MS / 1000
-            ));
+        if found.lines.is_empty() {
+            // `[约束]` "没搜到"不是失败。报成失败的话模型会去调参数重试，
+            // 而正确的下一步是换个词或者接受这个事实。
+            return ToolOutcome::ok_text(no_match_text(&parsed));
         }
 
-        // ripgrep 的退出码：0 有匹配，1 无匹配，2 出错。
-        //
-        // `[约束]` 1 和 2 必须分开。合并的话"没搜到"会被报成搜索失败,
-        // 模型会去调参数重试 —— 而正确的下一步是换个词或者接受这个事实。
-        match out.exit_code {
-            1 => return ToolOutcome::ok_text(no_match_text(&parsed)),
-            0 => {}
-            _ => return ToolOutcome::failed(rg_error_hint(&out.stderr)),
-        }
-
-        let clamped = clamp(&out.stdout, parsed.head_limit);
-        let mut body = if clamped.text.is_empty() {
-            // rg 说有匹配却没给内容，属于不该发生的情况。
-            // 返回空字符串会让模型以为工具坏了。
-            no_match_text(&parsed)
-        } else {
-            clamped.text.clone()
-        };
+        let clamped = clamp(&found.lines.join("\n"), parsed.head_limit);
+        let mut body = clamped.text.clone();
 
         if let Some(note) = clamped.note {
             body.push_str(&format!("\n\n<system-reminder>{note}</system-reminder>"));
+        }
+        if found.cut_short {
+            body.push_str(&format!(
+                "\n\n<system-reminder>搜索没走完（超过 {}s 或文件太多），\
+                 上面只是已经找到的部分。用 `path` 缩小范围，或者加 `glob` \
+                 过滤文件类型。</system-reminder>",
+                search::TIME_BUDGET_SECS
+            ));
         }
 
         ToolOutcome::Ok {
@@ -231,47 +239,6 @@ impl Tool for Grep {
     }
 }
 
-fn build_args(input: &Input, root: &std::path::Path) -> Vec<String> {
-    let mut a: Vec<String> = Vec::new();
-
-    // `[约束]` --no-config 不能省。用户的 RIPGREP_CONFIG_PATH 里可能有
-    // --smart-case、--hidden 之类的开关,那会让同一次搜索在不同机器上
-    // 给出不同结果,而模型和我们都看不到那份配置。
-    a.push("--no-config".into());
-    a.push("--color=never".into());
-
-    match input.output_mode {
-        OutputMode::Content => {
-            a.push("--line-number".into());
-            a.push("--with-filename".into());
-            if let Some(n) = input.context_lines {
-                a.push("--context".into());
-                a.push(n.to_string());
-            }
-        }
-        OutputMode::FilesWithMatches => a.push("--files-with-matches".into()),
-        OutputMode::Count => a.push("--count".into()),
-    }
-
-    if input.case_insensitive {
-        a.push("--ignore-case".into());
-    }
-    if let Some(g) = &input.glob {
-        a.push("--glob".into());
-        a.push(g.clone());
-    }
-
-    // `[约束]` pattern 必须走 `-e`。直接当位置参数的话,以 `-` 开头的
-    // 搜索词(比如搜 `--force`)会被当成 flag 解析 —— 表现是一个看不懂的
-    // "unknown option"错误,或者更糟,一个碰巧存在的 flag 被激活。
-    a.push("-e".into());
-    a.push(input.pattern.clone());
-
-    // `--` 之后全是路径。搜索根同理可能以 `-` 开头。
-    a.push("--".into());
-    a.push(root.to_string_lossy().into_owned());
-    a
-}
 
 struct Clamped {
     text: String,
@@ -329,22 +296,7 @@ fn no_match_text(input: &Input) -> String {
     )
 }
 
-fn spawn_hint(e: &std::io::Error) -> String {
-    match e.kind() {
-        std::io::ErrorKind::NotFound => {
-            "找不到 ripgrep（rg）。请先安装它，或者改用 Bash 里的 grep。".to_owned()
-        }
-        _ => format!("启动搜索失败：{e}"),
-    }
-}
 
-fn rg_error_hint(stderr: &str) -> String {
-    let first = stderr.lines().next().unwrap_or("").trim();
-    if first.is_empty() {
-        return "搜索失败，没有更多信息。".to_owned();
-    }
-    format!("搜索失败：{first}")
-}
 
 fn schema_hint(e: &serde_json::Error) -> String {
     let raw = e.to_string();

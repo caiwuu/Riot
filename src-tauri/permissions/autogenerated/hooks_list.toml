@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-hooks-list"
+description = "Enables the hooks_list command without any pre-configured scope."
+commands.allow = ["hooks_list"]
+
+[[permission]]
+identifier = "deny-hooks-list"
+description = "Denies the hooks_list command without any pre-configured scope."
+commands.deny = ["hooks_list"]

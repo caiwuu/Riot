@@ -10,9 +10,18 @@
 pub mod browser;
 pub mod config;
 pub mod fence;
+pub mod hooks;
 pub mod kernel;
+pub mod memory;
+pub mod mentions;
+pub mod persist;
 pub mod session;
+pub mod skills;
+pub mod slash;
 pub mod state;
+pub mod subagent;
+pub mod term;
+pub mod vision;
 pub mod web;
 
 use tauri::Manager;
@@ -37,6 +46,11 @@ pub enum HostError {
     Config(#[from] config::ConfigError),
     #[error("{0}")]
     Provider(String),
+    #[error("{0}")]
+    Term(String),
+    /// UserPromptSubmit hook 拦下了这条消息。
+    #[error("{0}")]
+    Hook(String),
 }
 
 // Tauri 要求错误类型可序列化。thiserror 不给 Serialize，手写一层。
@@ -67,13 +81,95 @@ async fn subscribe_session(
     Ok(())
 }
 
+/// 返回 `Some(条目 id)` 表示上一轮还在跑、消息进了插话队列；
+/// `None` 表示直接开轮。前端排队面板靠这个 id 跟踪条目。
 #[tauri::command]
 async fn send_turn(
     state: tauri::State<'_, AppState>,
     session_id: String,
     text: String,
-) -> HostResult<String> {
-    state.send_turn(&session_id, &text).await
+    // 用户附的图。没附就是空数组。
+    images: Vec<session::ImageInput>,
+    // 输入框里选中的文件引用（界面上的那些块），项目内相对路径。
+    // Option 是为了兼容不带这个字段的调用（缺参数会被 Tauri 拒成一条
+    // 看不懂的反序列化错误）。
+    refs: Option<Vec<String>>,
+) -> HostResult<Option<String>> {
+    state
+        .send_turn(&session_id, &text, images, refs.unwrap_or_default())
+        .await
+}
+
+/// 手动压缩会话历史（`/compact`）。空闲时才能做；完成发 Compacted 事件。
+#[tauri::command]
+async fn session_compact(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+) -> HostResult<()> {
+    state.compact_session(&session_id).await
+}
+
+/// 可用的斜杠命令（内置 + 项目 + 全局）。`root` 为 null 时只列内置和全局。
+#[tauri::command]
+async fn slash_commands(root: Option<String>) -> HostResult<Vec<slash::SlashCommand>> {
+    Ok(slash::discover(root.as_ref().map(std::path::Path::new)))
+}
+
+/// 配置里的 hooks 清单（含解析失败的文件）。给设置页看。
+#[tauri::command]
+async fn hooks_list(root: Option<String>) -> HostResult<Vec<hooks::HookInfo>> {
+    Ok(hooks::list(root.as_ref().map(std::path::Path::new)))
+}
+
+/// 展开一条自定义命令：`/name args` → 发给模型的 prompt。
+/// null = 没这条命令，或它是内置命令（前端按 name 执行）。
+#[tauri::command]
+async fn slash_expand(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    name: String,
+    args: String,
+) -> HostResult<Option<String>> {
+    state.slash_expand(&session_id, &name, &args).await
+}
+
+/// `@` 补全菜单的文件搜索：返回项目内相对路径。
+#[tauri::command]
+async fn search_files(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    query: String,
+) -> HostResult<Vec<String>> {
+    state.search_files(&session_id, &query).await
+}
+
+/// 排队面板：当前排着的插话清单。
+#[tauri::command]
+async fn queue_list(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+) -> HostResult<Vec<session::QueuedSummary>> {
+    state.queue_list(&session_id).await
+}
+
+/// 删掉一条排队插话。false = 条目已经不在（被注入或早被删了）。
+#[tauri::command]
+async fn queue_remove(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    entry_id: String,
+) -> HostResult<bool> {
+    state.queue_remove(&session_id, &entry_id).await
+}
+
+/// 撤回一条排队插话，还给前端原始输入（放回输入框编辑）。
+#[tauri::command]
+async fn queue_take(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    entry_id: String,
+) -> HostResult<Option<session::QueuedInputOut>> {
+    state.queue_take(&session_id, &entry_id).await
 }
 
 #[tauri::command]
@@ -102,6 +198,25 @@ async fn set_permission_mode(
     state.set_mode(&session_id, mode).await
 }
 
+/// 本会话已授权的渗透 scope（host 列表），给前端管理面板看。
+#[tauri::command]
+async fn browser_scope_list(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+) -> HostResult<Vec<String>> {
+    state.scope_hosts(&session_id).await
+}
+
+/// 撤销一个渗透 scope 授权。之后对该目标的侵入性动作会重新要求授权。
+#[tauri::command]
+async fn browser_scope_revoke(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    host: String,
+) -> HostResult<()> {
+    state.revoke_scope(&session_id, &host).await
+}
+
 /// 会话级采样覆盖。空字段继承 provider 的设置；下一轮生效。
 #[tauri::command]
 async fn set_session_sampling(
@@ -110,6 +225,26 @@ async fn set_session_sampling(
     sampling: config::Sampling,
 ) -> HostResult<()> {
     state.set_sampling(&session_id, sampling).await
+}
+
+/// 会话的 Python 虚拟环境。空字符串清除；宿主会验证目录像不像一个 venv。
+#[tauri::command]
+async fn set_session_python_venv(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    path: String,
+) -> HostResult<()> {
+    state.set_python_venv(&session_id, &path).await
+}
+
+/// 会话级追加的系统提示词。空字符串清除；下一轮生效。
+#[tauri::command]
+async fn set_session_system_prompt(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    prompt: String,
+) -> HostResult<()> {
+    state.set_system_prompt(&session_id, &prompt).await
 }
 
 /// 当前模型配置与"密钥在不在、从哪来"。
@@ -132,6 +267,61 @@ async fn set_config(
     config.validate()?;
     config::save(&config)?;
     state.set_config(config.clone()).await;
+    // MCP 连接对齐新配置。reconcile 只 diff + 起连接任务，不等握手，
+    // 不会拖慢保存按钮；进度由设置页轮询 mcp_status 看。
+    state.reconcile_mcp().await;
+    Ok(config::ConfigStatus::of(config))
+}
+
+/// MCP 服务器的连接状态（设置页轮询它显示状态点和工具数）。
+#[tauri::command]
+async fn mcp_status(state: tauri::State<'_, AppState>) -> HostResult<Vec<riot_mcp::ServerStatus>> {
+    Ok(state.mcp_statuses().await)
+}
+
+/// 手动重连一个 MCP 服务器（设置页的「重连」按钮）。
+#[tauri::command]
+async fn mcp_restart(state: tauri::State<'_, AppState>, server_id: String) -> HostResult<()> {
+    state.mcp_restart(&server_id).await
+}
+
+/// 当前可用的技能清单（含解析失败的，带原因）。
+/// `root` 传当前会话的项目根；不传只列全局技能。
+#[tauri::command]
+async fn skills_list(root: Option<String>) -> HostResult<Vec<skills::SkillInfo>> {
+    Ok(skills::list(root.as_deref().map(std::path::Path::new)))
+}
+
+/// 当前 MCP 服务器的标准 JSON（`{"mcpServers": {...}}`，生态通用格式）。
+#[tauri::command]
+async fn mcp_export_json(state: tauri::State<'_, AppState>) -> HostResult<String> {
+    Ok(config::mcp_servers_to_json(&state.config().await.mcp_servers))
+}
+
+/// 用标准 JSON **整体替换** MCP 服务器配置。
+///
+/// 语义是替换不是追加：JSON 视图显示的就是全部，保存回来的也该是
+/// 全部 —— 追加语义下删除一个服务器要去表单里点，两个视图就打架了。
+/// 显示名不属于标准格式，按 id 从旧配置捡回来。
+#[tauri::command]
+async fn mcp_import_json(
+    state: tauri::State<'_, AppState>,
+    raw: String,
+) -> HostResult<config::ConfigStatus> {
+    let mut servers = config::mcp_servers_from_json(&raw)?;
+    let mut config = state.config().await;
+    for s in &mut servers {
+        if s.name.is_empty()
+            && let Some(old) = config.mcp_servers.iter().find(|o| o.id == s.id)
+        {
+            s.name = old.name.clone();
+        }
+    }
+    config.mcp_servers = servers;
+    config.validate()?;
+    config::save(&config)?;
+    state.set_config(config.clone()).await;
+    state.reconcile_mcp().await;
     Ok(config::ConfigStatus::of(config))
 }
 
@@ -161,13 +351,17 @@ async fn set_api_key(
 // **用户自己**在操作 —— 为用户的鼠标弹一个"是否允许点击"的窗，既没有意义
 // 也会立刻把人逼去开「全部放行」。模型走 Browser* 工具，那条照常受管。
 
-/// 打开面板:开始把画面推给前端。
+/// 打开面板:开始把画面推给前端，并回一份标签栏状态。
+///
+/// `[约束]` 必须把状态一起回。不回的话前端只能等下一次定时同步 —— 而浏览器
+/// 起来本身就要一秒，再叠一次轮询间隔，用户看到的是"开了面板、空着两秒、
+/// 才冒出一个标签页"。
 #[tauri::command]
 async fn browser_open(
     state: tauri::State<'_, AppState>,
     session_id: String,
     on_frame: Channel<browser::access::Frame>,
-) -> HostResult<()> {
+) -> HostResult<browser::access::PanelState> {
     let b = state.panel_browser(&session_id).await?;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -181,7 +375,8 @@ async fn browser_open(
         }
     });
 
-    b.start_screencast(tx).await.map_err(HostError::Browser)
+    b.start_screencast(tx).await.map_err(HostError::Browser)?;
+    b.state().await.map_err(HostError::Browser)
 }
 
 /// 关闭面板。停止编码 —— 没人看的时候继续推是白烧 CPU 和电。
@@ -206,6 +401,88 @@ async fn browser_navigate(
     b.navigate(&url).await.map_err(HostError::Browser)
 }
 
+/// 工具栏的前进后退。`delta` 为 -1 后退、+1 前进。回来的是走完之后的状态。
+///
+/// 合成一条命令而不是 back / forward 两条:两边的实现只差一个符号，
+/// 而每多一条命令就要同步 build.rs、capabilities 和 ACL 用例三处。
+#[tauri::command]
+async fn browser_history(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    delta: i32,
+) -> HostResult<browser::access::TabInfo> {
+    let b = state.panel_browser(&session_id).await?;
+    b.go(delta).await.map_err(HostError::Browser)
+}
+
+/// 刷新当前页面。
+#[tauri::command]
+async fn browser_reload(state: tauri::State<'_, AppState>, session_id: String) -> HostResult<()> {
+    let b = state.panel_browser(&session_id).await?;
+    b.reload().await.map_err(HostError::Browser)
+}
+
+/// 标签栏 + 工具栏的状态。面板定期问，用来跟上页面自己发起的跳转。
+#[tauri::command]
+async fn browser_state(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+) -> HostResult<browser::access::PanelState> {
+    let b = state.panel_browser(&session_id).await?;
+    b.state().await.map_err(HostError::Browser)
+}
+
+/// 新开一个标签页并切过去。
+#[tauri::command]
+async fn browser_new_tab(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+) -> HostResult<browser::access::PanelState> {
+    let b = state.panel_browser(&session_id).await?;
+    b.open_tab().await.map_err(HostError::Browser)
+}
+
+/// 关一个标签页。关掉最后一个时会补一个新的空白页。
+#[tauri::command]
+async fn browser_close_tab(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    tab: u32,
+) -> HostResult<browser::access::PanelState> {
+    let b = state.panel_browser(&session_id).await?;
+    b.close_tab(tab).await.map_err(HostError::Browser)
+}
+
+/// 切到某个标签页。画面和工具栏都跟着它 —— 模型的浏览器工具也一样，
+/// 见 `BrowserAccess for HostBrowser` 的说明。
+#[tauri::command]
+async fn browser_select_tab(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    tab: u32,
+) -> HostResult<browser::access::PanelState> {
+    let b = state.panel_browser(&session_id).await?;
+    b.select_tab(tab).await.map_err(HostError::Browser)
+}
+
+/// 面板尺寸变了。视口跟着变 —— 比例对不上时画面周围会留出黑边。
+///
+/// `scale` 是面板所在屏幕的像素密度。它决定同一块地方用多少物理像素去画，
+/// 不改变页面的排版尺寸。
+#[tauri::command]
+async fn browser_resize(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    width: i32,
+    height: i32,
+    scale: f32,
+) -> HostResult<()> {
+    let b = state.panel_browser(&session_id).await?;
+    b.resize(width, height, scale)
+        .await
+        .map_err(HostError::Browser)
+}
+
 /// 把面板上的输入打到页面里。
 #[tauri::command]
 async fn browser_input(
@@ -215,6 +492,69 @@ async fn browser_input(
 ) -> HostResult<()> {
     let b = state.panel_browser(&session_id).await?;
     b.send_input(input).await.map_err(HostError::Browser)
+}
+
+// ── 底部终端面板 ──────────────────────────────────────
+//
+// 和浏览器面板同一条原则：面板里的操作是**用户自己**在敲，不过权限链。
+// 终端跟应用走、不跟会话走 —— 里面可能挂着 dev server，切个会话就把它
+// 杀掉是不可接受的。
+
+/// 开一个终端（在 `root` 目录起用户的默认 shell），输出通过 `on_event` 推给前端。
+///
+/// `root` 不存在或没传就退回家目录 —— 终端还是要开，只是位置不理想。
+#[tauri::command]
+async fn term_open(
+    terms: tauri::State<'_, term::Terminals>,
+    root: Option<String>,
+    cols: u16,
+    rows: u16,
+    on_event: Channel<term::TermEvent>,
+) -> HostResult<u32> {
+    terms.open(root, cols, rows, on_event).map_err(HostError::Term)
+}
+
+/// 把键盘输入写进 shell。`data` 是 xterm 给的原始串（含控制序列）。
+#[tauri::command]
+async fn term_write(
+    terms: tauri::State<'_, term::Terminals>,
+    id: u32,
+    data: String,
+) -> HostResult<()> {
+    terms.write(id, &data).map_err(HostError::Term)
+}
+
+/// 面板里的终端尺寸变了，PTY 跟着变 —— 不同步的话 shell 按旧宽度折行。
+#[tauri::command]
+async fn term_resize(
+    terms: tauri::State<'_, term::Terminals>,
+    id: u32,
+    cols: u16,
+    rows: u16,
+) -> HostResult<()> {
+    terms.resize(id, cols, rows).map_err(HostError::Term)
+}
+
+/// 关一个终端（杀掉 shell）。幂等。
+#[tauri::command]
+async fn term_close(terms: tauri::State<'_, term::Terminals>, id: u32) -> HostResult<()> {
+    terms.close(id);
+    Ok(())
+}
+
+/// 读一个图片文件，回 base64 和 MIME 类型。
+///
+/// 给拖进来的图和"选图片"按钮用。前端拿不到磁盘内容:webview 的
+/// `File` 对象只有拖放数据里那份，而 Tauri 的拖放事件给的是**路径**。
+///
+/// `[约束]` 必须限大小。一张手机拍的照片十几 MB，读进来再 base64 变二十
+/// 多 MB，光是 IPC 那一跳就能让界面卡住一两秒 —— 而它最终还是会被服务方
+/// 的单图上限拒掉。在这里拦住，用户立刻知道是哪张图的问题。
+#[tauri::command]
+async fn read_image(path: String) -> HostResult<session::ImageOutput> {
+    session::read_image(&path)
+        .await
+        .map_err(HostError::Provider)
 }
 
 /// 把一个目录加进项目列表（验证它存在、可 canonicalize），返回规范化的根。
@@ -260,7 +600,7 @@ async fn list_sessions(state: tauri::State<'_, AppState>) -> HostResult<Vec<stat
 async fn get_history(
     state: tauri::State<'_, AppState>,
     session_id: String,
-) -> HostResult<Vec<riot_protocol::message::Message>> {
+) -> HostResult<state::HistoryOut> {
     state.history(&session_id).await
 }
 
@@ -347,23 +687,55 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .manage(AppState::default())
+        // restore 而不是空表：会话和历史从上次的磁盘状态恢复。
+        // 必须发生在任何命令可达之前 —— 前端启动第一件事就是 list_sessions。
+        .manage(AppState::restore())
+        .manage(term::Terminals::default())
         // [约束] invoke_handler 只能调用一次。调多次只有最后一次生效，
         // 而且是静默失败 —— 前面注册的命令全部变成 "command not found"。
         .invoke_handler(tauri::generate_handler![
             subscribe_session,
             send_turn,
+            queue_list,
+            queue_remove,
+            queue_take,
+            session_compact,
+            slash_commands,
+            slash_expand,
+            hooks_list,
+            search_files,
             interrupt,
             respond_permission,
             set_permission_mode,
             set_session_sampling,
+            set_session_python_venv,
+            set_session_system_prompt,
             browser_open,
             browser_close,
             browser_navigate,
+            browser_history,
+            browser_reload,
+            browser_state,
+            browser_new_tab,
+            browser_close_tab,
+            browser_select_tab,
+            browser_resize,
             browser_input,
+            browser_scope_list,
+            browser_scope_revoke,
+            term_open,
+            term_write,
+            term_resize,
+            term_close,
+            read_image,
             get_config,
             set_config,
             set_api_key,
+            mcp_status,
+            mcp_restart,
+            mcp_export_json,
+            mcp_import_json,
+            skills_list,
             add_project,
             create_session,
             list_sessions,
@@ -375,6 +747,15 @@ pub fn run() {
             test_search_backend,
             list_models,
         ])
+        // 启动时把 MCP 连接对齐配置。放 setup 里而不是 restore：
+        // spawn 连接任务要求 runtime 已经起来，restore 跑在那之前。
+        .setup(|app| {
+            let state = app.state::<AppState>().inner().clone();
+            tauri::async_runtime::spawn(async move {
+                state.reconcile_mcp().await;
+            });
+            Ok(())
+        })
         .build(tauri::generate_context!())
         .expect("Tauri 初始化失败")
         .run(|app, event| {

@@ -18,11 +18,11 @@ use url::Url;
 use super::preapproved;
 use super::url as weburl;
 
-/// 对某个 URL 的域名做权限判定。
+/// 对某个 URL 做权限判定。
 ///
 /// `tool` 是发起访问的工具名 —— 规则匹配按工具区分，但**内容键是共享的**
-/// (`domain:<host>`)，所以用户为 WebFetch 允许过的域名，浏览器这边同样
-/// 命中。
+/// （http(s) 是 `domain:<host>`，本地文件是 `file:<目录>`），所以用户为
+/// WebFetch 允许过的域名，浏览器这边同样命中。
 pub fn decide_for_domain(tool: &str, u: &Url, ctx: &PermissionContext) -> PermissionResult {
     let content = weburl::permission_content(u);
     let host = u.host_str().unwrap_or_default();
@@ -42,7 +42,7 @@ pub fn decide_for_domain(tool: &str, u: &Url, ctx: &PermissionContext) -> Permis
                 reason,
             },
             RuleDecision::Ask => PermissionResult::Ask {
-                message: ask_message(tool, host),
+                message: ask_message(tool, u),
                 suggestions: suggestions(tool, &content),
                 reason,
             },
@@ -55,7 +55,8 @@ pub fn decide_for_domain(tool: &str, u: &Url, ctx: &PermissionContext) -> Permis
 
     // 官方文档站免确认。不这么做的话，用户查第三个文档时就会直接开
     // 「全部放行」—— 那比这份白名单危险得多。
-    if preapproved::is_preapproved(host, u.path()) {
+    // 本地文件不在白名单里：空 host 不该碰巧命中任何条目。
+    if u.scheme() != "file" && preapproved::is_preapproved(host, u.path()) {
         return PermissionResult::Allow {
             updated_input: None,
             reason: DecisionReason::Preapproved { what: content },
@@ -68,18 +69,28 @@ pub fn decide_for_domain(tool: &str, u: &Url, ctx: &PermissionContext) -> Permis
     // 冒充成规则会让决策链以为"用户明确要求问这个域名"，于是「全部放行」
     // 对这个工具永久失效。见 chain::decide 第 3 步 —— 这条是真实踩过的。
     PermissionResult::Ask {
-        message: ask_message(tool, host),
+        message: ask_message(tool, u),
         suggestions: suggestions(tool, &content),
         reason: DecisionReason::Consent { what: content },
     }
 }
 
-fn ask_message(tool: &str, host: &str) -> String {
+fn ask_message(tool: &str, u: &Url) -> String {
+    let label = permission_label(u);
     if tool == "WebFetch" {
-        format!("是否允许抓取 {host}？")
+        format!("是否允许抓取 {label}？")
+    } else if u.scheme() == "file" {
+        format!("是否允许在浏览器里打开本地文件 {label}？")
     } else {
-        format!("是否允许在浏览器里打开 {host}？")
+        format!("是否允许在浏览器里打开 {label}？")
     }
+}
+
+/// 弹窗上给人看的目标。文件显示完整路径，网站显示主机名。
+fn permission_label(u: &Url) -> String {
+    weburl::local_file_path(u)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| u.host_str().unwrap_or_default().to_owned())
 }
 
 /// "总是允许"要记成什么规则。
@@ -157,5 +168,48 @@ mod tests {
         };
         let r = decide_for_domain("WebFetch", &url("https://docs.rs/x"), &ctx(vec![deny]));
         assert!(matches!(r, PermissionResult::Deny { .. }), "{r:?}");
+    }
+
+    #[test]
+    fn 本地文件要问且键是目录粒度() {
+        let u = url("file:///Users/me/proj/wechat.html");
+        let r = decide_for_domain("BrowserNavigate", &u, &ctx(vec![]));
+        let PermissionResult::Ask {
+            message,
+            suggestions,
+            reason,
+        } = r
+        else {
+            panic!("本地文件必须确认，实际：{r:?}");
+        };
+        assert!(
+            message.contains("/Users/me/proj/wechat.html"),
+            "要让人看见完整路径：{message}"
+        );
+        assert!(
+            matches!(reason, DecisionReason::Consent { .. }),
+            "理由必须是 Consent，否则「全部放行」失效：{reason:?}"
+        );
+        let riot_protocol::permission::PermissionUpdate::AddRule { pattern, .. } = &suggestions[0]
+        else {
+            panic!("建议应当是 AddRule：{suggestions:?}");
+        };
+        assert_eq!(pattern.as_deref(), Some("file:/Users/me/proj"));
+    }
+
+    #[test]
+    fn 同一目录的本地文件共享允许规则() {
+        let allow = PermissionRule {
+            tool: "BrowserNavigate".into(),
+            pattern: Some("file:/Users/me/proj".into()),
+            decision: RuleDecision::Allow,
+            source: RuleSource::Session,
+        };
+        let r = decide_for_domain(
+            "BrowserNavigate",
+            &url("file:///Users/me/proj/other.html"),
+            &ctx(vec![allow]),
+        );
+        assert!(matches!(r, PermissionResult::Allow { .. }), "{r:?}");
     }
 }

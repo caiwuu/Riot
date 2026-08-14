@@ -221,6 +221,13 @@ pub enum SafetyKind {
     CommandInjection,
     /// 命令 AST 解析失败或含不认识的结构。
     UnparseableCommand,
+    /// 主动渗透动作打到了**未授权**的目标（不在渗透 scope 内）。
+    ///
+    /// `[约束]` 归到安全检查而不是普通同意，就是为了让它**对 bypass 免疫**:
+    /// 「全部放行」的语义是"信任 agent 做常规开发"，不是"允许它对任意目标
+    /// 发起攻击"。scope 外的改包、fuzzing、爬虫必须由用户显式授权目标，
+    /// 哪怕开着 bypass。只有无人值守模式（用户明示交出一切）才放行。
+    OutOfScope,
 }
 
 /// 结构化的"永久同意"。

@@ -12,7 +12,9 @@
 #![allow(clippy::disallowed_methods)]
 
 pub mod access;
+pub mod netlog;
 pub mod ops;
+pub mod taps;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -22,7 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use process_wrap::tokio::{ChildWrapper, CommandWrap};
-use riot_protocol::browser::{Command, Event};
+use riot_protocol::browser::{Command, Event, TabId};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -176,15 +178,22 @@ impl Browser {
     /// 分配 id、登记等待者、由读取任务按 id 唤醒 —— 和内核那边的 JSON-RPC
     /// 是同一套结构。
     ///
-    /// `[约束]` id 由这里独占分配。让调用方自己填的话，两个工具撞上同一个
-    /// id 时，响应会被派给错误的等待者 —— 那种错乱只在并发时出现，而且
-    /// 表现为"偶尔拿到别人的结果"。
-    pub async fn cdp(&self, method: &str, params: Value) -> Result<Value, BrowserError> {
+    /// `[约束]` id 由这里独占分配，而且是**整个进程一套**、不是每个标签页
+    /// 一套。让调用方自己填的话，两个工具撞上同一个 id 时，响应会被派给
+    /// 错误的等待者；各标签页各发一套号的话，两个标签页的第 1 号响应会撞在
+    /// 一起 —— 两种错乱都只在并发时出现，表现为"偶尔拿到别人的结果"。
+    pub async fn cdp(
+        &self,
+        tab: TabId,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, BrowserError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
 
         let sent = self.send(&Command::Cdp {
+            tab,
             payload: serde_json::json!({ "id": id, "method": method, "params": params }),
         });
         if let Err(e) = sent {
@@ -242,9 +251,15 @@ impl Browser {
     ///
     /// `[约束]` 仍然要占一个 id。CDP 不接受没有 id 的命令，而复用固定 id
     /// 会和真正在等结果的调用撞车。
-    pub fn cdp_no_wait(&self, method: &str, params: Value) -> Result<(), BrowserError> {
+    pub fn cdp_no_wait(
+        &self,
+        tab: TabId,
+        method: &str,
+        params: Value,
+    ) -> Result<(), BrowserError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.send(&Command::Cdp {
+            tab,
             payload: serde_json::json!({ "id": id, "method": method, "params": params }),
         })
     }
@@ -281,13 +296,37 @@ impl Browser {
     }
 }
 
+/// 一个标签页的句柄:浏览器进程 + 标签页号。
+///
+/// `[取舍]` 有了它，上层不必在每个调用点重复"对哪个标签页"。多标签之后，
+/// 每一条 CDP 都要指名页面，而漏传或传错一个号的症状是"命令打在了另一个
+/// 页面上" —— 单标签时代永远不会出现的一类错，而且很难从现象倒推。
+///
+/// 借用而不是持有 `Arc`:标签页句柄的生命周期短（一次操作），而浏览器进程
+/// 是长命的，让编译器盯着这个关系比运行时计数便宜。
+#[derive(Clone, Copy)]
+pub struct Tab<'a> {
+    pub browser: &'a Browser,
+    pub id: TabId,
+}
+
+impl Tab<'_> {
+    pub async fn cdp(&self, method: &str, params: Value) -> Result<Value, BrowserError> {
+        self.browser.cdp(self.id, method, params).await
+    }
+
+    pub fn cdp_no_wait(&self, method: &str, params: Value) -> Result<(), BrowserError> {
+        self.browser.cdp_no_wait(self.id, method, params)
+    }
+}
+
 /// 这条消息是不是某次 CDP 调用的响应；是的话唤醒等待者并返回 `true`。
 ///
 /// 返回 `false` 的两种情况都要继续走事件流:根本不是 CDP 消息，或者是
 /// 没有 `id` 的 CDP **事件**（Console、Network 那些推送）。响应和事件混在
 /// 同一条流里，`id` 是唯一的区分依据。
 async fn route_cdp_response(pending: &Pending, ev: &Event) -> bool {
-    let Event::Cdp { payload } = ev else {
+    let Event::Cdp { payload, .. } = ev else {
         return false;
     };
     let Some(id) = payload.get("id").and_then(Value::as_u64) else {

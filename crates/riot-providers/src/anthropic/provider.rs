@@ -38,6 +38,8 @@ use crate::watchdog::{DEFAULT_IDLE, with_idle_watchdog};
 
 pub struct AnthropicConfig {
     pub base_url: String,
+    /// 接口路径。空 = 按 base 猜（见 [`crate::endpoint::api_url`]）。
+    pub api_path: String,
     pub api_key: String,
     pub api_version: String,
     /// 降级目标。连续过载时切过去。
@@ -54,6 +56,7 @@ impl Default for AnthropicConfig {
     fn default() -> Self {
         Self {
             base_url: "https://api.anthropic.com".into(),
+            api_path: String::new(),
             api_key: String::new(),
             api_version: "2023-06-01".into(),
             fallback_model: None,
@@ -112,7 +115,12 @@ fn build_http_request(
         .map_err(|e| HttpError::transport(format!("请求序列化失败: {e}")))?;
 
     Ok(HttpRequest {
-        url: format!("{}/v1/messages", endpoint.base_url.trim_end_matches('/')),
+        url: crate::endpoint::api_url_with(
+            &endpoint.base_url,
+            &endpoint.api_path,
+            "v1",
+            "messages",
+        ),
         headers: vec![
             ("content-type".into(), "application/json".into()),
             ("accept".into(), "text/event-stream".into()),
@@ -126,6 +134,8 @@ fn build_http_request(
 #[derive(Clone)]
 struct Endpoint {
     base_url: String,
+    /// 接口路径。空 = 按 base 猜，见 [`crate::endpoint::api_url`]。
+    api_path: String,
     api_key: String,
     api_version: String,
 }
@@ -144,6 +154,7 @@ impl Provider for AnthropicProvider {
         let sampling = self.config.sampling;
         let endpoint = Endpoint {
             base_url: self.config.base_url.clone(),
+            api_path: self.config.api_path.clone(),
             api_key: self.config.api_key.clone(),
             api_version: self.config.api_version.clone(),
         };

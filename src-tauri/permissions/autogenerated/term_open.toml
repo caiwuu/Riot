@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-term-open"
+description = "Enables the term_open command without any pre-configured scope."
+commands.allow = ["term_open"]
+
+[[permission]]
+identifier = "deny-term-open"
+description = "Denies the term_open command without any pre-configured scope."
+commands.deny = ["term_open"]

@@ -23,7 +23,12 @@ pub trait Tool: Send + Sync + 'static {
     // 必须实现 —— 不要给这些加默认实现
     // ────────────────────────────────────────────────────────
 
-    fn name(&self) -> &'static str;
+    /// 工具名。进 API 的 `tools[].name`，也是权限规则匹配的键。
+    ///
+    /// 返回 `&str` 而不是 `&'static str`：内置工具的名字是编译期常量，
+    /// 但 MCP 工具的名字（`mcp__server__tool`）来自运行时的服务器清单 ——
+    /// 要求 'static 会逼适配层去 `Box::leak`。
+    fn name(&self) -> &str;
 
     fn input_schema(&self) -> schemars::Schema;
 
@@ -118,6 +123,16 @@ pub trait Tool: Send + Sync + 'static {
     /// 该工具操作的路径。用于路径围栏检查与 hook 规则匹配。
     fn target_path(&self, _input: &serde_json::Value) -> Option<PathBuf> {
         None
+    }
+
+    /// 是否参与延迟加载（工具目录瘦身）。
+    ///
+    /// 延迟工具在总量超过阈值时不进请求的 tools 数组，模型只知道名字，
+    /// 用 ToolSearch 按需取回完整定义。MCP 工具返回 true —— 它们是
+    /// 按工作流配的，大多数轮次用不到；内置工具保持 false，它们的
+    /// 描述是模型的基本操作手册。
+    fn should_defer(&self) -> bool {
+        false
     }
 
     fn user_facing_name(&self) -> &str {
@@ -264,6 +279,10 @@ pub struct ToolContext {
     pub session_id: SessionId,
     pub tool_use_id: ToolUseId,
     pub cwd: PathBuf,
+    /// 工具产物的落盘目录（会话专属）。截图的原图写在这里 —— 消息里只放
+    /// 压缩图和这个目录下的路径，几 MB 的 base64 不进会话历史。
+    /// 目录由宿主创建；写不进时工具自行降级（消息里不带路径），不报错。
+    pub artifacts_dir: PathBuf,
     /// 本工具专属的取消令牌。父级取消会传播下来。
     pub cancel: CancellationToken,
     /// 进度上报通道。
@@ -284,6 +303,12 @@ pub struct ToolContext {
     /// 默认是 [`crate::browser::NoBrowser`]（一律说"用不了"）—— 和 web
     /// 同理，宿主没装配就该明说，不该悄悄换个行为。
     pub browser: Arc<dyn crate::browser::BrowserAccess>,
+    /// 图片怎么交给模型。产出图片的工具（截图）用它。
+    ///
+    /// 默认是 [`crate::vision::NoVision`]（"模型不收图片，也没配兼容模型"）
+    /// —— 装配漏了的时候工具会明确让用户去配，而不是让图片在 provider 那层
+    /// 被静默替换成一句话。
+    pub vision: Arc<dyn crate::vision::VisionAccess>,
     /// 注入的时间源。
     ///
     /// WebFetch 的响应缓存要判 TTL，工具耗时统计也要它。不能用

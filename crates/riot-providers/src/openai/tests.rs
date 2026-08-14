@@ -117,6 +117,130 @@ fn 工具结果变成独立的_tool_消息() {
     );
 }
 
+/// 图片跟在 tool 消息后面单独发一条 user 消息。
+///
+/// `[约束]` 图片不能塞进 tool 消息:OpenAI 的 `tool` 消息 content 只收字符串。
+/// 塞进去要么被服务方 400，要么被当成一段字面 JSON 文本 —— 后者更糟，模型
+/// 会拿到一坨 base64 当正文读。
+///
+/// 而 tool 消息本身也不能为空:空结果会让一部分模型误判任务已经结束。
+#[test]
+fn 工具结果里的图片跟在后面的_user_消息里() {
+    let msgs = vec![Message::User {
+        id: MessageId::from_raw("u1"),
+        content: vec![UserContent::ToolResult {
+            tool_use_id: ToolUseId::from_raw("call_1"),
+            content: ToolResultContent::Image {
+                media_type: "image/jpeg".into(),
+                data: "AAAA".into(),
+                path: None,
+            },
+            is_error: false,
+        }],
+        meta: MessageMeta::default(),
+    }];
+
+    let out = convert_messages(&msgs);
+    assert_eq!(out.len(), 2, "一条 tool + 一条带图的 user：{out:?}");
+
+    match &out[0] {
+        WireMessage::Tool { content, .. } => {
+            assert!(!content.trim().is_empty(), "tool 消息不能为空");
+            assert!(!content.contains("AAAA"), "base64 不能出现在 tool 消息里");
+        }
+        other => panic!("第一条应该是 tool：{other:?}"),
+    }
+
+    match &out[1] {
+        WireMessage::UserParts { content } => {
+            let has_image = content.iter().any(|p| {
+                matches!(p, crate::openai::wire::WirePart::ImageUrl { image_url }
+                    if image_url.url == "data:image/jpeg;base64,AAAA")
+            });
+            assert!(has_image, "图片要以 data URL 形式带上：{content:?}");
+        }
+        other => panic!("第二条应该是带内容块的 user：{other:?}"),
+    }
+
+    // 线格式也要对。role 必须还是 user，content 必须是数组 —— 这两点错了
+    // 都是服务方 400，而错误信息不会指向这里。
+    let json = serde_json::to_value(&out[1]).expect("序列化");
+    assert_eq!(json["role"], "user");
+    assert!(json["content"].is_array(), "content 必须是内容块数组：{json}");
+    assert_eq!(json["content"][1]["type"], "image_url");
+}
+
+/// 用户附的图和文字进同一条 user 消息，而且图在前。
+///
+/// `[约束]` 顺序要和 user_content 摆进历史的顺序一致:两家的文档都建议
+/// 图片在前，实测差别在"先看图再读问题"和"读完问题回头找图"之间 ——
+/// 后者更容易答偏。以前这里把图挪到文字后面单发一条，等于把上游特意
+/// 排好的顺序又翻了回去。
+#[test]
+fn 用户附图和文字同一条消息且图在前() {
+    use riot_protocol::message::Attachment;
+
+    let msgs = vec![Message::User {
+        id: MessageId::from_raw("u1"),
+        content: vec![
+            UserContent::Attachment(Attachment::Image {
+                media_type: "image/png".into(),
+                data: "IMG1".into(),
+            }),
+            UserContent::Text {
+                text: "这里为什么错位".into(),
+            },
+        ],
+        meta: MessageMeta::default(),
+    }];
+
+    let out = convert_messages(&msgs);
+    assert_eq!(out.len(), 1, "图和文字不该拆成两条消息：{out:?}");
+
+    let WireMessage::UserParts { content } = &out[0] else {
+        panic!("应该是带内容块的 user：{:?}", out[0]);
+    };
+    assert!(
+        matches!(&content[0], crate::openai::wire::WirePart::ImageUrl { image_url }
+            if image_url.url == "data:image/png;base64,IMG1"),
+        "图片要排在最前：{content:?}"
+    );
+    assert!(
+        matches!(&content[1], crate::openai::wire::WirePart::Text { text }
+            if text == "这里为什么错位"),
+        "文字跟在图后面：{content:?}"
+    );
+}
+
+/// 系统提醒类附件渲染成 `<system-reminder>` 文本，不是字面 JSON。
+///
+/// 以前直接 `serde_json::to_string`，模型读到的是
+/// `{"type":"attachment","kind":"system_reminder",...}` —— 它会把这坨
+/// 当成数据而不是指示，而 Anthropic 那条路给的是正常文本，两边行为不一致。
+#[test]
+fn 系统提醒附件渲染成文本不是_json() {
+    use riot_protocol::message::Attachment;
+
+    let msgs = vec![Message::User {
+        id: MessageId::from_raw("u1"),
+        content: vec![
+            UserContent::Attachment(Attachment::SystemReminder {
+                text: "这是一条带外提示".into(),
+            }),
+            UserContent::Text { text: "继续".into() },
+        ],
+        meta: MessageMeta::default(),
+    }];
+
+    let out = convert_messages(&msgs);
+    let WireMessage::User { content } = &out[0] else {
+        panic!("没有图片时应该还是纯文本 user：{:?}", out[0]);
+    };
+    assert!(content.contains("<system-reminder>"), "{content}");
+    assert!(content.contains("这是一条带外提示"), "{content}");
+    assert!(!content.contains("\"kind\""), "不该是字面 JSON：{content}");
+}
+
 #[test]
 fn 工具结果排在同批用户文本之前() {
     // OpenAI 要求 tool 消息紧跟带 tool_calls 的 assistant，中间不能插 user。

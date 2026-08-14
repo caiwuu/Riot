@@ -178,6 +178,9 @@ fn describe(kind: SafetyKind, path: &Path) -> String {
         SafetyKind::Credentials => format!("{p} 看起来是凭证文件。"),
         SafetyKind::CommandInjection => format!("命令里检测到注入模式：{p}"),
         SafetyKind::UnparseableCommand => format!("无法解析这个命令：{p}"),
+        // scope 不走文件路径的 safety::check，这一分支只为穷尽匹配存在;
+        // 真正的 scope 提示由渗透工具自己拼（带目标域名）。
+        SafetyKind::OutOfScope => format!("目标 {p} 不在授权的渗透范围内。"),
     }
 }
 

@@ -312,6 +312,23 @@
           ]
         },
         {
+          "description": "会话的权限模式变了，而且**不是**用户在界面上切的。\n\n目前唯一来源：批准计划（ExitPlanMode）时用户选择的执行档位由\n宿主直接落到会话上。界面必须跟着更新 —— 否则 composer 还显示\n「规划模式」，而宿主已经在按「自动接受编辑」放行了。显示得比\n实际更严是最坏的一种错（和 SessionInfo.mode 的注释同一条教训）。",
+          "type": "object",
+          "properties": {
+            "mode": {
+              "$ref": "#/$defs/PermissionMode"
+            },
+            "type": {
+              "type": "string",
+              "const": "mode_changed"
+            }
+          },
+          "required": [
+            "type",
+            "mode"
+          ]
+        },
+        {
           "description": "终止。\n\n**必须是流的最后一个事件，且必须出现。** 即使内核 panic 被捕获，\n也要合成一条 `Done { reason: Error }`。消费者依赖这一点做资源清理；\n缺失会导致 UI 永远转圈。由 INV-4 断言保证。",
           "type": "object",
           "properties": {
@@ -526,6 +543,27 @@
             "kind": {
               "type": "string",
               "const": "restored_file"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "path",
+            "content"
+          ]
+        },
+        {
+          "description": "用户在消息里用 `@路径` 点名的文件。\n\n和 `RestoredFile` 分开是因为读者不同：那个是\"你之前读过\"，\n这个是\"用户现在让你看\"。界面也靠它在用户气泡下列出引用了哪些\n文件 —— 混进 SystemReminder 的话，切回会话就只剩一段光秃秃的\n提醒文本，看不出用户当时附了什么。",
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "user_file"
             },
             "path": {
               "type": "string"
@@ -2044,6 +2082,11 @@
           "description": "命令 AST 解析失败或含不认识的结构。",
           "type": "string",
           "const": "unparseable_command"
+        },
+        {
+          "description": "主动渗透动作打到了**未授权**的目标（不在渗透 scope 内）。\n\n`[约束]` 归到安全检查而不是普通同意，就是为了让它**对 bypass 免疫**:\n「全部放行」的语义是\"信任 agent 做常规开发\"，不是\"允许它对任意目标\n发起攻击\"。scope 外的改包、fuzzing、爬虫必须由用户显式授权目标，\n哪怕开着 bypass。只有无人值守模式（用户明示交出一切）才放行。",
+          "type": "string",
+          "const": "out_of_scope"
         }
       ]
     },
@@ -2338,13 +2381,22 @@
           ]
         },
         {
+          "description": "图片结果。`data` 是**给模型的那份**：产出方（截图、读图）会先把\n大图压到适合视觉模型的尺寸再放进来 —— 一张整页截图直接进上下文\n能吃掉小半个窗口，而模型判断布局并不需要原始分辨率。",
           "type": "object",
           "properties": {
             "data": {
               "type": "string"
             },
             "media_type": {
+              "description": "`data` 的类型（压缩产物通常是 image/jpeg），不一定等于原图类型。",
               "type": "string"
+            },
+            "path": {
+              "description": "原图的位置：截图落盘的文件，或被读的图片本身。界面优先按它\n显示原图（清晰、可另存）；`None` 表示没落成盘，界面显示\n`data` 里的压缩图兜底。模型不用这个字段。",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "type": {
               "type": "string",
@@ -2355,6 +2407,41 @@
             "type",
             "media_type",
             "data"
+          ]
+        },
+        {
+          "description": "图片 + 它的文字转述。主模型收不了图时（视觉兼容，见 vision 模块）\n的产物：**模型只读 `text`**（转述代替图片，provider 不发图），\n图片本体留给界面贴出来 —— 用户看得见图，而不是看见一段写给模型的\n转述文字。",
+          "type": "object",
+          "properties": {
+            "data": {
+              "description": "压缩图。界面在 `path` 缺失时用它兜底显示。",
+              "type": "string"
+            },
+            "media_type": {
+              "description": "`data` 的类型（压缩产物通常是 image/jpeg），不一定等于原图类型。",
+              "type": "string"
+            },
+            "path": {
+              "description": "原图位置，语义同 [`Image::path`](ToolResultContent::Image)。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text": {
+              "description": "给模型的转述，自带\"当作亲眼所见\"的使用指示。",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "described_image"
+            }
+          },
+          "required": [
+            "type",
+            "media_type",
+            "data",
+            "text"
           ]
         }
       ]

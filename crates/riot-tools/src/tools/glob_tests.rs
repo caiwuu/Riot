@@ -1,55 +1,76 @@
 //! Glob 工具的测试。
 //!
-//! 重头和 Grep 一样在 argv 构造，尤其是两个 `--glob` 的**先后顺序**：
-//! 排除 .git 的那条必须在用户 pattern 之后，否则 `**/*` 会把整个 object
-//! 库放回结果里。这个错误不会有任何报错，只会让答案悄悄变成垃圾。
+//! 跑的是**真遍历**：临时目录 + 真文件。以前这里断言的是拼给 ripgrep 的
+//! argv（那时工具是 spawn 子进程的）—— 换成库实现之后那些断言没有了对象，
+//! 而且它们本来就只能证明"参数拼对了"。
+//!
+//! 排序仍走注入的 fs（MemFs 记 mtime）：那部分是工具自己的逻辑，
+//! 和遍历无关，用真文件写 mtime 反而不好控制。
 
+// 建真目录、写真文件：测的就是在真实文件系统上的行为。
+#![allow(clippy::disallowed_methods)]
+
+use std::path::Path;
 use std::sync::Arc;
 
-use riot_protocol::tool::{Tool, ToolContext, ToolOutcome};
 use pretty_assertions::assert_eq;
+use riot_protocol::tool::{Tool, ToolContext, ToolOutcome};
 use tokio_util::sync::CancellationToken;
 
 use super::Glob;
-use super::fakeproc::{FakeProc, Script};
+use super::fakeproc::FakeProc;
 use super::memfs::{MemFileState, MemFs};
 
 struct Harness {
-    proc: Arc<FakeProc>,
     ctx: ToolContext,
+    fs: Arc<MemFs>,
+    _dir: tempfile::TempDir,
 }
 
-fn harness(proc: FakeProc, fs: MemFs) -> Harness {
-    let proc = Arc::new(proc);
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+/// 建一棵小树。`files` 里的每个相对路径都会被真的创建出来。
+fn harness(files: &[&str]) -> Harness {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let root = dir.path();
+    std::fs::write(root.join(".gitignore"), "ignored.rs\ntarget/\n").expect("写");
+    for f in files {
+        let p = root.join(f);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).expect("目录");
+        }
+        std::fs::write(&p, "x").expect("写");
+    }
 
+    // MemFs 只服务两件事：`path` 参数的围栏解析，和排序要读的 mtime。
+    let mut fs = MemFs::new().with_dir(root.to_path_buf());
+    for f in files {
+        let p = root.join(f);
+        if let Some(parent) = p.parent() {
+            fs = fs.with_dir(parent.to_path_buf());
+        }
+        fs = fs.with_file(p.clone(), "x");
+    }
+    let fs = Arc::new(fs);
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let ctx = ToolContext {
         session_id: riot_protocol::id::SessionId::from_raw("s1"),
         tool_use_id: riot_protocol::id::ToolUseId::from_raw("t1"),
-        cwd: "/work".into(),
+        cwd: root.to_path_buf(),
+        artifacts_dir: "/artifacts".into(),
         cancel: CancellationToken::new(),
         progress: riot_protocol::tool::ProgressSink::new(
             riot_protocol::id::ToolUseId::from_raw("t1"),
             tx,
         ),
         file_state: Arc::new(MemFileState::new()),
-        fs: Arc::new(fs),
-        proc: Arc::clone(&proc) as Arc<_>,
+        fs: Arc::clone(&fs) as Arc<_>,
+        proc: Arc::new(FakeProc::new()),
         web: Arc::new(riot_protocol::web::NoWeb),
         browser: Arc::new(riot_protocol::browser::NoBrowser),
+        vision: Arc::new(riot_protocol::vision::NoVision),
         clock: Arc::new(crate::testing::FixedClock::default()),
     };
-
-    Harness { proc, ctx }
-}
-
-fn base_fs() -> MemFs {
-    MemFs::new().with_dir("/work").with_dir("/work/src").with_dir("/etc")
-}
-
-/// FakeProc 按 args 最后一项索引脚本，而 Glob 的最后一项是搜索根。
-fn proc_for(root: &str, script: Script) -> FakeProc {
-    FakeProc::new().on(root, script)
+    Harness { ctx, fs, _dir: dir }
 }
 
 async fn glob(h: &Harness, args: serde_json::Value) -> ToolOutcome {
@@ -74,189 +95,131 @@ fn is_ok(o: &ToolOutcome) -> bool {
     matches!(o, ToolOutcome::Ok { .. })
 }
 
-fn args_of(h: &Harness) -> Vec<String> {
-    h.proc.last_spec().expect("起过进程").args
+/// 结果里的相对路径（去掉临时目录前缀，断言好读）。
+fn names(text: &str, root: &Path) -> Vec<String> {
+    let prefix = root.to_string_lossy().into_owned();
+    text.lines()
+        .filter(|l| l.starts_with(&prefix))
+        .map(|l| l[prefix.len()..].trim_start_matches('/').to_owned())
+        .collect()
 }
 
-// ── argv 构造 ─────────────────────────────────────────
+// ── 参数校验 ──────────────────────────────────────────
 
 #[tokio::test]
-async fn 列文件而不是搜内容() {
-    let h = harness(proc_for("/work", Script::ok("/work/a.rs\n")), base_fs());
-    glob(&h, serde_json::json!({ "pattern": "**/*.rs" })).await;
+async fn 空_pattern_给出可用写法() {
+    let h = harness(&["a.rs"]);
+    let o = glob(&h, serde_json::json!({ "pattern": "  " })).await;
+    assert!(!is_ok(&o));
+    assert!(text_of(&o).contains("**/*"), "{}", text_of(&o));
+}
 
-    let args = args_of(&h);
-    assert!(args.contains(&"--files".to_owned()), "少了 --files：{args:?}");
-    assert!(
-        args.contains(&"--no-config".to_owned()),
-        "少了 --no-config，用户的 rg 配置会让结果因机器而异：{args:?}"
-    );
+// ── 遍历 ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn 按扩展名找文件() {
+    let h = harness(&["a.rs", "src/b.rs", "c.txt"]);
+    let o = glob(&h, serde_json::json!({ "pattern": "**/*.rs" })).await;
+    let mut got = names(&text_of(&o), &h.ctx.cwd);
+    got.sort();
+    assert_eq!(got, vec!["a.rs", "src/b.rs"]);
+}
+
+#[tokio::test]
+async fn 限定子目录() {
+    let h = harness(&["a.rs", "src/b.rs"]);
+    let o = glob(&h, serde_json::json!({ "pattern": "src/*.rs" })).await;
+    assert_eq!(names(&text_of(&o), &h.ctx.cwd), vec!["src/b.rs"]);
 }
 
 #[tokio::test]
 async fn 进点开头的目录() {
     // .github/workflows/ci.yml、.cargo/config.toml 都是用户会问起的文件。
-    // 少了 --hidden 的话这个工具会显得时灵时不灵。
-    let h = harness(proc_for("/work", Script::ok("/work/a.yml\n")), base_fs());
-    glob(&h, serde_json::json!({ "pattern": "**/*.yml" })).await;
-
-    assert!(args_of(&h).contains(&"--hidden".to_owned()));
-}
-
-#[tokio::test]
-async fn 排除_git_的_glob_排在用户_pattern_之后() {
-    // `[约束]` ripgrep 里后写的 glob 优先级更高。顺序反过来的话，
-    // `**/*` 这种 pattern 会把 .git 整个放回结果 —— 没有任何报错，
-    // 只是答案被 object 文件淹没。
-    let h = harness(proc_for("/work", Script::ok("/work/a\n")), base_fs());
-    glob(&h, serde_json::json!({ "pattern": "**/*" })).await;
-
-    let args = args_of(&h);
-    let user = args.iter().position(|a| a == "**/*").expect("用户 pattern 在");
-    let exclude = args.iter().position(|a| a == "!.git/").expect("排除 .git 在");
-    assert!(
-        exclude > user,
-        "排除 .git 必须排在用户 pattern 之后，否则会被覆盖：{args:?}"
+    // 跳过隐藏目录的话，这个工具会显得时灵时不灵。
+    let h = harness(&[".github/workflows/ci.yml"]);
+    let o = glob(&h, serde_json::json!({ "pattern": "**/*.yml" })).await;
+    assert_eq!(
+        names(&text_of(&o), &h.ctx.cwd),
+        vec![".github/workflows/ci.yml"]
     );
 }
 
 #[tokio::test]
-async fn 路径参数在双横线之后() {
-    // 搜索根可能以 `-` 开头，不隔开会被当成 flag
-    let h = harness(proc_for("/work", Script::ok("")), base_fs());
-    glob(&h, serde_json::json!({ "pattern": "**/*" })).await;
-
-    let args = args_of(&h);
-    let dashdash = args.iter().position(|a| a == "--").expect("有 --");
-    assert_eq!(args.last().map(String::as_str), Some("/work"));
-    assert!(dashdash < args.len() - 1);
+async fn 不列出_git_内部() {
+    // `**/*` 会把 .git 整个捞出来的话，答案会被 object 文件淹没。
+    let h = harness(&["a.rs", ".git/HEAD", ".git/objects/ab/cdef"]);
+    let o = glob(&h, serde_json::json!({ "pattern": "**/*" })).await;
+    let got = names(&text_of(&o), &h.ctx.cwd);
+    assert!(!got.iter().any(|p| p.starts_with(".git/")), "{got:?}");
+    assert!(got.contains(&"a.rs".to_owned()), "{got:?}");
 }
-
-// ── 结果处理 ───────────────────────────────────────────
 
 #[tokio::test]
 async fn 没找到是成功不是失败() {
     // `[约束]` 报成失败会让模型换个参数把同一件事再做一遍。
     // "没有这样的文件"本身就是一个有用的答案。
-    let h = harness(proc_for("/work", Script::fail(1, "")), base_fs());
-    let out = glob(&h, serde_json::json!({ "pattern": "**/*.zig" })).await;
-
-    assert!(is_ok(&out), "无匹配必须是成功：{out:?}");
-    let t = text_of(&out);
+    let h = harness(&["a.rs"]);
+    let o = glob(&h, serde_json::json!({ "pattern": "**/*.zig" })).await;
+    assert!(is_ok(&o), "无匹配必须是成功：{o:?}");
+    let t = text_of(&o);
     assert!(t.contains("没有找到"), "{t}");
     assert!(t.contains(".gitignore"), "要说明为什么可能看不到：{t}");
 }
 
 #[tokio::test]
-async fn rg_出错才是失败() {
-    let h = harness(proc_for("/work", Script::fail(2, "regex parse error")), base_fs());
-    let out = glob(&h, serde_json::json!({ "pattern": "**/*.rs" })).await;
-
-    assert!(!is_ok(&out));
-    assert!(text_of(&out).contains("regex parse error"));
+async fn 坏的_glob_给出例子() {
+    let h = harness(&["a.rs"]);
+    let o = glob(&h, serde_json::json!({ "pattern": "[" })).await;
+    assert!(!is_ok(&o));
+    assert!(text_of(&o).contains("**/*.rs"), "{}", text_of(&o));
 }
+
+// ── 排序与上限 ────────────────────────────────────────
 
 #[tokio::test]
 async fn 最近修改的排在前面() {
-    // 结果被截断时，这个顺序决定了模型看到的是不是有用的那一批
-    let fs = base_fs()
-        .with_file("/work/old.rs", "x")
-        .with_file("/work/new.rs", "x")
-        .with_file("/work/mid.rs", "x");
-    fs.put("/work/old.rs", "x", 1_000);
-    fs.put("/work/mid.rs", "x", 2_000);
-    fs.put("/work/new.rs", "x", 3_000);
+    // 结果被截断时，这个顺序决定了模型看到的是不是有用的那一批。
+    let h = harness(&["old.rs", "mid.rs", "new.rs"]);
+    let root = h.ctx.cwd.clone();
+    h.fs.put(root.join("old.rs"), "x", 1_000);
+    h.fs.put(root.join("mid.rs"), "x", 2_000);
+    h.fs.put(root.join("new.rs"), "x", 3_000);
 
-    let h = harness(
-        proc_for("/work", Script::ok("/work/old.rs\n/work/new.rs\n/work/mid.rs\n")),
-        fs,
-    );
-    let out = glob(&h, serde_json::json!({ "pattern": "**/*.rs" })).await;
-
+    let o = glob(&h, serde_json::json!({ "pattern": "**/*.rs" })).await;
     assert_eq!(
-        text_of(&out),
-        "/work/new.rs\n/work/mid.rs\n/work/old.rs",
+        names(&text_of(&o), &root),
+        vec!["new.rs", "mid.rs", "old.rs"],
         "应该按 mtime 从新到旧"
     );
 }
 
 #[tokio::test]
 async fn stat_不到的文件排在最后而不是让整次调用失败() {
-    let fs = base_fs().with_file("/work/here.rs", "x");
-    fs.put("/work/here.rs", "x", 5_000);
+    let h = harness(&["here.rs", "gone.rs"]);
+    let root = h.ctx.cwd.clone();
+    h.fs.put(root.join("here.rs"), "x", 5_000);
+    // gone.rs 在真实磁盘上有、MemFs 里没记 mtime → 当作最旧。
 
-    let h = harness(
-        proc_for("/work", Script::ok("/work/ghost.rs\n/work/here.rs\n")),
-        fs,
-    );
-    let out = glob(&h, serde_json::json!({ "pattern": "**/*.rs" })).await;
-
-    assert!(is_ok(&out), "一个文件 stat 不到不该毁掉整次查找");
-    assert_eq!(text_of(&out), "/work/here.rs\n/work/ghost.rs");
+    let o = glob(&h, serde_json::json!({ "pattern": "**/*.rs" })).await;
+    assert!(is_ok(&o), "一个 stat 不到的文件不该让整次调用失败");
+    assert_eq!(names(&text_of(&o), &root), vec!["here.rs", "gone.rs"]);
 }
 
 #[tokio::test]
-async fn 同一时间的文件按路径稳定排序() {
-    // 生成代码、git checkout 会让一批文件共享同一个 mtime。
-    // 不兜底的话同样的调用两次给出不同顺序。
-    let fs = base_fs()
-        .with_file("/work/b.rs", "x")
-        .with_file("/work/a.rs", "x");
-    fs.put("/work/b.rs", "x", 7_000);
-    fs.put("/work/a.rs", "x", 7_000);
+async fn 结果过多时截断并说明() {
+    let names_: Vec<String> = (0..350).map(|i| format!("f{i:03}.rs")).collect();
+    let refs: Vec<&str> = names_.iter().map(String::as_str).collect();
+    let h = harness(&refs);
 
-    let h = harness(proc_for("/work", Script::ok("/work/b.rs\n/work/a.rs\n")), fs);
-    let out = glob(&h, serde_json::json!({ "pattern": "**/*.rs" })).await;
-
-    assert_eq!(text_of(&out), "/work/a.rs\n/work/b.rs");
+    let o = glob(&h, serde_json::json!({ "pattern": "**/*.rs" })).await;
+    let t = text_of(&o);
+    assert_eq!(names(&t, &h.ctx.cwd).len(), 300, "上限 300 条");
+    assert!(t.contains("共 350 个文件"), "要说清被截断了：{t}");
 }
 
 #[tokio::test]
-async fn 结果过多时截断并说明怎么缩小() {
-    let listing: String = (0..50)
-        .map(|i| format!("/work/f{i}.rs\n"))
-        .collect::<Vec<_>>()
-        .join("");
-    let h = harness(proc_for("/work", Script::ok(&listing)), base_fs());
-
-    let out = glob(&h, serde_json::json!({ "pattern": "**/*.rs", "head_limit": 5 })).await;
-    let t = text_of(&out);
-
-    assert_eq!(t.lines().filter(|l| l.starts_with("/work/")).count(), 5);
-    assert!(t.contains("共 50 个文件"), "{t}");
-    assert!(t.contains("`pattern` 更具体"), "要告诉模型下一步怎么做：{t}");
-}
-
-// ── 参数校验 ───────────────────────────────────────────
-
-#[tokio::test]
-async fn 项目目录之外也能搜() {
-    // 曾经断言"必须拒绝"。边界撤掉了 —— 在隔壁仓库里找文件是正当需求。
-    let h = harness(proc_for("/other", Script::ok("/other/a.rs")), base_fs().with_dir("/other"));
-    let out = glob(&h, serde_json::json!({ "pattern": "**/*.rs", "path": "/other" })).await;
-
-    assert!(is_ok(&out), "{}", text_of(&out));
-}
-
-#[tokio::test]
-async fn 空_pattern_被拒并给出替代写法() {
-    let h = harness(proc_for("/work", Script::ok("")), base_fs());
-    let out = glob(&h, serde_json::json!({ "pattern": "  " })).await;
-
-    assert!(!is_ok(&out));
-    assert!(text_of(&out).contains("**/*"), "光说不行还得说怎么做");
-}
-
-#[tokio::test]
-async fn 认错参数时指向_grep() {
-    // 模型最容易犯的错是拿 Glob 当 Grep 用
-    let h = harness(proc_for("/work", Script::ok("")), base_fs());
-    let out = glob(
-        &h,
-        serde_json::json!({ "pattern": "**/*.rs", "output_mode": "content" }),
-    )
-    .await;
-
-    assert!(!is_ok(&out));
-    assert!(text_of(&out).contains("Grep"), "{}", text_of(&out));
+async fn head_limit_限制条数() {
+    let h = harness(&["a.rs", "b.rs", "c.rs"]);
+    let o = glob(&h, serde_json::json!({ "pattern": "**/*.rs", "head_limit": 2 })).await;
+    assert_eq!(names(&text_of(&o), &h.ctx.cwd).len(), 2);
 }

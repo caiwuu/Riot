@@ -16,8 +16,15 @@ pub mod fakeproc;
 #[cfg(any(test, feature = "testing"))]
 pub mod memfs;
 pub mod path;
+pub mod search;
+pub mod pentest;
+pub mod plan;
 pub mod precondition;
 pub mod read;
+pub mod shrink;
+pub mod skill;
+pub mod todo;
+pub mod tool_search;
 pub mod text;
 pub mod web;
 pub mod write;
@@ -59,6 +66,8 @@ pub fn builtin() -> Vec<Arc<dyn Tool>> {
     // 浏览器工具单独一组:它们依赖宿主注入 BrowserAccess，没注入时
     // 会明确说"用不了"，而不是悄悄换个行为。
     tools.extend(browser::tools());
+    // 追加在末尾（prompt cache 前缀稳定性，见函数注释）。
+    tools.push(Arc::new(todo::TodoWrite));
     tools
 }
 

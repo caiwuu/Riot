@@ -31,6 +31,10 @@ export type AgentEvent =
       type: "compacted";
     }
   | {
+      mode: PermissionMode;
+      type: "mode_changed";
+    }
+  | {
       reason: TerminalReason;
       type: "done";
     };
@@ -124,8 +128,36 @@ export type ToolResultContent =
     }
   | {
       data: string;
+      /**
+       * `data` 的类型（压缩产物通常是 image/jpeg），不一定等于原图类型。
+       */
       media_type: string;
+      /**
+       * 原图的位置：截图落盘的文件，或被读的图片本身。界面优先按它
+       * 显示原图（清晰、可另存）；`None` 表示没落成盘，界面显示
+       * `data` 里的压缩图兜底。模型不用这个字段。
+       */
+      path?: string | null;
       type: "image";
+    }
+  | {
+      /**
+       * 压缩图。界面在 `path` 缺失时用它兜底显示。
+       */
+      data: string;
+      /**
+       * `data` 的类型（压缩产物通常是 image/jpeg），不一定等于原图类型。
+       */
+      media_type: string;
+      /**
+       * 原图位置，语义同 [`Image::path`](ToolResultContent::Image)。
+       */
+      path?: string | null;
+      /**
+       * 给模型的转述，自带"当作亲眼所见"的使用指示。
+       */
+      text: string;
+      type: "described_image";
     };
 /**
  * 文件引用、图片、系统提醒。展开时机由上下文管理层决定。
@@ -141,6 +173,11 @@ export type Attachment = {
   | {
       content: string;
       kind: "restored_file";
+      path: string;
+    }
+  | {
+      content: string;
+      kind: "user_file";
       path: string;
     }
   | {
@@ -258,7 +295,8 @@ export type SafetyKind =
   | "agent_config"
   | "credentials"
   | "command_injection"
-  | "unparseable_command";
+  | "unparseable_command"
+  | "out_of_scope";
 /**
  * 结构化的"永久同意"。
  */

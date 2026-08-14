@@ -43,18 +43,133 @@ pub struct ProviderConfig {
     /// 显示名。
     pub name: String,
     pub protocol: Protocol,
+    /// 接口主机（可以带前缀路径），如 `https://api.deepseek.com`。
     pub base_url: String,
+    /// 接口路径，如 `/v1/chat/completions`。
+    ///
+    /// 空 = 按主机猜（见 `riot_providers::endpoint::api_url`）。
+    ///
+    /// `[取舍]` 让用户能填，而不是全靠猜。猜的规则已经踩过两次:智谱的对话在
+    /// `/api/paas/v4/chat/completions`（带 `/v1` 就 404），而它的完整模型清单
+    /// 偏偏在 `/api/paas/v4/v1/models`。中转和自建网关的花样只会更多，而猜错
+    /// 的表现是一个 404 —— 那个报错里没有任何线索指向路径。
+    ///
+    /// 默认留空:大多数人不需要关心这件事，填了才走这条。
+    #[serde(default)]
+    pub api_path: String,
     /// 读 key 的环境变量名，同时是 `auth.json` 里的存储键。
     pub api_key_env: String,
     /// 已添加的模型（手动输入或从 `/models` 接口挑选保存）。
     #[serde(default)]
-    pub models: Vec<String>,
+    pub models: Vec<ModelConfig>,
     /// 过载时降级到的模型。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_model: Option<String>,
     /// 这个服务方的采样参数。会话可以临时覆盖单个字段。
     #[serde(default)]
     pub sampling: Sampling,
+    /// **已废弃**：视觉能力按模型记（[`ModelConfig::vision`]）。字段保留只为
+    /// 读懂短暂存在过的"按服务方"格式 —— 加载时 [`normalize`] 会把它铺到这个
+    /// 服务方的所有模型上然后清空。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) vision: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// 一个模型的配置。
+///
+/// `[约束]` 能力和采样参数属于**模型**，不属于服务方。同一家同时有视觉模型和
+/// 纯文本模型是常态 —— 智谱的 `glm-4.6v` 能看图、`glm-5.2` 不能。按服务方记
+/// 的话，为了把前者配成视觉兼容模型就得给整家打开，于是和后者聊天时截图也被
+/// 当成图片发出去，服务方回一句
+/// `messages.content.type 参数非法，取值范围['text']` —— 而那句话完全不指向
+/// "是那张截图的事"。这个坑真实踩过一次。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelConfig {
+    /// 发给服务方的模型名。
+    pub id: String,
+    /// 显示名。空 = 直接显示 `id`。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// 能收图片。
+    ///
+    /// 默认关:多数国内的对话模型是纯文本的，猜"支持"的代价是每次带图的请求
+    /// 都被服务方拒，而报错不指向这个开关。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub vision: bool,
+    /// 这个模型的采样参数。空字段继承 provider 的设置。
+    #[serde(default, skip_serializing_if = "Sampling::is_empty")]
+    pub sampling: Sampling,
+}
+
+impl ModelConfig {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: String::new(),
+            vision: false,
+            sampling: Sampling::default(),
+        }
+    }
+
+    /// 界面上显示什么。
+    pub fn label(&self) -> &str {
+        if self.name.trim().is_empty() {
+            &self.id
+        } else {
+            &self.name
+        }
+    }
+}
+
+/// `[约束]` 手写反序列化，为了同时读得懂两种形状:老配置里 `models` 是字符串
+/// 数组（`["glm-5.2"]`），新配置是对象数组。
+///
+/// 不兼容的后果不是"少了几个开关"，而是**整份配置解析失败** —— 用户升级之后
+/// 看到的是"我配的服务方、key、模型全没了"，而真正的原因只是这个字段换了形状。
+impl<'de> Deserialize<'de> for ModelConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Full {
+            id: String,
+            #[serde(default)]
+            name: String,
+            #[serde(default)]
+            vision: bool,
+            #[serde(default)]
+            sampling: Sampling,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            /// 老格式：只有模型名。
+            Name(String),
+            Full(Full),
+        }
+
+        Ok(match Raw::deserialize(d)? {
+            Raw::Name(id) => Self::new(id),
+            Raw::Full(f) => Self {
+                id: f.id,
+                name: f.name,
+                vision: f.vision,
+                sampling: f.sampling,
+            },
+        })
+    }
+}
+
+impl ProviderConfig {
+    /// 按模型名找配置。
+    pub fn model(&self, id: &str) -> Option<&ModelConfig> {
+        self.models.iter().find(|m| m.id == id)
+    }
 }
 
 impl ProviderConfig {
@@ -167,6 +282,184 @@ fn yes() -> bool {
     true
 }
 
+/// 一个 MCP 服务器（stdio 传输：命令 + 参数 + 环境变量）。
+///
+/// `[约束]` `id` 进工具名（`mcp__<id>__…`）和权限规则，改了它等于换了
+/// 一批工具名 —— 用户点过的"总是允许"全部失配。界面上要提示这一点。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerConfig {
+    /// 稳定标识。只允许字母数字、`-`、`_` —— 别的字符会在工具名里被
+    /// 替换成 `_`，两个只差一个点的 id 就撞名了。
+    pub id: String,
+    /// 显示名。空 = 显示 id。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// 启动命令，如 `npx`、`uvx`、或一个可执行文件的绝对路径。
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// 附加环境变量（API key 之类）。BTreeMap 保证序列化顺序稳定 ——
+    /// config.json 是用户会看、会 diff 的文件。
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// 关掉 = 进程停掉、工具消失，但配置留着。
+    #[serde(default = "yes")]
+    pub enabled: bool,
+}
+
+impl McpServerConfig {
+    pub fn label(&self) -> &str {
+        if self.name.trim().is_empty() { &self.id } else { &self.name }
+    }
+}
+
+// ── MCP 的标准 JSON 配置（生态通用格式） ─────────────────────
+//
+// Claude Desktop / Cursor / Cline / VS Code 用的是同一个形状：
+//
+// ```json
+// { "mcpServers": { "filesystem": { "command": "npx", "args": [...], "env": {...} } } }
+// ```
+//
+// 每个 MCP 服务器的 README 给的就是这段。支持粘贴它，而不是逼用户把
+// args 一行行拆进表单。解析在宿主做 —— 格式规则只能有一份。
+
+/// 标准格式里的一个服务器条目。
+///
+/// `[约束]` 未知字段**忽略而不是报错**：各家在这个形状上各有私货
+/// （Cline 的 `autoApprove`、`timeout`，VS Code 的 `envFile`……），
+/// 粘过来就报错的话，用户得先手工删字段才能导入。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawMcpServer {
+    #[serde(default)]
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: std::collections::BTreeMap<String, String>,
+    /// Cline / Roo 的停用标记。
+    #[serde(default)]
+    disabled: bool,
+    // 远程服务器的字段。认出来是为了给一句明确的"暂不支持"，
+    // 而不是"缺 command"这种不指向根因的报错。
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    server_url: Option<String>,
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    transport: Option<String>,
+}
+
+/// 把标准 JSON 解析成服务器列表。
+///
+/// 认三种根形状：`{"mcpServers": {...}}`（Claude Desktop / Cursor / Cline）、
+/// `{"servers": {...}}`（VS Code）、以及不带包装的裸映射 —— README 里
+/// 三种都常见。
+pub fn mcp_servers_from_json(raw: &str) -> Result<Vec<McpServerConfig>, ConfigError> {
+    let root: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|e| ConfigError::Parse(format!("不是合法的 JSON：{e}")))?;
+
+    let map = root
+        .get("mcpServers")
+        .or_else(|| root.get("servers"))
+        .unwrap_or(&root);
+    let map = map.as_object().ok_or_else(|| {
+        ConfigError::Parse(
+            "形状不对。期待 {\"mcpServers\": {\"名字\": {\"command\": …}}}".into(),
+        )
+    })?;
+    if map.is_empty() {
+        return Err(ConfigError::Parse("里面一个服务器都没有".into()));
+    }
+    // 裸映射的误判保护：如果"服务器"的值不是对象，说明用户粘的是单个
+    // 服务器的内层（{"command": "npx"}），缺了名字这一层。
+    if map.values().any(|v| !v.is_object()) {
+        return Err(ConfigError::Parse(
+            "形状不对。每个服务器要有名字：{\"mcpServers\": {\"名字\": {\"command\": …}}}".into(),
+        ));
+    }
+
+    let mut servers = Vec::with_capacity(map.len());
+    let mut seen = std::collections::HashSet::new();
+    for (key, value) in map {
+        let raw: RawMcpServer = serde_json::from_value(value.clone())
+            .map_err(|e| ConfigError::Parse(format!("「{key}」解析失败：{e}")))?;
+
+        if raw.url.is_some()
+            || raw.server_url.is_some()
+            || matches!(raw.kind.as_deref(), Some("http" | "sse" | "streamable-http"))
+            || matches!(raw.transport.as_deref(), Some("http" | "sse" | "streamable-http"))
+        {
+            return Err(ConfigError::Parse(format!(
+                "「{key}」是 http/sse 远程服务器，Riot 暂时只支持 stdio（command + args）"
+            )));
+        }
+        if raw.command.trim().is_empty() {
+            return Err(ConfigError::Parse(format!("「{key}」缺 command")));
+        }
+
+        // 生态里的键可以是任意字符串（"my.server"），而 id 要进工具名，
+        // 字符集受限。消毒进 id，原名进显示名 —— 不改用户看到的东西。
+        let id = sanitize_mcp_id(key);
+        if !seen.insert(id.clone()) {
+            return Err(ConfigError::Parse(format!(
+                "「{key}」和另一个服务器的 id 消毒后撞名了（{id}），改一下名字"
+            )));
+        }
+        servers.push(McpServerConfig {
+            name: if id == *key { String::new() } else { key.clone() },
+            id,
+            command: raw.command.trim().to_owned(),
+            args: raw.args,
+            env: raw.env,
+            enabled: !raw.disabled,
+        });
+    }
+    Ok(servers)
+}
+
+/// 把服务器列表导出成标准 JSON（和上面互逆）。
+///
+/// 只写标准字段：`name` 是 Riot 的显示名，标准格式里没有这个概念，
+/// 导出就丢 —— 导入侧按 id 合并时会把它捡回来。
+pub fn mcp_servers_to_json(servers: &[McpServerConfig]) -> String {
+    let mut map = serde_json::Map::new();
+    for s in servers {
+        let mut entry = serde_json::Map::new();
+        entry.insert("command".into(), s.command.clone().into());
+        if !s.args.is_empty() {
+            entry.insert("args".into(), s.args.clone().into());
+        }
+        if !s.env.is_empty() {
+            entry.insert(
+                "env".into(),
+                serde_json::Value::Object(
+                    s.env.iter().map(|(k, v)| (k.clone(), v.clone().into())).collect(),
+                ),
+            );
+        }
+        if !s.enabled {
+            entry.insert("disabled".into(), true.into());
+        }
+        map.insert(s.id.clone(), serde_json::Value::Object(entry));
+    }
+    let root = serde_json::json!({ "mcpServers": map });
+    serde_json::to_string_pretty(&root).expect("纯数据序列化不会失败")
+}
+
+/// id 消毒：和 validate_mcp 的字符集一致，别的字符换成 `-`。
+fn sanitize_mcp_id(key: &str) -> String {
+    let id: String = key
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    if id.trim_matches('-').is_empty() { "server".into() } else { id }
+}
+
 impl Default for WebConfig {
     fn default() -> Self {
         Self {
@@ -220,9 +513,37 @@ pub struct AppConfig {
     /// 没人看，等待只是让整条任务停在那里。
     #[serde(default = "default_ask_timeout_secs")]
     pub ask_timeout_secs: u32,
+    /// 单轮任务里模型最多自主往返多少次（一次 = 调模型 + 跑它要的工具）。
+    ///
+    /// 到顶就停下、等用户再说一句（不是报错，是"该歇口气了"）。可配置是
+    /// 因为不同任务的步数差一个量级:随手问一句几轮就够，而浏览器自动化、
+    /// 渗透这类多步任务动辄几十轮，写死一个值总有一头不合适。
+    #[serde(default = "default_max_turns")]
+    pub max_turns: u32,
     /// 联网能力（抓取 + 搜索）。
     #[serde(default)]
     pub web: WebConfig,
+    /// MCP 服务器。连接是应用级的（会话共享），工具每轮快照。
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerConfig>,
+    /// 历史估算超过这个 token 数时，轮次开始前做 LLM 总结压缩。
+    ///
+    /// 可配置是因为窗口大小 Riot 猜不到：各家模型 32k 到 200k+ 都有，
+    /// 而配置里的模型名对不上任何一张公开价目表（中转、自建、微调名）。
+    /// 默认值按 128k 窗口留 ~28k 余量取的；模型窗口更小就调低。
+    /// 413 反应式压缩仍然兜底 —— 这个阈值只决定"主动压"的时机。
+    #[serde(default = "default_compact_threshold_tokens")]
+    pub compact_threshold_tokens: u32,
+    /// 视觉兼容模型，格式 `providerId/model`。
+    ///
+    /// 主模型收不了图片（provider 没勾 `vision`）时，用它把图片转成文字再交给
+    /// 主模型。空 = 不转，截图工具会直接说"去配一下"。
+    ///
+    /// `[取舍]` 转述必然有损，但可选项只有三个:什么都不给（模型会自己去 shell
+    /// 里截屏，然后拿着一张截错的图分析 —— 真实发生过）、报错（截图工具在半数
+    /// 配置下等于不存在）、或者给一份有损但可用的描述。第三个最不坏。
+    #[serde(default)]
+    pub vision_model: String,
 }
 
 /// 权限弹窗默认等 60 秒。
@@ -234,6 +555,24 @@ pub struct AppConfig {
 /// 60 秒对在场的用户仍然够用：弹窗是主动弹出来的，不是要人去找。
 pub const fn default_ask_timeout_secs() -> u32 {
     60
+}
+
+/// 主动压缩的默认阈值：100k token。
+///
+/// 128k 窗口减去输出预留（~16k）和总结本身要占的空间，再留一点余量。
+/// 窗口更大的模型晚点压也无妨（压缩是省钱不是保命，保命有 413 兜底）；
+/// 窗口更小的模型需要用户在设置里调低。
+pub const fn default_compact_threshold_tokens() -> u32 {
+    100_000
+}
+
+/// 单轮默认最多 48 次往返。
+///
+/// 够一次中等复杂的任务（改代码 + 跑测试 + 修，或一串浏览器操作）在一句话
+/// 里跑完，又不至于让一个跑飞的循环烧太久才被兜住。多步的浏览器/渗透任务
+/// 常会吃满，用户可以在设置里调高。
+pub const fn default_max_turns() -> u32 {
+    48
 }
 
 impl Default for AppConfig {
@@ -256,7 +595,11 @@ impl Default for AppConfig {
             projects: Vec::new(),
             default_mode: None,
             ask_timeout_secs: default_ask_timeout_secs(),
+            max_turns: default_max_turns(),
             web: WebConfig::default(),
+            mcp_servers: Vec::new(),
+            compact_threshold_tokens: default_compact_threshold_tokens(),
+            vision_model: String::new(),
         }
     }
 }
@@ -264,6 +607,30 @@ impl Default for AppConfig {
 impl AppConfig {
     pub fn provider(&self, id: &str) -> Option<&ProviderConfig> {
         self.providers.iter().find(|p| p.id == id)
+    }
+
+    /// 当前激活的模型能不能直接收图片。
+    pub fn active_takes_images(&self) -> bool {
+        self.takes_images(&self.active_provider, &self.active_model)
+    }
+
+    /// 某个服务方下的某个模型能不能收图片。
+    pub fn takes_images(&self, provider_id: &str, model: &str) -> bool {
+        self.provider(provider_id)
+            .and_then(|p| p.model(model))
+            .is_some_and(|m| m.vision)
+    }
+
+    /// 视觉兼容模型，拆成 `(providerId, model)`。
+    ///
+    /// 主模型自己能看图时返回 `None` —— 那条路不需要转述，多走一次辅助模型
+    /// 只是白花钱，而且转述比原图差。
+    pub fn vision_target(&self) -> Option<(&str, &str)> {
+        if self.active_takes_images() {
+            return None;
+        }
+        let (p, m) = self.vision_model.trim().split_once('/')?;
+        (!p.is_empty() && !m.is_empty()).then_some((p, m))
     }
 
     /// 配置能不能保存：active 必须指向存在的 provider。
@@ -275,11 +642,41 @@ impl AppConfig {
         // 最后一家删掉的用户,都停在这里。拒绝保存的话,用户就再也删不掉
         // 最后一个服务方了 —— 那是把"没有"当成非法,而它只是"还没有"。
         if self.active_provider.is_empty() {
+            self.validate_mcp()?;
             return Ok(());
         }
         self.provider(&self.active_provider).map(|_| ()).ok_or_else(|| {
             ConfigError::Parse(format!("找不到 provider「{}」", self.active_provider))
-        })
+        })?;
+        self.validate_mcp()
+    }
+
+    /// MCP 配置的保存前校验。
+    ///
+    /// id 在这里管严：它进工具名和权限规则，坏 id 的失败发生在几天后
+    /// 的某次权限匹配上，而不是保存的那一刻 —— 那种时差 bug 最难查。
+    ///
+    /// `[约束]` **不校验 command 非空**。"刚点了添加、还没填命令"是设置页
+    /// 的合法中间状态，和 provider 允许暂时没选模型同一条理（见
+    /// [`Self::validate`] 的注释）——拒绝保存的表现是"添加按钮点了没反应"。
+    /// 空命令的服务器由 reconcile 跳过，永远不会被启动。
+    fn validate_mcp(&self) -> Result<(), ConfigError> {
+        let mut seen = std::collections::HashSet::new();
+        for s in &self.mcp_servers {
+            if s.id.trim().is_empty() {
+                return Err(ConfigError::Parse("MCP 服务器的 id 不能为空".into()));
+            }
+            if !s.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                return Err(ConfigError::Parse(format!(
+                    "MCP 服务器 id「{}」只能用字母、数字、- 和 _（它要进工具名）",
+                    s.id
+                )));
+            }
+            if !seen.insert(s.id.as_str()) {
+                return Err(ConfigError::Parse(format!("MCP 服务器 id「{}」重复了", s.id)));
+            }
+        }
+        Ok(())
     }
 
     /// 当前激活的 provider+model 的运行时快照。每轮开始时解析一次 ——
@@ -311,13 +708,20 @@ impl AppConfig {
                 p.name
             )));
         }
+        let model = model.trim();
         Ok(ResolvedModel {
             protocol: p.protocol,
             base_url: p.base_url.clone(),
+            api_path: p.api_path.clone(),
             api_key_env: p.api_key_env.clone(),
-            model: model.trim().to_owned(),
+            model: model.to_owned(),
             fallback_model: p.fallback_model.clone(),
-            sampling: p.sampling,
+            // 模型级参数叠在服务方之上，只盖用户在模型上动过的字段。
+            //
+            // 顺序是 模型 → 服务方 → 服务端默认。会话覆盖再叠在这之上（见
+            // state.rs 的 send_turn）—— 越具体的赢，这条链任何一环反了都
+            // 会表现为"我明明设了 temperature，它没生效"。
+            sampling: p.model(model).map_or(p.sampling, |m| m.sampling.or(p.sampling)),
         })
     }
 
@@ -338,6 +742,8 @@ impl AppConfig {
 pub struct ResolvedModel {
     pub protocol: Protocol,
     pub base_url: String,
+    /// 接口路径。空 = 按主机猜。
+    pub api_path: String,
     pub api_key_env: String,
     pub model: String,
     pub fallback_model: Option<String>,
@@ -615,16 +1021,47 @@ fn normalize(mut c: AppConfig) -> AppConfig {
         }
         c.sampling = Sampling::default();
     }
+
+    // 服务方级的 vision（短暂存在过的形状）铺到它的每个模型上。
+    //
+    // 铺开而不是丢掉:用户勾过那个开关，丢掉等于把他的设置悄悄关了 —— 而
+    // 表现是"截图突然又不给模型看了"。铺开之后如果有纯文本模型被误标，
+    // 他在模型行上取消一下就行，那个位置本来就是现在该看的地方。
+    for p in &mut c.providers {
+        if !p.vision {
+            continue;
+        }
+        for m in &mut p.models {
+            m.vision = true;
+        }
+        p.vision = false;
+    }
     // 夹在合理区间。config.json 是用户能手改的文件，0 会让每个弹窗
     // 瞬间超时（等于静默拒绝一切），过大的值等于回到"任务永远卡住"。
     c.ask_timeout_secs = c.ask_timeout_secs.clamp(MIN_ASK_TIMEOUT_SECS, MAX_ASK_TIMEOUT_SECS);
+    // 轮数同理夹一下。0 会让任何任务一开就到顶（等于什么都做不了），
+    // 过大的值让跑飞的循环烧很久才被兜住。
+    c.max_turns = c.max_turns.clamp(MIN_MAX_TURNS, MAX_MAX_TURNS);
+    // 压缩阈值：太低会让每轮都压（一句话就超），太高等于关掉主动压缩。
+    c.compact_threshold_tokens = c
+        .compact_threshold_tokens
+        .clamp(MIN_COMPACT_THRESHOLD, MAX_COMPACT_THRESHOLD);
     c
 }
+
+/// 阈值下限 8k：再低连一次正经的工具输出都装不下，压缩会变成每轮必发。
+const MIN_COMPACT_THRESHOLD: u32 = 8_000;
+/// 上限 1M：超过现有一切模型的窗口，等于"永不主动压"。
+const MAX_COMPACT_THRESHOLD: u32 = 1_000_000;
 
 /// 弹窗至少要留 5 秒 —— 再短用户根本来不及读完就没了。
 const MIN_ASK_TIMEOUT_SECS: u32 = 5;
 /// 上限一小时。超过这个数和"永不超时"没有实际区别。
 const MAX_ASK_TIMEOUT_SECS: u32 = 3600;
+/// 至少 1 轮 —— 0 轮等于什么都做不了。
+const MIN_MAX_TURNS: u32 = 1;
+/// 上限 1000 轮。到这个量级还没停多半是跑飞了，兜底比放任强。
+const MAX_MAX_TURNS: u32 = 1000;
 
 /// v1 → v2：旧的单模型配置变成 provider 列表里的一项并设为激活。
 ///
@@ -643,9 +1080,11 @@ fn migrate(old: LegacyConfig) -> AppConfig {
         protocol,
         base_url: old.base_url,
         api_key_env: old.api_key_env,
-        models: vec![old.model.clone()],
+        models: vec![ModelConfig::new(old.model.clone())],
         fallback_model: old.fallback_model,
         sampling: Sampling::default(),
+        vision: false,
+        api_path: String::new(),
     }];
 
     AppConfig {
@@ -659,8 +1098,12 @@ fn migrate(old: LegacyConfig) -> AppConfig {
         projects: old.projects,
         default_mode: old.default_mode,
         ask_timeout_secs: default_ask_timeout_secs(),
+        max_turns: default_max_turns(),
         // 老格式里没有联网配置，用默认值（抓取开、搜索关）。
         web: WebConfig::default(),
+        mcp_servers: Vec::new(),
+        compact_threshold_tokens: default_compact_threshold_tokens(),
+        vision_model: String::new(),
     }
 }
 
@@ -700,14 +1143,170 @@ mod tests {
                 protocol: Protocol::Openai,
                 base_url: "https://api.acme.test".into(),
                 api_key_env: "ACME_API_KEY".into(),
-                models: vec!["m1".into()],
+                models: vec![ModelConfig::new("m1")],
                 fallback_model: None,
                 sampling: Sampling::default(),
+                vision: false,
+                api_path: String::new(),
             }],
             active_provider: "acme".into(),
             active_model: "m1".into(),
             ..Default::default()
         }
+    }
+
+    /// 老配置里 `models` 是字符串数组，必须还能读。
+    ///
+    /// `[约束]` 读不懂的后果不是"少了几个开关"，而是整份配置解析失败 ——
+    /// 用户升级之后看到的是"服务方、key、模型全没了"。
+    #[test]
+    fn 老配置的字符串模型列表能读进来() {
+        let json = r#"{
+            "providers": [{
+                "id": "zp", "name": "智谱", "protocol": "openai",
+                "baseUrl": "https://open.bigmodel.cn/api/paas/v4", "apiKeyEnv": "K",
+                "models": ["glm-4.6v", "glm-5.2"]
+            }],
+            "activeProvider": "zp",
+            "activeModel": "glm-5.2"
+        }"#;
+        let c: AppConfig = serde_json::from_str(json).expect("老配置要能读");
+        let ids: Vec<&str> = c.providers[0].models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["glm-4.6v", "glm-5.2"]);
+        // 老格式里没有能力信息，一律按"不能看图"读 —— 猜"能"的代价是
+        // 每次带图的请求都被服务方拒。
+        assert!(c.providers[0].models.iter().all(|m| !m.vision));
+    }
+
+    /// 短暂存在过的"服务方级 vision"要铺到它的每个模型上。
+    ///
+    /// 丢掉的话等于把用户勾过的开关悄悄关了，表现是"截图突然又不给模型看了"。
+    #[test]
+    fn 服务方级视觉开关迁移到模型上() {
+        let json = r#"{
+            "providers": [{
+                "id": "zp", "name": "智谱", "protocol": "openai",
+                "baseUrl": "https://x.test", "apiKeyEnv": "K",
+                "models": ["glm-4.6v", "glm-5.2"],
+                "vision": true
+            }],
+            "activeProvider": "zp",
+            "activeModel": "glm-5.2"
+        }"#;
+        let c = normalize(serde_json::from_str(json).expect("读配置"));
+        assert!(
+            c.providers[0].models.iter().all(|m| m.vision),
+            "服务方那个开关该铺到每个模型上"
+        );
+        assert!(!c.providers[0].vision, "铺完之后要清掉，别留两个真相");
+    }
+
+    /// 视觉能力按模型算，不按服务方算。
+    ///
+    /// `[约束]` 这条盯的就是智谱那个 400:同一家的 glm-4.6v 能看图、
+    /// glm-5.2 不能，按服务方算的话后者也会被当成能看图。
+    #[test]
+    fn 同一家里能看图和不能看图的模型互不影响() {
+        let mut c = one_provider();
+        c.providers[0].models = vec![
+            ModelConfig { vision: true, ..ModelConfig::new("glm-4.6v") },
+            ModelConfig::new("glm-5.2"),
+        ];
+
+        c.active_model = "glm-4.6v".into();
+        assert!(c.active_takes_images());
+        c.active_model = "glm-5.2".into();
+        assert!(!c.active_takes_images(), "纯文本模型不该被当成能看图");
+        assert!(c.takes_images("acme", "glm-4.6v"), "另一个模型仍然能看图");
+    }
+
+    /// 采样参数的优先级:模型 → 服务方 → 服务端默认。
+    #[test]
+    fn 模型级采样参数盖住服务方的() {
+        let mut c = one_provider();
+        c.providers[0].sampling = Sampling {
+            temperature: Some(0.2),
+            max_output_tokens: Some(1000),
+            ..Sampling::default()
+        };
+        c.providers[0].models = vec![ModelConfig {
+            sampling: Sampling { temperature: Some(0.9), ..Sampling::default() },
+            ..ModelConfig::new("m1")
+        }];
+
+        let r = c.resolve().expect("解析");
+        assert_eq!(r.sampling.temperature, Some(0.9), "模型上动过的字段要赢");
+        assert_eq!(
+            r.sampling.max_output_tokens,
+            Some(1000),
+            "模型没动的字段要继承服务方，而不是被清掉"
+        );
+    }
+
+    /// 主模型自己能看图时不该再走兼容模型。
+    ///
+    /// 走了的话每张截图都多一次调用、多一次计费，而且拿到的是有损转述 ——
+    /// 明明有原图可以给。
+    #[test]
+    fn 能看图的模型不走视觉兼容() {
+        let mut c = one_provider();
+        c.vision_model = "acme/m1".into();
+
+        assert_eq!(c.vision_target(), Some(("acme", "m1")), "纯文本模型该走兼容");
+
+        c.providers[0].models[0].vision = true;
+        assert_eq!(c.vision_target(), None, "能看图就不该再转述一遍");
+        assert!(c.active_takes_images());
+    }
+
+    #[test]
+    fn 视觉兼容模型要写成_provider_斜杠_model() {
+        let mut c = one_provider();
+        for bad in ["", "acme", "/m1", "acme/", "  "] {
+            c.vision_model = bad.into();
+            assert_eq!(c.vision_target(), None, "「{bad}」不该被当成合法配置");
+        }
+        // 两头的空格是从输入框里带出来的，很常见。
+        c.vision_model = "  acme/m1  ".into();
+        assert_eq!(c.vision_target(), Some(("acme", "m1")));
+    }
+
+    /// 老配置里没有这两个字段，要能按"不收图片"读进来。
+    ///
+    /// `[约束]` 缺字段不能让整份配置解析失败 —— 那表现为用户升级之后
+    /// "我配的东西全没了"。
+    #[test]
+    fn 老配置缺视觉字段也能读() {
+        let json = r#"{
+            "providers": [{
+                "id": "acme", "name": "Acme", "protocol": "openai",
+                "baseUrl": "https://api.acme.test", "apiKeyEnv": "K",
+                "models": ["m1"]
+            }],
+            "activeProvider": "acme",
+            "activeModel": "m1"
+        }"#;
+        let c: AppConfig = serde_json::from_str(json).expect("老配置要能读");
+        assert!(!c.providers[0].vision, "缺字段按不收图片算");
+        assert!(c.vision_model.is_empty());
+        assert_eq!(c.vision_target(), None);
+    }
+
+    #[test]
+    fn max_turns_默认_48_且越界会被夹回() {
+        assert_eq!(default_max_turns(), 48);
+        // 手改 config.json 把它写成 0 或天文数字，normalize 要夹回区间。
+        let zero = normalize(AppConfig { max_turns: 0, ..Default::default() });
+        assert_eq!(zero.max_turns, MIN_MAX_TURNS, "0 轮等于什么都做不了，抬到下限");
+        let huge = normalize(AppConfig { max_turns: 999_999, ..Default::default() });
+        assert_eq!(huge.max_turns, MAX_MAX_TURNS, "过大要压到上限");
+    }
+
+    #[test]
+    fn 老配置缺_max_turns_用默认() {
+        // 升级上来的配置没有这个字段，要按默认 48 读，而不是 0。
+        let json = r#"{"providers":[],"activeProvider":"","activeModel":""}"#;
+        assert_eq!(parse(json).max_turns, 48);
     }
 
     #[test]
@@ -856,6 +1455,173 @@ mod tests {
         assert_eq!(t("只有provider/"), None);
     }
 
+    fn mcp(id: &str, command: &str) -> McpServerConfig {
+        McpServerConfig {
+            id: id.into(),
+            name: String::new(),
+            command: command.into(),
+            args: Vec::new(),
+            env: Default::default(),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn mcp_配置的坏_id_在保存时就拦下() {
+        // id 进工具名和权限规则，坏 id 的失败发生在几天后的权限匹配上 ——
+        // 必须在保存的那一刻报。
+        let ok = AppConfig { mcp_servers: vec![mcp("fs", "npx")], ..Default::default() };
+        assert!(ok.validate().is_ok());
+
+        let dup = AppConfig {
+            mcp_servers: vec![mcp("fs", "npx"), mcp("fs", "uvx")],
+            ..Default::default()
+        };
+        assert!(dup.validate().is_err(), "重复 id 必须拦");
+
+        let bad_char = AppConfig { mcp_servers: vec![mcp("my.server", "npx")], ..Default::default() };
+        let e = bad_char.validate().expect_err("带点的 id 必须拦").to_string();
+        assert!(e.contains("my.server"), "报错要点名：{e}");
+    }
+
+    #[test]
+    fn mcp_空命令是合法的中间状态() {
+        // "刚点了添加、还没填命令"必须能保存 —— 拒绝的表现是设置页
+        // "添加按钮点了没反应"（真实发生过）。空命令由 reconcile 跳过。
+        let c = AppConfig { mcp_servers: vec![mcp("fs", "")], ..Default::default() };
+        assert!(c.validate().is_ok(), "空命令不该拦保存，连接时才要求非空");
+    }
+
+    #[test]
+    fn 标准_mcp_json_能解析() {
+        // 这是 Claude Desktop / Cursor / Cline 的通用形状 —— 每个 MCP
+        // 服务器的 README 给的就是这段，必须能整段粘贴。
+        let raw = r#"{
+            "mcpServers": {
+                "filesystem": {
+                    "command": "npx",
+                    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+                    "env": { "LOG": "1" }
+                },
+                "github": { "command": "uvx", "args": ["mcp-github"], "disabled": true }
+            }
+        }"#;
+        let servers = mcp_servers_from_json(raw).expect("标准格式必须能读");
+        assert_eq!(servers.len(), 2);
+
+        let fs = servers.iter().find(|s| s.id == "filesystem").expect("有 filesystem");
+        assert_eq!(fs.command, "npx");
+        assert_eq!(fs.args, vec!["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]);
+        assert_eq!(fs.env.get("LOG").map(String::as_str), Some("1"));
+        assert!(fs.enabled);
+        assert!(fs.name.is_empty(), "键名合法时不需要另存显示名");
+
+        let gh = servers.iter().find(|s| s.id == "github").expect("有 github");
+        assert!(!gh.enabled, "disabled: true 要变成停用");
+    }
+
+    #[test]
+    fn mcp_json_认_vscode_键和裸映射() {
+        let vscode = r#"{ "servers": { "fs": { "command": "npx" } } }"#;
+        assert_eq!(mcp_servers_from_json(vscode).expect("servers 键").len(), 1);
+
+        let bare = r#"{ "fs": { "command": "npx" } }"#;
+        assert_eq!(mcp_servers_from_json(bare).expect("裸映射").len(), 1);
+    }
+
+    #[test]
+    fn mcp_json_未知字段忽略不报错() {
+        // Cline 的 autoApprove、timeout 之类的私货很常见 ——
+        // 报错的话用户得先手工删字段才能导入。
+        let raw = r#"{ "mcpServers": { "x": {
+            "command": "npx", "autoApprove": ["a"], "timeout": 60, "envFile": ".env"
+        } } }"#;
+        assert!(mcp_servers_from_json(raw).is_ok());
+    }
+
+    #[test]
+    fn mcp_json_远程服务器给明确的暂不支持() {
+        for raw in [
+            r#"{ "mcpServers": { "r": { "url": "https://x.test/mcp" } } }"#,
+            r#"{ "mcpServers": { "r": { "type": "sse", "command": "x" } } }"#,
+        ] {
+            let e = mcp_servers_from_json(raw).expect_err("远程该拒").to_string();
+            assert!(e.contains("stdio"), "报错要说清暂不支持什么：{e}");
+        }
+    }
+
+    #[test]
+    fn mcp_json_单个服务器内层给指路的报错() {
+        // 用户常粘错层级：只粘了 {"command": ...}，缺名字那一层。
+        let e = mcp_servers_from_json(r#"{ "command": "npx" }"#)
+            .expect_err("缺名字层该拒")
+            .to_string();
+        assert!(e.contains("名字"), "要教用户正确形状：{e}");
+    }
+
+    #[test]
+    fn mcp_json_键消毒进id_原名进显示名() {
+        let raw = r#"{ "mcpServers": { "my.server v2": { "command": "npx" } } }"#;
+        let servers = mcp_servers_from_json(raw).expect("能读");
+        assert_eq!(servers[0].id, "my-server-v2", "id 只能用工具名允许的字符");
+        assert_eq!(servers[0].name, "my.server v2", "用户看到的名字不变");
+        // 消毒结果必须过得了保存校验，否则导入成功、保存失败，用户懵
+        let c = AppConfig { mcp_servers: servers, ..Default::default() };
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn mcp_json_消毒撞名要报错() {
+        let raw = r#"{ "mcpServers": {
+            "my.server": { "command": "a" },
+            "my-server": { "command": "b" }
+        } }"#;
+        // 两个键消毒后都是 my-server。撞名必须拒绝 —— 静默丢一个的话，
+        // 用户以为两个都导入了。
+        assert!(mcp_servers_from_json(raw).is_err());
+    }
+
+    #[test]
+    fn mcp_json_导出导入互逆() {
+        let servers = vec![
+            McpServerConfig {
+                id: "fs".into(),
+                name: String::new(),
+                command: "npx".into(),
+                args: vec!["-y".into(), "pkg".into()],
+                env: [("K".to_owned(), "v".to_owned())].into(),
+                enabled: true,
+            },
+            McpServerConfig {
+                id: "gh".into(),
+                name: "GitHub".into(),
+                command: "uvx".into(),
+                args: Vec::new(),
+                env: Default::default(),
+                enabled: false,
+            },
+        ];
+        let json = mcp_servers_to_json(&servers);
+        assert!(json.contains("mcpServers"), "导出要用标准包装：{json}");
+        assert!(!json.contains("GitHub"), "显示名不是标准字段，不该出现在导出里");
+
+        let back = mcp_servers_from_json(&json).expect("自己导出的自己要能读");
+        assert_eq!(back.len(), 2);
+        let fs = back.iter().find(|s| s.id == "fs").expect("fs");
+        assert_eq!(fs.args, vec!["-y", "pkg"]);
+        assert!(fs.enabled);
+        let gh = back.iter().find(|s| s.id == "gh").expect("gh");
+        assert!(!gh.enabled, "disabled 要在往返中保住");
+    }
+
+    #[test]
+    fn 没有_mcp_段的老配置照常能读() {
+        let c = parse(
+            r#"{"providers":[],"activeProvider":"","activeModel":"","projects":[]}"#,
+        );
+        assert!(c.mcp_servers.is_empty(), "缺字段按空列表读，不能整体解析失败");
+    }
+
     #[test]
     fn active_指向不存在的_provider_报错() {
         let c = AppConfig {
@@ -920,7 +1686,7 @@ mod tests {
         assert_eq!(c.active_model, "qwen-max");
         let p = c.provider("openai").expect("迁移出的 provider");
         assert_eq!(p.protocol, Protocol::Openai);
-        assert_eq!(p.models, vec!["qwen-max".to_owned()]);
+        assert_eq!(p.models, vec![ModelConfig::new("qwen-max")]);
     }
 
     #[test]
@@ -950,6 +1716,8 @@ mod tests {
             models: vec![],
             fallback_model: None,
             sampling: Sampling::default(),
+            vision: false,
+            api_path: String::new(),
         };
         let e = p.api_key().expect_err("应该缺失");
         assert!(e.to_string().contains("DEFINITELY_NOT_SET_XYZ"));
@@ -969,6 +1737,8 @@ mod tests {
             models: vec![],
             fallback_model: None,
             sampling: Sampling::default(),
+            vision: false,
+            api_path: String::new(),
         };
         assert!(p.api_key().is_err());
         unsafe { std::env::remove_var("RIOT_TEST_BLANK") };
@@ -995,6 +1765,8 @@ mod tests {
             models: vec![],
             fallback_model: None,
             sampling: Sampling::default(),
+            vision: false,
+            api_path: String::new(),
         }
     }
 

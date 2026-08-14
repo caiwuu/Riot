@@ -81,4 +81,8 @@ pub fn setup_application() {
         objc2_app_kit::NSApp(mtm).isKindOfClass(RiotApplication::class()),
         "NSApp 不是 RiotApplication —— 说明在此之前已经有人初始化过 NSApp"
     );
+
+    // 这个进程不在 Dock 里露脸，靠的是 bundle 的 `LSUIElement` —— 见
+    // scripts/build-browser.sh。不在这里改 activation policy:那要等 NSApp
+    // 起来之后才生效，而 LaunchServices 是在加载前就读 plist 的。
 }

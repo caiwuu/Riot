@@ -68,6 +68,14 @@ pub enum AgentEvent {
         strategy: CompactStrategy,
     },
 
+    /// 会话的权限模式变了，而且**不是**用户在界面上切的。
+    ///
+    /// 目前唯一来源：批准计划（ExitPlanMode）时用户选择的执行档位由
+    /// 宿主直接落到会话上。界面必须跟着更新 —— 否则 composer 还显示
+    /// 「规划模式」，而宿主已经在按「自动接受编辑」放行了。显示得比
+    /// 实际更严是最坏的一种错（和 SessionInfo.mode 的注释同一条教训）。
+    ModeChanged { mode: crate::permission::PermissionMode },
+
     /// 终止。
     ///
     /// **必须是流的最后一个事件，且必须出现。** 即使内核 panic 被捕获，

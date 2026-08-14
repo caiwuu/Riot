@@ -41,7 +41,11 @@ async fn main() {
         std::process::exit(1);
     };
 
-    println!("端点   {base_url}/v1/chat/completions");
+    // 和真正发请求走同一套拼接，否则这行打印会在带路径的 base 上说谎。
+    println!(
+        "端点   {}",
+        riot_providers::endpoint::api_url(&base_url, "v1", "chat/completions")
+    );
     println!("模型   {model}");
     println!("密钥   {key_env}（{} 字符）", api_key.trim().len());
     println!("提问   {prompt}\n");

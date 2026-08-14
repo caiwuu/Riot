@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-browser-scope-revoke"
+description = "Enables the browser_scope_revoke command without any pre-configured scope."
+commands.allow = ["browser_scope_revoke"]
+
+[[permission]]
+identifier = "deny-browser-scope-revoke"
+description = "Denies the browser_scope_revoke command without any pre-configured scope."
+commands.deny = ["browser_scope_revoke"]

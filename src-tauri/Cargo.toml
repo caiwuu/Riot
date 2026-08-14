@@ -15,11 +15,15 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.6", features = [] }
 
 [dependencies]
+# 读用户附的图片文件时要编码成 base64 交给模型。
+base64 = "0.22"
 riot-core.workspace = true
+riot-mcp.workspace = true
 riot-permissions.workspace = true
 riot-protocol.workspace = true
 riot-providers.workspace = true
 riot-runtime.workspace = true
+riot-store.workspace = true
 riot-tools.workspace = true
 
 tauri = { version = "2.11", features = [] }
@@ -29,8 +33,13 @@ tauri-plugin-opener = "2.5"
 anyhow.workspace = true
 async-trait.workspace = true
 futures.workspace = true
+# 子 agent 工具（subagent.rs）声明输入 schema 用。
+schemars.workspace = true
 reqwest.workspace = true
 process-wrap.workspace = true
+# hooks 的 matcher 正则。lite 版和 riot-tools 一致 —— 匹配工具名用不上
+# unicode 类和回溯性能，全量 regex 多编译几秒不值。
+regex-lite = "0.1.9"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -38,7 +47,11 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+portable-pty = "0.9.0"
+ignore = "0.4.33"
 
 [dev-dependencies]
 pretty_assertions.workspace = true
 tempfile.workspace = true
+# e2e 里解码整页截图，按像素验证"视口外的内容真的渲染了、没有平铺"。
+image = { version = "0.25", default-features = false, features = ["jpeg"] }

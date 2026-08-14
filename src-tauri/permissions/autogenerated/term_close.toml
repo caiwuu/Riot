@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-term-close"
+description = "Enables the term_close command without any pre-configured scope."
+commands.allow = ["term_close"]
+
+[[permission]]
+identifier = "deny-term-close"
+description = "Denies the term_close command without any pre-configured scope."
+commands.deny = ["term_close"]

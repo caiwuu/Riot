@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-mcp-status"
+description = "Enables the mcp_status command without any pre-configured scope."
+commands.allow = ["mcp_status"]
+
+[[permission]]
+identifier = "deny-mcp-status"
+description = "Denies the mcp_status command without any pre-configured scope."
+commands.deny = ["mcp_status"]

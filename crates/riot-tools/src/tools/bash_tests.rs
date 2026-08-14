@@ -32,6 +32,7 @@ fn harness(proc: FakeProc) -> Harness {
         session_id: riot_protocol::id::SessionId::from_raw("s1"),
         tool_use_id: riot_protocol::id::ToolUseId::from_raw("t1"),
         cwd: "/work".into(),
+        artifacts_dir: "/artifacts".into(),
         cancel: CancellationToken::new(),
         progress: riot_protocol::tool::ProgressSink::new(
             riot_protocol::id::ToolUseId::from_raw("t1"),
@@ -42,6 +43,7 @@ fn harness(proc: FakeProc) -> Harness {
         proc: Arc::clone(&proc) as Arc<_>,
         web: Arc::new(riot_protocol::web::NoWeb),
         browser: Arc::new(riot_protocol::browser::NoBrowser),
+        vision: Arc::new(riot_protocol::vision::NoVision),
         clock: Arc::new(crate::testing::FixedClock::default()),
     };
 

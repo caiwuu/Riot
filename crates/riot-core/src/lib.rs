@@ -21,9 +21,10 @@ pub mod compactor;
 pub mod guard;
 pub mod invariants;
 pub mod state;
+pub mod summarize;
 pub mod testing;
 pub mod turn;
 
 pub use agent_loop::run_agent;
-pub use compactor::ClearOldResults;
+pub use compactor::{ClearOldResults, Layered};
 pub use state::{AgentDeps, AgentState, Transition};

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-slash-commands"
+description = "Enables the slash_commands command without any pre-configured scope."
+commands.allow = ["slash_commands"]
+
+[[permission]]
+identifier = "deny-slash-commands"
+description = "Denies the slash_commands command without any pre-configured scope."
+commands.deny = ["slash_commands"]

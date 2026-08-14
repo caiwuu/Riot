@@ -13,12 +13,14 @@
 //! 3. `tool_calls[].function.arguments` 是 JSON **字符串**，不是对象；
 //! 4. DeepSeek 的 `reasoning_content` 不能回传。
 
-use riot_protocol::message::{AssistantContent, Message, ToolResultContent, UserContent};
+use riot_protocol::message::{
+    AssistantContent, Attachment, Message, ToolResultContent, UserContent,
+};
 use riot_protocol::provider::ProviderRequest;
 
 use super::wire::{
-    StreamOptions, WireFunctionCall, WireMessage, WireRequest, WireTool, WireToolCall,
-    WireToolFunction,
+    StreamOptions, WireFunctionCall, WireImageUrl, WireMessage, WirePart, WireRequest, WireTool,
+    WireToolCall, WireToolFunction,
 };
 use crate::anthropic::request::SystemSection;
 
@@ -116,6 +118,10 @@ pub fn convert_messages(messages: &[Message]) -> Vec<WireMessage> {
                 // 用户新说的话（用户在工具跑的时候插了一句），而 OpenAI 要求
                 // tool 消息紧跟 assistant，中间不能插 user。
                 let mut texts: Vec<String> = Vec::new();
+                // 用户附的图。和文字同一条消息、排在文字前面（见下）。
+                let mut user_images: Vec<WirePart> = Vec::new();
+                // 工具结果里的图片。`tool` 消息装不了，攒起来跟在后面单发。
+                let mut tool_images: Vec<WirePart> = Vec::new();
                 for c in content {
                     match c {
                         UserContent::ToolResult {
@@ -127,18 +133,52 @@ pub fn convert_messages(messages: &[Message]) -> Vec<WireMessage> {
                                 tool_call_id: tool_use_id.as_str().to_owned(),
                                 content: render_result(content, *is_error),
                             });
+                            // `path` 是给界面的（落盘原图）；发模型的只有
+                            // `data` 里的压缩图。
+                            if let ToolResultContent::Image {
+                                media_type,
+                                data,
+                                path: _,
+                            } = content
+                            {
+                                tool_images.push(WirePart::Text {
+                                    text: format!("上一个工具结果（{tool_use_id}）的图片："),
+                                });
+                                tool_images.push(image_part(media_type, data));
+                            }
                         }
                         UserContent::Text { text } => texts.push(text.clone()),
                         UserContent::Attachment(a) => {
-                            if let Some(t) = render_attachment(a) {
+                            if let Attachment::Image { media_type, data } = a {
+                                user_images.push(image_part(media_type, data));
+                            } else if let Some(t) = render_attachment(a) {
                                 texts.push(t);
                             }
                         }
                     }
                 }
                 let joined = texts.join("\n");
-                if !joined.trim().is_empty() {
-                    out.push(WireMessage::User { content: joined });
+                if user_images.is_empty() {
+                    if !joined.trim().is_empty() {
+                        out.push(WireMessage::User { content: joined });
+                    }
+                } else {
+                    // `[约束]` 用户附的图排在文字**前面**，和 user_content
+                    // 摆进历史的顺序一致（两家的文档都建议这个顺序）。以前
+                    // 图片被挪到文字后面单发一条，等于把上游特意排好的顺序
+                    // 又翻了回去。
+                    let mut parts = user_images;
+                    if !joined.trim().is_empty() {
+                        parts.push(WirePart::Text { text: joined });
+                    }
+                    out.push(WireMessage::UserParts { content: parts });
+                }
+                // `[约束]` 工具结果的图必须排在 tool 消息**之后**，不能塞进
+                // tool 消息里。OpenAI 要求 tool 消息紧跟着对应的 assistant，
+                // 而它的 content 只收字符串 —— 唯一能带图的位置就是后面
+                // 这条 user 消息。
+                if !tool_images.is_empty() {
+                    out.push(WireMessage::UserParts { content: tool_images });
                 }
             }
 
@@ -189,6 +229,15 @@ pub fn convert_messages(messages: &[Message]) -> Vec<WireMessage> {
     out
 }
 
+/// 一张图的内容块。
+fn image_part(media_type: &str, data: &str) -> WirePart {
+    WirePart::ImageUrl {
+        image_url: WireImageUrl {
+            url: format!("data:{media_type};base64,{data}"),
+        },
+    }
+}
+
 fn render_result(content: &ToolResultContent, is_error: bool) -> String {
     let body = match content {
         ToolResultContent::Text { text } => text.clone(),
@@ -201,11 +250,15 @@ fn render_result(content: &ToolResultContent, is_error: bool) -> String {
             path.display()
         ),
         ToolResultContent::Cleared => "（历史结果已清理）".to_owned(),
-        // OpenAI 的 tool 消息只收文本。图片要走 user 消息的 image_url，
-        // 那是另一条路径，先不做。
+        // 图片本身跟在这条 tool 消息后面的那条 user 消息里（见
+        // convert_messages）。这里留一句话是因为 tool 消息不能为空 ——
+        // 空结果会让一部分模型误判任务结束。
         ToolResultContent::Image { media_type, .. } => {
-            format!("（{media_type} 图片，当前模型不支持在工具结果里返回图片）")
+            format!("（{media_type} 图片见下一条消息）")
         }
+        // 转述代替图片。图片是给界面的，不随请求发 —— 这个变体本来就
+        // 产生于"模型看不了图"的会话（见协议注释）。
+        ToolResultContent::DescribedImage { text, .. } => text.clone(),
     };
 
     // 空的 tool 结果会让部分模型误判任务结束。见 ARCHITECTURE.md §6.7
@@ -222,6 +275,30 @@ fn render_result(content: &ToolResultContent, is_error: bool) -> String {
     }
 }
 
+/// 附件转成给模型的文字。和 Anthropic 那条路（`convert_attachment`）保持
+/// 同一套措辞 —— 模型换协议不该看到两种不同的注入格式。
+///
+/// 以前这里直接 `serde_json::to_string`，模型读到的是一坨
+/// `{"type":"attachment","kind":...}` 的字面 JSON。
 fn render_attachment(a: &riot_protocol::message::Attachment) -> Option<String> {
-    serde_json::to_string(a).ok()
+    use riot_protocol::message::Attachment;
+    Some(match a {
+        Attachment::Memory { path, content } => format!(
+            "<system-reminder>\n项目记忆 {}：\n{content}\n</system-reminder>",
+            path.display()
+        ),
+        Attachment::RestoredFile { path, content } => format!(
+            "<system-reminder>\n压缩前你读过 {}：\n{content}\n</system-reminder>",
+            path.display()
+        ),
+        Attachment::UserFile { path, content } => format!(
+            "<system-reminder>\n用户在消息里引用了 {}，内容如下：\n{content}\n</system-reminder>",
+            path.display()
+        ),
+        Attachment::Environment { text } | Attachment::SystemReminder { text } => {
+            format!("<system-reminder>\n{text}\n</system-reminder>")
+        }
+        // 图片由调用方单独走内容块，不在这里变成文字。
+        Attachment::Image { .. } => return None,
+    })
 }

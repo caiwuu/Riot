@@ -27,6 +27,10 @@ pub struct AgentState {
     pub attempted_reactive_compact: bool,
     pub compact_failure_streak: u8,
     pub max_output_tokens_override: Option<u32>,
+    /// 本 run 内 stop hook 阻止收尾的累计次数。**从不重置**（run 的生命周期
+    /// 内单调递增）：它既是熔断依据，也透传给 hook（CC 的 stop_hook_active
+    /// 同义）让脚本自己防循环。
+    pub stop_hook_blocks: u32,
 
     /// 上一轮为何继续。仅用于测试与观测，不参与决策。
     pub transition: Option<Transition>,
@@ -45,6 +49,7 @@ impl AgentState {
             attempted_reactive_compact: false,
             compact_failure_streak: 0,
             max_output_tokens_override: None,
+            stop_hook_blocks: 0,
             transition: None,
         }
     }
@@ -108,6 +113,64 @@ pub struct AgentDeps {
     pub clock: Arc<dyn Clock>,
     pub ids: Arc<dyn IdGenerator>,
     pub tools: Arc<dyn ToolRunner>,
+    /// 跑轮中用户插话的队列。主循环只在**一个点** drain：模型正常收尾
+    /// （没有 tool_use）、准备报 Completed 之前 —— 排队的消息等当前任务
+    /// 完全跑完才进对话（Cursor 语义），要插队由宿主中断本轮来实现。
+    /// 这个位置天然满足 API 约束（tool_use / tool_result 配对之间不能
+    /// 夹用户消息，否则 400）。
+    pub queue: Arc<dyn InputQueue>,
+    /// 收尾闸。模型正常说完、准备报 Completed 之前问一声 —— 宿主用它跑
+    /// Stop hooks（用户配置的"产出检查"脚本）。
+    ///
+    /// `[约束]` 只在**正常收尾**时问：错误路径、中断路径都不问。在错误
+    /// 消息上跑 stop hook 是 error → hook 注入 → 重试 → error 的死循环
+    /// （INV-6 同源的教训，CC 的注释里有记录）。
+    pub stop_gate: Arc<dyn StopGate>,
+}
+
+/// 收尾闸的裁决。
+#[derive(Debug, Clone, PartialEq)]
+pub enum StopDecision {
+    /// 放行，正常收尾。
+    Allow,
+    /// 阻止收尾：理由注入对话（模型可见），强制再跑一轮把活干完。
+    Block { reason: String },
+}
+
+/// 收尾闸。见 [`AgentDeps::stop_gate`]。
+#[async_trait::async_trait]
+pub trait StopGate: Send + Sync {
+    /// `blocks_so_far`：本 run 已被阻止的次数。透传给 hook 让脚本自己
+    /// 防循环（内核另有硬熔断兜底，见主循环的 MAX_STOP_HOOK_BLOCKS）。
+    async fn check(&self, blocks_so_far: u32) -> StopDecision;
+}
+
+/// 默认实现：没有 stop hooks（子 agent、多数测试）。
+pub struct NoStopGate;
+
+#[async_trait::async_trait]
+impl StopGate for NoStopGate {
+    async fn check(&self, _blocks_so_far: u32) -> StopDecision {
+        StopDecision::Allow
+    }
+}
+
+/// 跑轮中插话的队列。宿主实现（真实队列），测试注入脚本。
+///
+/// `drain` 是同步的：主循环在两个确定的位置调用它，队列实现只是弹出
+/// 已经准备好的消息 —— 消息的组装（图片转述等异步工作）在入队一侧完成。
+pub trait InputQueue: Send + Sync {
+    /// 取走当前排队的全部消息（先进先出）。没有就空。
+    fn drain(&self) -> Vec<riot_protocol::message::Message>;
+}
+
+/// 默认实现：没有队列（子 agent、多数测试）。
+pub struct NoQueue;
+
+impl InputQueue for NoQueue {
+    fn drain(&self) -> Vec<riot_protocol::message::Message> {
+        Vec::new()
+    }
 }
 
 // 工具执行契约住在协议层，和 Provider 对称 —— 这样 riot-tools 能直接

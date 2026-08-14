@@ -5,7 +5,9 @@
 //!
 //! # 三层拦截
 //!
-//! 1. [`normalize`] —— 请求发出前的静态检查：协议、长度、userinfo、字面量私有 IP。
+//! 1. [`normalize`] —— 抓取发出前的静态检查：协议、长度、userinfo、字面量私有 IP。
+//!    浏览器走 [`normalize_for_browser`]，允许 localhost / 内网 / 本地 `file://`，
+//!    且不升级 http。
 //! 2. DNS 解析后的私有网段检查 —— 在 `riot-runtime` 里，因为解析结果
 //!    只有那一层看得见。
 //! 3. [`is_permitted_redirect`] —— 每一跳都要重新过。
@@ -14,6 +16,8 @@
 //! `127.0.0.1` 就穿了；只做第 2 层，`http://[::1]/` 这种字面量地址虽然会被
 //! 拦但错误信息会很难懂；只做前两层，一个可信域名上的开放重定向就能把请求
 //! 带去任何地方。
+
+use std::path::{Path, PathBuf};
 
 use url::{Host, Url};
 
@@ -39,6 +43,10 @@ pub enum UrlReject {
     #[error("只支持 http 与 https，不支持 {scheme}")]
     BadScheme { scheme: String },
 
+    /// `file://nas/share` 这种网上邻居。本地预览不是这条路。
+    #[error("`file://` 只支持本机文件，不支持主机 `{host}`")]
+    RemoteFile { host: String },
+
     /// `https://user:pass@host/` 这种形式。
     ///
     /// 拦它有两个理由：凭证会跟着请求泄漏出去；而且 `evil.com` 可以伪装成
@@ -57,23 +65,106 @@ pub enum UrlReject {
     PrivateAddress { host: String },
 }
 
-/// 校验并规范化一个 URL。
+/// 校验并规范化一个 **抓取** URL。
 ///
 /// 成功时返回**已把 http 升级成 https 的** URL。升级而不是拒绝，是因为模型
 /// 从网页里抄下来的链接经常还是 http，直接拒绝会让它反复重试同一个地址。
+///
+/// 同时拒绝 localhost 和字面量内网 IP —— 抓取工具默认不能打内网。
+/// 内置浏览器走 [`normalize_for_browser`]，那条路允许本地地址。
 pub fn normalize(raw: &str) -> Result<Url, UrlReject> {
+    let mut u = parse_http_url(raw)?;
+    if u.scheme() == "http" {
+        // set_scheme 只在 URL 有主机时才成功，而没主机的情况 parse 已经拦掉。
+        let _ = u.set_scheme("https");
+    }
+    check_host(&u.host().ok_or(UrlReject::NoHost)?)?;
+    Ok(u)
+}
+
+/// 校验浏览器要打开的 URL。
+///
+/// 和 [`normalize`] 共用 http(s) 的长度 / 凭证检查，但：
+/// - **不**把 http 升级成 https（本地开发服务器几乎都没有证书）
+/// - **不**拒绝 localhost / 内网 IP（内置浏览器就是用来看自己刚改完的前端）
+/// - **允许**本地 `file://` 和本机绝对路径（预览静态 HTML 是常见用法）
+///
+/// 远程 `file://host/share` 仍然拒绝 —— 那是网上邻居，不是本地预览。
+/// 内网访问仍要过同意弹窗。WebFetch 继续走 [`normalize`]。
+pub fn normalize_for_browser(raw: &str) -> Result<Url, UrlReject> {
+    if raw.len() > MAX_URL_LENGTH {
+        return Err(UrlReject::TooLong);
+    }
+    if let Some(u) = try_local_file(raw)? {
+        return Ok(u);
+    }
+    parse_http_url(raw)
+}
+
+/// 是本地文件地址的话返回规范化后的 `file://` URL。
+///
+/// 不是文件地址返回 `Ok(None)`，交给调用方按 http(s) 继续解析。
+/// 看起来像文件但非法（网上邻居、带凭证）返回 `Err`，不再回落到 http。
+fn try_local_file(raw: &str) -> Result<Option<Url>, UrlReject> {
+    if is_local_abs_path(raw) {
+        return Url::from_file_path(raw)
+            .map(Some)
+            .map_err(|()| UrlReject::Malformed);
+    }
+
+    let Ok(u) = Url::parse(raw) else {
+        return Ok(None);
+    };
+    if u.scheme() != "file" {
+        return Ok(None);
+    }
+    Ok(Some(check_file_url(u)?))
+}
+
+/// 本机绝对路径，且看起来不像 URL。
+///
+/// `://` 挡的是已经带协议的地址；`//` 挡的是协议相对 URL（`//example.com`），
+/// 那种在 Unix 上会被 `Path::is_absolute` 误判成本地路径。
+fn is_local_abs_path(raw: &str) -> bool {
+    !raw.contains("://") && !raw.starts_with("//") && Path::new(raw).is_absolute()
+}
+
+fn check_file_url(u: Url) -> Result<Url, UrlReject> {
+    if !u.username().is_empty() || u.password().is_some() {
+        return Err(UrlReject::HasCredentials);
+    }
+    match u.host_str() {
+        None | Some("") | Some("localhost") => {}
+        Some(host) => {
+            return Err(UrlReject::RemoteFile {
+                host: host.to_owned(),
+            });
+        }
+    }
+    if u.to_file_path().is_err() {
+        return Err(UrlReject::Malformed);
+    }
+    Ok(u)
+}
+
+/// `file://` URL 对应的本机路径。其它协议返回 `None`。
+pub fn local_file_path(u: &Url) -> Option<PathBuf> {
+    if u.scheme() != "file" {
+        return None;
+    }
+    u.to_file_path().ok()
+}
+
+/// 协议、长度、凭证、主机存在性。两边共用；主机是不是公网只在 [`normalize`] 里查。
+fn parse_http_url(raw: &str) -> Result<Url, UrlReject> {
     if raw.len() > MAX_URL_LENGTH {
         return Err(UrlReject::TooLong);
     }
 
-    let mut u = Url::parse(raw).map_err(|_| UrlReject::Malformed)?;
+    let u = Url::parse(raw).map_err(|_| UrlReject::Malformed)?;
 
     match u.scheme() {
-        "https" => {}
-        "http" => {
-            // set_scheme 只在 URL 有主机时才成功，而无主机的情况下面会拦掉。
-            let _ = u.set_scheme("https");
-        }
+        "http" | "https" => {}
         other => {
             return Err(UrlReject::BadScheme {
                 scheme: other.to_owned(),
@@ -85,8 +176,9 @@ pub fn normalize(raw: &str) -> Result<Url, UrlReject> {
         return Err(UrlReject::HasCredentials);
     }
 
-    let host = u.host().ok_or(UrlReject::NoHost)?;
-    check_host(&host)?;
+    if u.host().is_none() {
+        return Err(UrlReject::NoHost);
+    }
 
     Ok(u)
 }
@@ -156,11 +248,19 @@ fn strip_www(host: &str) -> &str {
     host.strip_prefix("www.").unwrap_or(host)
 }
 
-/// 取出用于权限规则匹配的域名，形如 `domain:docs.rs`。
+/// 取出用于权限规则匹配的内容键。
 ///
-/// 权限粒度是域名而不是整个工具：用户点"总是允许"应该意味着"信任
-/// docs.rs"，而不是"以后随便抓什么都行"。
+/// http(s) 是域名粒度（`domain:docs.rs`）：用户点"总是允许"意味着"信任
+/// 这个站"，而不是"以后随便抓什么都行"。
+///
+/// 本地文件是**目录**粒度（`file:/Users/me/proj`）：同一页的 css / js /
+/// 其它 html 都在旁边，问一次就该覆盖整个目录。用整条 `file:` 的话，
+/// 一次"总是允许"等于打开任意本地文件。
 pub fn permission_content(u: &Url) -> String {
+    if let Some(path) = local_file_path(u) {
+        let dir = path.parent().unwrap_or(&path);
+        return format!("file:{}", dir.display());
+    }
     format!("domain:{}", u.host_str().unwrap_or_default())
 }
 
@@ -337,6 +437,105 @@ mod tests {
 
     #[test]
     fn 权限内容是域名粒度() {
+        assert_eq!(
+            permission_content(&u("https://docs.rs/tokio/1.0/x")),
+            "domain:docs.rs"
+        );
+    }
+
+    #[test]
+    fn 浏览器允许本地地址且保留_http() {
+        let n = normalize_for_browser("http://localhost:8765/wechat.html").expect("应当通过");
+        assert_eq!(n.as_str(), "http://localhost:8765/wechat.html");
+
+        let n = normalize_for_browser("http://127.0.0.1:3000/").expect("应当通过");
+        assert_eq!(n.as_str(), "http://127.0.0.1:3000/");
+
+        let n = normalize_for_browser("http://[::1]:8080/").expect("应当通过");
+        assert_eq!(n.as_str(), "http://[::1]:8080/");
+
+        // 公网 http 也不升级 —— 浏览器打开什么就是什么
+        let n = normalize_for_browser("http://example.com/a").expect("应当通过");
+        assert_eq!(n.as_str(), "http://example.com/a");
+    }
+
+    #[test]
+    fn 抓取仍然拒绝本地_浏览器放行() {
+        // 两条路必须分叉：抓取默认打不进内网，浏览器可以看本地前端。
+        assert!(matches!(
+            normalize("http://localhost:8765/wechat.html"),
+            Err(UrlReject::NotPublicHost { .. })
+        ));
+        assert!(matches!(
+            normalize("http://127.0.0.1:3000/"),
+            Err(UrlReject::PrivateAddress { .. })
+        ));
+        assert!(normalize_for_browser("http://localhost:8765/wechat.html").is_ok());
+        assert!(normalize_for_browser("http://127.0.0.1:3000/").is_ok());
+    }
+
+    #[test]
+    fn 浏览器允许本地文件() {
+        let n = normalize_for_browser("file:///Users/me/proj/wechat.html").expect("应当通过");
+        assert_eq!(n.scheme(), "file");
+        assert_eq!(
+            n.to_file_path().expect("能转成本地路径"),
+            PathBuf::from("/Users/me/proj/wechat.html")
+        );
+
+        // 模型经常直接塞绝对路径，不带 file://
+        let n = normalize_for_browser("/Users/me/proj/wechat.html").expect("应当通过");
+        assert_eq!(n.scheme(), "file");
+        assert_eq!(
+            n.to_file_path().expect("能转成本地路径"),
+            PathBuf::from("/Users/me/proj/wechat.html")
+        );
+
+        // Chromium 也认 file://localhost/...
+        let n = normalize_for_browser("file://localhost/Users/me/proj/a.html").expect("应当通过");
+        assert_eq!(
+            n.to_file_path().expect("能转成本地路径"),
+            PathBuf::from("/Users/me/proj/a.html")
+        );
+    }
+
+    #[test]
+    fn 浏览器拒绝远程_file_和危险协议() {
+        // 网上邻居不是本地预览
+        assert!(matches!(
+            normalize_for_browser("file://nas.local/share/a.html"),
+            Err(UrlReject::RemoteFile { .. })
+        ));
+        // data: 能绕过一切网络检查；javascript: 是代码执行
+        for bad in ["data:text/html,hi", "javascript:alert(1)", "ftp://example.com/x"] {
+            assert!(
+                matches!(normalize_for_browser(bad), Err(UrlReject::BadScheme { .. })),
+                "{bad} 应当被拒"
+            );
+        }
+        assert_eq!(
+            normalize_for_browser("https://user:pw@localhost/"),
+            Err(UrlReject::HasCredentials)
+        );
+        // rust-url 把带凭证的 file:// 直接判成解析失败，两条路都是拒绝。
+        assert!(normalize_for_browser("file://user:pw@localhost/tmp/a.html").is_err());
+    }
+
+    #[test]
+    fn 抓取仍然拒绝_file_浏览器放行() {
+        assert!(matches!(
+            normalize("file:///Users/me/proj/wechat.html"),
+            Err(UrlReject::BadScheme { .. })
+        ));
+        assert!(normalize_for_browser("file:///Users/me/proj/wechat.html").is_ok());
+    }
+
+    #[test]
+    fn 本地文件的权限键是目录粒度() {
+        assert_eq!(
+            permission_content(&u("file:///Users/me/proj/wechat.html")),
+            "file:/Users/me/proj"
+        );
         assert_eq!(
             permission_content(&u("https://docs.rs/tokio/1.0/x")),
             "domain:docs.rs"

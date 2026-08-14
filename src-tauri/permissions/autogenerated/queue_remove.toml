@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-queue-remove"
+description = "Enables the queue_remove command without any pre-configured scope."
+commands.allow = ["queue_remove"]
+
+[[permission]]
+identifier = "deny-queue-remove"
+description = "Denies the queue_remove command without any pre-configured scope."
+commands.deny = ["queue_remove"]

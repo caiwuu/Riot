@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-queue-list"
+description = "Enables the queue_list command without any pre-configured scope."
+commands.allow = ["queue_list"]
+
+[[permission]]
+identifier = "deny-queue-list"
+description = "Denies the queue_list command without any pre-configured scope."
+commands.deny = ["queue_list"]

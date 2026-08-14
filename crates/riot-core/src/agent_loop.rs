@@ -30,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 use crate::guard::guarded;
 use crate::invariant;
 use crate::invariants;
-use crate::state::{AgentDeps, AgentState, BatchContext, BatchEvent, Transition};
+use crate::state::{AgentDeps, AgentState, BatchContext, BatchEvent, StopDecision, Transition};
 use crate::turn::TurnAccumulator;
 
 /// 输出上限恢复的最大次数。
@@ -38,6 +38,38 @@ use crate::turn::TurnAccumulator;
 /// 超过就说明不是「这次输出偏长」而是「任务本身要求的输出超出模型能力」，
 /// 继续对半砍只会让模型输出越来越短的半成品。
 const MAX_OUTPUT_LIMIT_RECOVERY: u8 = 2;
+
+/// 用户取消之后，等下游自己收场的宽限期。
+///
+/// 礼貌的下游（真实的 provider、调度器）在几毫秒内就结束了，走它们
+/// 那条路收尾信息更完整。超过这个时间还没动静，就说明它没在听 ——
+/// 主循环自己收场，别让用户对着一个按了没反应的停止键。
+///
+/// 2 秒是照着最慢的正当路径定的：杀进程组要走 SIGTERM → 500ms 宽限
+/// → SIGKILL，再加上读干管道。
+const ABORT_GRACE_MS: u64 = 2_000;
+
+/// 取消发生**之后**再等 `grace_ms`。没取消就永远不醒。
+///
+/// `[约束]` 这里刻意用真实时钟，是这条 crate 规矩（一切等待走注入的
+/// Clock）唯一的例外，理由是它测量的东西本身就是墙上时钟：
+/// "用户按了停止之后，现实世界过去了多久还没反应"。换成注入的 Clock，
+/// 一个立即返回的 mock 会让这个兜底在每次取消时都抢跑，把调度器更
+/// 完整的收尾路径挤掉（黄金回放抓到过这个退化）。
+///
+/// 这不会让回放变得不确定：mock 下游在微秒级就收场了，2 秒的余量不是
+/// 任何真实机器会踩到的窗口。
+#[allow(clippy::disallowed_methods)]
+async fn grace_after_cancel(cancel: &CancellationToken, grace_ms: u64) {
+    cancel.cancelled().await;
+    tokio::time::sleep(std::time::Duration::from_millis(grace_ms)).await;
+}
+
+/// stop hook 在一次 run 内最多阻止收尾几次。
+///
+/// 超过就说明 hook 的判据永远满足不了（或者脚本本身坏了），继续给机会
+/// 只是无限烧 API。熔断时以 `StopHookPrevented` 终止，理由带给用户。
+const MAX_STOP_HOOK_BLOCKS: u32 = 5;
 
 /// 压缩连续失败多少次熔断。
 const MAX_COMPACT_FAILURES: u8 = 3;
@@ -89,7 +121,32 @@ pub fn run_agent(
             let mut turn = TurnAccumulator::new();
             let mut model_stream = deps.provider.stream(request, cancel.child_token());
 
-            while let Some(item) = model_stream.next().await {
+            // `[约束]` 取消之后给下游一个宽限期，超了就自己收场 ——
+            // 不能只靠 provider 自己停。
+            //
+            // Provider 拿到的是子令牌、也确实会检查它，但那是**约定**：
+            // 一个没检查的实现（或一次"等首字节等了半分钟"的慢请求）
+            // 就会让停止键变成装饰品 —— 用户按了，界面照转，而没有任何
+            // 报错能解释这件事。停止是用户对系统最基本的控制权，必须由
+            // 主循环兜底。
+            //
+            // 留宽限期而不是当场掐断：礼貌的下游会在几毫秒内自己结束流，
+            // 那条路产出的收尾信息更完整（谁被取消了、取消了几个）。
+            let abort_deadline = grace_after_cancel(&cancel, ABORT_GRACE_MS);
+            futures::pin_mut!(abort_deadline);
+
+            let mut stream_abandoned = false;
+            'stream: loop {
+                let item = tokio::select! {
+                    item = model_stream.next() => match item {
+                        Some(item) => item,
+                        None => break 'stream,
+                    },
+                    _ = &mut abort_deadline => {
+                        stream_abandoned = true;
+                        break 'stream;
+                    }
+                };
                 match item {
                     ProviderEvent::Delta(d) => yield AgentEvent::Delta(d),
                     ProviderEvent::Usage(u) => turn.merge_usage(&u),
@@ -117,6 +174,25 @@ pub fn run_agent(
                 }
             }
             drop(model_stream);
+
+            // 只有**流被放弃**才在这里收场。
+            //
+            // 取消了但流自己正常结束时不能走这条 —— 让它照常往下走：
+            // 那边的调度器会给每个工具补一条"已取消"结果并报出取消
+            // 个数，收尾信息比这里合成的完整。抢在它前面，等于用一条
+            // 更粗糙的路径替掉一条更细的。
+            if stream_abandoned {
+                state.messages.extend(turn.take_messages());
+                if let Some(msg) = synthesize_cancelled_results(&state) {
+                    state.messages.push(msg.clone());
+                    yield AgentEvent::Message(msg);
+                }
+                invariants::check_tool_pairing(&state.messages);
+                yield AgentEvent::Done {
+                    reason: TerminalReason::Aborted { by: AbortSource::User },
+                };
+                return;
+            }
 
             // ── 4. 恢复路径 ──────────────────────────────────────
             if let Some(err) = turn.withheld().cloned() {
@@ -177,8 +253,86 @@ pub fn run_agent(
             // ── 5. 退出判据：只看有没有 tool_use ──────────────────
             if !turn.has_tool_use() {
                 state.messages.extend(turn.take_messages());
-                yield AgentEvent::Done { reason: TerminalReason::Completed };
-                return;
+
+                // 收尾闸（stop hooks）：产出检查脚本说"活没干完"就不让停，
+                // 反馈注入对话强制再跑一轮。排在队列 drain **之前** ——
+                // 活没干完就不该开始处理插话。
+                match deps.stop_gate.check(state.stop_hook_blocks).await {
+                    StopDecision::Allow => {}
+                    StopDecision::Block { reason } => {
+                        state.stop_hook_blocks += 1;
+                        // 硬熔断：hook 拿到过这么多次机会还在拦，多半是它的
+                        // 判据永远满足不了（或脚本本身坏了）。带着理由终止，
+                        // 而不是无限烧 API。
+                        if state.stop_hook_blocks > MAX_STOP_HOOK_BLOCKS {
+                            yield AgentEvent::Done {
+                                reason: TerminalReason::StopHookPrevented { message: reason },
+                            };
+                            return;
+                        }
+                        // 两条消息两个读者：System 给用户解释为什么没停
+                        // （不进模型），SystemReminder 给模型布置整改。
+                        let notice = Message::System {
+                            id: riot_protocol::id::MessageId::from_raw(deps.ids.next_id("msg")),
+                            level: riot_protocol::message::SystemLevel::Info,
+                            text: format!("Stop hook 要求继续：{reason}"),
+                        };
+                        state.messages.push(notice.clone());
+                        yield AgentEvent::Message(notice);
+                        let feedback = Message::User {
+                            id: riot_protocol::id::MessageId::from_raw(deps.ids.next_id("msg")),
+                            content: vec![UserContent::Attachment(
+                                riot_protocol::message::Attachment::SystemReminder {
+                                    text: format!(
+                                        "Stop hook 检查未通过：{reason}\n\
+                                         请处理上述问题后再收尾。这是自动化检查的反馈，\
+                                         不是用户消息。"
+                                    ),
+                                },
+                            )],
+                            meta: MessageMeta { synthetic: true, ..Default::default() },
+                        };
+                        state.messages.push(feedback.clone());
+                        yield AgentEvent::Message(feedback);
+
+                        // `[约束]` 这里**不走** advance_turn：它会重置
+                        // attempted_reactive_compact，而 stop-hook 重试路径
+                        // 必须保留它 —— 否则 hook 注入 → 溢出 → 压缩 →
+                        // hook 又注入 → 又溢出，压缩循环永不熔断（CC 的
+                        // 注释里记录过这个 bug）。轮数照常推进，受
+                        // max_turns 兜底。
+                        state.turn += 1;
+                        state.transition = Some(Transition::StopHookBlocking);
+                        if state.turn >= state.max_turns {
+                            yield AgentEvent::Done {
+                                reason: TerminalReason::MaxTurns { limit: state.max_turns },
+                            };
+                            return;
+                        }
+                        continue;
+                    }
+                }
+
+                // 收尾前再看队列：模型答完了、用户在它工作时又说了话，
+                // 直接开下一轮（普通 user 消息，不加"插话"包装 —— 对模型
+                // 来说这就是新的一轮对话）。
+                let queued = deps.queue.drain();
+                if queued.is_empty() {
+                    yield AgentEvent::Done { reason: TerminalReason::Completed };
+                    return;
+                }
+                for msg in queued {
+                    state.messages.push(msg.clone());
+                    yield AgentEvent::Message(msg);
+                }
+                state.advance_turn();
+                if state.turn >= state.max_turns {
+                    yield AgentEvent::Done {
+                        reason: TerminalReason::MaxTurns { limit: state.max_turns },
+                    };
+                    return;
+                }
+                continue;
             }
 
             // ── 6. 工具执行 ──────────────────────────────────────
@@ -191,8 +345,25 @@ pub fn run_agent(
             };
             let mut batch = deps.tools.run_batch(calls, batch_ctx);
             let mut outcome = None;
+            let mut abandoned = false;
 
-            while let Some(ev) = batch.next().await {
+            // 同样是"宽限期 + 兜底"（理由见上面消费模型流那段）。正常
+            // 情况下调度器自己会在取消后很快收场，而且它给出的结果更
+            // 完整：每个工具一条"已取消"的 tool_result，还带取消计数。
+            let abort_deadline = grace_after_cancel(&cancel, ABORT_GRACE_MS);
+            futures::pin_mut!(abort_deadline);
+
+            loop {
+                let ev = tokio::select! {
+                    ev = batch.next() => match ev {
+                        Some(ev) => ev,
+                        None => break,
+                    },
+                    _ = &mut abort_deadline => {
+                        abandoned = true;
+                        break;
+                    }
+                };
                 match ev {
                     BatchEvent::Progress { tool_use_id, payload } => {
                         yield AgentEvent::Progress { tool_use_id, payload };
@@ -200,7 +371,23 @@ pub fn run_agent(
                     BatchEvent::Done(o) => outcome = Some(o),
                 }
             }
+            // drop 掉批次 = 丢弃还在跑的工具 future。子进程由
+            // kill_on_drop / 进程组清理兜底（见 riot-runtime 的 proc）。
             drop(batch);
+
+            if abandoned {
+                // 结果没收齐，但**每个 tool_use 都必须有 tool_result**，
+                // 否则带着这段历史再请求就是 400。
+                if let Some(msg) = synthesize_cancelled_results(&state) {
+                    state.messages.push(msg.clone());
+                    yield AgentEvent::Message(msg);
+                }
+                invariants::check_tool_pairing(&state.messages);
+                yield AgentEvent::Done {
+                    reason: TerminalReason::Aborted { by: AbortSource::User },
+                };
+                return;
+            }
 
             match outcome {
                 Some(o) => {
@@ -238,6 +425,12 @@ pub fn run_agent(
             }
 
             invariants::check_tool_pairing(&state.messages);
+
+            // 刻意**不在这里** drain 插话队列。工具结果就位后插入虽然对
+            // API 是安全的（CC 就这么做），但对用户是惊吓：排队面板里的
+            // 消息突然在任务中途蹦进对话，模型分心去答它。这里的语义是
+            // Cursor 式的 —— 排队的消息等当前任务**完全跑完**（见第 5 步
+            // 的收尾 drain），要插队由用户在面板上点"立即发送"（中断）。
 
             // ── 7. 收尾 ──────────────────────────────────────────
             state.advance_turn();

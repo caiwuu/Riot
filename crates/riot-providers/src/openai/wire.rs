@@ -41,6 +41,15 @@ pub enum WireMessage {
     User {
         content: String,
     },
+    /// 带图片的 user 消息:content 是内容块数组而不是字符串。
+    ///
+    /// `[约束]` 图片只能走这条路。OpenAI 的 `tool` 消息的 content 只接受
+    /// 字符串 —— 截图这类工具的结果因此没法直接带图，只能在工具结果之后
+    /// 补一条 user 消息把图捎上（见 request.rs）。
+    #[serde(rename = "user")]
+    UserParts {
+        content: Vec<WirePart>,
+    },
     Assistant {
         #[serde(skip_serializing_if = "Option::is_none")]
         content: Option<String>,
@@ -51,6 +60,23 @@ pub enum WireMessage {
         tool_call_id: String,
         content: String,
     },
+}
+
+/// user 消息里的一块内容。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WirePart {
+    Text { text: String },
+    /// `url` 用 data URL 形式:`data:image/jpeg;base64,...`。
+    ///
+    /// 不传外链是刻意的:截图是本地产物，没有可访问的 URL，而让服务方去拉
+    /// 一个我们临时起的 HTTP 服务只会多一条会坏的链路。
+    ImageUrl { image_url: WireImageUrl },
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct WireImageUrl {
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]

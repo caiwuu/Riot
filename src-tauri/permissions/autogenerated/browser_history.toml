@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-browser-history"
+description = "Enables the browser_history command without any pre-configured scope."
+commands.allow = ["browser_history"]
+
+[[permission]]
+identifier = "deny-browser-history"
+description = "Denies the browser_history command without any pre-configured scope."
+commands.deny = ["browser_history"]

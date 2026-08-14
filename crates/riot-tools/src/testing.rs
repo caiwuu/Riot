@@ -494,3 +494,183 @@ pub fn test_scheduler(tools: Vec<Arc<dyn Tool>>) -> crate::scheduler::Scheduler 
         Arc::new(FixedClock::default()),
     )
 }
+
+/// 浏览器替身:能截图，交互按配置应答。
+///
+/// 没配置的能力一律报"用不了" —— 替身比真实实现宽容会让用例测不到
+/// 该测的东西（见本文件顶部）。
+#[derive(Default)]
+pub struct FakeBrowser {
+    /// 截图返回的 base64。
+    pub shot: String,
+    /// 交互（click/type/key/scroll）的应答。
+    /// `None` = 报"不可用"；`Some(Err(msg))` = Target 错误（编号失效那类）。
+    pub interact: Option<Result<String, String>>,
+    /// 交互调用的记录，如 `click 3`、`type 3 "你好" submit=true`。
+    /// 用例拿它断言参数原样到达了宿主。
+    pub calls: std::sync::Mutex<Vec<String>>,
+}
+
+impl FakeBrowser {
+    fn interaction(
+        &self,
+        what: String,
+    ) -> Result<String, riot_protocol::browser::InteractError> {
+        self.calls.lock().expect("calls poisoned").push(what);
+        match &self.interact {
+            Some(Ok(msg)) => Ok(msg.clone()),
+            Some(Err(t)) => Err(riot_protocol::browser::InteractError::Target(t.clone())),
+            None => Err(riot_protocol::browser::InteractError::Unavailable(
+                riot_protocol::browser::BrowserUnavailable("替身没有交互能力".into()),
+            )),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl riot_protocol::browser::BrowserAccess for FakeBrowser {
+    async fn navigate(
+        &self,
+        url: &str,
+    ) -> Result<(), riot_protocol::browser::BrowserUnavailable> {
+        self.calls.lock().expect("calls poisoned").push(format!("navigate {url}"));
+        Err(riot_protocol::browser::BrowserUnavailable("替身不导航".into()))
+    }
+    async fn screenshot(&self) -> Result<String, riot_protocol::browser::BrowserUnavailable> {
+        Ok(self.shot.clone())
+    }
+    async fn snapshot(&self) -> Result<String, riot_protocol::browser::BrowserUnavailable> {
+        Err(riot_protocol::browser::BrowserUnavailable("替身没有快照".into()))
+    }
+    async fn console(
+        &self,
+    ) -> Result<Vec<String>, riot_protocol::browser::BrowserUnavailable> {
+        Err(riot_protocol::browser::BrowserUnavailable("替身没有 console".into()))
+    }
+    async fn current_url(&self) -> String {
+        String::new()
+    }
+    async fn click(
+        &self,
+        target: riot_protocol::browser::Target,
+    ) -> Result<String, riot_protocol::browser::InteractError> {
+        self.interaction(format!("click {}", fake_target(&target)))
+    }
+    async fn type_text(
+        &self,
+        target: riot_protocol::browser::Target,
+        text: &str,
+        submit: bool,
+    ) -> Result<String, riot_protocol::browser::InteractError> {
+        self.interaction(format!("type {} {text:?} submit={submit}", fake_target(&target)))
+    }
+    async fn press_key(
+        &self,
+        key: &str,
+    ) -> Result<String, riot_protocol::browser::InteractError> {
+        self.interaction(format!("key {key}"))
+    }
+    async fn scroll(
+        &self,
+        delta_y: f64,
+    ) -> Result<String, riot_protocol::browser::InteractError> {
+        self.interaction(format!("scroll {delta_y}"))
+    }
+    async fn wait_for(
+        &self,
+        cond: riot_protocol::browser::WaitCondition,
+        timeout_ms: u64,
+    ) -> Result<String, riot_protocol::browser::InteractError> {
+        self.interaction(format!("wait {cond:?} {timeout_ms}"))
+    }
+    async fn act(
+        &self,
+        action: riot_protocol::browser::Action,
+    ) -> Result<String, riot_protocol::browser::InteractError> {
+        self.interaction(format!("act {action:?}"))
+    }
+    async fn browse(
+        &self,
+        nav: riot_protocol::browser::Nav,
+    ) -> Result<String, riot_protocol::browser::InteractError> {
+        self.interaction(format!("browse {nav:?}"))
+    }
+    async fn evaluate(
+        &self,
+        expr: &str,
+    ) -> Result<String, riot_protocol::browser::InteractError> {
+        self.interaction(format!("eval {expr}"))
+    }
+    async fn upload(
+        &self,
+        target: riot_protocol::browser::Target,
+        paths: Vec<String>,
+    ) -> Result<String, riot_protocol::browser::InteractError> {
+        self.interaction(format!("upload {} {}", fake_target(&target), paths.join(",")))
+    }
+    async fn cookies(&self) -> Result<String, riot_protocol::browser::InteractError> {
+        self.interaction("cookies".to_owned())
+    }
+    async fn network(
+        &self,
+        query: riot_protocol::browser::NetQuery,
+    ) -> Result<String, riot_protocol::browser::InteractError> {
+        self.interaction(format!("network {query:?}"))
+    }
+    async fn replay(
+        &self,
+        url: &str,
+        method: &str,
+        _headers: serde_json::Value,
+        body: Option<String>,
+    ) -> Result<String, riot_protocol::browser::InteractError> {
+        self.interaction(format!("replay {method} {url} body={}", body.is_some()))
+    }
+    async fn intercept(
+        &self,
+        op: riot_protocol::browser::InterceptOp,
+    ) -> Result<String, riot_protocol::browser::InteractError> {
+        self.interaction(format!("intercept {op:?}"))
+    }
+}
+
+/// 把定位目标压成一行，供用例断言参数原样到达。
+fn fake_target(t: &riot_protocol::browser::Target) -> String {
+    match t {
+        riot_protocol::browser::Target::Ref(n) => format!("ref:{n}"),
+        riot_protocol::browser::Target::Selector(s) => format!("sel:{s}"),
+        riot_protocol::browser::Target::Text(s) => format!("text:{s}"),
+    }
+}
+
+/// 图片能力的替身。
+pub enum FakeVision {
+    /// 主模型自己能看图。
+    Direct,
+    /// 主模型看不了，由兼容模型转述成这段文字。
+    Describe(String),
+    /// 看不了，也没配兼容模型。
+    None,
+}
+
+#[async_trait::async_trait]
+impl riot_protocol::vision::VisionAccess for FakeVision {
+    fn accepts_images(&self) -> bool {
+        matches!(self, Self::Direct)
+    }
+
+    async fn describe(
+        &self,
+        _req: riot_protocol::vision::DescribeRequest,
+    ) -> Result<String, riot_protocol::vision::VisionError> {
+        match self {
+            Self::Describe(text) => Ok(text.clone()),
+            // Direct 时调用方不该走到这条路 —— 走到了就是分支写错了，
+            // 替身要让那种错误当场可见，而不是悄悄给一段文字。
+            Self::Direct => Err(riot_protocol::vision::VisionError::Failed {
+                message: "模型本来就能看图，不该来转述".into(),
+            }),
+            Self::None => Err(riot_protocol::vision::VisionError::NotConfigured),
+        }
+    }
+}

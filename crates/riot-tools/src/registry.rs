@@ -124,6 +124,32 @@ mod tests {
         Registry::new(tools).expect("注册表构造成功")
     }
 
+    /// 浏览器工具要真的出现在发给模型的清单里。
+    ///
+    /// `[约束]` 少了它们，模型不是报错，而是**自己想办法**:去 shell 里
+    /// `screencapture` 截整个屏幕、用 osascript 找窗口，然后拿着一张截错的
+    /// 图言之凿凿。那种失败看起来像模型笨，而根因是工具没装上 —— 真实发生
+    /// 过一次，排查方向整个跑偏。
+    #[test]
+    fn 浏览器工具在发给模型的清单里() {
+        let r = Registry::new(crate::tools::builtin()).expect("内建工具集");
+        let ctx = PromptContext {
+            cwd: std::path::PathBuf::from("/work"),
+            platform: "macos".to_owned(),
+            sibling_tools: Vec::new(),
+            today: "2026-08".to_owned(),
+        };
+        let names: Vec<String> = r.specs(&ctx).into_iter().map(|s| s.name).collect();
+        for want in [
+            "BrowserNavigate",
+            "BrowserSnapshot",
+            "BrowserScreenshot",
+            "BrowserConsole",
+        ] {
+            assert!(names.contains(&want.to_owned()), "{want} 不在清单里：{names:?}");
+        }
+    }
+
     #[test]
     fn 内建工具集能构造() {
         // Registry::new 会拒绝重名和别名撞车。这个测试的意义是：
