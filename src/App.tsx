@@ -2539,8 +2539,18 @@ function Composer({
       .catch(() => {});
   };
   const switchModel = (m: string) => {
-    if (m === cfg.activeModel) return;
-    void saveConfig({ ...cfg, activeModel: m }).then(onConfig).catch(() => {});
+    if (m === cfg.activeModel && activeProvider?.id === cfg.activeProvider) return;
+    // 菜单里列的是 activeProvider（含 providers[0] 兜底）的模型，所以
+    // provider 要一起写。只写 activeModel 的话，active 为空时会留下
+    // 「模型有值、provider 是空 id」的配置 —— keyStatus 按空 id 查不到，
+    // 表现为 key 已保存、横幅却说没配。
+    void saveConfig({
+      ...cfg,
+      activeProvider: activeProvider?.id ?? cfg.activeProvider,
+      activeModel: m,
+    })
+      .then(onConfig)
+      .catch(() => {});
   };
 
   // 技能也在这份清单里 —— 宿主那边把命令和技能并成了一条发现管道

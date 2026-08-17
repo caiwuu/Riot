@@ -277,7 +277,14 @@ function ProviderPane({
       fallbackModel: null,
       sampling: {},
     };
-    void commit({ ...cfg, providers: [...cfg.providers, p] }).then((ok) => {
+    // 第一家服务方直接设为当前。active 留空的话（validate 放行），主界面
+    // 显示会拿 providers[0] 兜底，key 状态却按空 id 查 —— 两边说的不是
+    // 同一家，表现为「key 已保存，横幅还说没配」。
+    void commit({
+      ...cfg,
+      providers: [...cfg.providers, p],
+      ...(cfg.activeProvider ? {} : { activeProvider: id }),
+    }).then((ok) => {
       if (ok) {
         setSelId(id);
         setJustAdded(id);

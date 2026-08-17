@@ -1120,6 +1120,27 @@ fn normalize(mut c: AppConfig) -> AppConfig {
         }
         p.vision = false;
     }
+
+    // active 指向空/幽灵 provider 而列表非空时，吸附到第一家。
+    //
+    // 这个状态是能被正常操作拼出来的：添加第一家服务方时 active 留空
+    // （validate 放行），之后在输入框旁的模型菜单选模型只写 active_model。
+    // 主界面显示用 providers[0] 兜底，key 状态却按空 id 查 —— 表现为
+    // 「key 明明已保存，横幅还说没有 API key」，发送键也一直是灰的。
+    // 在加载时吸附，已经写盘的坏配置下次启动就自愈。
+    if c.provider(&c.active_provider).is_none()
+        && let Some(first) = c.providers.first()
+    {
+        let id = first.id.clone();
+        let model = first.models.first().map(|m| m.id.clone());
+        c.active_provider = id;
+        if c.active_model.is_empty()
+            && let Some(m) = model
+        {
+            c.active_model = m;
+        }
+    }
+
     // 夹在合理区间。config.json 是用户能手改的文件，0 会让每个弹窗
     // 瞬间超时（等于静默拒绝一切），过大的值等于回到"任务永远卡住"。
     c.ask_timeout_secs = c.ask_timeout_secs.clamp(MIN_ASK_TIMEOUT_SECS, MAX_ASK_TIMEOUT_SECS);
@@ -1285,6 +1306,54 @@ mod tests {
             "服务方那个开关该铺到每个模型上"
         );
         assert!(!c.providers[0].vision, "铺完之后要清掉，别留两个真相");
+    }
+
+    /// active 为空但列表里有服务方：加载时吸附到第一家。
+    ///
+    /// `[约束]` 这个状态用户拼得出来（添加第一家服务方时 active 留空，
+    /// 之后只在主界面模型菜单里选模型）。放着不管的话，界面显示的是
+    /// providers[0]，key 状态却按空 id 查 —— 表现为「key 已保存，横幅
+    /// 还说没有 API key」。
+    #[test]
+    fn active_为空但有服务方时吸附到第一家() {
+        let json = r#"{
+            "providers": [{
+                "id": "ds", "name": "deepseek", "protocol": "openai",
+                "baseUrl": "https://api.deepseek.com", "apiKeyEnv": "K",
+                "models": ["deepseek-v4-flash"]
+            }],
+            "activeProvider": "",
+            "activeModel": ""
+        }"#;
+        let c = parse(json);
+        assert_eq!(c.active_provider, "ds");
+        assert_eq!(c.active_model, "deepseek-v4-flash", "模型也为空时一并吸附");
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn active_为空但模型已选时只吸附服务方() {
+        // 正是 bug 现场的形状：横幅说没 key、模型 pill 却显示着选中的模型。
+        let json = r#"{
+            "providers": [{
+                "id": "ds", "name": "deepseek", "protocol": "openai",
+                "baseUrl": "https://api.deepseek.com", "apiKeyEnv": "K",
+                "models": ["deepseek-v4-flash"]
+            }],
+            "activeProvider": "",
+            "activeModel": "deepseek-v4-flash"
+        }"#;
+        let c = parse(json);
+        assert_eq!(c.active_provider, "ds");
+        assert_eq!(c.active_model, "deepseek-v4-flash", "用户选过的模型不能被盖掉");
+    }
+
+    #[test]
+    fn 没有服务方时_active_保持为空() {
+        // 全新用户 / 刚删掉最后一家：空 active 是合法状态，不该被动。
+        let c = parse(r#"{"providers":[],"activeProvider":"","activeModel":""}"#);
+        assert!(c.active_provider.is_empty());
+        assert!(c.active_model.is_empty());
     }
 
     /// 视觉能力按模型算，不按服务方算。
