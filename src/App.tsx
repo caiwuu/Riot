@@ -1561,6 +1561,10 @@ function Transcript({
     if (!box) return;
     pinning.current = true;
     box.scrollTop = box.scrollHeight;
+    stick.current = true;
+    // 程序化滚动被 pinning 挡掉 onScroll，这里自己收按钮 ——
+    // 不收的话点了「回到底部」它还挂着。
+    setAwayFromBottom(false);
     requestAnimationFrame(() => {
       pinning.current = false;
     });
