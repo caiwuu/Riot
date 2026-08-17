@@ -93,7 +93,16 @@ impl TerminalAccess for HostTerminal {
 
     async fn read(&self, id: u32, lines: usize) -> Result<String, TerminalUnavailable> {
         self.check_read(id)?;
-        self.terms.read(id, lines).map_err(TerminalUnavailable)
+        // 过了 check_read 还读不到，只剩一种情况：id 归本会话管，但条目
+        // 已经没了 —— 用户在面板上把它关掉了。底层那句「这个终端已经关了」
+        // 是给面板看的，对模型不够：不指路的话，它会拿着旧 id 再试一轮，
+        // 或者从零猜。直接告诉它下一步。
+        self.terms.read(id, lines).map_err(|_| {
+            TerminalUnavailable(format!(
+                "终端 {id} 已经不在了（多半是用户在面板上关掉了它），这个 id 不会复活。\
+                 还需要这个服务的话，用 Bash 的 background 重新起一个。"
+            ))
+        })
     }
 
     async fn kill(&self, id: u32) -> Result<(), TerminalUnavailable> {
@@ -169,6 +178,27 @@ mod tests {
         assert!(h.read(his, 10).await.is_err(), "撤销共享之后要立刻失效");
 
         terms.close(his);
+    }
+
+    /// 自己起的服务被用户关掉之后再读，报错要指路（重新起一个），
+    /// 不能只说"关了"—— 模型上一轮的记忆里这个 id 还是活的，只给一句
+    /// "关了"它会拿着旧 id 再试，或者从零开始猜。
+    #[tokio::test]
+    async fn 用户关掉的服务再读要指路重开() {
+        let terms = Terminals::default();
+        let h = HostTerminal::new(terms.clone(), std::env::temp_dir());
+        let id = h.spawn("sleep 30", "测试服务").await.expect("起服务");
+
+        // 用户在面板上点 ×：宿主把条目彻底移除。
+        terms.close(id);
+
+        let err = h.read(id, 10).await.expect_err("条目没了就该失败");
+        assert!(err.0.contains("重新起"), "要指路而不是只说关了：{}", err.0);
+        assert!(
+            !err.0.contains("不是你起的"),
+            "明明是它起的，语义不能串：{}",
+            err.0
+        );
     }
 
     /// 模型这一侧不能给自己开权限 —— 这靠的是 trait 上没有这个方法，
