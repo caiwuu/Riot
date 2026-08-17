@@ -156,6 +156,18 @@ pub struct TurnConfig {
     pub thinking: ThinkingPolicy,
 }
 
+/// 排队面板的一条插话摘要。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct QueuedSummary {
+    pub id: String,
+    pub text: String,
+    /// 附了几张图。面板只显示个数 —— 全量 base64 回传太重。
+    pub images: usize,
+    /// 引用的文件路径。面板直接列出来(它们是路径,不重)。
+    pub refs: Vec<String>,
+}
+
 /// 用户随消息附上的一张图。只走内容不走路径(剪贴板截图没有路径)。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

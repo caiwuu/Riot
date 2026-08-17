@@ -22,54 +22,15 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde::Serialize;
 use similar::{ChangeTag, TextDiff};
 
 /// 单个文件超过这么多行差异就截断。一次全量重写能产出几千行，
 /// 全塞给界面只会让面板卡住 —— 那种改动本来也不是靠逐行读来 review 的。
 const MAX_LINES_PER_FILE: usize = 600;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ChangeStatus {
-    Created,
-    Modified,
-    Deleted,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LineKind {
-    Context,
-    Add,
-    Del,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct DiffLine {
-    pub kind: LineKind,
-    pub text: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct Hunk {
-    /// `@@ -1,4 +1,6 @@` 那一行。
-    pub header: String,
-    pub lines: Vec<DiffLine>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FileChange {
-    /// 相对项目根的路径。绝对路径在界面上又长又没有信息量。
-    pub path: String,
-    pub status: ChangeStatus,
-    pub added: usize,
-    pub removed: usize,
-    pub hunks: Vec<Hunk>,
-    /// 差异太大，`hunks` 只是前一截。
-    pub truncated: bool,
-}
+// 形状定义在 protocol(要跨进程走 session.changes RPC);这里 re-export
+// 维持 `crate::changes::FileChange` 等原有路径。
+pub use riot_protocol::changes::{ChangeStatus, DiffLine, FileChange, Hunk, LineKind};
 
 /// 算出一个会话的净改动。
 ///

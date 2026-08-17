@@ -568,6 +568,7 @@ export type RpcRequest =
   | {
       method: "session.resume";
       params: {
+        cwd: string;
         session_id: string;
       };
     }
@@ -599,10 +600,71 @@ export type RpcRequest =
       };
     }
   | {
-      method: "turn.queue_message";
+      method: "queue.list";
       params: {
-        content: UserContent[];
         session_id: string;
+      };
+    }
+  | {
+      method: "queue.remove";
+      params: {
+        entry_id: string;
+        session_id: string;
+      };
+    }
+  | {
+      method: "queue.take";
+      params: {
+        entry_id: string;
+        session_id: string;
+      };
+    }
+  | {
+      method: "session.compact";
+      params: {
+        model: ModelEndpoint;
+        session_id: string;
+      };
+    }
+  | {
+      method: "session.changes";
+      params: {
+        session_id: string;
+      };
+    }
+  | {
+      method: "session.set_title";
+      params: {
+        session_id: string;
+        title?: string | null;
+      };
+    }
+  | {
+      method: "scope.list";
+      params: {
+        session_id: string;
+      };
+    }
+  | {
+      method: "scope.revoke";
+      params: {
+        host: string;
+        session_id: string;
+      };
+    }
+  | {
+      method: "mcp.reconcile";
+      params: {
+        servers: McpServerSpec[];
+      };
+    }
+  | {
+      method: "mcp.status";
+    }
+  | {
+      method: "mcp.restart";
+      params: {
+        id: string;
       };
     }
   | {
@@ -657,6 +719,15 @@ export type RpcResponse =
     }
   | {
       data: {
+        /**
+         * 压缩边界之前的消息。模型看不见,界面画在分割线上面。
+         */
+        archived: Message1[];
+        /**
+         * 有没有轮子在跑。决定界面显示停止键还是发送键。
+         */
+        busy: boolean;
+        compacting: boolean;
         messages: Message1[];
       };
       result: "session_resumed";
@@ -681,6 +752,42 @@ export type RpcResponse =
     }
   | {
       data: {
+        entries: QueuedSummary[];
+      };
+      result: "queue_list";
+    }
+  | {
+      data: {
+        input?: TurnInput1 | null;
+      };
+      result: "queue_taken";
+    }
+  | {
+      data: {
+        removed: boolean;
+      };
+      result: "removed";
+    }
+  | {
+      data: {
+        changes: FileChange[];
+      };
+      result: "changes";
+    }
+  | {
+      data: {
+        hosts: string[];
+      };
+      result: "scope_hosts";
+    }
+  | {
+      data: {
+        servers: McpServerStatus[];
+      };
+      result: "mcp_statuses";
+    }
+  | {
+      data: {
         tools: ToolInfo[];
       };
       result: "tools_list";
@@ -700,6 +807,8 @@ export type RpcResponse =
       };
       result: "error";
     };
+export type LineKind = "context" | "add" | "del";
+export type ChangeStatus = "created" | "modified" | "deleted";
 export type RpcErrorCode = ("session_not_found" | "invalid_params" | "internal") | "turn_in_progress";
 
 /**
@@ -1013,12 +1122,93 @@ export interface ImageInput {
   data: string;
   mediaType: string;
 }
+/**
+ * MCP 服务器的启动描述。宿主从设置里组好(过滤掉未启用/没填完的),
+ * 内核只管照单连接 —— 内核不读配置文件。
+ */
+export interface McpServerSpec {
+  args: string[];
+  command: string;
+  env: [unknown, unknown][];
+  /**
+   * 稳定标识,进工具名(`mcp__<id>__…`),也是权限规则的一部分。
+   */
+  id: string;
+}
 export interface SessionSummary {
   cwd: string;
   message_count: number;
   session_id: string;
   title?: string | null;
   updated_at_ms: number;
+}
+/**
+ * 排队面板的一条插话摘要。
+ */
+export interface QueuedSummary {
+  id: string;
+  /**
+   * 附了几张图。面板只显示个数 —— 全量 base64 回传太重。
+   */
+  images: number;
+  /**
+   * 引用的文件路径。面板直接列出来(它们是路径,不重)。
+   */
+  refs: string[];
+  text: string;
+}
+/**
+ * 用户这一轮发来的原始输入。图片转述、`@` 展开、UserPromptSubmit hook 都在
+ * 内核完成 —— 所以这里只传原始三样,内核据此构造最终消息(内核有 vision /
+ * mentions / hooks,宿主没有,不能在宿主构造一半)。
+ */
+export interface TurnInput1 {
+  images?: ImageInput[];
+  refs?: string[];
+  text: string;
+}
+export interface FileChange {
+  added: number;
+  hunks: Hunk[];
+  /**
+   * 相对项目根的路径。绝对路径在界面上又长又没有信息量。
+   */
+  path: string;
+  removed: number;
+  status: ChangeStatus;
+  /**
+   * 差异太大,`hunks` 只是前一截。
+   */
+  truncated: boolean;
+}
+export interface Hunk {
+  /**
+   * `@@ -1,4 +1,6 @@` 那一行。
+   */
+  header: string;
+  lines: DiffLine[];
+}
+export interface DiffLine {
+  kind: LineKind;
+  text: string;
+}
+/**
+ * MCP 连接状态快照,给设置页看。
+ */
+export interface McpServerStatus {
+  /**
+   * connected 时是服务器自报的名字和版本;failed 时是错误原因。
+   */
+  detail: string;
+  id: string;
+  /**
+   * `connecting` / `connected` / `failed`
+   */
+  state: string;
+  /**
+   * 对外的完整工具名(`mcp__…`)。
+   */
+  tools: string[];
 }
 export interface ToolInfo {
   enabled: boolean;

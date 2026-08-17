@@ -113,8 +113,24 @@ impl SessionManager {
         id
     }
 
-    /// 恢复一个会话(建活会话 + 从 transcript 水合历史),返回历史给宿主显示。
-    pub async fn resume(&self, session_id: &str, cwd: PathBuf) -> (Vec<Message>, Vec<Message>) {
+    /// 恢复/查询一个会话。已在内存就直接回快照(切回会话是高频操作,幂等);
+    /// 不在就建活会话并从 transcript 水合历史。
+    ///
+    /// 会话设置(mode/venv/system prompt 等)不在这里恢复 —— 它们由宿主持有,
+    /// 随每轮 TurnConfig 传入;自定义标题走 session.set_title。
+    pub async fn resume(
+        &self,
+        session_id: &str,
+        cwd: PathBuf,
+    ) -> (Vec<Message>, Vec<Message>, bool, bool) {
+        if let Some(s) = self.get(session_id).await {
+            return (
+                s.history().await,
+                s.ui_archive().await,
+                s.is_running().await,
+                s.is_compacting(),
+            );
+        }
         let id = SessionId::from_raw(session_id.to_owned());
         let log = self.transcripts.open(riot_store::TranscriptMeta {
             id: id.clone(),
@@ -139,7 +155,7 @@ impl SessionManager {
             .lock()
             .await
             .insert(session_id.to_owned(), session);
-        (history, archived)
+        (history, archived, false, false)
     }
 
     pub async fn delete(&self, session_id: &str) {
@@ -264,6 +280,115 @@ impl SessionManager {
         Ok(session
             .submit(session_input, config.model, caps, sink, limits)
             .await)
+    }
+
+    /// 手动压缩(/compact)。空闲时才能做,session 内部会拒绝并发。
+    pub async fn compact(
+        &self,
+        session_id: &str,
+        model: riot_protocol::ModelEndpoint,
+    ) -> Result<(), String> {
+        let s = self.get(session_id).await.ok_or("会话不存在")?;
+        let sink = s.sink();
+        s.compact_now(model, sink).await
+    }
+
+    pub async fn queue_list(&self, session_id: &str) -> Vec<riot_protocol::QueuedSummary> {
+        match self.get(session_id).await {
+            Some(s) => s.queue_snapshot(),
+            None => Vec::new(),
+        }
+    }
+
+    pub async fn queue_remove(&self, session_id: &str, entry_id: &str) -> bool {
+        match self.get(session_id).await {
+            Some(s) => s.queue_remove(entry_id),
+            None => false,
+        }
+    }
+
+    /// 撤回一条排队插话,还原始输入。hook 附加的上下文不带回 —— 放回
+    /// 输入框编辑后重新提交时会重跑 hook。
+    pub async fn queue_take(&self, session_id: &str, entry_id: &str) -> Option<RpcTurnInput> {
+        let s = self.get(session_id).await?;
+        let input = s.queue_take(entry_id)?;
+        Some(RpcTurnInput {
+            text: input.text,
+            images: input
+                .images
+                .into_iter()
+                .map(|i| riot_protocol::ImageInput {
+                    media_type: i.media_type,
+                    data: i.data,
+                })
+                .collect(),
+            refs: input.refs,
+        })
+    }
+
+    pub async fn changes(&self, session_id: &str) -> Vec<riot_protocol::FileChange> {
+        match self.get(session_id).await {
+            Some(s) => s.changes().await,
+            None => Vec::new(),
+        }
+    }
+
+    pub async fn set_mode(&self, session_id: &str, mode: riot_protocol::PermissionMode) {
+        if let Some(s) = self.get(session_id).await {
+            s.set_mode(mode).await;
+        }
+    }
+
+    pub async fn set_title(&self, session_id: &str, title: Option<String>) {
+        if let Some(s) = self.get(session_id).await {
+            s.set_title(title).await;
+        }
+    }
+
+    pub async fn scope_hosts(&self, session_id: &str) -> Vec<String> {
+        match self.get(session_id).await {
+            Some(s) => s.scope_hosts().await,
+            None => Vec::new(),
+        }
+    }
+
+    pub async fn revoke_scope(&self, session_id: &str, host: &str) {
+        if let Some(s) = self.get(session_id).await {
+            s.revoke_scope(host).await;
+        }
+    }
+
+    /// 让 MCP 连接对齐宿主传来的服务器清单。
+    pub async fn mcp_reconcile(&self, servers: Vec<riot_protocol::rpc::McpServerSpec>) {
+        let specs = servers
+            .into_iter()
+            .map(|s| riot_mcp::ServerSpec {
+                id: s.id,
+                command: s.command,
+                args: s.args,
+                env: s.env,
+            })
+            .collect();
+        self.mcp.reconcile(specs).await;
+    }
+
+    pub async fn mcp_statuses(&self) -> Vec<riot_protocol::rpc::McpServerStatus> {
+        self.mcp
+            .statuses()
+            .await
+            .into_iter()
+            .map(|s| riot_protocol::rpc::McpServerStatus {
+                id: s.id,
+                state: s.state,
+                detail: s.detail,
+                tools: s.tools,
+            })
+            .collect()
+    }
+
+    /// 手动重连一个 MCP 服务器。false = 没有这个 id。
+    pub async fn mcp_restart(&self, id: &str) -> bool {
+        self.mcp.restart(id).await
     }
 
     /// 关闭:中断所有会话、flush、收 MCP。宿主 kernel.shutdown 调它。

@@ -232,17 +232,8 @@ struct QueuedEntry {
     msg: Message,
 }
 
-/// 给前端排队面板的一条摘要。
-#[derive(serde::Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct QueuedSummary {
-    pub id: String,
-    pub text: String,
-    /// 附了几张图。面板只显示个数 —— 全量 base64 回传太重。
-    pub images: usize,
-    /// 引用的文件路径。面板直接列出来（它们是路径，不重）。
-    pub refs: Vec<String>,
-}
+/// 给前端排队面板的一条摘要。形状在 protocol(跨进程走 queue.list)。
+pub use riot_protocol::QueuedSummary;
 
 /// 撤回一条排队插话时还给前端的原始输入。
 #[derive(serde::Serialize)]

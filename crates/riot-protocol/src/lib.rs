@@ -7,6 +7,7 @@
 //! **TS 类型必须是生成的，不允许手写。** 见 docs/VERIFICATION.md §2
 
 pub mod browser;
+pub mod changes;
 pub mod compact;
 pub mod event;
 pub mod hook;
@@ -27,6 +28,7 @@ pub use browser::{
     Event as BrowserEvent, InteractError, InterceptOp, Nav as BrowserNav, NetQuery, NoBrowser,
     Target as BrowserTarget, WaitCondition,
 };
+pub use changes::{ChangeStatus, DiffLine, FileChange, Hunk, LineKind};
 pub use compact::{CompactBudget, CompactResult, Compactor};
 pub use event::{
     AbortSource, AgentError, AgentEvent, CompactStrategy, ProgressPayload, StreamDelta,
@@ -55,8 +57,8 @@ pub use tool::{
     ToolContext, ToolOutcome, UiPayload, ValidationError,
 };
 pub use turn::{
-    ApiProtocol, EndpointSampling, ImageInput, ModelEndpoint, SandboxKind, TurnConfig, TurnInput,
-    TurnLimits, VisionSetup, WebSetup,
+    ApiProtocol, EndpointSampling, ImageInput, ModelEndpoint, QueuedSummary, SandboxKind,
+    TurnConfig, TurnInput, TurnLimits, VisionSetup, WebSetup,
 };
 pub use vision::{DescribeRequest, NoVision, VisionAccess, VisionError};
 pub use web::{

@@ -218,14 +218,15 @@ async fn dispatch(request: RpcRequest, manager: &manager::SessionManager) -> Rpc
         Req::SessionCreate { cwd, .. } => RpcResponse::SessionCreated {
             session_id: manager.create(cwd).await,
         },
-        // 简化版:若会话已在内存里就回它的历史。真正的"从磁盘水合恢复"要
-        // 带 cwd,留待 M-B4d 宿主翻转时补(那时 rpc 加 cwd 字段)。
-        Req::SessionResume { session_id } => {
-            let (messages, _archived) = manager
-                .history(session_id.as_str())
-                .await
-                .unwrap_or_default();
-            RpcResponse::SessionResumed { messages }
+        Req::SessionResume { session_id, cwd } => {
+            let (messages, archived, busy, compacting) =
+                manager.resume(session_id.as_str(), cwd).await;
+            RpcResponse::SessionResumed {
+                messages,
+                archived,
+                busy,
+                compacting,
+            }
         }
         Req::SessionDelete { session_id } => {
             manager.delete(session_id.as_str()).await;
@@ -257,8 +258,71 @@ async fn dispatch(request: RpcRequest, manager: &manager::SessionManager) -> Rpc
                 .await;
             RpcResponse::Ok
         }
-        // 其余方法(session.list/history、queue.*、compact、config.set_mode、
-        // tools.list、mcp.* 等)随宿主翻转逐个接上;在那之前明确报未实现。
+        Req::QueueList { session_id } => RpcResponse::QueueList {
+            entries: manager.queue_list(session_id.as_str()).await,
+        },
+        Req::QueueRemove {
+            session_id,
+            entry_id,
+        } => RpcResponse::Removed {
+            removed: manager.queue_remove(session_id.as_str(), &entry_id).await,
+        },
+        Req::QueueTake {
+            session_id,
+            entry_id,
+        } => RpcResponse::QueueTaken {
+            input: manager.queue_take(session_id.as_str(), &entry_id).await,
+        },
+        Req::SessionCompact { session_id, model } => {
+            match manager.compact(session_id.as_str(), *model).await {
+                Ok(()) => RpcResponse::Ok,
+                Err(e) => RpcResponse::Error {
+                    error: RpcError {
+                        code: RpcErrorCode::Internal,
+                        message: e,
+                    },
+                },
+            }
+        }
+        Req::SessionChanges { session_id } => RpcResponse::Changes {
+            changes: manager.changes(session_id.as_str()).await,
+        },
+        Req::SessionSetTitle { session_id, title } => {
+            manager.set_title(session_id.as_str(), title).await;
+            RpcResponse::Ok
+        }
+        Req::ConfigSetMode { session_id, mode } => {
+            manager.set_mode(session_id.as_str(), mode).await;
+            RpcResponse::Ok
+        }
+        Req::ScopeList { session_id } => RpcResponse::ScopeHosts {
+            hosts: manager.scope_hosts(session_id.as_str()).await,
+        },
+        Req::ScopeRevoke { session_id, host } => {
+            manager.revoke_scope(session_id.as_str(), &host).await;
+            RpcResponse::Ok
+        }
+        Req::McpReconcile { servers } => {
+            manager.mcp_reconcile(servers).await;
+            RpcResponse::Ok
+        }
+        Req::McpStatus => RpcResponse::McpStatuses {
+            servers: manager.mcp_statuses().await,
+        },
+        Req::McpRestart { id } => {
+            if manager.mcp_restart(&id).await {
+                RpcResponse::Ok
+            } else {
+                RpcResponse::Error {
+                    error: RpcError {
+                        code: RpcErrorCode::InvalidParams,
+                        message: format!("没有叫「{id}」的 MCP 服务器在运行。先在设置里启用它。"),
+                    },
+                }
+            }
+        }
+        // 其余方法(session.list、tools.list)随宿主翻转按需接上;
+        // 在那之前明确报未实现。
         _ => RpcResponse::Error {
             error: RpcError {
                 code: RpcErrorCode::Internal,
@@ -310,9 +374,9 @@ mod tests {
     #[tokio::test]
     async fn unknown_method_reports_error_not_silence() {
         // 尚未接上的方法要回一条明确错误 —— 静默无应答会让宿主等到超时。
-        // (session.create 现在已实现,改用一个仍未接的方法。)
+        // (随方法逐个落地,这里要挑一个仍未接的;目前是 tools.list。)
         let mgr = test_manager();
-        let line = r#"{"jsonrpc":"2.0","id":2,"method":"config.set_mode","params":{"session_id":"s1","mode":"default"}}"#;
+        let line = r#"{"jsonrpc":"2.0","id":2,"method":"tools.list","params":{"session_id":"s1"}}"#;
         let out = handle_line(line, &mgr).await.expect("未实现的方法也要应答");
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["id"], 2);
@@ -321,10 +385,7 @@ mod tests {
         let msg = v["result"]["data"]["error"]["message"]
             .as_str()
             .unwrap_or_default();
-        assert!(
-            msg.contains("config.set_mode"),
-            "错误要点名是哪个方法:{out}"
-        );
+        assert!(msg.contains("tools.list"), "错误要点名是哪个方法:{out}");
     }
 
     #[tokio::test]

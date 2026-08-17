@@ -4,11 +4,12 @@
 //! 但所有调用仍然穿过这里定义的类型 —— 这样阶段 B 拆进程时
 //! 只需要换一个 transport 实现。见 ARCHITECTURE.md §2.2
 
+use crate::changes::FileChange;
 use crate::event::AgentEvent;
 use crate::id::{RequestId, SessionId, TurnId};
-use crate::message::{Message, UserContent};
+use crate::message::Message;
 use crate::permission::{PermissionMode, PermissionResponse};
-use crate::turn::TurnConfig;
+use crate::turn::{ModelEndpoint, QueuedSummary, TurnConfig, TurnInput};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -19,8 +20,10 @@ use std::path::PathBuf;
 pub enum RpcRequest {
     #[serde(rename = "session.create")]
     SessionCreate { cwd: PathBuf, model: String },
+    /// 恢复/查询一个会话:不在内存就从 transcript 水合,已在内存就直接回
+    /// 快照。宿主切回会话时调,幂等。
     #[serde(rename = "session.resume")]
-    SessionResume { session_id: SessionId },
+    SessionResume { session_id: SessionId, cwd: PathBuf },
     #[serde(rename = "session.list")]
     SessionList,
     #[serde(rename = "session.delete")]
@@ -42,13 +45,59 @@ pub enum RpcRequest {
         /// 用户插话时为 true —— UI 不显示"已中断"文案。
         interjection: bool,
     },
-    /// 运行中排队消息。会在工具结果全部就位后 drain，
-    /// 绝不能插在 tool_use 和 tool_result 之间（INV-2）。
-    #[serde(rename = "turn.queue_message")]
-    TurnQueueMessage {
+    /// 排队面板:列出等待注入的插话。(跑轮中的新消息经 turn.submit 自动
+    /// 入队,drain 时绝不插在 tool_use 和 tool_result 之间 —— INV-2。)
+    #[serde(rename = "queue.list")]
+    QueueList { session_id: SessionId },
+    /// 删一条排队插话。
+    #[serde(rename = "queue.remove")]
+    QueueRemove {
         session_id: SessionId,
-        content: Vec<UserContent>,
+        entry_id: String,
     },
+    /// 撤回一条排队插话,拿回原始输入放回输入框编辑。
+    #[serde(rename = "queue.take")]
+    QueueTake {
+        session_id: SessionId,
+        entry_id: String,
+    },
+
+    /// 手动压缩(/compact)。带模型端点 —— 压缩要调 LLM。
+    #[serde(rename = "session.compact")]
+    SessionCompact {
+        session_id: SessionId,
+        model: Box<ModelEndpoint>,
+    },
+    /// 本会话的净改动(变更面板)。
+    #[serde(rename = "session.changes")]
+    SessionChanges { session_id: SessionId },
+    /// 改会话标题。自定义标题会抑制自动起名。
+    #[serde(rename = "session.set_title")]
+    SessionSetTitle {
+        session_id: SessionId,
+        title: Option<String>,
+    },
+
+    /// 本会话已授权的网络主机。
+    #[serde(rename = "scope.list")]
+    ScopeList { session_id: SessionId },
+    /// 撤销一个已授权主机。
+    #[serde(rename = "scope.revoke")]
+    ScopeRevoke {
+        session_id: SessionId,
+        host: String,
+    },
+
+    /// 让 MCP 连接对齐给定的服务器清单(宿主从设置里组好传入,内核不读
+    /// 配置文件)。启动时和每次保存设置后调用。
+    #[serde(rename = "mcp.reconcile")]
+    McpReconcile { servers: Vec<McpServerSpec> },
+    /// MCP 连接状态(设置页显示)。
+    #[serde(rename = "mcp.status")]
+    McpStatus,
+    /// 手动重连一个 MCP 服务器。
+    #[serde(rename = "mcp.restart")]
+    McpRestart { id: String },
 
     #[serde(rename = "permission.respond")]
     PermissionRespond {
@@ -83,6 +132,11 @@ pub enum RpcResponse {
     },
     SessionResumed {
         messages: Vec<Message>,
+        /// 压缩边界之前的消息。模型看不见,界面画在分割线上面。
+        archived: Vec<Message>,
+        /// 有没有轮子在跑。决定界面显示停止键还是发送键。
+        busy: bool,
+        compacting: bool,
     },
     SessionList {
         sessions: Vec<SessionSummary>,
@@ -94,6 +148,26 @@ pub enum RpcResponse {
     /// 插话队列(条目 id,前端排队面板据此跟踪);None = 直接开轮了。
     TurnSubmitted {
         queued_id: Option<String>,
+    },
+    QueueList {
+        entries: Vec<QueuedSummary>,
+    },
+    /// queue.take 的应答。None = 条目已不在(被注入或被删)。
+    QueueTaken {
+        input: Option<TurnInput>,
+    },
+    /// queue.remove 的应答:是否真的删到了。
+    Removed {
+        removed: bool,
+    },
+    Changes {
+        changes: Vec<FileChange>,
+    },
+    ScopeHosts {
+        hosts: Vec<String>,
+    },
+    McpStatuses {
+        servers: Vec<McpServerStatus>,
     },
     ToolsList {
         tools: Vec<ToolInfo>,
@@ -137,6 +211,30 @@ pub struct ToolInfo {
     pub name: String,
     pub user_facing_name: String,
     pub enabled: bool,
+}
+
+/// MCP 服务器的启动描述。宿主从设置里组好(过滤掉未启用/没填完的),
+/// 内核只管照单连接 —— 内核不读配置文件。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct McpServerSpec {
+    /// 稳定标识,进工具名(`mcp__<id>__…`),也是权限规则的一部分。
+    pub id: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
+/// MCP 连接状态快照,给设置页看。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerStatus {
+    pub id: String,
+    /// `connecting` / `connected` / `failed`
+    pub state: String,
+    /// connected 时是服务器自报的名字和版本;failed 时是错误原因。
+    pub detail: String,
+    /// 对外的完整工具名(`mcp__…`)。
+    pub tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
