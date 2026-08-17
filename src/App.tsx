@@ -119,6 +119,13 @@ export function App() {
   const [renaming, setRenaming] = useState<string | null>(null);
   /** 右侧抽屉此刻装着谁。两个都是整列，只能二选一。 */
   const [drawer, setDrawer] = useState<"browser" | "changes" | null>(null);
+  /**
+   * 用户主动关过浏览器抽屉的会话。模型在这些会话里再用浏览器工具，
+   * 抽屉不再自动弹出 —— 用户已经表过态，每次工具调用都弹回去等于
+   * 反复跟他抢屏幕。手动重开视为又想看了，从集合里移除、恢复自动弹出。
+   * 存会话 id 而不是一个布尔：别的会话的浏览器活动不该被这个会话连坐。
+   */
+  const browserDismissed = useRef(new Set<string>());
   const [showTerm, setShowTerm] = useState(false);
   const [showSessionCfg, setShowSessionCfg] = useState(false);
   /** 递增一次，改动面板重新比对一次。轮次结束时推一下。 */
@@ -264,11 +271,15 @@ export function App() {
           // 永远拦下，绝不让它冒泡去关窗口。收起一个面板：抽屉优先，
           // 其次终端；都没开就静默吃掉（绝不关窗）。
           e.preventDefault();
-          setDrawer((d) => {
-            if (d) return null;
+          if (drawer) {
+            // 用键盘收掉浏览器抽屉也是主动关闭，之后不再自动弹。
+            if (drawer === "browser" && activeSession) {
+              browserDismissed.current.add(activeSession.id);
+            }
+            setDrawer(null);
+          } else {
             setShowTerm((v) => (v ? false : v));
-            return d;
-          });
+          }
           return;
         default:
           return;
@@ -276,7 +287,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [activeSession, projects, newSession, toggleSidebar]);
+  }, [activeSession, projects, newSession, toggleSidebar, drawer]);
 
   /* ── 会话 / 项目操作 ──────────────────────── */
 
@@ -451,7 +462,15 @@ export function App() {
           onSessionMenu={sessionMenu}
           browserOpen={drawer === "browser"}
           browserEnabled={activeSession !== null}
-          onToggleBrowser={() => setDrawer((d) => (d === "browser" ? null : "browser"))}
+          onToggleBrowser={() => {
+            if (drawer === "browser") {
+              if (activeSession) browserDismissed.current.add(activeSession.id);
+              setDrawer(null);
+            } else {
+              if (activeSession) browserDismissed.current.delete(activeSession.id);
+              setDrawer("browser");
+            }
+          }}
           terminalOpen={showTerm}
           onToggleTerminal={() => setShowTerm((v) => !v)}
           sessionCfgOpen={showSessionCfg}
@@ -459,7 +478,14 @@ export function App() {
           onToggleSessionCfg={() => setShowSessionCfg((v) => !v)}
           changesOpen={drawer === "changes"}
           changesEnabled={activeSession !== null}
-          onToggleChanges={() => setDrawer((d) => (d === "changes" ? null : "changes"))}
+          onToggleChanges={() => {
+            // 切到改动面板会把浏览器顶掉 —— 这也是"用户不想看浏览器"的
+            // 表态，不记下来的话，模型下一次导航又把改动面板抢回去。
+            if (drawer === "browser" && activeSession) {
+              browserDismissed.current.add(activeSession.id);
+            }
+            setDrawer((d) => (d === "changes" ? null : "changes"));
+          }}
         />
 
         <div className="workarea">
@@ -474,7 +500,10 @@ export function App() {
                 onConfig={setConfig}
                 onOpenSettings={() => setShowSettings(true)}
                 onFirstMessage={onFirstMessage}
-                onAgentBrowser={() => setDrawer("browser")}
+                onAgentBrowser={() => {
+                  if (browserDismissed.current.has(activeSession.id)) return;
+                  setDrawer("browser");
+                }}
                 onTurnEnd={() => setChangesRev((n) => n + 1)}
                 onBusy={(b) => patchSession(activeSession.id, { busy: b })}
                 insertText={termSnippet}
@@ -562,7 +591,10 @@ export function App() {
                 <BrowserPanel
                   key={activeSession.id}
                   sessionId={activeSession.id}
-                  onClose={() => setDrawer(null)}
+                  onClose={() => {
+                    browserDismissed.current.add(activeSession.id);
+                    setDrawer(null);
+                  }}
                 />
                 <ScopePanel sessionId={activeSession.id} />
               </>
