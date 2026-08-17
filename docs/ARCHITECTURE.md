@@ -96,6 +96,8 @@ Agent 的正确性大部分体现在**编译器检查不到的地方**:中断后
 
 判断何时进入阶段 B:当内核的单次操作开始出现 >200ms 的阻塞,或者第一次遇到 panic 拖垮窗口。
 
+**当前状态:阶段 B 已落地。**会话装配在 `crates/riot-kernel`(`SessionManager`),宿主 `AppState` 是 RPC 客户端(`kernel/client.rs`),职责划分:宿主是会话注册表与设置的权威(id/标题/mode 等,纯本地),内核会话是按需水合的运行时投影(`session.resume` 幂等),每轮配置随 `TurnConfig` 传输。尚未接:终端/浏览器的反向 RPC(§2.4)、externalBin 打包、崩溃自动重启。
+
 ### 2.3 内核进程的 spawn 与关闭 ⭐
 
 `[约束]` **不要用 `tauri-plugin-shell` 的 `sidecar().spawn()` 来启动内核。**用 `externalBin` 只做打包分发,实际进程用 `tokio::process::Command` + `process-wrap` 自己管。
@@ -1475,13 +1477,16 @@ tokio::select! {
 
 `[取舍]` `Scheduler` 的 gate 字段是 `Option`,`None` 表示不检查。这只在测试里成立(那些用例验证的是调度行为:顺序、配对、级联,权限会把它们变成两件事)。生产路径必须调 `with_gate`。这是一个 fail-open 的默认值,代价是"忘了设置"等于无限权限 —— 用类型强制的话要改掉所有调度器测试,权衡之后选了在 `session.rs` 里放一个测试盯着。
 
-### 12.5 内核暂时内嵌,不是独立进程
+### 12.5 内核已拆成独立进程
 
-`[取舍]` 阶段 A 内核是一个 library,跑在 Tauri 的 tokio runtime 上;`riot-kernel` 那个二进制还是空壳。
+阶段 B 已落地(原先这一节记录的是"暂时内嵌"的取舍,那个阶段已经过去):
 
-进程边界要解决的是崩溃隔离和资源限制,而在主循环的正确性还没被真实模型验证过之前,那层边界只会让每一次调试多一跳(RPC 序列化、进程监管、日志分离)。
+- `riot-kernel` 二进制承载会话运行时(`SessionManager` + 全部会话装配),stdin/stdout 上跑换行分隔的 JSON-RPC,stderr 走日志。
+- 宿主 `kernel/supervisor.rs` 管进程(Job Object / 进程组、四步关闭序列),`kernel/client.rs` 管类型(`RpcRequest` 进、`RpcResponse` 出)和事件分发(每会话 Coalescer 合帧后进前端 Channel)。
+- 权限往返已跨进程:内核发 `PermissionAsked` 事件 → 前端弹窗 → `permission.respond` RPC 回内核的待答表。
+- 每轮配置(模型端点含明文 key、联网/视觉目标、limits、会话设置)由宿主打包成 `TurnConfig` 随 `turn.submit` 传入 —— 内核不读 config.json / auth.json。
 
-拆的时候 `AgentDeps` 的形状不用变 —— 它本来就是按"能被替换"设计的。真正要补的是 RPC 方法的实现,以及把 `PermissionGate` 从进程内调用改成跨进程往返。后者的接口已经是 async 的,形状对得上。
+还欠:终端/浏览器工具的反向 RPC(内核 → 宿主,见 §2.4 的宿主能力划分)、externalBin 打包、崩溃自动重启(supervisor 的 `RestartPolicy` 已就位,还没接进事件循环)。
 
 ---
 
