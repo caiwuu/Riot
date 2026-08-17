@@ -384,6 +384,87 @@ async fn 高层操作在真实页面上成立() {
         "应当抓到页面加载期间的 console：{logs:?}"
     );
 
+    // 禁回弹的样式跟钩子一起注入。滚动边缘的橡皮筋在面板里看是"画面在
+    // 窗口里晃"，macOS 上没有开关能关（Chromium 对 Apple 写死启用），
+    // 只有这条注入路。断言 computed style —— 注入失败时它是默认的 auto。
+    let overscroll = ops::evaluate(
+        tab,
+        "getComputedStyle(document.documentElement).overscrollBehaviorY",
+    )
+    .await
+    .expect("查 overscroll");
+    assert_eq!(overscroll, "none", "html 上应当钉着 overscroll-behavior");
+
+    // 换一个文档还得在:注入走的是 addScriptToEvaluateOnNewDocument，
+    // 只对当前文档 evaluate 一次的话，第一次跳转就失效了。
+    ops::navigate(tab, "data:text/html;charset=utf-8,<body>第二页</body>")
+        .await
+        .expect("再导航");
+    let overscroll = ops::evaluate(
+        tab,
+        "getComputedStyle(document.documentElement).overscrollBehaviorY",
+    )
+    .await
+    .expect("查 overscroll");
+    assert_eq!(overscroll, "none", "跨导航之后禁回弹要还在");
+
+    browser.shutdown().await;
+}
+
+/// Set-of-Marks 的 ops 层在真实页面上成立:几何按 backendId 对齐、叠框
+/// 截图能出图、overlay 截完撤干净。
+///
+/// 盯着的是三个只在真浏览器里才暴露的点:a11y 的 `backendDOMNodeId` 能不能
+/// 和 DOMSnapshot 的 `backendNodeId` 对上（对不上 rect 全空、整个特性废）、
+/// 注入 overlay 后 `Page.captureScreenshot` 出的图非空、以及截完那层红框
+/// 有没有留在页面上（留了的话之后每张普通截图都带框）。
+#[tokio::test]
+async fn 叠框截图在真实页面成立() {
+    let Some(app) = bundle() else {
+        eprintln!("跳过：还没打包");
+        return;
+    };
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let browser = Browser::spawn(app, Some(profile("marks")), tx)
+        .await
+        .expect("起浏览器");
+    wait_for(&mut rx, 30, "ready", |e| matches!(e, Event::Ready)).await;
+    let id = open_tab(&browser, &mut rx).await;
+    let tab = Tab { browser: &browser, id };
+
+    let page = "data:text/html;charset=utf-8,\
+        <html><body>\
+        <button>提交</button>\
+        <a href='%23x'>帮助链接</a>\
+        </body></html>";
+    ops::navigate(tab, page).await.expect("导航");
+    wait_for(&mut rx, 30, "页面加载完成", |e| {
+        matches!(e, Event::LoadEnd { url, .. } if url.starts_with("data:"))
+    })
+    .await;
+
+    // 几何:按钮的 backendId 要能在 DOMSnapshot 里查到一个正矩形。这一步
+    // 就是 a11y 编号和 DOMSnapshot backendNodeId 对齐的真实验证。
+    let (_snap, refs) = ops::snapshot(tab).await.expect("快照");
+    let button = refs
+        .iter()
+        .find(|(_, r)| r.label.contains("提交"))
+        .map(|(n, _)| *n)
+        .expect("按钮该有编号");
+    let rect = refs[&button].rect.expect("按钮该有几何（backendId 没对上就会是 None）");
+    assert!(rect.w > 0.0 && rect.h > 0.0, "矩形该是正的：{rect:?}");
+
+    // 叠框截图:注入 overlay → 截视口 → 撤 overlay，出的图非空。
+    let shot = ops::screenshot_marked(tab, &[(button, rect)]).await.expect("叠框截图");
+    assert!(shot.len() > 1000, "叠框截图太小，可能白屏：{} 字节", shot.len());
+
+    // overlay 必须撤干净 —— 留一层红框在页面上，之后每张普通截图都会带框。
+    let left = ops::evaluate(tab, "!!document.getElementById('__riot_marks__')")
+        .await
+        .expect("查残留");
+    assert_eq!(left, "false", "overlay 截完没撤干净：{left}");
+
     browser.shutdown().await;
 }
 
@@ -939,6 +1020,118 @@ async fn 改视口之后帧尺寸跟着变() {
     .await;
 
     browser.shutdown().await;
+}
+
+/// screencast 开着的时候把面板拖大，画面要跟上。
+///
+/// `[约束]` 这条盯的是"只能缩不能放"。用户拖窗口时 screencast 已经在推，
+/// resize 是打在一个进行中的会话上的 —— 和"先 resize 再开 screencast"
+/// （下面那条用例）走的不是同一条时序。放大跟不上的现象:面板变大后
+/// 画面还是旧尺寸，等比铺放后右侧/下侧留黑边，而缩小看起来一切正常。
+#[tokio::test]
+async fn screencast_进行中放大面板画面要跟上() {
+    let Some(app) = bundle() else {
+        eprintln!("跳过：还没打包");
+        return;
+    };
+
+    use riot_protocol::browser::BrowserAccess as _;
+    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("cast-grow"));
+
+    // `[约束]` 页面必须是静止的。带动画的页面每 100ms 就有新 damage，
+    // capturer 错过一帧还有下一帧兜着 —— 而用户看的多数页面（文档、
+    // 聊天记录）加载完就不动了，resize 之后要是没抓到重排后的那一帧，
+    // 画面就永远停在中间态上。动画页面测不出这个。
+    let page = "data:text/html;charset=utf-8,\
+        <body style='background:%23111;color:%230f0'><h1>STATIC</h1></body>";
+    host.navigate(page).await.expect("导航");
+
+    // 从一块小面板开始推。scale=2 对齐 Retina —— 放大的回归只在高密度下
+    // 出现过，1x 一直是好的。
+    host.resize(600, 500, 2.0).await.expect("初始视口");
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    host.start_screencast(tx).await.expect("开 screencast");
+
+    // 等画面稳定在初始尺寸上 —— 确认会话真的按 600x500 在推。
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!left.is_zero(), "20 秒内没等到 600x500 的帧");
+        let Ok(Some(f)) = tokio::time::timeout(left, rx.recv()).await else {
+            panic!("等初始帧失败");
+        };
+        if (f.width, f.height) == (600, 500) {
+            break;
+        }
+    }
+
+    // 先缩小 —— 用户拖窗口通常先把它压窄，这一步看起来总是正常的。
+    host.resize(400, 500, 2.0).await.expect("缩小视口");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!left.is_zero(), "20 秒内没等到缩小后 400x500 的帧");
+        let Ok(Some(f)) = tokio::time::timeout(left, rx.recv()).await else {
+            panic!("等缩小帧失败");
+        };
+        if (f.width, f.height) == (400, 500) {
+            break;
+        }
+    }
+
+    // 再拖大。此刻 screencast 还开着 —— 正是用户拖窗口的路径。
+    host.resize(1100, 900, 2.0).await.expect("放大视口");
+
+    // 排版视口要真的变大。metadata 跟上了、页面还按旧宽度排版的话，
+    // 帧的右侧全是黑 —— 用户看到的正是"面板拖大了、页面缩在左边"。
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let got = host
+            .evaluate("`${innerWidth}x${innerHeight}`")
+            .await
+            .unwrap_or_default();
+        if got == "1100x900" {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "放大后 20 秒排版视口还是 {got}，没到 1100x900"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let mut seen = Vec::new();
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !left.is_zero(),
+            "放大后 20 秒内没等到 1100x900 的帧，收到过：{seen:?}"
+        );
+        let Ok(Some(f)) = tokio::time::timeout(left, rx.recv()).await else {
+            panic!("等放大后的帧失败，收到过：{seen:?}");
+        };
+        if (f.width, f.height) == (1100, 900) {
+            // 元数据跟上还不够:JPEG 的真实像素也要是新表面的大小。
+            // 表面没放大的话，这里解出来还是旧的 1200x1000。
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&f.data)
+                .expect("解 base64");
+            let real = jpeg_size(&bytes);
+            assert_eq!(
+                real,
+                (2200, 1800),
+                "元数据说 1100x900@2x，JPEG 却是 {real:?} —— 表面没跟着放大"
+            );
+            break;
+        }
+        let size = (f.width, f.height);
+        if !seen.contains(&size) {
+            seen.push(size);
+        }
+    }
+
+    host.stop_screencast().await;
 }
 
 /// 推给面板的画面要按面板的尺寸出。

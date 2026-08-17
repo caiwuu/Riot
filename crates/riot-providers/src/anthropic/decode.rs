@@ -124,8 +124,22 @@ impl StreamDecoder {
                     },
                     WireBlockStart::Unknown => BlockAccumulator::Unknown,
                 };
+                // 工具块一开头就说一声。参数（Write 的整份文件）要生成
+                // 几十秒，而完整的 tool_use 到 message_stop 才给得出来 ——
+                // 不在这里报，界面那几十秒里连卡片都画不出来。
+                let started = match &acc {
+                    BlockAccumulator::ToolUse { id, name, .. } => {
+                        Some((id.clone(), name.clone()))
+                    }
+                    _ => None,
+                };
                 self.put_block(index, acc);
-                Vec::new()
+                match started {
+                    Some((tool_use_id, name)) => vec![ProviderEvent::Delta(
+                        StreamDelta::ToolStart { tool_use_id, name },
+                    )],
+                    None => Vec::new(),
+                }
             }
 
             WireEvent::ContentBlockDelta { index, delta } => self.apply_delta(index, delta),

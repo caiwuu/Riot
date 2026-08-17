@@ -8,7 +8,7 @@ pub use riot_protocol::compact::Compactor;
 pub use riot_protocol::event::Transition;
 use riot_protocol::id::{IdGenerator, SessionId};
 use riot_protocol::message::Message;
-use riot_protocol::provider::Provider;
+use riot_protocol::provider::{Provider, ThinkingPolicy};
 use riot_protocol::tool::Clock;
 
 use crate::invariants::RecoveryCounters;
@@ -31,6 +31,9 @@ pub struct AgentState {
     /// 内单调递增）：它既是熔断依据，也透传给 hook（CC 的 stop_hook_active
     /// 同义）让脚本自己防循环。
     pub stop_hook_blocks: u32,
+    /// 思考策略。存策略而不是解析好的配置：`Adaptive` 要按 `turn` 逐请求
+    /// 解析（首请求 vs 工具续轮不同档），存配置的话整个 run 只能一档到底。
+    pub thinking: ThinkingPolicy,
 
     /// 上一轮为何继续。仅用于测试与观测，不参与决策。
     pub transition: Option<Transition>,
@@ -50,6 +53,7 @@ impl AgentState {
             compact_failure_streak: 0,
             max_output_tokens_override: None,
             stop_hook_blocks: 0,
+            thinking: ThinkingPolicy::Default,
             transition: None,
         }
     }

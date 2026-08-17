@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { browserScopeList, browserScopeRevoke } from "../bridge";
 
@@ -17,6 +17,14 @@ import { browserScopeList, browserScopeRevoke } from "../bridge";
  */
 export function ScopePanel({ sessionId }: { sessionId: string }) {
   const [hosts, setHosts] = useState<string[]>([]);
+  /** 撤销被宿主拒绝。乐观移除会被轮询默默补回来 —— 用户以为权限
+   *  已收回而实际仍生效，这在安全面板上必须说出声。 */
+  const [revokeError, setRevokeError] = useState("");
+  const errTimer = useRef<number | undefined>(undefined);
+  /** 撤掉最后一项后先亮一拍"已全部撤销"再消失 —— 面板瞬间蒸发的话，
+   *  用户来不及确认那一下点上了没有。 */
+  const [farewell, setFarewell] = useState(false);
+  const farewellTimer = useRef<number | undefined>(undefined);
 
   const refresh = useCallback(() => {
     browserScopeList(sessionId)
@@ -34,18 +42,45 @@ export function ScopePanel({ sessionId }: { sessionId: string }) {
 
   const revoke = (host: string) => {
     // 乐观移除:先从界面拿掉，再落到宿主。失败了下一拍轮询会把它补回来。
-    setHosts((hs) => hs.filter((h) => h !== host));
-    browserScopeRevoke(sessionId, host).catch(refresh);
+    const next = hosts.filter((h) => h !== host);
+    setHosts(next);
+    if (next.length === 0) {
+      setFarewell(true);
+      window.clearTimeout(farewellTimer.current);
+      farewellTimer.current = window.setTimeout(() => setFarewell(false), 1500);
+    }
+    browserScopeRevoke(sessionId, host).catch(() => {
+      refresh();
+      setRevokeError(`撤销 ${host} 失败，授权仍然有效`);
+      window.clearTimeout(errTimer.current);
+      errTimer.current = window.setTimeout(() => setRevokeError(""), 4000);
+    });
   };
 
-  if (hosts.length === 0) return null;
+  if (hosts.length === 0) {
+    if (!farewell) return null;
+    return (
+      <div className="scope-panel">
+        <div className="scope-head">
+          <span className="scope-title">已全部撤销</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="scope-panel">
       <div className="scope-head">
         <span className="scope-title">渗透授权范围</span>
+        <span
+          className="scope-info"
+          title="这些站点是你在权限弹窗里点过「总是允许」的侵入性渗透目标。撤销之后，模型再对它做侵入操作会重新询问。"
+        >
+          ⓘ
+        </span>
         <span className="scope-count">{hosts.length}</span>
       </div>
+      {revokeError ? <div className="scope-error">{revokeError}</div> : null}
       <ul className="scope-list">
         {hosts.map((h) => (
           <li key={h} className="scope-item">

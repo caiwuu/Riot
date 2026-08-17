@@ -33,6 +33,7 @@ fn harness(fs: MemFs) -> Harness {
         proc: Arc::new(super::super::testing::NullProc),
         web: Arc::new(riot_protocol::web::NoWeb),
         browser: Arc::new(riot_protocol::browser::NoBrowser),
+        terminal: Arc::new(riot_protocol::terminal::NoTerminal),
         vision: Arc::new(riot_protocol::vision::NoVision),
         clock: Arc::new(super::super::testing::FixedClock::default()),
     };

@@ -180,29 +180,60 @@ const DEFAULT_MAX_TOKENS: u32 = 8192;
 // 组装
 // ────────────────────────────────────────────────────────────
 
+/// 力度档 → 思考预算。Anthropic 没有档位参数，只有 `budget_tokens`。
+///
+/// 数值参照 Claude Code 的 think/megathink 量级；high 刻意没顶到 CC 的
+/// ultrathink（32k）—— 那是用户喊口令才给的量，当作常规档每轮都发太贵。
+fn effort_budget(level: riot_protocol::provider::ThinkingEffort) -> u32 {
+    use riot_protocol::provider::ThinkingEffort;
+    match level {
+        ThinkingEffort::Low => 2_048,
+        ThinkingEffort::Medium => 8_192,
+        ThinkingEffort::High => 24_576,
+    }
+}
+
+/// 把预算夹进 API 的硬约束：`1024 ≤ budget < max_tokens`。
+///
+/// 挤不下（max_tokens 太小，思考和输出没法都留出最低空间）就返回 None
+/// 不开思考 —— 发一个非法组合出去是整个请求 400，而不是思考被忽略。
+fn clamp_thinking_budget(budget: u32, max_tokens: u32) -> Option<u32> {
+    const MIN_BUDGET: u32 = 1_024;
+    // 给最终输出至少留 MIN_BUDGET：预算贴着 max_tokens 的话，思考一满
+    // 输出就被截断，表现为"想了半天一句话没说完"。
+    let cap = max_tokens.saturating_sub(MIN_BUDGET);
+    if cap < MIN_BUDGET {
+        return None;
+    }
+    Some(budget.clamp(MIN_BUDGET, cap))
+}
+
 /// 组装一次请求。**这是唯一的组装入口。**
 pub fn build_request(
     req: &ProviderRequest,
     system: &[SystemSection],
     retry: &RetryContext,
 ) -> WireRequest {
+    let max_tokens = retry
+        .max_output_tokens_override
+        .or(req.max_output_tokens)
+        .unwrap_or(DEFAULT_MAX_TOKENS);
     let out = WireRequest {
         model: retry
             .model_override
             .clone()
             .unwrap_or_else(|| req.model.clone()),
-        max_tokens: retry
-            .max_output_tokens_override
-            .or(req.max_output_tokens)
-            .unwrap_or(DEFAULT_MAX_TOKENS),
+        max_tokens,
         system: build_system(system),
         messages: build_messages(&req.messages, retry),
         tools: build_tools(&req.tools),
         thinking: match req.thinking {
-            ThinkingConfig::Off => None,
-            ThinkingConfig::Budget { tokens } => Some(WireThinking::Enabled {
-                budget_tokens: tokens,
-            }),
+            // Anthropic 默认就不思考，Disabled 等价于不发。
+            ThinkingConfig::Off | ThinkingConfig::Disabled => None,
+            ThinkingConfig::Effort { level } => clamp_thinking_budget(effort_budget(level), max_tokens)
+                .map(|budget_tokens| WireThinking::Enabled { budget_tokens }),
+            ThinkingConfig::Budget { tokens } => clamp_thinking_budget(tokens, max_tokens)
+                .map(|budget_tokens| WireThinking::Enabled { budget_tokens }),
         },
         temperature: None,
         top_p: None,
@@ -400,6 +431,17 @@ fn convert_tool_result_content(c: &ToolResultContent) -> serde_json::Value {
         // 也照发文字 —— 对话前文都建立在这段转述上，换成图反而变了口径。
         ToolResultContent::DescribedImage { text, .. } => {
             serde_json::json!([{ "type": "text", "text": text }])
+        }
+        // Set-of-Marks:一条 result 里图文都发。text 在前 —— 模型先读编号
+        // 清单建立"[n] 是什么"，再看图上的框定位，两路对齐。
+        ToolResultContent::MarkedImage { media_type, data, path: _, text } => {
+            serde_json::json!([
+                { "type": "text", "text": text },
+                {
+                    "type": "image",
+                    "source": { "type": "base64", "media_type": media_type, "data": data },
+                },
+            ])
         }
     }
 }
@@ -853,12 +895,49 @@ mod tests {
     #[test]
     fn thinking_配置透传() {
         let mut r = req(vec![user("hi")]);
+        // max_tokens 要给足：预算必须小于它，不给的话默认 8192 会把 10_000 夹掉。
+        r.max_output_tokens = Some(32_000);
         r.thinking = ThinkingConfig::Budget { tokens: 10_000 };
         assert_eq!(
             build_request(&r, &sections(), &RetryContext::initial()).thinking,
             Some(WireThinking::Enabled {
                 budget_tokens: 10_000
             })
+        );
+    }
+
+    /// 预算必须夹在 `1024 ≤ budget < max_tokens` 里。
+    ///
+    /// 不夹的话，high 档（24576）配上默认 max_tokens（8192）就是一个
+    /// 必然 400 的组合 —— 用户看到的只是"开了思考请求就失败"。
+    #[test]
+    fn thinking_预算夹进_max_tokens() {
+        use riot_protocol::provider::ThinkingEffort;
+
+        // 默认 max_tokens 8192：high 档被夹到 8192 - 1024。
+        let mut r = req(vec![user("hi")]);
+        r.thinking = ThinkingConfig::Effort { level: ThinkingEffort::High };
+        assert_eq!(
+            build_request(&r, &sections(), &RetryContext::initial()).thinking,
+            Some(WireThinking::Enabled { budget_tokens: 7_168 })
+        );
+
+        // max_tokens 小到挤不下思考 + 输出：不开思考，而不是发非法组合。
+        r.max_output_tokens = Some(1_500);
+        assert_eq!(
+            build_request(&r, &sections(), &RetryContext::initial()).thinking,
+            None
+        );
+    }
+
+    /// Disabled 在 Anthropic 侧等价于不发 —— 它默认就不思考。
+    #[test]
+    fn thinking_disabled_不发参数() {
+        let mut r = req(vec![user("hi")]);
+        r.thinking = ThinkingConfig::Disabled;
+        assert_eq!(
+            build_request(&r, &sections(), &RetryContext::initial()).thinking,
+            None
         );
     }
 }

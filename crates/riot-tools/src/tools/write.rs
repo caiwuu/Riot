@@ -119,6 +119,10 @@ impl Tool for Write {
         let existing = ctx.fs.metadata(&resolved).await.ok();
         let created = existing.is_none();
 
+        // 覆盖之前的样子。新建时是 None —— 会话改动视图靠它区分"新增文件"
+        // 和"改了文件"。
+        let mut before: Option<String> = None;
+
         // 已存在的文件：复查先读后写 + TOCTOU
         let (newline, bom) = if existing.is_some() {
             let state = match check_fresh(&resolved, &ctx).await {
@@ -129,6 +133,7 @@ impl Tool for Write {
             if let Err(msg) = verify_unchanged(&resolved, &state.content, &ctx).await {
                 return ToolOutcome::failed(msg);
             }
+            before = Some(state.content.clone());
 
             // 保持原文件的换行风格和 BOM。用户的文件是 CRLF 的话，
             // 全量覆盖成 LF 会让整个文件进 diff。
@@ -154,6 +159,8 @@ impl Tool for Write {
             .await
             .map(|m| m.mtime_ms)
             .unwrap_or(0);
+
+        ctx.file_state.note_baseline(resolved.clone(), before);
 
         // 写完就是最新状态，直接进缓存 —— 否则模型写完还得再 Read
         // 一次才能 Edit，白白多一轮。

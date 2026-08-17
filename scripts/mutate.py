@@ -19,11 +19,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# 变异分层。key 是层名，value 是 (cargo 包名, 源码目录)
+# 变异分层。key 是层名，value 是 (cargo 包名, 源码目录, 额外的 cargo 参数)
 LAYERS = {
-    "permissions": ("riot-permissions", ROOT / "crates/riot-permissions/src"),
-    "tools": ("riot-tools", ROOT / "crates/riot-tools/src"),
-    "runtime": ("riot-runtime", ROOT / "crates/riot-runtime/src"),
+    "permissions": ("riot-permissions", ROOT / "crates/riot-permissions/src", []),
+    "tools": ("riot-tools", ROOT / "crates/riot-tools/src", []),
+    "runtime": ("riot-runtime", ROOT / "crates/riot-runtime/src", []),
+    # 宿主层只跑 --lib。浏览器 e2e 要起 CEF 子进程，几十秒起步，而且几十个
+    # 用例抢一个子进程时本身就会偶发超时 —— 一次偶发失败会被记成"变异被
+    # 抓住"，那正是这个脚本最该避免的假绿。
+    "gate": ("riot-host", ROOT / "src-tauri/src", ["--lib"]),
 }
 
 # (名字, 层, 文件, 原文, 替换, 这个 bug 会导致什么)
@@ -56,6 +60,31 @@ MUTANTS = [
             return coerce_ask(tool_says, ctx);
         }""",
         "第 3 步吃掉后面四步 —— 开了「全部放行」还是每个域名都弹框（真实发生过）",
+    ),
+    # ── 权限闸：Auto 模式的判危 ────────────────────────
+    (
+        "分类器压过安全检查",
+        "gate",
+        "session.rs",
+        """        if !reason.yields_to_bypass() {
+            return None;
+        }""",
+        """        if false {
+            return None;
+        }""",
+        "Auto 模式下小模型能自动放行写 SSH 密钥 / shell 启动脚本 —— 判危器成了绕过分层免疫的后门",
+    ),
+    (
+        "判不准当成安全",
+        "gate",
+        "classifier.rs",
+        """    if up.contains("UNSAFE") {
+        return SafetyVerdict::Hold;
+    }""",
+        """    if up.contains("UNSAFE") && false {
+        return SafetyVerdict::Hold;
+    }""",
+        '"UNSAFE" 里包含 "SAFE" —— 判定顺序一反，每一次拒绝都被静默读成放行',
     ),
     (
         "同意请求交给只读兜底",
@@ -563,31 +592,54 @@ MUTANTS = [
         "`mkdir foo` 失败后并行的 `cd foo && ...` continue 跑，产生一堆误导性错误",
     ),
     # ── Grep ──────────────────────────────────────────
+    # 这里曾经有两个变异："pattern 当位置参数"（漏 `-e` 前缀，搜 `--force`
+    # 会被 rg 当 flag）和"不隔离用户的 rg 配置"（漏 `--no-config`）。
+    #
+    # 两个都**删掉了**，不是因为锚点漂了，而是因为它们防的东西已经不存在：
+    # Grep 底层从 rg 的二进制换成了 ripgrep 的库（`grep-searcher` / `ignore`），
+    # 没有 argv 也没有子进程，pattern 是一个 Rust 值，`RIPGREP_CONFIG_PATH`
+    # 根本不会被读。这类变异重新锚定只会得到一个永远杀不死的假变异。
+    #
+    # 记在这里而不是直接删干净：下一个读这份清单的人会问"搜索层怎么没有
+    # 命令注入相关的变异"，答案是那条路整个不存在了。
     (
-        "pattern 当位置参数",
+        "没搜到当成失败",
         "tools",
         "tools/grep.rs",
-        """    a.push("-e".into());
-    a.push(input.pattern.clone());""",
-        """    a.push(input.pattern.clone());""",
-        "搜 `--force` 这类词时被 rg 当成 flag 解析",
+        "            return ToolOutcome::ok_text(no_match_text(&parsed));",
+        "            return ToolOutcome::failed(no_match_text(&parsed));",
+        "「没搜到」被报成搜索失败，模型会反复调参数重试，而正确的下一步是换个词",
     ),
     (
-        "不隔离用户的 rg 配置",
+        "遍历被截断不告诉模型",
         "tools",
         "tools/grep.rs",
-        '    a.push("--no-config".into());',
+        "        found.cut_short |= walked.cut_short;",
+        "        let _ = walked.cut_short;",
+        "遍历撞上文件数上限后结果不完整，而模型以为它搜完了 —— 静默的错答案",
+    ),
+    (
+        "不完整的结果不加提示",
+        "tools",
+        "tools/grep.rs",
+        r"""    if cut_short {
+        body.push_str(&format!(
+            "\n\n<system-reminder>搜索没走完（超过 {}s 或文件太多），\
+             上面只是已经找到的部分。用 `path` 缩小范围，或者加 `glob` \
+             过滤文件类型。</system-reminder>",
+            search::TIME_BUDGET_SECS
+        ));
+    }""",
         "",
-        "同一次搜索在不同机器上给出不同结果，而那份配置模型看不到",
+        "超时或文件太多导致搜索提前收工，模型却拿着半份结果当全部 —— 不报错不崩，只是结论错",
     ),
     (
-        "rg 的没匹配当成失败",
+        "没走完却说没找到",
         "tools",
         "tools/grep.rs",
-        """            1 => return ToolOutcome::ok_text(no_match_text(&parsed)),
-            0 => {}""",
-        """            0 => {}""",
-        "\"没搜到\"被报成搜索失败，模型反复调参数重试",
+        "            if found.cut_short {",
+        "            if false {",
+        "一次超时的搜索被报成「没有找到」，模型据此断定这东西不存在 —— 把「没搜」说成「不存在」",
     ),
     (
         "Grep 搜索根不过围栏",
@@ -686,7 +738,7 @@ def run_tests(layer: str) -> tuple[int, list[str]]:
     pkg = LAYERS[layer][0]
     try:
         r = subprocess.run(
-            ["cargo", "test", "-p", pkg, "--", "--test-threads=4"],
+            ["cargo", "test", "-p", pkg, *LAYERS[layer][2], "--", "--test-threads=4"],
             cwd=ROOT,
             capture_output=True,
             text=True,

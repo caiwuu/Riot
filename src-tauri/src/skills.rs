@@ -1,14 +1,28 @@
 //! Skill 的发现与解析。
 //!
-//! # 目录布局
+//! # 三层来源
 //!
 //! ```text
-//! <配置目录>/riot/skills/<名字>/SKILL.md     全局技能，所有项目可用
 //! <项目根>/.riot/skills/<名字>/SKILL.md      项目技能，只在该项目的会话里
+//! <配置目录>/skills/<名字>/SKILL.md          全局技能，用户自己写的
+//! （编进二进制）                              内置技能，随应用分发
 //! ```
 //!
-//! 同名时**项目级赢** —— 项目里的约定比全局偏好更具体（和 git 的
-//! local > global 同一直觉）。
+//! 同名时**越具体的赢**：项目 > 全局 > 内置（和 git 的 local > global
+//! 同一直觉）。内置的排最后是刻意的 —— 用户想改内置技能的做法时，写一个
+//! 同名的就能盖掉，不需要去找应用包里的文件，也不用等版本更新。
+//!
+//! # 内置技能为什么编进二进制
+//!
+//! `[约束]` 内置技能走 `include_str!`，**不走文件系统**。
+//!
+//! 理由和 Grep 用 ripgrep 的库而不是它的二进制是同一条：桌面应用不能假设
+//! 运行时的文件布局。打包后的资源目录、开发时的 target 目录、用户手动挪过
+//! 位置的 `.app`，三种情况路径都不一样，而任何一种解析失败的表现都是
+//! 「内置技能莫名其妙消失了」—— 那种问题在用户机器上没法复现。
+//!
+//! 代价是加一个内置技能要改一行 Rust（见 [`BUILTIN_SKILLS`]）。换来的是
+//! 「能装上就一定在」。
 //!
 //! # SKILL.md 格式
 //!
@@ -42,13 +56,71 @@ use serde::Serialize;
 /// 技能目录里让模型按需 Read，不该整个贴进 SKILL.md）。
 const MAX_BODY_CHARS: usize = 64 * 1024;
 
+/// 随应用分发的技能。源文件在 `src-tauri/builtin/skills/<名字>/SKILL.md`。
+///
+/// 加一个：放好文件，然后在这里加一行。见模块文档「为什么编进二进制」。
+///
+/// `[约束]` 只放**在任何项目里都成立**的东西。这个清单会跟着应用装到每台
+/// 机器上，往里塞 Riot 自己仓库的规矩（怎么跑 `cargo clippy -p riot-tools`、
+/// `Tool` trait 怎么实现）等于给所有用户的所有项目发一份用不上的说明书。
+/// 那类东西属于 Riot 仓库的 `.riot/skills/`。
+const BUILTIN_SKILLS: &[(&str, &str)] = &[
+    (
+        "extend-riot",
+        include_str!("../builtin/skills/extend-riot/SKILL.md"),
+    ),
+    ("commit", include_str!("../builtin/skills/commit/SKILL.md")),
+    ("review", include_str!("../builtin/skills/review/SKILL.md")),
+    ("verify", include_str!("../builtin/skills/verify/SKILL.md")),
+    ("debug", include_str!("../builtin/skills/debug/SKILL.md")),
+    (
+        "simplify",
+        include_str!("../builtin/skills/simplify/SKILL.md"),
+    ),
+    (
+        "skillify",
+        include_str!("../builtin/skills/skillify/SKILL.md"),
+    ),
+    (
+        "split-to-prs",
+        include_str!("../builtin/skills/split-to-prs/SKILL.md"),
+    ),
+];
+
 /// 发现结果：能用的进工具，有问题的报给设置页。
 #[derive(Default)]
 pub struct Discovered {
+    /// 全部可用技能。**包含**只给用户的那些 —— 它们要出现在 `/` 菜单里。
     pub cards: Vec<SkillCard>,
     pub problems: Vec<Problem>,
+    /// frontmatter 写了 `disable-model-invocation: true` 的技能名。
+    ///
+    /// 这些只出现在 `/` 菜单里，不进 Skill 工具的清单。用途是"我想有个
+    /// 快捷入口，但不希望模型自己去调它" —— 比如一个会改动很多文件的流程。
+    pub slash_only: std::collections::HashSet<String>,
+    /// 最终生效的这一份是内置技能（不是用户写的）。
+    ///
+    /// 记「最终生效的」而不是「存在同名内置」：用户写了同名的就以他为准，
+    /// 这时这个名字不该再被标成内置 —— 设置页要显示的是**实际在用的那份**
+    /// 来自哪里。
+    pub builtin: std::collections::HashSet<String>,
 }
 
+impl Discovered {
+    /// 模型能主动调的那些。
+    ///
+    /// `[约束]` Skill 工具只该拿到这一份。拿全量的话 `disable-model-invocation`
+    /// 就成了一个骗人的开关 —— 它写在 frontmatter 里，用户会以为生效了。
+    pub fn model_cards(&self) -> Vec<SkillCard> {
+        self.cards
+            .iter()
+            .filter(|c| !self.slash_only.contains(&c.name))
+            .cloned()
+            .collect()
+    }
+}
+
+#[derive(Clone)]
 pub struct Problem {
     pub path: PathBuf,
     pub reason: String,
@@ -60,9 +132,9 @@ pub struct Problem {
 pub struct SkillInfo {
     pub name: String,
     pub description: String,
-    /// SKILL.md 的完整路径。
+    /// SKILL.md 的完整路径。内置技能没有路径（编进了二进制），给空串。
     pub path: String,
-    /// `global` 或 `project`。
+    /// `builtin` / `global` / `project`。
     pub source: String,
     /// 解析失败的原因。None = 这个技能可用。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -82,12 +154,34 @@ pub fn project_dir(root: &Path) -> PathBuf {
     root.join(".riot").join("skills")
 }
 
-/// 扫描一个项目的可用技能：项目级在前（同名赢），全局在后。
+/// 扫描一个项目的可用技能：项目级 > 全局 > 内置（同名先到先得）。
 pub fn discover(project_root: &Path) -> Discovered {
     discover_in(&project_dir(project_root), &global_dir())
 }
 
+/// 没有活跃项目时（设置页）也要能列：全局 + 内置。
+///
+/// 内置技能不依赖项目，少了它们设置页会显示"还没有技能"，而它们明明装着。
+pub fn discover_opt(project_root: Option<&Path>) -> Discovered {
+    match project_root {
+        Some(root) => discover(root),
+        None => discover_in(Path::new("/nonexistent-no-project"), &global_dir()),
+    }
+}
+
 fn discover_in(project: &Path, global: &Path) -> Discovered {
+    let mut out = discover_dirs(project, global);
+    // 内置**最后**扫：同名先到先得，所以用户写的那份赢。
+    scan_builtin(&mut out);
+    out
+}
+
+/// 只扫两个目录，不含内置。
+///
+/// 单独留一个入口是给测试用的：目录扫描的规则（同名优先级、顺序稳定、
+/// 解析失败进 problems）和内置那一层无关，混在一起测的话每加一个内置技能
+/// 都要去改一堆断言里的数字。
+fn discover_dirs(project: &Path, global: &Path) -> Discovered {
     let mut out = Discovered::default();
     scan_dir(project, &mut out);
     scan_dir(global, &mut out);
@@ -124,11 +218,14 @@ fn scan_dir(dir: &Path, out: &mut Discovered) {
             .unwrap_or("unnamed")
             .to_owned();
         match parse_skill(&raw, &fallback_name, &entry) {
-            Ok(card) => {
+            Ok((card, slash_only)) => {
                 // 同名先到先得：项目目录先扫，所以项目级赢。
                 if out.cards.iter().any(|c| c.name == card.name) {
                     tracing::debug!(name = %card.name, "同名技能已存在（项目级优先），跳过");
                 } else {
+                    if slash_only {
+                        out.slash_only.insert(card.name.clone());
+                    }
                     out.cards.push(card);
                 }
             }
@@ -137,8 +234,36 @@ fn scan_dir(dir: &Path, out: &mut Discovered) {
     }
 }
 
-/// 解析一个 SKILL.md。
-fn parse_skill(raw: &str, fallback_name: &str, dir: &Path) -> Result<SkillCard, String> {
+/// 扫内置技能（编进二进制的那些）。
+///
+/// 解析失败进 `problems` 而不是 panic：一个写坏的内置技能不该让应用起不来。
+/// 真正防它的是 `内置技能都能解析` 那个用例 —— 在 CI 里拦住，不在用户机器上。
+fn scan_builtin(out: &mut Discovered) {
+    for (name, raw) in BUILTIN_SKILLS {
+        // 内置技能没有目录：它不在文件系统上，也就不可能有同目录的数据文件。
+        // 因此 `${SKILL_DIR}` 对它没有意义（有用例守着这一点）。
+        match parse_skill(raw, name, Path::new("")) {
+            Ok((card, slash_only)) => {
+                if out.cards.iter().any(|c| c.name == card.name) {
+                    tracing::debug!(name = %card.name, "用户写了同名技能，内置的那份让位");
+                } else {
+                    if slash_only {
+                        out.slash_only.insert(card.name.clone());
+                    }
+                    out.builtin.insert(card.name.clone());
+                    out.cards.push(card);
+                }
+            }
+            Err(reason) => out.problems.push(Problem {
+                path: PathBuf::from(format!("<内置技能 {name}>")),
+                reason,
+            }),
+        }
+    }
+}
+
+/// 解析一个 SKILL.md。返回 `(卡片, 是否只给用户调)`。
+fn parse_skill(raw: &str, fallback_name: &str, dir: &Path) -> Result<(SkillCard, bool), String> {
     let rest = raw
         .strip_prefix("---")
         .ok_or("缺 frontmatter：文件要以 --- 开头，里面至少写一行 description")?;
@@ -148,6 +273,7 @@ fn parse_skill(raw: &str, fallback_name: &str, dir: &Path) -> Result<SkillCard, 
 
     let mut name = None;
     let mut description = None;
+    let mut slash_only = false;
     for line in front.lines() {
         let Some((key, value)) = line.split_once(':') else {
             continue;
@@ -158,6 +284,8 @@ fn parse_skill(raw: &str, fallback_name: &str, dir: &Path) -> Result<SkillCard, 
         match key.trim() {
             "name" => name = Some(value),
             "description" => description = Some(value),
+            // 只给用户 `/` 调，不进 Skill 工具。
+            "disable-model-invocation" => slash_only = value.eq_ignore_ascii_case("true"),
             _ => {} // allowed-tools / model 等字段先不支持，忽略而不是报错
         }
     }
@@ -176,37 +304,51 @@ fn parse_skill(raw: &str, fallback_name: &str, dir: &Path) -> Result<SkillCard, 
         return Err("正文是空的：frontmatter 之后要写这个技能的具体做法".into());
     }
 
-    Ok(SkillCard {
-        name,
-        description,
-        dir: dir.to_path_buf(),
-        body,
-    })
+    Ok((
+        SkillCard {
+            name,
+            description,
+            dir: dir.to_path_buf(),
+            body,
+        },
+        slash_only,
+    ))
 }
 
 /// 设置页的技能清单：可用的和有问题的都列出来。
 pub fn list(project_root: Option<&Path>) -> Vec<SkillInfo> {
     let global = global_dir();
-    let d = match project_root {
-        Some(root) => discover(root),
-        None => discover_in(Path::new("/nonexistent-no-project"), &global),
-    };
+    let d = discover_opt(project_root);
 
     let mut out: Vec<SkillInfo> = d
         .cards
-        .into_iter()
+        .iter()
         .map(|c| {
-            let source = if c.dir.starts_with(&global) { "global" } else { "project" };
+            // 内置的先判：它的 dir 是空路径，落到下面的前缀判断会被误认成
+            // "project"（空路径不以全局目录开头）。
+            let builtin = d.builtin.contains(&c.name);
+            let source = if builtin {
+                "builtin"
+            } else if c.dir.starts_with(&global) {
+                "global"
+            } else {
+                "project"
+            };
             SkillInfo {
-                name: c.name,
-                description: c.description,
-                path: c.dir.join("SKILL.md").display().to_string(),
+                name: c.name.clone(),
+                description: c.description.clone(),
+                // 内置技能不在文件系统上，没有路径可给。
+                path: if builtin {
+                    String::new()
+                } else {
+                    c.dir.join("SKILL.md").display().to_string()
+                },
                 source: source.into(),
                 error: None,
             }
         })
         .collect();
-    out.extend(d.problems.into_iter().map(|p| SkillInfo {
+    out.extend(d.problems.iter().cloned().map(|p| SkillInfo {
         name: p
             .path
             .parent()
@@ -250,7 +392,7 @@ mod tests {
             "---\nname: 发布\ndescription: \"发布新版本时用\"\n---\n第一步：跑测试。\n",
         );
 
-        let d = discover_in(&project, &global);
+        let d = discover_dirs(&project, &global);
         assert!(d.problems.is_empty(), "{:?}", d.problems.first().map(|p| &p.reason));
         assert_eq!(d.cards.len(), 1);
         assert_eq!(d.cards[0].name, "发布");
@@ -265,7 +407,7 @@ mod tests {
         let (_t, project, global) = dirs();
         write_skill(&global, "bad", "---\nname: x\n---\n正文\n");
 
-        let d = discover_in(&project, &global);
+        let d = discover_dirs(&project, &global);
         assert!(d.cards.is_empty());
         assert_eq!(d.problems.len(), 1);
         assert!(d.problems[0].reason.contains("description"), "{}", d.problems[0].reason);
@@ -275,7 +417,7 @@ mod tests {
     fn 名字缺省用目录名() {
         let (_t, project, global) = dirs();
         write_skill(&global, "deploy", "---\ndescription: d\n---\n正文\n");
-        let d = discover_in(&project, &global);
+        let d = discover_dirs(&project, &global);
         assert_eq!(d.cards[0].name, "deploy");
     }
 
@@ -287,7 +429,7 @@ mod tests {
         write_skill(&global, "release", "---\nname: 发布\ndescription: 全局\n---\n全局做法\n");
         write_skill(&project, "release", "---\nname: 发布\ndescription: 项目\n---\n项目做法\n");
 
-        let d = discover_in(&project, &global);
+        let d = discover_dirs(&project, &global);
         assert_eq!(d.cards.len(), 1);
         assert_eq!(d.cards[0].description, "项目", "项目级必须赢");
     }
@@ -295,7 +437,7 @@ mod tests {
     #[test]
     fn 没有技能目录不是错误() {
         let t = tempfile::tempdir().expect("临时目录");
-        let d = discover_in(&t.path().join("nope1"), &t.path().join("nope2"));
+        let d = discover_dirs(&t.path().join("nope1"), &t.path().join("nope2"));
         assert!(d.cards.is_empty());
         assert!(d.problems.is_empty());
     }
@@ -304,9 +446,153 @@ mod tests {
     fn 没有_frontmatter_的文件报问题() {
         let (_t, project, global) = dirs();
         write_skill(&global, "plain", "就是一段普通 markdown\n");
-        let d = discover_in(&project, &global);
+        let d = discover_dirs(&project, &global);
         assert!(d.cards.is_empty());
         assert!(d.problems[0].reason.contains("---"), "{}", d.problems[0].reason);
+    }
+
+    /// 内置技能必须全部能解析。
+    ///
+    /// 这是 `BUILTIN_SKILLS` 存在的前提：它们编进了二进制，装到每台机器上，
+    /// 而一个 frontmatter 写坏的内置技能不会让任何东西编译失败 —— 只会让那条
+    /// 流程在**所有用户**那里静默地不存在。要在 CI 拦住，不能等用户发现。
+    #[test]
+    fn 内置技能都能解析() {
+        let mut out = Discovered::default();
+        scan_builtin(&mut out);
+
+        assert!(
+            out.problems.is_empty(),
+            "内置技能解析失败：{:?}",
+            out.problems.iter().map(|p| (&p.path, &p.reason)).collect::<Vec<_>>()
+        );
+        assert_eq!(out.cards.len(), BUILTIN_SKILLS.len(), "清单里的每一条都该出来");
+        assert_eq!(out.builtin.len(), BUILTIN_SKILLS.len(), "都该被标成内置");
+
+        for c in &out.cards {
+            // 清单进工具 prompt，单条描述硬顶 250 字符（见 skill.rs）。
+            assert!(
+                c.description.chars().count() <= 250,
+                "内置技能「{}」的 description 有 {} 字，会被截断",
+                c.name,
+                c.description.chars().count()
+            );
+            assert!(!c.body.trim().is_empty(), "内置技能「{}」正文是空的", c.name);
+        }
+
+        // 刻意**不**断言正文里没有 `${SKILL_DIR}`：内置技能没有目录，但
+        // 「扩展 Riot」那个正是在讲解这个占位符，文本里出现它是对的。
+        // 真正要守的是"没有目录时不做替换"，那是 skill.rs 的职责，
+        // 用例在 `riot-tools` 那边（搜 `没有目录的技能不替换占位符`）。
+    }
+
+    /// 用户写的同名技能要盖掉内置的。
+    ///
+    /// 这是内置技能排最后扫的全部意义：想改内置流程的做法时，写一个同名的
+    /// 就行，不用去翻应用包里的文件，也不用等版本更新。
+    #[test]
+    fn 用户的同名技能盖掉内置的() {
+        let name = BUILTIN_SKILLS[0].0;
+        let (_t, project, global) = dirs();
+        write_skill(
+            &project,
+            name,
+            &format!("---\nname: {name}\ndescription: 我自己的版本\n---\n我的做法\n"),
+        );
+
+        let d = discover_in(&project, &global);
+        let hit: Vec<&SkillCard> = d.cards.iter().filter(|c| c.name == name).collect();
+        assert_eq!(hit.len(), 1, "不该出现两条同名");
+        assert_eq!(hit[0].description, "我自己的版本", "用户的那份必须赢");
+        assert!(
+            !d.builtin.contains(name),
+            "被盖掉之后不该再标成内置 —— 设置页要显示实际在用的那份来自哪里"
+        );
+    }
+
+    /// 没有活跃项目时（设置页刚打开、还没建会话）也要列出内置技能。
+    ///
+    /// 少了这条，设置页会显示"还没有技能"，而它们明明装着。
+    #[test]
+    fn 没有项目也能列出内置技能() {
+        let list = list(None);
+        assert!(
+            list.iter().any(|s| s.source == "builtin"),
+            "没有项目时该列出内置技能，实际：{:?}",
+            list.iter().map(|s| (&s.name, &s.source)).collect::<Vec<_>>()
+        );
+        assert!(
+            list.iter().filter(|s| s.source == "builtin").all(|s| s.path.is_empty()),
+            "内置技能不在文件系统上，不该给出路径"
+        );
+    }
+
+    /// 仓库自带的技能必须全部能解析。
+    ///
+    /// 它们是"机制之外的内容"—— 一个 frontmatter 写坏的 SKILL.md 不会让
+    /// 任何东西编译失败，只会让那条流程**静默地不存在**，而模型照旧在没有
+    /// 它的情况下干活，谁都不会注意到。
+    #[test]
+    fn 仓库自带的技能都能解析() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("src-tauri 的上一级是仓库根");
+        let d = discover_dirs(&project_dir(repo), Path::new("/nonexistent-no-global"));
+
+        assert!(
+            d.problems.is_empty(),
+            "自带技能解析失败：{:?}",
+            d.problems.iter().map(|p| (&p.path, &p.reason)).collect::<Vec<_>>()
+        );
+        assert!(!d.cards.is_empty(), "仓库该自带技能，一个都没扫到说明目录没跟着走");
+        for c in &d.cards {
+            // 清单进工具 prompt，单条描述硬顶 250 字符（见 skill.rs）。
+            // 超了会被截断，模型就是在残句上做"要不要加载"的判断。
+            assert!(
+                c.description.chars().count() <= 250,
+                "技能「{}」的 description 有 {} 字，会被截断",
+                c.name,
+                c.description.chars().count()
+            );
+        }
+    }
+
+    /// `disable-model-invocation` 必须真的把技能从模型那侧摘掉。
+    ///
+    /// 只解析不生效是最坏的一种：用户在 frontmatter 里写了它，设置页也
+    /// 列着这个技能，而模型照样能调 —— 没有任何迹象表明开关没生效。
+    #[test]
+    fn 只给用户调的技能不进模型清单() {
+        let (_t, project, global) = dirs();
+        write_skill(
+            &global,
+            "danger",
+            "---\nname: danger\ndescription: d\ndisable-model-invocation: true\n---\n正文\n",
+        );
+        write_skill(&global, "normal", "---\nname: normal\ndescription: d\n---\n正文\n");
+
+        let d = discover_dirs(&project, &global);
+        assert!(d.problems.is_empty(), "{:?}", d.problems.first().map(|p| &p.reason));
+        assert_eq!(d.cards.len(), 2, "两个都该被发现（`/` 菜单要用全量）");
+
+        let model = d.model_cards();
+        let names: Vec<&str> = model.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["normal"], "写了开关的不该进模型清单");
+    }
+
+    #[test]
+    fn 开关只认_true() {
+        let (_t, project, global) = dirs();
+        // 写成别的值按"没关"算 —— fail-open 的方向在这里是对的：
+        // 拼错一个值不该让技能从模型那侧静默消失。
+        write_skill(
+            &global,
+            "s",
+            "---\nname: s\ndescription: d\ndisable-model-invocation: no\n---\n正文\n",
+        );
+        let d = discover_dirs(&project, &global);
+        assert_eq!(d.model_cards().len(), 1, "「no」不是 true，该照常给模型");
+        assert!(d.slash_only.is_empty());
     }
 
     #[test]
@@ -316,7 +602,7 @@ mod tests {
         let (_t, project, global) = dirs();
         write_skill(&global, "bbb", "---\ndescription: b\n---\nx\n");
         write_skill(&global, "aaa", "---\ndescription: a\n---\nx\n");
-        let names: Vec<String> = discover_in(&project, &global)
+        let names: Vec<String> = discover_dirs(&project, &global)
             .cards
             .into_iter()
             .map(|c| c.name)

@@ -303,6 +303,11 @@ pub struct ToolContext {
     /// 默认是 [`crate::browser::NoBrowser`]（一律说"用不了"）—— 和 web
     /// 同理，宿主没装配就该明说，不该悄悄换个行为。
     pub browser: Arc<dyn crate::browser::BrowserAccess>,
+    /// 注入的终端面板。长期服务（dev server）跑在这里，不走 `proc` ——
+    /// 那条路收尾时会清掉整个进程组，服务活不过一次调用。
+    ///
+    /// 默认是 [`crate::terminal::NoTerminal`]，同 web / browser 的规矩。
+    pub terminal: Arc<dyn crate::terminal::TerminalAccess>,
     /// 图片怎么交给模型。产出图片的工具（截图）用它。
     ///
     /// 默认是 [`crate::vision::NoVision`]（"模型不收图片，也没配兼容模型"）
@@ -363,6 +368,21 @@ pub trait FileStateCache: Send + Sync {
     fn invalidate(&self, path: &std::path::Path);
     /// 最近读过的文件，最新在前。压缩后恢复工作集要用。
     fn recent(&self, limit: usize) -> Vec<(PathBuf, FileState)>;
+
+    /// 记下这个文件被本会话改动**之前**的样子。`None` = 那时它还不存在。
+    ///
+    /// `[约束]` 只有第一次算数。同一个文件改五次，基线永远是最初那份 ——
+    /// 每次都覆盖的话，"这次会话到底动了什么"会退化成"最后一次改了什么"，
+    /// 而前者才是 review 要回答的问题。
+    ///
+    /// 默认空实现：只有宿主那份缓存要给改动视图供货，测试替身不必
+    /// 为此各写一遍。
+    fn note_baseline(&self, _path: PathBuf, _before: Option<String>) {}
+
+    /// 本会话改动过的文件，附各自的基线。顺序不定。
+    fn baselines(&self) -> Vec<(PathBuf, Option<String>)> {
+        Vec::new()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

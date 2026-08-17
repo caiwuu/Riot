@@ -16,11 +16,11 @@
 use riot_protocol::message::{
     AssistantContent, Attachment, Message, ToolResultContent, UserContent,
 };
-use riot_protocol::provider::ProviderRequest;
+use riot_protocol::provider::{ProviderRequest, ThinkingConfig, ThinkingEffort};
 
 use super::wire::{
-    StreamOptions, WireFunctionCall, WireImageUrl, WireMessage, WirePart, WireRequest, WireTool,
-    WireToolCall, WireToolFunction,
+    StreamOptions, WireFunctionCall, WireImageUrl, WireMessage, WirePart, WireRequest,
+    WireThinkingToggle, WireTool, WireToolCall, WireToolFunction,
 };
 use crate::anthropic::request::SystemSection;
 
@@ -91,6 +91,23 @@ pub fn build_request(
         .collect();
     tools.sort_by(|a, b| a.function.name.cmp(&b.function.name));
 
+    // Effort 只发标准的 reasoning_effort：思考默认就是开的（DeepSeek / GLM），
+    // 再捎上非标准的 thinking 对象只会把 OpenAI 官方端点也搭进去 400。
+    let (reasoning_effort, thinking) = match req.thinking {
+        ThinkingConfig::Off => (None, None),
+        ThinkingConfig::Disabled => (None, Some(WireThinkingToggle::disabled())),
+        ThinkingConfig::Effort { level } => (Some(level.as_openai_str()), None),
+        // OpenAI 兼容协议没有预算参数，折算成最近的档位。
+        ThinkingConfig::Budget { tokens } => (
+            Some(match tokens {
+                ..=4_096 => ThinkingEffort::Low.as_openai_str(),
+                ..=16_384 => ThinkingEffort::Medium.as_openai_str(),
+                _ => ThinkingEffort::High.as_openai_str(),
+            }),
+            None,
+        ),
+    };
+
     WireRequest {
         model: ctx
             .model_override
@@ -105,6 +122,8 @@ pub fn build_request(
         stream_options: Some(StreamOptions {
             include_usage: true,
         }),
+        reasoning_effort,
+        thinking,
     }
 }
 
@@ -149,11 +168,11 @@ pub fn convert_messages(messages: &[Message]) -> Vec<WireMessage> {
                             });
                             // `path` 是给界面的（落盘原图）；发模型的只有
                             // `data` 里的压缩图。
-                            if let ToolResultContent::Image {
-                                media_type,
-                                data,
-                                path: _,
-                            } = content
+                            // Image 和 MarkedImage 都带一张给模型的图，走同一条
+                            // "图放下一条 user 消息"的路（OpenAI 的 tool 消息本身
+                            // 塞不了图）。
+                            if let ToolResultContent::Image { media_type, data, .. }
+                            | ToolResultContent::MarkedImage { media_type, data, .. } = content
                             {
                                 tool_images.push(WirePart::Text {
                                     text: format!("上一个工具结果（{tool_use_id}）的图片："),
@@ -273,6 +292,11 @@ fn render_result(content: &ToolResultContent, is_error: bool) -> String {
         // 转述代替图片。图片是给界面的，不随请求发 —— 这个变体本来就
         // 产生于"模型看不了图"的会话（见协议注释）。
         ToolResultContent::DescribedImage { text, .. } => text.clone(),
+        // 图跟在下一条 user 消息里（见 convert_messages 的 tool_images）；
+        // 这里给编号清单 + 一句指路，tool 消息不能为空。
+        ToolResultContent::MarkedImage { media_type, text, .. } => {
+            format!("{text}\n（带编号框的截图见下一条消息，{media_type}）")
+        }
     };
 
     // 空的 tool 结果会让部分模型误判任务结束。见 ARCHITECTURE.md §6.7

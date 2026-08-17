@@ -104,6 +104,10 @@ async fn main() {
                 first_byte.get_or_insert_with(|| started.elapsed());
                 eprint!("\x1b[2m{text}\x1b[0m");
             }
+            ProviderEvent::Delta(StreamDelta::ToolStart { name, .. }) => {
+                first_byte.get_or_insert_with(|| started.elapsed());
+                println!("\n\n[开始调用] {name}");
+            }
             ProviderEvent::Delta(StreamDelta::ToolInput { .. }) => {}
             ProviderEvent::Message(Message::Assistant { content, .. }) => {
                 for c in &content {

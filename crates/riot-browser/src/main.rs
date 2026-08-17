@@ -155,6 +155,28 @@ wrap_app! {
                 Some(&key),
                 Some(&CefString::from(features.as_str())),
             );
+
+            // `[取舍]` 关掉组件更新器。
+            //
+            // 它下载的那批东西按**每个 profile** 各存一份，而这里是一个会话
+            // 一个 profile（见 paths::cache_dir）—— 于是每开一个会话就重下
+            // 一套约 110MB：component_crx_cache 56MB、WasmTtsEngine 22MB、
+            // WidevineCdm 19MB、OnDeviceHeadSuggestModel 7.6MB，加上十几个
+            // 几百 KB 的列表。真正属于会话的数据（cookie、localStorage、
+            // IndexedDB）只有不到 10MB。攒到六十个会话就是 4GB 缓存，
+            // 其中 92% 是同一份内容的拷贝。
+            //
+            // 不能靠共享 root_cache_path 来去重：CEF 120 起在它上面建了
+            // 进程单例锁，两个会话指同一个根的话，第二个浏览器进程会在
+            // initialize 阶段直接退出。
+            //
+            // 代价是这些组件的能力全都没有：Widevine（DRM 视频放不了）、
+            // 语音合成、地址栏搜索建议，以及 Safe Browsing / 证书吊销
+            // / 优化提示这些列表不再更新。对一个 agent 驱动的无窗口浏览器
+            // 都不成立 —— 它没有地址栏，不放付费视频，也不靠这些列表做
+            // 安全决策（那一层由权限系统管）。编译进 Chromium 的静态数据
+            // 照旧生效，只是不再往上打增量。
+            cl.append_switch(Some(&CefString::from("disable-component-update")));
         }
 
         fn browser_process_handler(&self) -> Option<BrowserProcessHandler> {

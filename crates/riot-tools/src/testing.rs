@@ -542,6 +542,17 @@ impl riot_protocol::browser::BrowserAccess for FakeBrowser {
     async fn snapshot(&self) -> Result<String, riot_protocol::browser::BrowserUnavailable> {
         Err(riot_protocol::browser::BrowserUnavailable("替身没有快照".into()))
     }
+    /// 和 [`Self::snapshot`] 一致地报不可用。
+    ///
+    /// `[约束]` 替身不能比真实实现更宽容。这里返回一个空的 `MarkedView`
+    /// 会让"没有快照能力"变成"快照是空的"，而 BrowserView 对这两种情况
+    /// 的处理完全不同（前者失败，后者说"页面上没有可识别的结构"）——
+    /// 那样用例就在替身造出来的第三种世界里跑。
+    async fn snapshot_marked(
+        &self,
+    ) -> Result<riot_protocol::browser::MarkedView, riot_protocol::browser::BrowserUnavailable> {
+        Err(riot_protocol::browser::BrowserUnavailable("替身没有快照".into()))
+    }
     async fn console(
         &self,
     ) -> Result<Vec<String>, riot_protocol::browser::BrowserUnavailable> {

@@ -190,6 +190,11 @@ impl Tool for Edit {
             .map(|m| m.mtime_ms)
             .unwrap_or(state.mtime_ms);
 
+        // 改动前的样子留一份给会话改动视图。写成功之后才记 —— 失败的
+        // 尝试不算改动。重复改同一个文件时只有第一份会留下。
+        ctx.file_state
+            .note_baseline(resolved.clone(), Some(state.content.clone()));
+
         ctx.file_state.put(
             resolved.clone(),
             FileState {

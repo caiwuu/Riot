@@ -17,7 +17,7 @@ import {
   sendTurn,
   subscribeSession,
 } from "../bridge";
-import { extractTopLevelStringField } from "../lib/partialJson";
+import { extractTopLevelStringField, extractTopLevelStringFields } from "../lib/partialJson";
 
 /**
  * 界面上的一条内容。
@@ -55,7 +55,9 @@ export type Item =
     }
   | { kind: "error"; id: string; text: string }
   /** 中性告知（不是出错）：到达轮数上限之类，只是提示"该歇口气了"。 */
-  | { kind: "notice"; id: string; text: string };
+  | { kind: "notice"; id: string; text: string }
+  /** 压缩边界：上面是压缩前的记录，下面是压缩后的对话。 */
+  | { kind: "compact"; id: string };
 
 /**
  * 排队面板里的一条插话（还没被内核注入的用户消息）。
@@ -150,6 +152,14 @@ export function useSession(
   const pendingThinking = useRef("");
   const pendingToolJson = useRef<{ id: string; chunk: string }[]>([]);
   const toolJsonById = useRef(new Map<string, string>());
+  /**
+   * 工具卡片出现时就地落定的流式内容。
+   *
+   * 卡片必须排在模型那句话的**下面**（"先写文件："在上，卡片在下），所以
+   * 工具一开始就把当时的流式文本/思考落成条目。完整消息随后会把同样的块
+   * 再给一遍 —— 靠这里去重，否则同一句话在界面上出现两次。
+   */
+  const settled = useRef<{ text: string[]; thinking: string[] }>({ text: [], thinking: [] });
   const rafId = useRef(0);
   const onBrowserOpenRef = useRef(opts?.onBrowserOpen);
   onBrowserOpenRef.current = opts?.onBrowserOpen;
@@ -187,11 +197,14 @@ export function useSession(
       pendingToolJson.current = [];
 
       let plan: string | undefined;
+      // 工具参数边流边填进卡片：id → 此刻已经到齐的那些字段。
+      const partial = new Map<string, Record<string, string>>();
       for (const { id, chunk } of chunks) {
         const next = (toolJsonById.current.get(id) ?? "") + chunk;
         toolJsonById.current.set(id, next);
         const extracted = extractTopLevelStringField(next, "plan");
         if (extracted !== null) plan = extracted;
+        partial.set(id, extractTopLevelStringFields(next));
       }
 
       setState((s) => ({
@@ -199,6 +212,7 @@ export function useSession(
         streaming: s.streaming + t,
         thinking: s.thinking + k,
         ...(plan !== undefined ? { streamingPlan: plan } : {}),
+        ...(partial.size ? { items: fillToolInput(s.items, partial) } : {}),
       }));
     };
 
@@ -236,9 +250,50 @@ export function useSession(
           } else if (event.kind === "thinking") {
             pendingThinking.current += event.text;
             schedule();
+          } else if (event.kind === "tool_start") {
+            // 卡片立刻出现，不等参数流完。Write 的整份文件在参数里，
+            // 生成要几十秒 —— 那段时间屏幕上不能什么都没有。
+            flush();
+            setState((s) => {
+              if (s.items.some((it) => it.kind === "tool" && it.id === event.tool_use_id)) {
+                return s;
+              }
+              const items = [...s.items];
+              // 工具块开始 = 前面那段话已经说完了。就地落定，卡片才能
+              // 排在它下面 —— 反过来是"卡片在前、话在后"。
+              // `[约束]` 记 settled 用 includes 判重:StrictMode 把 updater
+              // 跑两遍，直接 push 会攒下两份同样的文本。
+              if (s.thinking.trim()) {
+                items.push({
+                  kind: "thinking",
+                  id: `${event.tool_use_id}-k`,
+                  text: s.thinking,
+                });
+                if (!settled.current.thinking.includes(s.thinking)) {
+                  settled.current.thinking.push(s.thinking);
+                }
+              }
+              if (s.streaming.trim()) {
+                items.push({
+                  kind: "assistant",
+                  id: `${event.tool_use_id}-t`,
+                  text: s.streaming,
+                });
+                if (!settled.current.text.includes(s.streaming)) {
+                  settled.current.text.push(s.streaming);
+                }
+              }
+              items.push({
+                kind: "tool",
+                id: event.tool_use_id,
+                name: event.name,
+                input: {},
+                status: "running",
+                output: [],
+              });
+              return { ...s, items, streaming: "", thinking: "" };
+            });
           } else if (event.kind === "tool_input") {
-            // 普通工具参数仍等完整 tool_use 再出卡片（JSON 碎片没法读）。
-            // 计划是例外：正文就在参数里，必须边写边显示。
             pendingToolJson.current.push({
               id: event.tool_use_id,
               chunk: event.partial_json,
@@ -249,10 +304,17 @@ export function useSession(
 
         case "request_start":
           toolJsonById.current.clear();
+          // 上一轮的残留会让这一轮的同样一句话被误删。
+          settled.current = { text: [], thinking: [] };
           busyRef.current = true;
           // 请求开始意味着压缩这一段结束了 —— 成功如此，失败也如此
           // （失败没有事件，只有日志，但轮次照常用完整历史往下走）。
-          setState((s) => ({ ...s, busy: true, streamingPlan: null, compacting: false }));
+          setState((s) => ({
+            ...s,
+            busy: true,
+            streamingPlan: null,
+            compacting: false,
+          }));
           break;
 
         case "message": {
@@ -291,7 +353,10 @@ export function useSession(
               break;
             }
           }
-          setState((s) => applyMessage(s, event));
+          // 去重在 updater 外面做：StrictMode 会把 updater 跑两遍，
+          // 而 settled 的消费是一次性的。
+          const deduped = dropSettled(event, settled.current);
+          setState((s) => applyMessage(s, deduped));
           break;
         }
 
@@ -332,20 +397,12 @@ export function useSession(
           break;
 
         case "compacted":
-          // 不提示的话，用户看到的是回答突然变快了、模型偶尔忘了远处的
-          // 细节 —— 而他不知道发生过什么。
+          // 旧消息还在界面上，划一条线就够了。再出一块提示等于把记录盖住。
           flush();
           setState((s) => ({
             ...s,
             compacting: false,
-            items: [
-              ...s.items,
-              {
-                kind: "notice",
-                id: `compact-${Date.now()}`,
-                text: `上下文已压缩（${fmtK(event.before_tokens)} → ${fmtK(event.after_tokens)} token）。更早的对话已折叠成摘要，继续对话不受影响。`,
-              },
-            ],
+            items: [...s.items, { kind: "compact", id: `compact-${Date.now()}` }],
           }));
           break;
 
@@ -422,21 +479,33 @@ export function useSession(
       onSubscribeError,
     );
 
-    getHistory(sessionId)
-      .then(({ messages, busy }) => {
-        if (cancelled) return;
-        // busy 要跟着历史一起恢复：轮子在后台跑着，而界面状态随组件
-        // 卸载丢了 —— 不恢复的话切回来看到的是发送键，停不下来。
+    // 先等出口挂上再拉历史。并行的话，结束事件可能还打在已经没人听的
+    // 旧 channel 上，而快照里 busy 仍是 true —— 停止键就摘不掉。
+    void sub.ready
+      .then(() => {
+        if (cancelled) return undefined;
+        return getHistory(sessionId);
+      })
+      .then((hist) => {
+        if (cancelled || !hist) return;
+        const messages = hist.messages ?? [];
+        const archived = hist.archived ?? [];
+        const busy = hist.busy;
+        const compacting = hist.compacting ?? false;
+        // busy / compacting 要跟着历史一起恢复：轮子在后台跑着，而界面
+        // 状态随组件卸载丢了 —— 不恢复的话切回来只剩三个点，或发送键
+        // 停不下来。
         busyRef.current = busy;
-        if (messages.length === 0) {
-          setState((s) => ({ ...s, busy }));
+        if (messages.length === 0 && archived.length === 0) {
+          setState((s) => ({ ...s, busy, compacting }));
           return;
         }
         setState((s) => ({
           ...s,
           busy,
-          items: messagesToItems(messages),
-          tokens: sumUsage(messages),
+          compacting,
+          items: historyToItems(messages, archived),
+          tokens: sumUsage([...archived, ...messages]),
         }));
       })
       .catch(() => {
@@ -545,7 +614,7 @@ export function useSession(
           busy: wasBusy,
           items: [
             ...s.items.filter((it) => it.id !== localId),
-            { kind: "error", id: `err-${Date.now()}`, text: String(e) },
+            { kind: "error", id: `err-${Date.now()}`, text: humanizeError(e) },
           ],
         }));
         return false;
@@ -619,7 +688,13 @@ export function useSession(
       const item: QueuedItem = took ? { ...local, ...took } : local;
       if (busyRef.current) {
         mutateQueued((q) => [item, ...q.filter((x) => x.id !== id)]);
-        void interruptSession(sessionId);
+        void interruptSession(sessionId).then((cancelled) => {
+          if (cancelled) return;
+          // 宿主已经闲着，忙碌是残留。直接发，别等一个永远不来的 Done。
+          busyRef.current = false;
+          mutateQueued((q) => q.filter((x) => x.id !== id));
+          void send(item.text, item.images, item.refs);
+        });
       } else {
         mutateQueued((q) => q.filter((x) => x.id !== id));
         void send(item.text, item.images, item.refs);
@@ -628,11 +703,31 @@ export function useSession(
     [sessionId, mutateQueued, send],
   );
 
-  const stop = useCallback(() => void interruptSession(sessionId), [sessionId]);
+  const stop = useCallback(() => {
+    void interruptSession(sessionId).then((cancelled) => {
+      if (cancelled) return;
+      // 宿主已经闲着。结束事件在换订阅时丢过，界面还转圈 ——
+      // 再点停止必须把残留忙碌清掉，否则停止键永远摘不下来。
+      busyRef.current = false;
+      setState((s) => ({
+        ...s,
+        busy: false,
+        compacting: false,
+        streaming: "",
+        thinking: "",
+        streamingPlan: null,
+        items: s.items.map((it) =>
+          it.kind === "tool" && it.status === "running"
+            ? { ...it, status: "error" as const, result: "未完成" }
+            : it,
+        ),
+      }));
+    });
+  }, [sessionId]);
 
   const answer = useCallback(
     async (response: PermissionResponse, requestId?: string) => {
-      // 计划批准卡和权限弹窗可能同时在场（并发工具各自征求授权），
+      // 计划卡、选择题卡和权限弹窗可能同时在场（并发工具各自征求授权），
       // 必须按 id 应答 —— 拿队首猜的话，点计划卡的"批准"可能答给了
       // 旁边排队的某次 Bash 确认。
       const ask = requestId
@@ -654,27 +749,27 @@ export function useSession(
   return { ...state, send, stop, answer, queueDelete, queueEdit, queueSendNow };
 }
 
-/**
- * 把持久化的历史翻译成界面条目。切回会话时用。
- *
- * 和 applyMessage 的差别只有一处：历史里的用户文本必须显示（applyMessage
- * 跳过它，因为实时路径上 send 已经乐观插入过了）。
- */
-function messagesToItems(msgs: Message[]): Item[] {
+/** 活历史 + 压缩前归档 → 界面条目。归档画在分割线上面。 */
+function historyToItems(live: Message[], archived: Message[]): Item[] {
+  const past = messagesToItems(archived, true);
+  const now = messagesToItems(live, true);
+  if (past.length === 0) return now;
+  return [...past, { kind: "compact", id: "compact-boundary" }, ...now];
+}
+
+function messagesToItems(msgs: Message[], skipSynthetic = false): Item[] {
   const items: Item[] = [];
 
   for (const msg of msgs) {
     if (msg.role === "user") {
-      // 带文本的合成用户消息（压缩后的续接摘要）不是用户说的话，渲染成
-      // 用户气泡会让人以为自己发过一大段总结 —— 折叠成一条中性提示。
+      // 带文本的合成用户消息（压缩后的续接摘要）不是用户说的话。
+      // 分割线已经说明"上面被压缩了"，这里不再画一块提示把记录盖住。
       // 只拦带文本的：中断时合成的"已取消"消息只有 tool_result，必须
       // 走下面的正常流程去把工具卡片标成中断。
       if (msg.meta?.synthetic && msg.content.some((c) => c.type === "text")) {
-        items.push({
-          kind: "notice",
-          id: `${msg.id}-synthetic`,
-          text: "（更早的对话已压缩成摘要，模型可见）",
-        });
+        if (!skipSynthetic) {
+          items.push({ kind: "compact", id: `${msg.id}-synthetic` });
+        }
         continue;
       }
       // 历史里用户附的图（模型能直接看图时存的是原图）。不回显的话，
@@ -749,6 +844,47 @@ function messagesToItems(msgs: Message[]): Item[] {
   return items;
 }
 
+/**
+ * 把流式到达的工具参数填进对应卡片。
+ *
+ * 参数还没齐，能显示多少显示多少 —— Write 的正文就是这样一行行长出来的。
+ * 解析只认顶层字符串字段，数字和布尔参数要等完整的 tool_use 才补上。
+ */
+function fillToolInput(items: Item[], partial: Map<string, Record<string, string>>): Item[] {
+  let hit = false;
+  const out = items.map((it) => {
+    if (it.kind !== "tool") return it;
+    const fields = partial.get(it.id);
+    if (!fields) return it;
+    hit = true;
+    return { ...it, input: fields };
+  });
+  return hit ? out : items;
+}
+
+/**
+ * 去掉工具卡片出现时已经就地落定的那些块。
+ *
+ * 完整消息会把同一段话再给一遍，不去掉的话界面上出现两次。按内容配对
+ * 而不是按位置 —— 一条消息里可能有好几个文本块，只有落定过的那些要走。
+ */
+function dropSettled(
+  event: Extract<AgentEvent, { type: "message" }>,
+  settled: { text: string[]; thinking: string[] },
+): Extract<AgentEvent, { type: "message" }> {
+  if (event.role !== "assistant") return event;
+  if (settled.text.length === 0 && settled.thinking.length === 0) return event;
+  const content = event.content.filter((c) => {
+    if (c.type !== "text" && c.type !== "thinking") return true;
+    const pool = c.type === "text" ? settled.text : settled.thinking;
+    const at = pool.indexOf(c.text);
+    if (at < 0) return true;
+    pool.splice(at, 1);
+    return false;
+  });
+  return { ...event, content };
+}
+
 function applyMessage(s: SessionState, event: Extract<AgentEvent, { type: "message" }>): SessionState {
   const items = [...s.items];
   const msg = event;
@@ -785,14 +921,23 @@ function applyMessage(s: SessionState, event: Extract<AgentEvent, { type: "messa
       } else if (c.type === "thinking" && c.text.trim()) {
         items.push({ kind: "thinking", id: `${msg.id}-k`, text: c.text });
       } else if (c.type === "tool_use") {
-        items.push({
-          kind: "tool",
+        // 卡片多半已经在了（tool_start 时就插好、参数边流边填）。这里补
+        // 上完整参数 —— 再 push 一张的话，一次调用会显示成两张卡。
+        const at = items.findIndex((it) => it.kind === "tool" && it.id === c.id);
+        const card = {
+          kind: "tool" as const,
           id: c.id,
           name: c.name,
           input: c.input,
-          status: "running",
-          output: [],
-        });
+          status: "running" as const,
+          output: [] as string[],
+        };
+        if (at >= 0) {
+          const prev = items[at] as Extract<Item, { kind: "tool" }>;
+          items[at] = { ...card, status: prev.status, output: prev.output };
+        } else {
+          items.push(card);
+        }
       }
     }
     // 流式文本已经落成正式消息，清掉临时区，否则同一段会显示两遍
@@ -893,10 +1038,32 @@ function applyResolved(s: SessionState, requestId: string, reason: DecisionReaso
   };
 }
 
+/**
+ * 把一串技术错误链翻成一句人话。识别不了的原样保留 —— 编出来的
+ * 解释比看不懂的原文更糟。原文压缩在括号里，报 bug 时用得上。
+ */
+function humanizeError(e: unknown): string {
+  const raw = String(e);
+  const lower = raw.toLowerCase();
+  const known: [RegExp, string][] = [
+    [/timed?\s*out|timeout/, "请求超时了，网络或服务方没有按时响应。稍等重试一般就好。"],
+    [/dns|name not resolved|nodename/, "域名解析失败 —— 检查网络连接或服务方地址。"],
+    [/connection refused|connect error|network|fetch failed/, "连不上服务方 —— 检查网络或代理设置。"],
+    [/401|unauthorized|invalid.*key|authentication/, "服务方拒绝了 API key，去设置里检查一下。"],
+    [/429|rate.?limit|overloaded/, "服务方限流了，稍等一会儿再发。"],
+    [/insufficient|quota|balance/, "服务方账户额度不足。"],
+  ];
+  for (const [re, msg] of known) {
+    if (re.test(lower)) return `${msg}（${raw.length > 200 ? `${raw.slice(0, 200)}…` : raw}）`;
+  }
+  return raw;
+}
+
 function describeError(e: AgentError): string {
   switch (e.kind) {
     case "provider":
-      return e.message;
+      // 服务方的报错常是一整条 HTTP 错误链，先过一遍人话转换
+      return humanizeError(e.message);
     case "context_exhausted":
       return `上下文超限且压缩无效（用了 ${e.used}，上限 ${e.limit}）。开个新会话吧。`;
     case "compact_circuit_open":
@@ -928,6 +1095,7 @@ function resultView(c: ToolResultContent): { text?: string; image?: string; imag
       return { text: "（历史结果已清理）" };
     case "image":
     case "described_image":
+    case "marked_image":
       return {
         image: `data:${c.media_type};base64,${c.data}`,
         ...(c.path ? { imagePath: c.path } : {}),
@@ -935,10 +1103,6 @@ function resultView(c: ToolResultContent): { text?: string; image?: string; imag
     default:
       return {};
   }
-}
-
-function fmtK(n: number): string {
-  return n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
 }
 
 function findLast<T>(arr: T[], pred: (x: T) => boolean): number {

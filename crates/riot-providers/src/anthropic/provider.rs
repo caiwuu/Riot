@@ -170,9 +170,14 @@ impl Provider for AnthropicProvider {
                 }
 
                 let mut wire = build_request(&req, &system, &retry_ctx);
-                wire.temperature = sampling.temperature;
-                wire.top_p = sampling.top_p;
-                wire.top_k = sampling.top_k;
+                // `[约束]` 开了 thinking 就不能注采样：Anthropic 对
+                // thinking + temperature/top_k 的组合直接 400。思考的价值
+                // 高于用户调过的采样 —— 两者冲突时保思考、弃采样。
+                if wire.thinking.is_none() {
+                    wire.temperature = sampling.temperature;
+                    wire.top_p = sampling.top_p;
+                    wire.top_k = sampling.top_k;
+                }
                 let http_req = match build_http_request(&wire, &endpoint) {
                     Ok(r) => r,
                     Err(e) => {

@@ -110,14 +110,24 @@ impl Tool for SkillTool {
             let args = input.args.as_deref().unwrap_or("（调用时没有提供参数）");
             body = body.replace("$ARGUMENTS", args);
         }
-        body = body.replace("${SKILL_DIR}", &skill.dir.display().to_string());
+        // 内置技能（编进二进制的那些）没有目录，替换成空串只会把正文弄坏 ——
+        // 而正文里出现这个 token 时，最可能的情况是它在**讲解**这个占位符
+        // （「扩展 Riot」那个内置技能就是）。留着原样比换成空串诚实。
+        let no_dir = skill.dir.as_os_str().is_empty();
+        if !no_dir {
+            body = body.replace("${SKILL_DIR}", &skill.dir.display().to_string());
+        }
 
-        let text = format!(
-            "# 技能：{}\n（目录：{}。正文里的相对路径以它为基准，需要时用 Read 读取。）\n\n{}",
-            skill.name,
-            skill.dir.display(),
-            body.trim(),
-        );
+        let text = if no_dir {
+            format!("# 技能：{}\n\n{}", skill.name, body.trim())
+        } else {
+            format!(
+                "# 技能：{}\n（目录：{}。正文里的相对路径以它为基准，需要时用 Read 读取。）\n\n{}",
+                skill.name,
+                skill.dir.display(),
+                body.trim(),
+            )
+        };
         ToolOutcome::Ok {
             ui_payload: Some(UiPayload::Plain {
                 text: format!("已加载技能「{}」（{} 字符）", skill.name, text.chars().count()),
@@ -161,6 +171,7 @@ mod tests {
             proc: Arc::new(NullProc),
             web: Arc::new(riot_protocol::web::NoWeb),
             browser: Arc::new(riot_protocol::browser::NoBrowser),
+            terminal: Arc::new(riot_protocol::terminal::NoTerminal),
             vision: Arc::new(riot_protocol::vision::NoVision),
             clock: Arc::new(FixedClock::default()),
         }
@@ -214,6 +225,28 @@ mod tests {
         let text = format!("{model_content:?}");
         assert!(text.contains("查询目标：example.com"));
         assert!(text.contains("/tmp/skills/查/conf.json"), "${{SKILL_DIR}} 要替换成真实目录");
+    }
+
+    /// 内置技能（编进二进制的那些）没有目录，这时不该做替换。
+    ///
+    /// 换成空串会把正文弄坏，而正文里出现这个 token 时最可能的情况是它在
+    /// **讲解**这个占位符 —— 「扩展 Riot」那个内置技能就是。同理也不该再
+    /// 输出「目录：」那一行，它会变成一个空路径。
+    #[tokio::test]
+    async fn 没有目录的技能不替换占位符() {
+        let mut c = card("扩展", "d", "占位符写成 ${SKILL_DIR}，指技能自己的目录。");
+        c.dir = std::path::PathBuf::new();
+        let t = SkillTool::new(vec![c]);
+        let out = t.call(serde_json::json!({ "name": "扩展" }), ctx()).await;
+        let ToolOutcome::Ok { model_content, .. } = out else {
+            panic!("该成功：{out:?}")
+        };
+        let text = format!("{model_content:?}");
+        assert!(
+            text.contains("${SKILL_DIR}"),
+            "没有目录时该原样留着，而不是换成空串：{text}"
+        );
+        assert!(!text.contains("目录："), "没有目录就别输出那一行：{text}");
     }
 
     #[tokio::test]

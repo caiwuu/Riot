@@ -1,13 +1,20 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   type Sampling,
   type SessionInfo,
+  type ThinkingPolicy,
+  detectVenvs,
   pickDirectory,
   setSessionPythonVenv,
   setSessionSampling,
   setSessionSystemPrompt,
+  setSessionThinking,
 } from "../bridge";
+import { FieldNumber } from "./FieldNumber";
+import { FieldSelect, type FieldOption } from "./FieldSelect";
+import { HintTip } from "./HintTip";
+import { Modal } from "./Modal";
 
 /**
  * 会话设置弹窗：只管**这个会话**的东西 —— 采样覆盖、Python 虚拟环境、
@@ -51,6 +58,27 @@ function sameSampling(a: Sampling, b: Sampling): boolean {
   return SAMPLING_FIELDS.every((f) => (a[f.key] ?? null) === (b[f.key] ?? null));
 }
 
+/** 思考策略的下拉项。固定档位摊平成一级选项 —— 六个选项不值得两级菜单。
+ *  说明走 hint（第二行灰字）：塞进主标签会挤成两行大字，见谁选谁难受。 */
+const THINKING_OPTIONS: FieldOption[] = [
+  { value: "default", label: "默认", hint: "不发思考参数，随端点默认" },
+  { value: "adaptive", label: "自适应", hint: "首轮认真想，工具续轮少想" },
+  { value: "low", label: "低" },
+  { value: "medium", label: "中" },
+  { value: "high", label: "高" },
+  { value: "disabled", label: "关闭思考", hint: "部分端点不支持" },
+];
+
+function thinkingKey(p: ThinkingPolicy): string {
+  return p.mode === "fixed" ? p.level : p.mode;
+}
+
+function thinkingFromKey(k: string): ThinkingPolicy {
+  if (k === "low" || k === "medium" || k === "high") return { mode: "fixed", level: k };
+  if (k === "adaptive" || k === "disabled") return { mode: k };
+  return { mode: "default" };
+}
+
 export function SessionSettings({
   session,
   inherited,
@@ -72,12 +100,28 @@ export function SessionSettings({
   );
   const [venv, setVenv] = useState(session.pythonVenv ?? "");
   const [prompt, setPrompt] = useState(session.systemPrompt ?? "");
-  const [error, setError] = useState("");
+  const [thinking, setThinking] = useState(() => thinkingKey(session.thinking));
+  /** 项目根下探测到的 venv（.venv / venv）。系统选择框藏起点开头的目录，
+   *  多数人的 .venv 在选择框里根本看不到 —— 探测到就给一键填入。 */
+  const [venvFound, setVenvFound] = useState<string[]>([]);
 
   useEffect(() => {
-    const esc = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", esc);
-    return () => window.removeEventListener("keydown", esc);
+    // 探测失败不打扰：这只是个便利入口，手输和选择框都还在。
+    detectVenvs(session.id).then(setVenvFound).catch(() => {});
+  }, [session.id]);
+  const [error, setError] = useState("");
+  /** 「全部恢复继承」的点击回执。没有它，点下去唯一的变化是按钮自己变灰。 */
+  const [resetDone, setResetDone] = useState(false);
+  const resetTimer = useRef(0);
+
+  /**
+   * 关窗前把焦点从输入框上拿走，让"失焦提交"先落地。不做的话，
+   * 正写了一半的系统提示词会随组件卸载无声蒸发 —— 那可能是用户
+   * 斟酌了几分钟的长文本。
+   */
+  const requestClose = useCallback(() => {
+    (document.activeElement as HTMLElement | null)?.blur?.();
+    onClose();
   }, [onClose]);
 
   const overrides = SAMPLING_FIELDS.filter(
@@ -95,6 +139,19 @@ export function SessionSettings({
   const resetSampling = () => {
     setSamp(Object.fromEntries(SAMPLING_FIELDS.map((f) => [f.key, ""])));
     commitSampling({});
+    setResetDone(true);
+    window.clearTimeout(resetTimer.current);
+    resetTimer.current = window.setTimeout(() => setResetDone(false), 1500);
+  };
+
+  const commitThinking = (key: string) => {
+    if (key === thinking) return;
+    setThinking(key);
+    setError("");
+    const policy = thinkingFromKey(key);
+    setSessionThinking(session.id, policy)
+      .then(() => onPatch({ thinking: policy }))
+      .catch((e: unknown) => setError(String(e)));
   };
 
   const commitVenv = async (value: string) => {
@@ -112,7 +169,8 @@ export function SessionSettings({
   };
 
   const pickVenv = async () => {
-    const dir = await pickDirectory();
+    // 从会话根打开：venv 几乎总在项目里，从家目录翻过去纯属折磨。
+    const dir = await pickDirectory(session.root);
     if (!dir) return;
     setVenv(dir);
     await commitVenv(dir);
@@ -128,49 +186,75 @@ export function SessionSettings({
   };
 
   return (
-    <div
-      className="modal-backdrop"
-      onMouseDown={(e) => e.target === e.currentTarget && onClose()}
-    >
-      <div className="modal session-dialog">
+    <Modal className="session-dialog" label="会话设置" onClose={requestClose}>
         <div className="modal-head">
           <span className="modal-title">会话设置</span>
-          <span className="modal-queue" title={session.root}>
-            {session.title ?? "新会话"}
-          </span>
-          <button className="ghost" onClick={onClose} aria-label="关闭 (Esc)">
+          <span className="modal-queue">{session.title ?? "新会话"}</span>
+          <button className="ghost" onClick={requestClose} aria-label="关闭 (Esc)">
             ✕
           </button>
         </div>
 
         <div className="session-dialog-body">
-          <h3 className="dialog-section" style={{ marginTop: 0 }} title="留空继承服务方的设置，占位符是继承来的值">
+          {/* 路径常驻而不是藏在 title 里 —— 开错会话的设置时，它是唯一的线索。 */}
+          <p className="session-path">{session.root}</p>
+          <h3 className="dialog-section" style={{ marginTop: 0 }}>
             采样参数
+            <HintTip>留空继承服务方的设置，占位符是继承来的值。</HintTip>
           </h3>
           <div className="samp-grid">
             {SAMPLING_FIELDS.map((f) => (
               <div className="field-row" key={f.key}>
                 <label>{f.label}</label>
-                <input
-                  type="number"
-                  step={f.step}
+                <FieldNumber
                   value={samp[f.key] ?? ""}
                   onChange={(e) => setSamp({ ...samp, [f.key]: e.target.value })}
                   onBlur={() => commitSampling(parseSampling(samp))}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                  }}
                   placeholder={inherited[f.key]?.toString() ?? "默认"}
-                  spellCheck={false}
                 />
               </div>
             ))}
           </div>
-          {overrides ? (
-            <button className="ghost" onClick={resetSampling}>
+          {/* 按钮常驻：忽隐忽现的按钮像 bug，disabled 才说明"现在没有可恢复的"。 */}
+          <div className="samp-reset">
+            <button className="ghost" onClick={resetSampling} disabled={!overrides}>
               全部恢复继承
             </button>
-          ) : null}
+            {resetDone ? (
+              <span className="hint" role="status" style={{ margin: 0 }}>
+                已恢复
+              </span>
+            ) : null}
+          </div>
 
-          <h3 className="dialog-section" title="注入 VIRTUAL_ENV 并把 bin 排到 PATH 最前，python / pip 直接落在这个环境。清空恢复系统默认">
+          <h3 className="dialog-section">
+            思考力度
+            <HintTip>
+              控制推理模型每次请求想多深（reasoning_effort / thinking）。自适应 =
+              新指令用中档、工具续轮用低档，省时省钱。「默认」不发任何参数；
+              档位和关闭需要端点支持（DeepSeek、GLM、OpenAI 推理模型），
+              不支持的端点会拒绝请求，届时改回「默认」。下一轮生效。
+            </HintTip>
+          </h3>
+          {/* 包一层 field-row 撑满：菜单宽度跟着触发框走，触发框太窄
+              说明文字就会折行。 */}
+          <div className="field-row">
+            <FieldSelect
+              value={thinking}
+              onChange={commitThinking}
+              options={THINKING_OPTIONS}
+            />
+          </div>
+
+          <h3 className="dialog-section">
             Python 虚拟环境
+            <HintTip>
+              注入 VIRTUAL_ENV 并把 bin 排到 PATH 最前，python / pip 直接落在这个环境。清空恢复系统默认。
+              系统选择框默认隐藏 .venv 这类点开头的目录（⌘⇧. 切换显示），也可以直接手输路径。
+            </HintTip>
           </h3>
           <div className="key-row">
             <input
@@ -185,9 +269,31 @@ export function SessionSettings({
             />
             <button onClick={() => void pickVenv()}>选择…</button>
           </div>
+          {/* 探测到的 venv 一键填入。已填的不再展示 —— 按钮的意义是"帮你
+              绕开藏起来的 .venv"，不是常驻装饰。 */}
+          {venvFound.filter((p) => p !== venv).length > 0 ? (
+            <div className="venv-found">
+              {venvFound
+                .filter((p) => p !== venv)
+                .map((p) => (
+                  <button
+                    key={p}
+                    className="ghost"
+                    title={p}
+                    onClick={() => {
+                      setVenv(p);
+                      void commitVenv(p);
+                    }}
+                  >
+                    检测到 {p.split("/").pop()}，使用
+                  </button>
+                ))}
+            </div>
+          ) : null}
 
-          <h3 className="dialog-section" title="追加在内置提示词之后，不替换它。留空只用内置提示词">
+          <h3 className="dialog-section">
             系统提示词
+            <HintTip>追加在内置提示词之后，不替换它。留空只用内置提示词。</HintTip>
           </h3>
           <textarea
             className="prompt-input"
@@ -201,7 +307,6 @@ export function SessionSettings({
 
           {error ? <p className="form-error">{error}</p> : null}
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

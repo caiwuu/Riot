@@ -28,6 +28,74 @@ export function extractTopLevelStringField(
   return unescapeJsonStringPrefix(t.slice(i + 1));
 }
 
+/**
+ * 从尚未闭合的 JSON 对象里抽出已出现的顶层字符串字段。
+ *
+ * Write 的参数是 `{"path":"...","content":"..."}`，正文在第二个键里，
+ * 而且会流很久。只看第一个键的话，用户对着三个点干等整份文件写完。
+ * 值还在写的那个字段带上已写出的前缀。
+ */
+export function extractTopLevelStringFields(partial: string): Record<string, string> {
+  const t = partial.trimStart();
+  if (!t.startsWith("{")) return {};
+  const out: Record<string, string> = {};
+  let i = 1;
+  while (i < t.length) {
+    i = skipWs(t, i);
+    if (i >= t.length) break;
+    if (t[i] === "}") break;
+    if (t[i] === ",") {
+      i += 1;
+      continue;
+    }
+    if (t[i] !== '"') break;
+    const key = readClosedJsonString(t, i);
+    if (!key) break;
+    i = key.end;
+    i = skipWs(t, i);
+    if (i >= t.length) break;
+    if (t[i] !== ":") break;
+    i += 1;
+    i = skipWs(t, i);
+    if (i >= t.length) {
+      out[key.value] = "";
+      break;
+    }
+    if (t[i] !== '"') break;
+    const val = unescapeJsonStringPrefix(t.slice(i + 1));
+    out[key.value] = val;
+    const closed = jsonStringClosed(t, i + 1);
+    if (!closed) break;
+    i = closed;
+  }
+  return out;
+}
+
+/** 读一个已经闭合的 JSON 字符串（含开头引号）。没闭合就当键还没写完。 */
+function readClosedJsonString(s: string, start: number): { value: string; end: number } | null {
+  if (s[start] !== '"') return null;
+  const value = unescapeJsonStringPrefix(s.slice(start + 1));
+  const end = jsonStringClosed(s, start + 1);
+  if (end === null) return null;
+  return { value, end };
+}
+
+/** 从字符串内容起点找到闭合引号之后的下标；还没闭合返回 null。 */
+function jsonStringClosed(s: string, from: number): number | null {
+  for (let i = from; i < s.length; i++) {
+    const c = s[i];
+    if (c === '"') return i + 1;
+    if (c !== "\\") continue;
+    if (i + 1 >= s.length) return null;
+    const n = s[++i]!;
+    if (n === "u") {
+      if (i + 4 >= s.length) return null;
+      i += 4;
+    }
+  }
+  return null;
+}
+
 function skipWs(s: string, i: number): number {
   while (i < s.length) {
     const c = s[i];

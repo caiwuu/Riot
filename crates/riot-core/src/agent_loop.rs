@@ -24,7 +24,7 @@ use riot_protocol::compact::{CompactBudget, CompactResult};
 use riot_protocol::event::{AbortSource, AgentError, AgentEvent, TerminalReason};
 use riot_protocol::id::ToolUseId;
 use riot_protocol::message::{Message, MessageMeta, ToolResultContent, UserContent};
-use riot_protocol::provider::{ProviderError, ProviderEvent, ProviderRequest, ThinkingConfig};
+use riot_protocol::provider::{ProviderError, ProviderEvent, ProviderRequest};
 use tokio_util::sync::CancellationToken;
 
 use crate::guard::guarded;
@@ -114,7 +114,8 @@ pub fn run_agent(
                 system: state.system.clone(),
                 tools: deps.tools.specs(),
                 max_output_tokens: state.max_output_tokens_override,
-                thinking: ThinkingConfig::Off,
+                // 按请求序号解析：Adaptive 在首请求和工具续轮给不同档。
+                thinking: state.thinking.config_for(state.turn),
             };
 
             // ── 3. 流式消费模型输出 ──────────────────────────────

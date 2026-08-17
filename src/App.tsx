@@ -1,7 +1,17 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import {
+  memo,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import {
   addProject,
+  browserScopeList,
   type ConfigStatus,
   createSession,
   deleteSession,
@@ -31,13 +41,22 @@ import {
   subscribeFullscreen,
 } from "./bridge";
 import { BrowserPanel } from "./components/BrowserPanel";
+import { Chevron } from "./components/Chevron";
+import { ChangesPanel } from "./components/ChangesPanel";
 import { ScopePanel } from "./components/ScopePanel";
 import { SessionSettings } from "./components/SessionSettings";
 import { ConfirmDialog, type ConfirmRequest } from "./components/ConfirmDialog";
-import { Markdown } from "./components/Markdown";
-import { PermissionDialog, PlanApprovalCard, PlanDraft } from "./components/PermissionDialog";
+import { Markdown, ProjectRootContext } from "./components/Markdown";
+import {
+  AskChoiceCard,
+  PermissionDialog,
+  PlanApprovalCard,
+  PlanDraft,
+} from "./components/PermissionDialog";
 import { Settings } from "./components/Settings";
+import { useEscLayer } from "./components/Modal";
 import { TerminalPanel } from "./components/TerminalPanel";
+import { TodoPanel } from "./components/TodoPanel";
 import { ToolCard } from "./components/ToolCard";
 import { type Item, type QueuedItem, useSession } from "./hooks/useSession";
 
@@ -98,9 +117,15 @@ export function App() {
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
-  const [showBrowser, setShowBrowser] = useState(false);
+  /** 右侧抽屉此刻装着谁。两个都是整列，只能二选一。 */
+  const [drawer, setDrawer] = useState<"browser" | "changes" | null>(null);
   const [showTerm, setShowTerm] = useState(false);
   const [showSessionCfg, setShowSessionCfg] = useState(false);
+  /** 递增一次，改动面板重新比对一次。轮次结束时推一下。 */
+  const [changesRev, setChangesRev] = useState(0);
+  /** 用户从终端选中、要交给模型的一段输出。塞进输入框而不是直接发送 ——
+   *  他多半还要在前面补一句"这个报错怎么回事"。 */
+  const [termSnippet, setTermSnippet] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(
     () => localStorage.getItem(LS.sidebarOpen) !== "0",
   );
@@ -186,6 +211,72 @@ export function App() {
   const patchSession = useCallback((id: string, patch: Partial<SessionInfo>) => {
     setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
   }, []);
+
+  // 后台会话的忙碌状态没有事件可订阅（只有挂载中的会话有事件流），
+  // 侧栏的"正在跑"指示点只能靠轮询对齐。只在确实有会话在跑时才轮 ——
+  // 全员空闲时一次都不发。
+  const anyBusy = sessions.some((s) => s.busy);
+  useEffect(() => {
+    if (!anyBusy) return;
+    const t = setInterval(() => {
+      listSessions()
+        .then(setSessions)
+        .catch(() => {});
+    }, 5000);
+    return () => clearInterval(t);
+  }, [anyBusy]);
+
+  /**
+   * 全局 ⌘ 快捷键。macOS 用户带着 Finder/浏览器的肌肉记忆来 ——
+   * ⌘N 新会话、⌘, 设置、⌘B 侧栏、⌘J 终端。
+   *
+   * `[约束]` ⌘W 必须拦下来 preventDefault，否则 WKWebView 默认会关掉整个
+   * 窗口 —— 用户想关的多半是一个面板，不是整个应用。这里把它接住当"收起
+   * 当前抽屉/终端"，没有可收的就静默吃掉，绝不放它去关窗。
+   */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.metaKey || e.ctrlKey || e.altKey) return;
+      const k = e.key.toLowerCase();
+      switch (k) {
+        case "n": {
+          if (e.shiftKey) return;
+          const root = activeSession?.root ?? projects[0];
+          if (root) {
+            e.preventDefault();
+            void newSession(root);
+          }
+          return;
+        }
+        case ",":
+          e.preventDefault();
+          setShowSettings(true);
+          return;
+        case "b":
+          e.preventDefault();
+          toggleSidebar();
+          return;
+        case "j":
+          e.preventDefault();
+          setShowTerm((v) => !v);
+          return;
+        case "w":
+          // 永远拦下，绝不让它冒泡去关窗口。收起一个面板：抽屉优先，
+          // 其次终端；都没开就静默吃掉（绝不关窗）。
+          e.preventDefault();
+          setDrawer((d) => {
+            if (d) return null;
+            setShowTerm((v) => (v ? false : v));
+            return d;
+          });
+          return;
+        default:
+          return;
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [activeSession, projects, newSession, toggleSidebar]);
 
   /* ── 会话 / 项目操作 ──────────────────────── */
 
@@ -303,10 +394,17 @@ export function App() {
   }
 
   if (booting || !config) {
-    return <div className="booting">{booting ? "" : "启动中…"}</div>;
+    // 冷启动那一两秒别留纯白屏 —— 给个品牌骨架，让"在启动"看得出来。
+    return (
+      <div className="booting">
+        <div className="booting-logo">Riot</div>
+        <div className="booting-spinner" aria-label="启动中" />
+      </div>
+    );
   }
 
   return (
+    <ProjectRootContext.Provider value={activeSession?.root ?? ""}>
     <div className="shell" data-fullscreen={fullscreen ? "" : undefined}>
       {sidebarOpen ? (
         <>
@@ -351,14 +449,17 @@ export function App() {
           onToggleSidebar={toggleSidebar}
           session={activeSession}
           onSessionMenu={sessionMenu}
-          browserOpen={showBrowser}
+          browserOpen={drawer === "browser"}
           browserEnabled={activeSession !== null}
-          onToggleBrowser={() => setShowBrowser((v) => !v)}
+          onToggleBrowser={() => setDrawer((d) => (d === "browser" ? null : "browser"))}
           terminalOpen={showTerm}
           onToggleTerminal={() => setShowTerm((v) => !v)}
           sessionCfgOpen={showSessionCfg}
           sessionCfgEnabled={activeSession !== null}
           onToggleSessionCfg={() => setShowSessionCfg((v) => !v)}
+          changesOpen={drawer === "changes"}
+          changesEnabled={activeSession !== null}
+          onToggleChanges={() => setDrawer((d) => (d === "changes" ? null : "changes"))}
         />
 
         <div className="workarea">
@@ -373,7 +474,11 @@ export function App() {
                 onConfig={setConfig}
                 onOpenSettings={() => setShowSettings(true)}
                 onFirstMessage={onFirstMessage}
-                onAgentBrowser={() => setShowBrowser(true)}
+                onAgentBrowser={() => setDrawer("browser")}
+                onTurnEnd={() => setChangesRev((n) => n + 1)}
+                onBusy={(b) => patchSession(activeSession.id, { busy: b })}
+                insertText={termSnippet}
+                onInserted={() => setTermSnippet(null)}
               />
             ) : (
               <Welcome
@@ -415,13 +520,18 @@ export function App() {
           height={termH}
           defaultRoot={activeSession?.root ?? projects[0] ?? null}
           onHide={() => setShowTerm(false)}
+          onAgentTerminal={() => setShowTerm(true)}
+          onSendSelection={setTermSnippet}
         />
       </div>
 
       {/* 抽屉是 main 的兄弟：整列全高（Codex 同款），terminal 只垫在对话
           下面。抽屉和对话共享同一个会话 —— 这正是它存在的意义：你和模型
-          看同一个页面。 */}
-      {activeSession && showBrowser ? (
+          看同一个页面。
+
+          浏览器和改动共用这一个槽位，互斥：两个都是"右边整列"，同时开
+          会把对话挤成一条缝。宽度共享，拖过一次两个都记住。 */}
+      {activeSession && drawer ? (
         <>
           <Resizer
             axis="x"
@@ -447,12 +557,23 @@ export function App() {
             }}
           />
           <div className="drawer" style={{ width: drawerW }}>
-            <BrowserPanel
-              key={activeSession.id}
-              sessionId={activeSession.id}
-              onClose={() => setShowBrowser(false)}
-            />
-            <ScopePanel sessionId={activeSession.id} />
+            {drawer === "browser" ? (
+              <>
+                <BrowserPanel
+                  key={activeSession.id}
+                  sessionId={activeSession.id}
+                  onClose={() => setDrawer(null)}
+                />
+                <ScopePanel sessionId={activeSession.id} />
+              </>
+            ) : (
+              <ChangesPanel
+                key={activeSession.id}
+                sessionId={activeSession.id}
+                refreshKey={changesRev}
+                onClose={() => setDrawer(null)}
+              />
+            )}
           </div>
         </>
       ) : null}
@@ -483,6 +604,7 @@ export function App() {
       {menu ? <ContextMenu menu={menu} onClose={() => setMenu(null)} /> : null}
       {confirm ? <ConfirmDialog c={confirm} onClose={() => setConfirm(null)} /> : null}
     </div>
+    </ProjectRootContext.Provider>
   );
 }
 
@@ -505,6 +627,9 @@ function TopBar({
   sessionCfgOpen,
   sessionCfgEnabled,
   onToggleSessionCfg,
+  changesOpen,
+  changesEnabled,
+  onToggleChanges,
 }: {
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
@@ -520,6 +645,9 @@ function TopBar({
   /** 会话设置管的是单个会话的参数，没有会话时置灰。 */
   sessionCfgEnabled: boolean;
   onToggleSessionCfg: () => void;
+  changesOpen: boolean;
+  changesEnabled: boolean;
+  onToggleChanges: () => void;
 }) {
   // 侧栏收起后 macOS 的红绿灯悬在主区左上角，工具栏给它们让位。
   // 全屏没有红绿灯（见 shell[data-fullscreen]），Windows/Linux 的窗口
@@ -549,6 +677,20 @@ function TopBar({
 
       <div className="tb-spacer" data-tauri-drag-region />
 
+      {/* 渗透授权常驻角标：授权列表原本只在浏览器抽屉里可见，抽屉一关，
+          "允许对哪些站做侵入性操作"就从界面上彻底消失 —— 授权还生效着，
+          它的可见性不能跟着面板走。 */}
+      {session ? <ScopeBadge sessionId={session.id} onOpen={onToggleBrowser} browserOpen={browserOpen} /> : null}
+
+      <button
+        className={changesOpen ? "tb-btn active" : "tb-btn"}
+        onClick={onToggleChanges}
+        disabled={!changesEnabled}
+        title={changesEnabled ? "本次会话的改动" : "先打开一个会话"}
+        aria-label="本次会话的改动"
+      >
+        <DiffIcon />
+      </button>
       <button
         className={browserOpen ? "tb-btn active" : "tb-btn"}
         onClick={onToggleBrowser}
@@ -556,7 +698,7 @@ function TopBar({
         title={browserEnabled ? "浏览器抽屉" : "先打开一个会话再用浏览器"}
         aria-label="浏览器抽屉"
       >
-        <PanelRightIcon />
+        <BrowserIcon />
       </button>
       <button
         className={terminalOpen ? "tb-btn active" : "tb-btn"}
@@ -576,6 +718,70 @@ function TopBar({
         <GearIcon />
       </button>
     </header>
+  );
+}
+
+/**
+ * 顶栏的渗透授权角标。有生效的 scope 授权时亮起（盾牌 + 数量），
+ * 点击打开浏览器抽屉 —— 撤销入口（ScopePanel）在那里。
+ * 没有授权时整个不渲染，颗粒无声。
+ */
+function ScopeBadge({
+  sessionId,
+  browserOpen,
+  onOpen,
+}: {
+  sessionId: string;
+  browserOpen: boolean;
+  onOpen: () => void;
+}) {
+  const [count, setCount] = useState(0);
+
+  useEffect(() => {
+    let alive = true;
+    const pull = () => {
+      browserScopeList(sessionId)
+        .then((hs) => {
+          if (alive) setCount(hs.length);
+        })
+        .catch(() => {
+          // 浏览器还没起来。下一拍再问。
+        });
+    };
+    pull();
+    const t = setInterval(pull, 3000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [sessionId]);
+
+  if (count === 0) return null;
+  return (
+    <button
+      className="tb-btn scope-badge"
+      onClick={() => {
+        if (!browserOpen) onOpen();
+      }}
+      title={`${count} 个站点授权了侵入性渗透操作 —— 点击查看和撤销`}
+      aria-label={`渗透授权 ${count} 个站点`}
+    >
+      <ShieldIcon />
+      <span className="scope-badge-count">{count}</span>
+    </button>
+  );
+}
+
+function ShieldIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M8 1.8l5 1.8v3.9c0 3.2-2.1 5.6-5 6.7-2.9-1.1-5-3.5-5-6.7V3.6L8 1.8z"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 
@@ -641,14 +847,16 @@ function Resizer({
 
 /** 全局唯一的上下文菜单。透明遮罩负责"点外面关闭"。 */
 function ContextMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }) {
-  useEffect(() => {
-    const esc = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", esc);
-    return () => window.removeEventListener("keydown", esc);
-  }, [onClose]);
+  // Esc 走公共栈：菜单叠在弹窗上时只关菜单，不连带关底下的。
+  useEscLayer(onClose);
+  const boxRef = useRef<HTMLDivElement>(null);
+  /** 键盘高亮到第几项。-1 = 还没用键盘。 */
+  const [pick, setPick] = useState(-1);
 
-  // 贴近视口底部时往上顶，别让菜单被截掉
+  // 贴近视口边缘时往回顶，别让菜单被截掉。右缘按典型菜单宽估算 ——
+  // 菜单还没渲染，量不到自己。
   const top = Math.min(menu.y, window.innerHeight - menu.entries.length * 34 - 16);
+  const left = Math.min(menu.x, window.innerWidth - CTX_MENU_W - 8);
 
   return (
     <div
@@ -661,13 +869,30 @@ function ContextMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }
     >
       <div
         className="ctx-menu"
-        style={{ left: menu.x, top }}
+        role="menu"
+        ref={boxRef}
+        style={{ left, top }}
         onMouseDown={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          // 上下键 + Enter：右键菜单的标配键盘模型。
+          const n = menu.entries.length;
+          if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+            e.preventDefault();
+            const next =
+              e.key === "ArrowDown" ? (pick + 1) % n : (pick - 1 + n) % n;
+            setPick(next);
+            boxRef.current?.querySelectorAll("button")[next]?.focus();
+          }
+        }}
       >
-        {menu.entries.map((en) => (
+        {menu.entries.map((en, i) => (
           <button
             key={en.label}
+            role="menuitem"
             className={en.danger ? "ctx-item danger" : "ctx-item"}
+            // 打开时聚焦第一项，键盘直接能用
+            autoFocus={i === 0}
+            onFocus={() => setPick(i)}
             onClick={() => {
               onClose();
               en.action();
@@ -680,6 +905,9 @@ function ContextMenu({ menu, onClose }: { menu: MenuState; onClose: () => void }
     </div>
   );
 }
+
+/** 上下文菜单的估算宽度（clamp 右缘用）。和 .ctx-menu 的 CSS 保持一致。 */
+const CTX_MENU_W = 180;
 
 /* ── 侧边栏 ─────────────────────────────────── */
 
@@ -717,7 +945,7 @@ function Sidebar(props: SidebarProps) {
 
       <button className="new-thread" onClick={onOpenProject}>
         <PlusIcon />
-        打开项目…
+        打开目录…
       </button>
 
       <nav className="threads">
@@ -797,6 +1025,11 @@ function ProjectGroup(props: SidebarProps & { root: string }) {
             onContextMenu={(e) => onSessionMenu(e, s)}
           >
             <button className="thread-label" onClick={() => onSelect(s.id)}>
+              {/* 正在跑的会话给个小圆点 —— 切走之后它还在干活，列表里
+                  得看得出来，不然用户以为它闲着。 */}
+              {s.busy ? (
+                <span className="thread-busy" title="正在运行" aria-label="正在运行" />
+              ) : null}
               {s.title ?? "新会话"}
             </button>
             <button className="row-btn" onClick={(e) => onSessionMenu(e, s)} title="会话操作">
@@ -919,6 +1152,23 @@ function parentOf(p: string): string {
 
 /* ── 对话 ───────────────────────────────────── */
 
+/**
+ * 长任务在后台跑完时发系统通知。权限只在第一次要 —— 被拒绝就永远
+ * 沉默，不反复骚扰。失败静默：通知是锦上添花，不值得报错。
+ */
+async function notifyTurnDone() {
+  try {
+    const { isPermissionGranted, requestPermission, sendNotification } = await import(
+      "@tauri-apps/plugin-notification"
+    );
+    let ok = await isPermissionGranted();
+    if (!ok) ok = (await requestPermission()) === "granted";
+    if (ok) sendNotification({ title: "Riot", body: "任务完成了，回来看看结果吧。" });
+  } catch {
+    // 平台不支持或用户拒绝 —— 无声跳过
+  }
+}
+
 function Chat({
   sessionId,
   config,
@@ -928,6 +1178,10 @@ function Chat({
   onOpenSettings,
   onFirstMessage,
   onAgentBrowser,
+  onTurnEnd,
+  onBusy,
+  insertText,
+  onInserted,
 }: {
   sessionId: string;
   config: ConfigStatus;
@@ -938,20 +1192,49 @@ function Chat({
   onFirstMessage: (sessionId: string, text: string) => void;
   /** 模型调用浏览器工具时打开右侧抽屉，让用户看见同一页。 */
   onAgentBrowser?: () => void;
+  /** 一轮跑完。改动面板据此重新比对 —— 抽屉是常驻的，模型改完文件
+   *  不刷新的话，那里还停在上一轮的样子。 */
+  onTurnEnd?: () => void;
+  /** 忙碌状态变化。侧栏的"正在跑"指示点靠它即时更新。 */
+  onBusy?: (busy: boolean) => void;
+  /** 要塞进输入框的一段文字（终端选中的输出）。null = 没有。 */
+  insertText?: string | null;
+  onInserted?: () => void;
 }) {
   const session = useSession(
     sessionId,
     onAgentBrowser ? { onBrowserOpen: onAgentBrowser } : undefined,
   );
+
+  const busy = session.busy;
+  const turnEndRef = useRef(onTurnEnd);
+  turnEndRef.current = onTurnEnd;
+  const busyRef = useRef(onBusy);
+  busyRef.current = onBusy;
+  // 跳过挂载那次：挂载时的 busy 是历史快照，不是一次"变化"。
+  const sawBusy = useRef(false);
+  useEffect(() => {
+    if (!busy) turnEndRef.current?.();
+    busyRef.current?.(busy);
+    if (busy) {
+      sawBusy.current = true;
+    } else if (sawBusy.current && !document.hasFocus()) {
+      // 长任务跑完而窗口在后台：发一条系统通知，不然就错过了。
+      // 窗口在前台时不发 —— 用户正看着呢。
+      notifyTurnDone();
+    }
+  }, [busy]);
   const empty =
     session.items.length === 0 && !session.streaming && !session.thinking;
 
-  // 计划批准走对话流里的内联卡（计划是要读的文档，长在对话里；
-  // 弹窗会在等了很久之后突然糊脸）；其余权限询问保持弹窗。
+  // 计划和选择题都走对话流里的内联卡：它们是对话的一部分，不是危险
+  // 操作。Bash / Write 这类权限询问仍弹窗 —— 必须看见原文才能签。
   const isPlanAsk = (a: (typeof session.asks)[number]) =>
     a.detail.suggestions.some((s) => s.type === "set_mode");
+  const isChoiceAsk = (a: (typeof session.asks)[number]) => a.detail.preview.kind === "choice";
   const planAsk = session.asks.find(isPlanAsk);
-  const modalAsk = session.asks.find((a) => !isPlanAsk(a));
+  const choiceAsk = session.asks.find(isChoiceAsk);
+  const modalAsk = session.asks.find((a) => !isPlanAsk(a) && !isChoiceAsk(a));
 
   const send = (
     text: string,
@@ -979,6 +1262,8 @@ function Chat({
       onSend={send}
       onStop={session.stop}
       onOpenSettings={onOpenSettings}
+      insertText={insertText ?? null}
+      {...(onInserted ? { onInserted } : {})}
     />
   );
 
@@ -988,7 +1273,7 @@ function Chat({
         <div className="hero">
           <h1 className="hero-title">今天做点什么？</h1>
           <p className="hero-ws" title={workspace}>
-            <FolderIcon /> {workspace}
+            <FolderIcon /> <span className="hero-ws-path">{workspace}</span>
           </p>
           {composer}
         </div>
@@ -1002,9 +1287,16 @@ function Chat({
             busy={session.busy}
             compacting={session.compacting}
             {...(planAsk ? { planAsk } : {})}
+            {...(choiceAsk ? { choiceAsk } : {})}
             onAnswerPlan={(r) => planAsk && void session.answer(r, planAsk.requestId)}
+            onAnswerChoice={(r) => choiceAsk && void session.answer(r, choiceAsk.requestId)}
           />
-          <div className="composer-dock">{composer}</div>
+          <div className="composer-dock">
+            {/* 任务清单钉在输入框上方、就地更新 —— 它是状态不是事件，
+                只有最新版有意义。对话流里的每次 TodoWrite 只留单行。 */}
+            <TodoPanel items={session.items} />
+            {composer}
+          </div>
         </>
       )}
 
@@ -1022,6 +1314,157 @@ function Chat({
   );
 }
 
+/**
+ * 会话内查找（⌘F）。
+ *
+ * 高亮用 CSS Custom Highlight API：直接在文本节点上建 Range，不往
+ * React 管理的 DOM 里塞 <mark> —— 塞了的话下一次渲染要么被抹掉、
+ * 要么把 React 的 diff 弄糊涂。旧 WebView 没有这个 API 时退化成
+ * 只滚动定位、不上色。
+ */
+function FindBar({
+  box,
+  onClose,
+}: {
+  /** 对话流的滚动容器。 */
+  box: React.RefObject<HTMLElement | null>;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [cur, setCur] = useState(0);
+  const hitsRef = useRef<Range[]>([]);
+  const [total, setTotal] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const highlights = (CSS as unknown as { highlights?: Map<string, unknown> }).highlights;
+
+  const clear = () => {
+    highlights?.delete("riot-find");
+    highlights?.delete("riot-find-cur");
+  };
+
+  /** 全量重扫。对话流不重排 DOM 的话 Range 一直有效，扫一次够用。 */
+  const scan = (q: string): Range[] => {
+    const root = box.current;
+    if (!root || !q) return [];
+    const needle = q.toLowerCase();
+    const ranges: Range[] = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const text = node.textContent ?? "";
+      const hay = text.toLowerCase();
+      let at = hay.indexOf(needle);
+      while (at !== -1) {
+        const r = document.createRange();
+        r.setStart(node, at);
+        r.setEnd(node, at + needle.length);
+        ranges.push(r);
+        at = hay.indexOf(needle, at + needle.length);
+      }
+    }
+    return ranges;
+  };
+
+  const paint = (ranges: Range[], current: number) => {
+    if (!highlights) return;
+    const H = (window as unknown as { Highlight?: new (...r: Range[]) => unknown }).Highlight;
+    if (!H) return;
+    clear();
+    if (ranges.length) {
+      highlights.set("riot-find", new H(...ranges));
+      const c = ranges[current];
+      if (c) highlights.set("riot-find-cur", new H(c));
+    }
+  };
+
+  const jump = (ranges: Range[], i: number) => {
+    const r = ranges[i];
+    if (!r) return;
+    const el = r.startContainer.parentElement;
+    el?.scrollIntoView({ block: "center" });
+  };
+
+  const run = (q: string) => {
+    setQuery(q);
+    const ranges = scan(q);
+    hitsRef.current = ranges;
+    setTotal(ranges.length);
+    setCur(0);
+    paint(ranges, 0);
+    jump(ranges, 0);
+  };
+
+  const step = (dir: 1 | -1) => {
+    const ranges = hitsRef.current;
+    if (!ranges.length) return;
+    const next = (cur + dir + ranges.length) % ranges.length;
+    setCur(next);
+    paint(ranges, next);
+    jump(ranges, next);
+  };
+
+  // 关闭（含卸载）时清掉高亮，别在页面上留一堆黄块
+  useEffect(() => clear, []);
+
+  return (
+    <div className="find-wrap">
+      <div className="find-bar" role="search">
+        <input
+          ref={inputRef}
+          autoFocus
+          value={query}
+          placeholder="在会话中查找"
+          onChange={(e) => run(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              step(e.shiftKey ? -1 : 1);
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              e.stopPropagation();
+              clear();
+              onClose();
+            }
+          }}
+        />
+        <span className="find-count">{total ? `${cur + 1}/${total}` : query ? "0/0" : ""}</span>
+        <button
+          type="button"
+          className="find-btn"
+          title="上一个 (⇧Enter)"
+          aria-label="上一个"
+          disabled={!total}
+          onClick={() => step(-1)}
+        >
+          ▲
+        </button>
+        <button
+          type="button"
+          className="find-btn"
+          title="下一个 (Enter)"
+          aria-label="下一个"
+          disabled={!total}
+          onClick={() => step(1)}
+        >
+          ▼
+        </button>
+        <button
+          type="button"
+          className="find-btn"
+          title="关闭 (Esc)"
+          aria-label="关闭查找"
+          onClick={() => {
+            clear();
+            onClose();
+          }}
+        >
+          ✕
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function Transcript({
   items,
   streaming,
@@ -1030,7 +1473,9 @@ function Transcript({
   busy,
   compacting,
   planAsk,
+  choiceAsk,
   onAnswerPlan,
+  onAnswerChoice,
 }: {
   items: Item[];
   streaming: string;
@@ -1041,11 +1486,40 @@ function Transcript({
   compacting: boolean;
   /** 待批准的计划（ExitPlanMode 的询问）。内联在对话流末尾。 */
   planAsk?: { requestId: string; detail: PermissionAsk };
+  /** 模型主动提的选择题。同样内联，不弹窗。 */
+  choiceAsk?: { requestId: string; detail: PermissionAsk };
   onAnswerPlan?: (r: PermissionResponse) => void;
+  onAnswerChoice?: (r: PermissionResponse) => void;
 }) {
-  const endRef = useRef<HTMLDivElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  /** 程序化贴底时挡住 onScroll，免得自己把 stick 打成 false。 */
+  const pinning = useRef(false);
+  /** 离底超过一屏时浮现「回到底部」按钮。 */
+  const [awayFromBottom, setAwayFromBottom] = useState(false);
+  /** ⌘F 查找条。长对话找不到历史内容是真实痛点。 */
+  const [findOpen, setFindOpen] = useState(false);
+
+  const pinBottom = () => {
+    const box = boxRef.current;
+    if (!box) return;
+    pinning.current = true;
+    box.scrollTop = box.scrollHeight;
+    requestAnimationFrame(() => {
+      pinning.current = false;
+    });
+  };
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        setFindOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // 只在用户本来就贴着底部时才自动滚。他往上翻着看历史的时候把他拽回来，
   // 是聊天界面里最招人烦的一件事。
@@ -1053,18 +1527,58 @@ function Transcript({
     const box = boxRef.current;
     if (!box) return;
     const onScroll = () => {
-      stick.current = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+      if (pinning.current) return;
+      const gap = box.scrollHeight - box.scrollTop - box.clientHeight;
+      stick.current = gap < 80;
+      setAwayFromBottom(gap > box.clientHeight);
     };
-    box.addEventListener("scroll", onScroll);
+    box.addEventListener("scroll", onScroll, { passive: true });
     return () => box.removeEventListener("scroll", onScroll);
   }, []);
 
+  // 正文晚一拍量完（markdown / 图片）时高度还会涨，贴着就跟上。
   useEffect(() => {
-    if (stick.current) endRef.current?.scrollIntoView({ block: "end" });
-  }, [items, streaming, thinking, streamingPlan, planAsk?.requestId]);
+    const box = boxRef.current;
+    const col = box?.querySelector(".thread-col");
+    if (!box || !col) return;
+    const ro = new ResizeObserver(() => {
+      if (stick.current) pinBottom();
+    });
+    ro.observe(col);
+    return () => ro.disconnect();
+  }, []);
+
+  // 自己发的消息无条件回到底部。没有这条的话，在上面翻历史时发了新
+  // 消息，stick 是 false，整轮生成都不跟随 —— 得手动滑到底才恢复。
+  const lastUserId = useRef("");
+  useLayoutEffect(() => {
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      if (it?.kind !== "user") continue;
+      if (it.id !== lastUserId.current) {
+        lastUserId.current = it.id;
+        stick.current = true;
+      }
+      break;
+    }
+    if (stick.current) pinBottom();
+  }, [items, streaming, thinking, streamingPlan, planAsk?.requestId, choiceAsk?.requestId, busy]);
+
+  // 还在转圈的工具。底部状态行靠它说清此刻在等谁 —— 一次 build 跑两
+  // 分钟的时候，"生成中"是句废话。
+  const runningTool = useMemo(() => {
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      if (it && it.kind === "tool" && it.status === "running") return it.name;
+    }
+    return null;
+  }, [items]);
+
+  const waitLabel = runningTool ? `正在执行 ${runningTool}` : "正在生成…";
 
   return (
     <main className="transcript" ref={boxRef}>
+      {findOpen ? <FindBar box={boxRef} onClose={() => setFindOpen(false)} /> : null}
       <div className="thread-col">
         {items.map((it) => (
           <Row key={it.id} item={it} />
@@ -1087,22 +1601,53 @@ function Transcript({
             onAnswer={onAnswerPlan}
           />
         ) : null}
+        {choiceAsk && onAnswerChoice ? (
+          <AskChoiceCard
+            key={choiceAsk.requestId}
+            ask={choiceAsk.detail}
+            onAnswer={onAnswerChoice}
+          />
+        ) : null}
         {/*
-         * 压缩中的提示优先于其他一切，而且不看 busy。
+         * 状态行在整个忙碌期间常驻，**不和流式内容二选一**。
          *
-         * 不看 busy 是因为手动 `/compact` 不占 busy（那条路不开轮次）。
-         * 优先是因为它回答的正是"为什么在等" —— 反应式压缩发生在一轮
-         * 中间，那时屏幕上可能还留着上一段流式文本，光秃秃的三个点
-         * 混在里面看不出和平时有什么不同。
+         * `[约束]` 早先的写法是"有流式文本就把它藏起来"，理由是文字本身
+         * 就在动。但模型说完"先写文件："之后要花十几秒生成工具参数，
+         * 那段时间一个字都不吐 —— 屏幕彻底静止，和卡死没有区别。等的
+         * 是什么、等了多久，只有这一行能回答。
+         *
+         * 压缩优先且不看 busy：手动 `/compact` 不开轮次，不占 busy。
          */}
         {compacting ? (
-          <Dots label="正在压缩上下文…" />
-        ) : busy && !streaming && !thinking && streamingPlan === null && !planAsk ? (
-          <Dots />
+          <Dots label="正在压缩上下文…" timed />
+        ) : busy && !planAsk && !choiceAsk ? (
+          <Dots label={waitLabel} timed />
         ) : null}
-
-        <div ref={endRef} />
       </div>
+      {/* 往上翻了超过一屏才出现 —— 贴底时这按钮只是噪音。点了重新贴底，
+          流式输出会继续跟随。 */}
+      {awayFromBottom ? (
+        <button
+          type="button"
+          className="jump-bottom"
+          title="回到底部"
+          aria-label="回到底部"
+          onClick={() => {
+            stick.current = true;
+            pinBottom();
+          }}
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+            <path
+              d="M8 3v10M3.5 8.5L8 13l4.5-4.5"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </button>
+      ) : null}
     </main>
   );
 }
@@ -1145,15 +1690,24 @@ const Row = memo(function Row({ item }: { item: Item }) {
       return <div className="msg error">{item.text}</div>;
     case "notice":
       return <div className="msg notice">{item.text}</div>;
+    case "compact":
+      return (
+        <div className="compact-rule" role="separator">
+          以上消息已被压缩
+        </div>
+      );
   }
 });
 
 /**
- * 思考过程：写完的默认折叠（过程不是结论，铺开会把回答挤走）。
- * 正在流的那条默认展开 —— 只显示「思考中… N 字」的话，跟卡住没法区分。
+ * 思考过程：始终默认折叠（过程不是结论，铺开会把回答挤走）。
+ *
+ * 正在流的那条不展开正文，而是在标题右侧滚过最新的思考文字 ——
+ * 既能看出"没卡住"，收尾落定时高度又几乎不变。早先直播时整块展开，
+ * 收尾一折叠底部内容瞬间矮掉几百像素，贴底跟随会被这次跳变打断。
  */
 function ThinkingBlock({ text, live }: { text: string; live?: boolean }) {
-  const [open, setOpen] = useState(Boolean(live));
+  const [open, setOpen] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -1162,12 +1716,27 @@ function ThinkingBlock({ text, live }: { text: string; live?: boolean }) {
     if (el) el.scrollTop = el.scrollHeight;
   }, [text, live, open]);
 
+  // 最近一段文字压成一行当预览。换行换成空格 —— 预览框只有一行高。
+  const peek = live && !open ? text.slice(-160).replace(/\s+/g, " ").trim() : "";
+
   return (
     <div className={live ? "think-block live" : "think-block"}>
-      <button type="button" className="think-head" onClick={() => setOpen(!open)}>
-        <span className="think-icon">{open ? "▾" : "▸"}</span>
-        {live ? "思考中…" : "思考过程"}
+      <button
+        type="button"
+        className="think-head"
+        // 点标题只为开合，不要把焦点吃过去 —— WKWebView 对 focused
+        // button 会默认滚进视野，正好滚到这条思考、离开底部。
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => setOpen(!open)}
+      >
+        <Chevron open={open} />
+        <span className="think-label">{live ? "思考中…" : "思考过程"}</span>
         <span className="think-chars">{text.length} 字</span>
+        {peek ? (
+          <span className="think-peek" aria-hidden>
+            <span className="think-peek-text">{peek}</span>
+          </span>
+        ) : null}
       </button>
       {open ? (
         <div className="think-body" ref={bodyRef}>
@@ -1200,11 +1769,23 @@ function CopyMsg({ text }: { text: string }) {
 /**
  * 等待指示。
  *
- * `label` 说明这次等的是什么。没有它的时候（模型正在应答）不需要文字 ——
- * 那是最常见的等待，用户认得。有具体原因时必须写出来:同一个动画表示
- * 两件事，用户只能按最常见的那个理解。
+ * `label` 说明这次等的是什么。同一个动画表示好几件事的话，用户只能按
+ * 最常见的那个理解 —— 所以有具体原因时必须写出来。
+ *
+ * `timed` 让它自己数秒。模型准备工具参数的那十几秒里一个字都不会吐，
+ * 静止的三个点和"卡死了"看起来一模一样；走动的秒数是那段时间里唯一
+ * 能证明系统还活着的东西。
  */
-function Dots({ label }: { label?: string }) {
+function Dots({ label, timed }: { label?: string; timed?: boolean }) {
+  const [elapsed, setElapsed] = useState(0);
+  const start = useRef(Date.now());
+
+  useEffect(() => {
+    if (!timed) return;
+    const id = setInterval(() => setElapsed(Math.round((Date.now() - start.current) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [timed]);
+
   const dots = (
     <div className="dots">
       <span />
@@ -1212,11 +1793,14 @@ function Dots({ label }: { label?: string }) {
       <span />
     </div>
   );
-  if (!label) return dots;
+  // 头几秒不报时:答得快的时候跳一下数字，看着像出了故障。
+  const secs = timed && elapsed >= 3 ? `${elapsed}s` : "";
+  if (!label && !secs) return dots;
   return (
     <div className="wait-note" role="status">
       {dots}
-      <span className="wait-note-text">{label}</span>
+      {label ? <span className="wait-note-text">{label}</span> : null}
+      {secs ? <span className="wait-note-time">{secs}</span> : null}
     </div>
   );
 }
@@ -1227,6 +1811,7 @@ const MODE_LABEL: Record<string, string> = {
   default: "每次询问",
   acceptEdits: "自动接受编辑",
   plan: "规划模式",
+  auto: "自动判危",
   bypassPermissions: "全部放行",
   unattended: "无人值守",
 };
@@ -1243,13 +1828,26 @@ const MODE_WARN: Record<string, string> = {
  * 真实的内容损失。进程内存足够，不值得为草稿上持久化。
  */
 /**
- * 输入框里的一段内容：一截文字，或一个文件引用块。
+ * 输入框里的一段内容：一截文字、一个文件引用块，或一条斜杠命令/技能块。
  *
  * 输入框是 contenteditable 而不是 textarea —— 引用块要和文字**排在
  * 同一行**（用户是在句子中间点名文件的："打开 [index.html] 看看"），
  * 而 textarea 只能装纯文本，块只能堆到框外面去，读起来就和正文脱节了。
+ *
+ * 命令/技能同样不能是一段可被改坏的 `/compact` 字符串：选中之后变成
+ * 色块，退格整块删掉，和普通输入一眼能分开。
  */
-type Seg = { kind: "text"; value: string } | { kind: "ref"; value: string };
+type Seg =
+  | { kind: "text"; value: string }
+  | { kind: "ref"; value: string }
+  | { kind: "cmd"; value: string };
+
+/** 斜杠名：字母数字、中文、冒号命名空间。名字里不含 `/`，免得把 /usr/bin 认成命令。 */
+const SLASH_CH = String.raw`[\w\p{L}\p{N}:-]`;
+const SLASH_QUERY_RE = new RegExp(`^/(${SLASH_CH}*)$`, "u");
+const SLASH_LEAD_RE = new RegExp(`^/(${SLASH_CH}+)(\\s)([\\s\\S]*)$`, "u");
+const SLASH_SUBMIT_RE = new RegExp(`^/(${SLASH_CH}+)\\s*([\\s\\S]*)$`, "u");
+const SLASH_HEAD_RE = new RegExp(`^/(${SLASH_CH}+)(?=\\s|$)`, "u");
 
 const drafts = new Map<string, Seg[]>();
 
@@ -1259,17 +1857,172 @@ const CHIP_ICON =
   'stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>' +
   '<path d="M8.9 2v3.4h3.4" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>';
 
-/** 造一个引用块。`contenteditable=false` 让它在编辑器里是一个整体。 */
+/** 造一个引用块。`contenteditable=false` 让它在编辑器里是一个整体。
+ *  文件名走 `data-label` + CSS `::after`，块里不放文本节点 —— WebKit
+ *  否则会把光标塞进色块内部，退格先"走进去"再删。 */
 function chipEl(path: string): HTMLElement {
   const span = document.createElement("span");
   span.className = "ref-chip";
   span.contentEditable = "false";
   span.dataset.path = path;
+  span.dataset.label = path.split("/").pop() ?? path;
   span.title = path;
-  // 图标是常量 HTML；路径只走 textContent / dataset / title，不拼进 HTML。
   span.innerHTML = CHIP_ICON;
-  span.appendChild(document.createTextNode(path.split("/").pop() ?? path));
+  return bindChip(span);
+}
+
+/** 造一个命令/技能色块。名字只走 dataset，不拼进 HTML。 */
+function cmdChipEl(name: string): HTMLElement {
+  const span = document.createElement("span");
+  span.className = "cmd-chip";
+  span.contentEditable = "false";
+  span.dataset.cmd = name;
+  span.dataset.label = `/${name}`;
+  span.title = `/${name}`;
+  return bindChip(span);
+}
+
+function isChip(node: Node | null): node is HTMLElement {
+  return node instanceof HTMLElement && (node.dataset.path != null || node.dataset.cmd != null);
+}
+
+function chipAround(node: Node | null, root: HTMLElement): HTMLElement | null {
+  let n: Node | null = node;
+  while (n && n !== root) {
+    if (isChip(n)) return n;
+    n = n.parentNode;
+  }
+  return null;
+}
+
+function skipEmpty(node: Node | null, dir: 1 | -1): Node | null {
+  let n = node;
+  while (n && n.nodeType === Node.TEXT_NODE && !(n.nodeValue ?? "").length) {
+    n = dir === 1 ? n.nextSibling : n.previousSibling;
+  }
+  return n;
+}
+
+function placeCaretAfter(chip: HTMLElement) {
+  const sel = window.getSelection();
+  if (!sel) return;
+  let next = chip.nextSibling;
+  if (!next || next.nodeType !== Node.TEXT_NODE) {
+    next = document.createTextNode("");
+    chip.after(next);
+  }
+  const r = document.createRange();
+  r.setStart(next, 0);
+  r.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(r);
+}
+
+function placeCaretBefore(chip: HTMLElement) {
+  const sel = window.getSelection();
+  if (!sel) return;
+  let prev = chip.previousSibling;
+  if (!prev || prev.nodeType !== Node.TEXT_NODE) {
+    prev = document.createTextNode("");
+    chip.before(prev);
+  }
+  const r = document.createRange();
+  r.setStart(prev, prev.nodeValue?.length ?? 0);
+  r.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(r);
+}
+
+/** 点在块上时把光标放到外侧，不要让 WebKit 把插入点放进边框里。 */
+function bindChip(span: HTMLElement): HTMLElement {
+  span.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    const root = span.parentElement;
+    if (!root) return;
+    root.focus();
+    const mid = span.getBoundingClientRect().left + span.getBoundingClientRect().width / 2;
+    if (e.clientX < mid) placeCaretBefore(span);
+    else placeCaretAfter(span);
+  });
   return span;
+}
+
+function removeChip(chip: HTMLElement) {
+  const pad = chip.nextSibling;
+  const dropPad =
+    pad?.nodeType === Node.TEXT_NODE && (pad.nodeValue === " " || pad.nodeValue === "");
+  placeCaretBefore(chip);
+  chip.remove();
+  if (dropPad) pad.remove();
+}
+
+/**
+ * 光标紧挨着的块。`before` = 块在光标前面（退格要删的那个）。
+ * 插块时留下的那个空格算"紧挨着"，好一次退格把块带走。
+ */
+function adjacentChip(root: HTMLElement, side: "before" | "after"): HTMLElement | null {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return null;
+  const range = sel.getRangeAt(0);
+  if (!root.contains(range.startContainer)) return null;
+
+  const inside = chipAround(range.startContainer, root);
+  if (inside) return inside;
+
+  const node = range.startContainer;
+  const offset = range.startOffset;
+
+  if (node === root) {
+    const child = root.childNodes[side === "before" ? offset - 1 : offset] ?? null;
+    return isChip(child) ? child : null;
+  }
+
+  if (node.nodeType !== Node.TEXT_NODE) return null;
+  const text = node.nodeValue ?? "";
+  if (side === "before") {
+    if (offset > 0 && !(text.slice(0, offset).trim() === "" && text.slice(offset) === "")) {
+      return null;
+    }
+    const prev = skipEmpty(node.previousSibling, -1);
+    return isChip(prev) ? prev : null;
+  }
+  if (offset < text.length && !(text.slice(offset).trim() === "" && text.slice(0, offset) === "")) {
+    return null;
+  }
+  const next = skipEmpty(node.nextSibling, 1);
+  return isChip(next) ? next : null;
+}
+
+/** 方向键跨过整块，退格/删除一次拿掉整块。处理了就返回 true。 */
+function handleChipKey(e: { key: string; altKey: boolean; metaKey: boolean; ctrlKey: boolean }, root: HTMLElement): boolean {
+  const key = e.key;
+  if (key === "Backspace") {
+    const chip = adjacentChip(root, "before");
+    if (!chip) return false;
+    removeChip(chip);
+    return true;
+  }
+  if (key === "Delete") {
+    const chip = adjacentChip(root, "after");
+    if (!chip) return false;
+    removeChip(chip);
+    return true;
+  }
+  if (key === "ArrowLeft" && !e.altKey && !e.metaKey && !e.ctrlKey) {
+    const chip =
+      chipAround(window.getSelection()?.anchorNode ?? null, root) ?? adjacentChip(root, "before");
+    if (!chip) return false;
+    placeCaretBefore(chip);
+    return true;
+  }
+  if (key === "ArrowRight" && !e.altKey && !e.metaKey && !e.ctrlKey) {
+    const chip =
+      chipAround(window.getSelection()?.anchorNode ?? null, root) ?? adjacentChip(root, "after");
+    if (!chip) return false;
+    placeCaretAfter(chip);
+    return true;
+  }
+  return false;
 }
 
 /** 把编辑区的 DOM 读成段落序列。 */
@@ -1287,8 +2040,11 @@ function readEditor(el: HTMLElement): Seg[] {
         push({ kind: "text", value: child.nodeValue ?? "" });
       } else if (child instanceof HTMLElement) {
         const path = child.dataset["path"];
+        const cmd = child.dataset["cmd"];
         if (path) {
           push({ kind: "ref", value: path });
+        } else if (cmd) {
+          push({ kind: "cmd", value: cmd });
         } else if (child.tagName === "BR") {
           push({ kind: "text", value: "\n" });
         } else {
@@ -1310,7 +2066,8 @@ function writeEditor(el: HTMLElement, segs: Seg[]) {
   el.replaceChildren();
   for (const s of segs) {
     if (s.kind === "text") el.appendChild(document.createTextNode(s.value));
-    else el.appendChild(chipEl(s.value));
+    else if (s.kind === "ref") el.appendChild(chipEl(s.value));
+    else el.appendChild(cmdChipEl(s.value));
   }
 }
 
@@ -1328,7 +2085,25 @@ function segsText(segs: Seg[]): string {
  * 这些标记把块画回原来的位置。
  */
 function segsToPrompt(segs: Seg[]): string {
-  return segs.map((s) => (s.kind === "text" ? s.value : mentionToken(s.value))).join("");
+  return segs
+    .map((s) => {
+      if (s.kind === "text") return s.value;
+      if (s.kind === "ref") return mentionToken(s.value);
+      return `/${s.value}`;
+    })
+    .join("");
+}
+
+/** 把开头的 `/已知命令 ` 收成色块。已经有块、或名字还不完整，原样返回。 */
+function promoteLeadingCmd(segs: Seg[], known: Set<string>): Seg[] | null {
+  if (segs.some((s) => s.kind === "cmd")) return null;
+  const first = segs[0];
+  if (first?.kind !== "text") return null;
+  const m = SLASH_LEAD_RE.exec(first.value);
+  const [, name, gap, rest] = m ?? [];
+  if (name === undefined || gap === undefined || rest === undefined) return null;
+  if (!known.has(name)) return null;
+  return [{ kind: "cmd", value: name }, { kind: "text", value: gap + rest }, ...segs.slice(1)];
 }
 
 /** 路径带空格时要加引号，否则解析器会在空格处断开。 */
@@ -1512,31 +2287,45 @@ function bytesToBase64(bytes: Uint8Array): string {
  * 把块抽出来堆到文字下面，等于把他写的句子拆了。
  */
 function UserText({ text, files = [] }: { text: string; files?: string[] }) {
-  if (files.length === 0) return <>{text}</>;
+  const lead = SLASH_HEAD_RE.exec(text);
+  const cmdName = lead?.[1];
+  const body = lead ? text.slice(lead[0].length).replace(/^\s/, "") : text;
 
-  const escaped = files.map((f) => f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  const re = new RegExp(`@"(?:${escaped.join("|")})"|@(?:${escaped.join("|")})`, "g");
-  const out: React.ReactNode[] = [];
-  const seen = new Set<string>();
-  let last = 0;
-  for (const m of text.matchAll(re)) {
-    const path = m[0].replace(/^@"?/, "").replace(/"$/, "");
-    if (m.index > last) out.push(text.slice(last, m.index));
-    out.push(<FileChip key={`${path}-${m.index}`} path={path} />);
-    seen.add(path);
-    last = m.index + m[0].length;
+  const fileNodes = (src: string): ReactNode => {
+    if (files.length === 0) return src;
+    const escaped = files.map((f) => f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    const re = new RegExp(`@"(?:${escaped.join("|")})"|@(?:${escaped.join("|")})`, "g");
+    const out: React.ReactNode[] = [];
+    const seen = new Set<string>();
+    let last = 0;
+    for (const m of src.matchAll(re)) {
+      const path = m[0].replace(/^@"?/, "").replace(/"$/, "");
+      if (m.index > last) out.push(src.slice(last, m.index));
+      out.push(<FileChip key={`${path}-${m.index}`} path={path} />);
+      seen.add(path);
+      last = m.index + m[0].length;
+    }
+    if (last < src.length) out.push(src.slice(last));
+    const orphans = files.filter((f) => !seen.has(f));
+    return (
+      <>
+        {out}
+        {orphans.map((p) => (
+          <FileChip key={`orphan-${p}`} path={p} />
+        ))}
+      </>
+    );
+  };
+
+  if (!cmdName) {
+    if (files.length === 0) return <>{text}</>;
+    return <>{fileNodes(body)}</>;
   }
-  if (last < text.length) out.push(text.slice(last));
 
-  // 正文里没留下标记的引用（老消息、命令展开出来的）照样要露出来，
-  // 否则用户看不出这条消息带了什么文件。
-  const orphans = files.filter((f) => !seen.has(f));
   return (
     <>
-      {out}
-      {orphans.map((p) => (
-        <FileChip key={`orphan-${p}`} path={p} />
-      ))}
+      <CmdChip name={cmdName} />
+      {body ? <> {fileNodes(body)}</> : files.length > 0 ? fileNodes("") : null}
     </>
   );
 }
@@ -1546,6 +2335,14 @@ function FileChip({ path }: { path: string }) {
     <span className="ref-chip static" title={path}>
       <FileIcon />
       {path.split("/").pop()}
+    </span>
+  );
+}
+
+function CmdChip({ name }: { name: string }) {
+  return (
+    <span className="cmd-chip static" title={`/${name}`}>
+      /{name}
     </span>
   );
 }
@@ -1584,9 +2381,7 @@ function QueuePanel({
   return (
     <div className="queue-panel">
       <button type="button" className="queue-head" onClick={() => setOpen((v) => !v)}>
-        <span className={open ? "queue-chevron open" : "queue-chevron"}>
-          <ChevronRightIcon />
-        </span>
+        <Chevron open={open} />
         {queued.length} 条排队
       </button>
       {open
@@ -1648,6 +2443,8 @@ function Composer({
   onSend,
   onStop,
   onOpenSettings,
+  insertText,
+  onInserted,
 }: {
   sessionId: string;
   /** 会话的项目根。斜杠命令要按它找项目级 commands/。 */
@@ -1671,6 +2468,9 @@ function Composer({
   onSend: (t: string, images: ImageInput[], refs: string[]) => Promise<boolean>;
   onStop: () => void;
   onOpenSettings: () => void;
+  /** 外部要塞进来的一段文字（终端选中的输出）。null = 没有。 */
+  insertText?: string | null;
+  onInserted?: () => void;
 }) {
   // 编辑区是**非受控**的：内容住在 DOM 里，这些 state 只是它的投影。
   // 受控写法（每次输入都回写 innerHTML）会在每一次按键后重置光标，
@@ -1691,8 +2491,10 @@ function Composer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hostMode, sessionId]);
   const [modeConfirm, setModeConfirm] = useState<ConfirmRequest | null>(null);
-  /** 这个会话可用的斜杠命令。每次挂载拉一次（用户加了 .md 切一下会话就有）。 */
+  /** 这个会话可用的斜杠命令 + 技能。每次挂载拉一次（用户加了 .md 切一下会话就有）。 */
   const [commands, setCommands] = useState<SlashCommand[]>([]);
+  /** 已经落成色块的那条命令/技能名。有它就算有内容，占位提示该让开。 */
+  const [cmdName, setCmdName] = useState<string | null>(null);
   /** 补全菜单里高亮到第几条。 */
   const [slashPick, setSlashPick] = useState(0);
   /** `@` 引用的候选文件。 */
@@ -1741,11 +2543,17 @@ function Composer({
     void saveConfig({ ...cfg, activeModel: m }).then(onConfig).catch(() => {});
   };
 
+  // 技能也在这份清单里 —— 宿主那边把命令和技能并成了一条发现管道
+  // （`slash::discover`）。这里曾经自己拉一次 skillsList 再合并，那是
+  // 两个真相：优先级规则（内置 > 命令 > 技能）在两处各写一遍，改一边
+  // 就会不一致。
   useEffect(() => {
     let alive = true;
     void slashCommands(workspace)
-      .then((c) => alive && setCommands(c))
-      .catch(() => {}); // 没有命令目录不是错误
+      .then((cmds) => {
+        if (alive) setCommands(cmds);
+      })
+      .catch(() => {});
     return () => {
       alive = false;
     };
@@ -1755,15 +2563,24 @@ function Composer({
   const sync = () => {
     const el = ref.current;
     if (!el) return;
-    const segs = readEditor(el);
+    let segs = readEditor(el);
+    const known = new Set(commands.map((c) => c.name));
+    const promoted = promoteLeadingCmd(segs, known);
+    if (promoted) {
+      writeEditor(el, promoted);
+      caretToEnd(el);
+      segs = promoted;
+    }
     const text = segsText(segs);
     const paths = segs.flatMap((s) => (s.kind === "ref" ? [s.value] : []));
+    const cmd = segs.find((s) => s.kind === "cmd")?.value ?? null;
     setDraftRaw(text);
     setRefs(paths);
+    setCmdName(cmd);
     setMentionQuery(queryAtCaret(el));
     // 删光内容后浏览器常留一个 `<br>`，读出来是个 "\n"。当成有内容的话，
     // 占位提示不再出现、草稿缓存里也会存下一堆看不见的空行。
-    if (text.trim() || paths.length) drafts.set(sessionId, segs);
+    if (text.trim() || paths.length || cmd) drafts.set(sessionId, segs);
     else drafts.delete(sessionId);
   };
 
@@ -1779,16 +2596,36 @@ function Composer({
   /**
    * 换掉文字、留下已有的块。
    *
-   * `[约束]` 只在"整条文字都要被替换"时用（选中斜杠命令、Esc 清空）。
+   * `[约束]` 只在"整条文字都要被替换"时用（Esc 清掉半截 `/xxx`）。
    * 别拿它做追加 —— 块会被重排到前面去，用户会看到自己刚插在句中的
    * 引用莫名其妙跳到了句首。要在光标处加东西用 `insertChipAtCaret`。
    */
   const replaceText = (v: string) => {
     const el = ref.current;
     if (!el) return;
-    const keep = readEditor(el).filter((s) => s.kind === "ref");
+    const keep = readEditor(el).filter((s) => s.kind === "ref" || s.kind === "cmd");
     setContent(v ? [{ kind: "text", value: v }, ...keep] : keep);
   };
+
+  // 终端选中的那段输出：追加到现有草稿后面，不是替换。
+  //
+  // 包在代码围栏里 —— 报错栈里的尖括号和缩进不这么处理会被 markdown
+  // 吃掉一半。追加完把焦点放回输入框，用户接着就能在前面补一句
+  // "这个报错怎么回事"，那才是他按下那个键的目的。
+  const insertedRef = useRef(onInserted);
+  insertedRef.current = onInserted;
+  useEffect(() => {
+    if (!insertText) return;
+    const el = ref.current;
+    if (!el) return;
+    const cur = readEditor(el);
+    const prefix = segsText(cur).trim() ? "\n\n" : "";
+    setContent([...cur, { kind: "text", value: `${prefix}\`\`\`\n${insertText}\n\`\`\`\n` }]);
+    el.focus();
+    caretToEnd(el);
+    insertedRef.current?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [insertText]);
 
   // 切会话：编辑区是非受控的，组件复用时内容不会自己跟着换。
   // 顺带把焦点放进去 —— contenteditable 不吃 autoFocus（React 只对
@@ -1805,7 +2642,7 @@ function Composer({
 
   // 补全菜单只在"还没敲空格"时出：`/co` 出菜单，`/compact 参数` 不出 ——
   // 后者用户已经选定命令在写参数了，菜单只会挡住视线。
-  const slashQuery = /^\/([\w:-]*)$/.exec(draft)?.[1];
+  const slashQuery = cmdName ? undefined : SLASH_QUERY_RE.exec(draft)?.[1];
   const matches =
     slashQuery === undefined
       ? []
@@ -1821,11 +2658,14 @@ function Composer({
           .slice(0, 8);
   const pick = Math.min(slashPick, Math.max(matches.length - 1, 0));
 
-  /** 选中一条命令：填进输入框等用户敲参数（没有参数的直接可发）。 */
+  /** 选中一条命令/技能：收成色块，光标停在后面的空格上写参数。 */
   const chooseSlash = (c: SlashCommand) => {
-    replaceText(`/${c.name} `);
+    const el = ref.current;
+    if (!el) return;
+    const refsOnly = readEditor(el).filter((s) => s.kind === "ref");
+    setContent([{ kind: "cmd", value: c.name }, { kind: "text", value: " " }, ...refsOnly]);
     setSlashPick(0);
-    ref.current?.focus();
+    el.focus();
   };
 
   // `@` 文件引用：认的是**光标处**那个没敲完的 token（由 sync 算出来），
@@ -1866,14 +2706,34 @@ function Composer({
     // 只附了图/只挂了引用、什么都没打也算一条消息 —— "看这个截图"、
     // "看看这个文件"都是这么发的。
     // busy 不拦：模型干活时发的消息进排队面板，内核在安全点注入。
-    if ((!text && shots.length === 0 && refs.length === 0) || !hasKey || !cfg.activeModel) return;
+    if ((!text && shots.length === 0 && refs.length === 0 && !cmdName) || !hasKey || !cfg.activeModel) {
+      return;
+    }
 
-    // 斜杠命令：内置的当场执行，自定义的展开成 prompt 再走正常发送。
+    // 斜杠命令：内置的当场执行，能展开的展开成 prompt 再走正常发送。
+    //
+    // 普通技能**不**当命令跑（`expandInline` 为假）—— 只把名字发给模型，
+    // 由它用 Skill 工具按需加载正文。展开了就等于把几 KB 正文塞进用户可见
+    // 的消息，渐进披露白做。写了 disable-model-invocation 的技能例外：
+    // 模型的清单里没有它，不展开谁都跑不了。判据由宿主给，见 slash.rs。
+    //
     // 认不出的 `/xxx` 原样发出去 —— 用户可能真想跟模型说这个词。
-    const slash = /^\/([\w:-]+)\s*([\s\S]*)$/.exec(text);
-    const cmd = slash ? commands.find((c) => c.name === slash[1]) : undefined;
-    if (slash && cmd) {
-      const args = slash[2] ?? "";
+    const sentSegsNow = ref.current ? readEditor(ref.current) : [];
+    const cmdSeg = sentSegsNow.find((s) => s.kind === "cmd");
+    const cmd = cmdSeg
+      ? commands.find((c) => c.name === cmdSeg.value)
+      : (() => {
+          const slash = SLASH_SUBMIT_RE.exec(text);
+          return slash ? commands.find((c) => c.name === slash[1]) : undefined;
+        })();
+    if (cmd && (cmd.source === "builtin" || cmd.expandInline)) {
+      const args = cmdSeg
+        ? sentSegsNow
+            .filter((s) => s.kind === "text")
+            .map((s) => s.value)
+            .join("")
+            .trim()
+        : (SLASH_SUBMIT_RE.exec(text)?.[2] ?? "");
       const sentRefs = refs;
       setContent([]);
       setShots([]);
@@ -1914,10 +2774,9 @@ function Composer({
   const runSlash = async (cmd: SlashCommand, args: string, sentRefs: string[] = []) => {
     if (cmd.source === "builtin") {
       if (cmd.name === "compact") {
-        setSlashNote("正在压缩历史…");
+        // 进行中的提示在对话流里（「正在压缩上下文…」），这里不再横幅重复一遍。
         try {
           await compactSession(sessionId);
-          setSlashNote("");
         } catch (e) {
           setSlashNote(String(e));
         }
@@ -1926,13 +2785,17 @@ function Composer({
     }
     // 失败时把 `/命令 参数` 和引用块原样放回去：展开出来的 prompt 是
     // 派生物，用户手里那行才是他打的东西。
-    const typed = args ? `/${cmd.name} ${args}` : `/${cmd.name}`;
     const restore = () => {
       const cur = ref.current ? readEditor(ref.current) : [];
       const back: Seg[] = sentRefs
         .filter((r) => !cur.some((s) => s.kind === "ref" && s.value === r))
         .map((value) => ({ kind: "ref", value }));
-      setContent([{ kind: "text", value: `${typed} ` }, ...back, ...cur]);
+      setContent([
+        { kind: "cmd", value: cmd.name },
+        { kind: "text", value: args ? ` ${args} ` : " " },
+        ...back,
+        ...cur,
+      ]);
     };
     try {
       const prompt = await slashExpand(sessionId, cmd.name, args);
@@ -1990,7 +2853,14 @@ function Composer({
         }),
       ),
     );
-    setShots((prev) => [...prev, ...scaled].slice(0, MAX_SHOTS));
+    setShots((prev) => {
+      const merged = [...prev, ...scaled];
+      // 超上限要说出来 —— 静默丢掉的话，用户以为十张全发出去了。
+      if (merged.length > MAX_SHOTS) {
+        setDropError(`一条消息最多 ${MAX_SHOTS} 张图，已忽略多出的 ${merged.length - MAX_SHOTS} 张。`);
+      }
+      return merged.slice(0, MAX_SHOTS);
+    });
   };
 
   /** 拖进来或粘贴进来的 `File`:图片收下，其它的说清为什么不收。 */
@@ -2117,11 +2987,13 @@ function Composer({
               }}
               onMouseEnter={() => setSlashPick(i)}
             >
-              <span className="slash-name">/{c.name}</span>
+              <CmdChip name={c.name} />
               {c.argumentHint ? <span className="slash-hint">{c.argumentHint}</span> : null}
               <span className="slash-desc">{c.description}</span>
               {c.source !== "builtin" ? (
-                <span className="slash-src">{c.source === "project" ? "项目" : "全局"}</span>
+                <span className="slash-src">
+                  {c.source === "skill" ? "技能" : c.source === "project" ? "项目" : "全局"}
+                </span>
               ) : null}
             </button>
           ))}
@@ -2142,7 +3014,7 @@ function Composer({
               onMouseEnter={() => setFilePick(i)}
             >
               {/* 文件名在前、目录在后：一屏候选里先扫到的是名字。 */}
-              <span className="slash-name">{p.split("/").pop()}</span>
+              <FileChip path={p} />
               <span className="slash-desc">{p}</span>
             </button>
           ))}
@@ -2190,7 +3062,7 @@ function Composer({
         {/* 引用块住在编辑区里、和文字同一行，所以这里没有单独的块列表。 */}
         <div
           ref={ref}
-          className={draft.trim() || refs.length ? "composer-input" : "composer-input empty"}
+          className={draft.trim() || refs.length || cmdName ? "composer-input" : "composer-input empty"}
           contentEditable
           suppressContentEditableWarning
           role="textbox"
@@ -2233,9 +3105,19 @@ function Composer({
             sync();
           }}
           onKeyDown={(e) => {
-            // 退格删块交给浏览器：contenteditable=false 的元素整个删掉，
-            // 而且删的是光标**紧邻**那个，不是"最后一个"。
-            //
+            // 色块当原子：退格一次整块删掉，方向键整块跳过。
+            // 交给浏览器的话，WebKit 会先把光标塞进块里（或先选中再删）。
+            if (
+              ref.current &&
+              !e.nativeEvent.isComposing &&
+              !imeRef.current &&
+              handleChipKey(e, ref.current)
+            ) {
+              e.preventDefault();
+              sync();
+              return;
+            }
+
             // 补全菜单开着时，方向键和 Tab/Enter 归它用。两个菜单不会
             // 同时开：`/` 要求整条草稿就是命令，`@` 认的是末尾那一段。
             const menu = matches.length > 0 ? "slash" : fileMatches.length > 0 ? "file" : null;
@@ -2276,6 +3158,23 @@ function Composer({
                 return;
               }
             }
+            // 空输入时 Esc 中断当前轮 —— 想停不必去够那个停止按钮。
+            // 有草稿时 Esc 留给"清空/退出引用"这类局部撤销，不误伤。
+            if (e.key === "Escape" && busy && !draft.trim() && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              onStop();
+              return;
+            }
+            // 敲空格且整段正好是一条已知命令：收成色块，别留下 `/compact ` 纯文字。
+            if (e.key === " " && !e.nativeEvent.isComposing && !imeRef.current) {
+              const typed = SLASH_QUERY_RE.exec(draft)?.[1];
+              const exact = typed ? commands.find((c) => c.name === typed) : undefined;
+              if (exact) {
+                e.preventDefault();
+                chooseSlash(exact);
+                return;
+              }
+            }
             // 229 = IME 处理中的占位 keyCode，部分 WebView 上比 isComposing 更准
             if (
               e.key === "Enter" &&
@@ -2291,69 +3190,81 @@ function Composer({
         />
 
         <div className="composer-bar">
-          <button
-            type="button"
-            className="composer-icon"
-            onClick={() => void pickFiles().then(takePaths).catch(() => {})}
-            title="附加图片或文件"
-            aria-label="附加图片或文件"
-          >
-            <PlusIcon />
-          </button>
-          <ModeMenu mode={mode} onChange={changeMode} />
-          <Picker
-            title="切换服务方"
-            label={activeProvider?.name ?? "选择服务方"}
-            items={cfg.providers.map((p) => ({
-              id: p.id,
-              label: p.name,
-              active: p.id === cfg.activeProvider,
-              ...(config.keyStatus[p.id] ? {} : { note: "未配置 key", warn: true }),
-            }))}
-            onPick={(id) => {
-              const p = cfg.providers.find((x) => x.id === id);
-              if (p) switchProvider(p);
-            }}
-          />
-          <Picker
-            title="切换模型"
-            label={modelLabel(activeProvider, cfg.activeModel) || "选择模型"}
-            items={(activeProvider?.models ?? []).map((m) => ({
-              id: m.id,
-              // 有显示名就用它。菜单里那一列越短越好读，模型 ID 常常很长。
-              label: m.name?.trim() || m.id,
-              active: m.id === cfg.activeModel,
-              ...(m.vision ? { vision: true } : {}),
-            }))}
-            emptyHint="这个服务方还没有模型"
-            onEmpty={onOpenSettings}
-            onPick={switchModel}
-          />
-          <span className="bar-spacer" />
-          {tokens.input + tokens.output > 0 ? (
-            <span className="usage" title="本会话累计 token（输入 / 输出）">
-              {fmtTokens(tokens.input)} / {fmtTokens(tokens.output)}
-            </span>
-          ) : null}
-          {/* 一个位置一个按钮（Cursor 同款）：忙 + 空输入 = 停止；
-              一旦打了字就变成发送（排队），清空又变回停止。 */}
-          {busy && !draft.trim() && shots.length === 0 ? (
-            <button type="button" className="send stop" onClick={onStop} title="停止" aria-label="停止">
-              <StopIcon />
-            </button>
-          ) : (
+          <div className="composer-tools">
             <button
-              type="submit"
-              className="send"
-              disabled={(!draft.trim() && shots.length === 0) || !hasKey || !cfg.activeModel}
-              title={
-                busy ? "排队发送（当前任务完成后自动发出）" : cfg.activeModel ? "发送" : "先选择一个模型"
-              }
-              aria-label={busy ? "排队发送" : cfg.activeModel ? "发送" : "先选择一个模型"}
+              type="button"
+              className="composer-icon"
+              onClick={() => void pickFiles().then(takePaths).catch(() => {})}
+              title="附加图片或文件"
+              aria-label="附加图片或文件"
             >
-              <ArrowUpIcon />
+              <PlusIcon />
             </button>
-          )}
+            <ModeMenu mode={mode} onChange={changeMode} />
+            {/* 窄列藏起来：三个 pill 并排是挤的源头，换服务方/模型去设置里也能做。 */}
+            <div className="composer-picks">
+              <Picker
+                title="切换服务方"
+                label={activeProvider?.name ?? "选择服务方"}
+                items={cfg.providers.map((p) => ({
+                  id: p.id,
+                  label: p.name,
+                  active: p.id === cfg.activeProvider,
+                  ...(config.keyStatus[p.id] ? {} : { note: "未配置 key", warn: true }),
+                }))}
+                onPick={(id) => {
+                  const p = cfg.providers.find((x) => x.id === id);
+                  if (p) switchProvider(p);
+                }}
+              />
+              <Picker
+                title="切换模型"
+                label={modelLabel(activeProvider, cfg.activeModel) || "选择模型"}
+                items={(activeProvider?.models ?? []).map((m) => ({
+                  id: m.id,
+                  // 有显示名就用它。菜单里那一列越短越好读，模型 ID 常常很长。
+                  label: m.name?.trim() || m.id,
+                  active: m.id === cfg.activeModel,
+                  ...(m.vision ? { vision: true } : {}),
+                }))}
+                emptyHint="这个服务方还没有模型"
+                onEmpty={onOpenSettings}
+                onPick={switchModel}
+              />
+            </div>
+          </div>
+          <div className="composer-actions">
+            {tokens.input + tokens.output > 0 ? (
+              // "a / b" 会被读成"已用 / 上限"，箭头形式没有歧义
+              <span className="usage" title="本会话累计 token：↑输入 ↓输出">
+                ↑{fmtTokens(tokens.input)} ↓{fmtTokens(tokens.output)}
+              </span>
+            ) : null}
+            {/* 停止常驻：只要在忙就显示，不再被"打了字"的发送按钮顶掉 ——
+                想中止不必先清空输入。有草稿时它和发送并排，各司其职。 */}
+            {busy ? (
+              <button type="button" className="send stop" onClick={onStop} title="停止 (Esc)" aria-label="停止">
+                <StopIcon />
+              </button>
+            ) : null}
+            {!busy || draft.trim() || shots.length > 0 || refs.length > 0 || cmdName ? (
+              <button
+                type="submit"
+                className="send"
+                disabled={
+                  (!draft.trim() && shots.length === 0 && refs.length === 0 && !cmdName) ||
+                  !hasKey ||
+                  !cfg.activeModel
+                }
+                title={
+                  busy ? "排队发送（当前任务完成后自动发出）" : cfg.activeModel ? "发送" : "先选择一个模型"
+                }
+                aria-label={busy ? "排队发送" : cfg.activeModel ? "发送" : "先选择一个模型"}
+              >
+                <ArrowUpIcon />
+              </button>
+            ) : null}
+          </div>
         </div>
       </form>
       {modeConfirm ? (
@@ -2374,15 +3285,12 @@ function fmtTokens(n: number): string {
   return `${(n / 1_000_000).toFixed(2)}M`;
 }
 
-/** 权限模式的上拉菜单。原生 select 样式改不动，自己画一个。 */
-function ModeMenu({
-  mode,
-  onChange,
-}: {
-  mode: PermissionMode;
-  onChange: (m: PermissionMode) => void;
-}) {
-  const [open, setOpen] = useState(false);
+/**
+ * 上拉菜单的公共行为：点外面关、Esc 关（焦点还给 pill）、上下键在
+ * 菜单项间移动。三个 pill 菜单（模式/服务方/模型）共用，键盘模型
+ * 才能一致。
+ */
+function useDropdown(open: boolean, setOpen: (v: boolean) => void) {
   const rootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -2392,20 +3300,76 @@ function ModeMenu({
     };
     window.addEventListener("mousedown", close);
     return () => window.removeEventListener("mousedown", close);
+  }, [open, setOpen]);
+
+  // 打开后把焦点放到当前选中项，键盘用户不用先按好几下 Tab
+  useEffect(() => {
+    if (!open) return;
+    const root = rootRef.current;
+    const target =
+      root?.querySelector<HTMLButtonElement>(".menu-item.active") ??
+      root?.querySelector<HTMLButtonElement>(".menu-item");
+    target?.focus();
   }, [open]);
 
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (!open) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      setOpen(false);
+      rootRef.current?.querySelector<HTMLButtonElement>(".picker-pill")?.focus();
+      return;
+    }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const items = [...(rootRef.current?.querySelectorAll<HTMLButtonElement>(".menu-item") ?? [])];
+      if (!items.length) return;
+      const cur = items.indexOf(document.activeElement as HTMLButtonElement);
+      const n = items.length;
+      const next = e.key === "ArrowDown" ? (cur + 1) % n : (cur - 1 + n) % n;
+      items[next]?.focus();
+    }
+  };
+
+  return { rootRef, onKeyDown };
+}
+
+/** 权限模式的上拉菜单。原生 select 样式改不动，自己画一个。 */
+function ModeMenu({
+  mode,
+  onChange,
+}: {
+  mode: PermissionMode;
+  onChange: (m: PermissionMode) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const { rootRef, onKeyDown } = useDropdown(open, setOpen);
+  // 危险模式常态化后不能和安全模式长得一样 —— pill 要一直带警示色
+  const danger = Boolean(MODE_WARN[mode]);
+
   return (
-    <div className="mode-menu" ref={rootRef}>
-      <button type="button" className="pill" onClick={() => setOpen(!open)}>
-        {MODE_LABEL[mode] ?? mode}
-        <span className="pick-caret">▾</span>
+    <div className="mode-menu" ref={rootRef} onKeyDown={onKeyDown}>
+      <button
+        type="button"
+        className={danger ? "pill picker-pill pill-danger" : "pill picker-pill"}
+        title={danger ? `${MODE_LABEL[mode]}（${MODE_WARN[mode]}）` : (MODE_LABEL[mode] ?? mode)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+      >
+        {danger ? <span className="pill-danger-dot" aria-hidden /> : null}
+        <span className="pick-label">{MODE_LABEL[mode] ?? mode}</span>
+        <Chevron down open={open} />
       </button>
       {open ? (
-        <div className="menu">
+        <div className="menu" role="menu">
           {(Object.keys(MODE_LABEL) as PermissionMode[]).map((m) => (
             <button
               key={m}
               type="button"
+              role="menuitemradio"
+              aria-checked={m === mode}
               className={m === mode ? "menu-item active" : "menu-item"}
               onClick={() => {
                 onChange(m);
@@ -2454,35 +3418,30 @@ function Picker({
   onEmpty?: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
   const isEmpty = items.length === 0;
-
-  useEffect(() => {
-    if (!open) return;
-    const close = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    window.addEventListener("mousedown", close);
-    return () => window.removeEventListener("mousedown", close);
-  }, [open]);
+  const { rootRef, onKeyDown } = useDropdown(open, setOpen);
 
   return (
-    <div className="mode-menu" ref={rootRef}>
+    <div className="mode-menu" ref={rootRef} onKeyDown={onKeyDown}>
       <button
         type="button"
         className="pill picker-pill"
-        title={isEmpty ? emptyHint : title}
+        title={isEmpty ? (emptyHint ?? title) : label}
+        aria-haspopup="menu"
+        aria-expanded={open}
         onClick={() => (isEmpty ? onEmpty?.() : setOpen(!open))}
       >
         <span className="pick-label">{label}</span>
-        <span className="pick-caret">▾</span>
+        <Chevron down open={open} />
       </button>
       {open && !isEmpty ? (
-        <div className="menu">
+        <div className="menu" role="menu">
           {items.map((it) => (
             <button
               key={it.id}
               type="button"
+              role="menuitemradio"
+              aria-checked={Boolean(it.active)}
               className={it.active ? "menu-item picker-item active" : "menu-item picker-item"}
               onClick={() => {
                 onPick(it.id);
@@ -2520,12 +3479,27 @@ function SidebarToggleIcon() {
   );
 }
 
-/** 右侧抽屉开关：矩形 + 右侧一道竖线。 */
-function PanelRightIcon() {
+/**
+ * 浏览器：Chrome 的轮廓（内置浏览器跑的就是 Chromium）。
+ *
+ * 圆形在一排矩形图标里本身就够显眼，不用靠颜色 —— 旁边几个都是矩形
+ * 加一道线，只差线的方向，扫一眼分不出谁是谁。
+ */
+function BrowserIcon() {
   return (
-    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <rect x="1.5" y="2.5" width="13" height="11" rx="2" stroke="currentColor" strokeWidth="1.3" />
-      <path d="M10 2.5v11" stroke="currentColor" strokeWidth="1.3" />
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      aria-hidden
+    >
+      <circle cx="12" cy="12" r="9.5" />
+      <circle cx="12" cy="12" r="4" />
+      <path d="M21.17 8H12M3.95 6.06 8.54 14M10.88 21.94 15.46 14" />
     </svg>
   );
 }
@@ -2536,6 +3510,21 @@ function PanelBottomIcon() {
     <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
       <rect x="1.5" y="2.5" width="13" height="11" rx="2" stroke="currentColor" strokeWidth="1.3" />
       <path d="M1.5 9.5h13" stroke="currentColor" strokeWidth="1.3" />
+    </svg>
+  );
+}
+
+/** 改动一览：上面一个加号、下面一道减号 —— diff 的通用符号（octicon 同款）。 */
+function DiffIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M8 2.5v7M4.5 6h7"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+      <path d="M4.5 13h7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
     </svg>
   );
 }
@@ -2592,20 +3581,6 @@ function StopIcon() {
   return (
     <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden>
       <rect x="1.5" y="1.5" width="9" height="9" rx="1.5" fill="currentColor" />
-    </svg>
-  );
-}
-
-function ChevronRightIcon() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <path
-        d="M6 3.5L10.5 8L6 12.5"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
     </svg>
   );
 }

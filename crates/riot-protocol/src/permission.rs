@@ -188,6 +188,18 @@ pub enum PermissionMode {
     AcceptEdits,
     /// 只读规划模式。
     Plan,
+    /// 小模型判危：明确安全的自动放行，其余照常弹窗。
+    ///
+    /// 定位是 [`Self::Default`] 和 [`Self::Unattended`] 之间缺的那一档。
+    /// 长任务里的绝大多数询问是 `cargo check`、`ls`、读一个文件这类东西，
+    /// 逐个点"允许"会把人训练成无脑点 —— 而无脑点的人在真正危险的那次
+    /// 也会点。让小模型先筛掉显然安全的，剩下的才值得打断人。
+    ///
+    /// `[约束]` 分类器的权力**不超过** [`Self::BypassPermissions`]：只有
+    /// `yields_to_bypass()` 为真的询问才可能被它自动放行。安全检查
+    /// （SSH 密钥、shell 启动脚本）和用户亲手写的 ask 规则对它免疫 ——
+    /// 判据和分层免疫是同一条，见 [`DecisionReason::yields_to_bypass`]。
+    Auto,
     /// 全部放行 —— 但敏感操作安全检查仍然生效。
     BypassPermissions,
     /// 什么都不问，安全检查也一并放行。
@@ -289,9 +301,81 @@ pub struct PermissionAsk {
 pub enum AskPreview {
     Command { command: String, cwd: PathBuf },
     FileEdit { path: PathBuf, diff: String },
-    FileWrite { path: PathBuf, bytes: u64 },
+    /// 写整文件。`preview` 是内容的前若干行 —— 只显示路径和字节数
+    /// 等于让用户盲签，而这个文件顶上的约束明说了不能这样。`lines`
+    /// 是总行数，`truncated` 标记 preview 是否被截断。
+    FileWrite {
+        path: PathBuf,
+        bytes: u64,
+        preview: String,
+        lines: u64,
+        truncated: bool,
+    },
     NetworkFetch { url: String },
     Plain { text: String },
+    /// 模型主动提的结构化问题（`AskUserQuestion` 工具）。
+    ///
+    /// `[取舍]` 复用权限的 ask 通道而不是另建一条问答链路。理由是这条通道
+    /// 已经解决了同一批难题：等用户时的超时（按拒绝处理）、中断时补齐
+    /// tool_result 配对、子 agent 不许弹窗（`can_prompt_user`）。另建一条
+    /// 就要把这些全部重做一遍，而它们每一个都是踩过坑才对的。
+    ///
+    /// 代价是"提问"被塞进了权限语义 —— 用户的选择经 [`PermissionResponse::Allow`]
+    /// 的 `choice` 回来，再由宿主写进工具输入。
+    Choice {
+        question: String,
+        options: Vec<AskChoiceOption>,
+        /// 允许选多项。
+        allow_multiple: bool,
+    },
+}
+
+/// 结构化提问的一个候选项。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AskChoiceOption {
+    /// 回传给模型的稳定标识。用它而不是 label —— label 是给人读的文案，
+    /// 改一个字就会让模型收到不一样的答案。
+    pub id: String,
+    /// 给用户看的文案。
+    pub label: String,
+}
+
+/// 分类器的判定。
+///
+/// 只有两个结果，不是三个。"判不准"和"不安全"都归到 [`Self::Hold`] ——
+/// 对调用方来说它们的后续完全一样（继续等用户），分成三档只会诱使调用方
+/// 对"判不准"另做处理，而那条路唯一能通向的地方是放行。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SafetyVerdict {
+    /// 明确安全，可以不打断用户。`confidence` 进 [`DecisionReason::Classifier`]，
+    /// 让日志和界面能解释这次放行是谁批的。
+    Safe { confidence: f32 },
+    /// 继续等用户。不安全、判不准、请求失败、输出看不懂，全在这里。
+    Hold,
+}
+
+/// 小模型判危。[`PermissionMode::Auto`] 用它。
+///
+/// 和 [`PermissionGate`] 同一个路子：决策链是纯函数，跑不了 IO，所以这层
+/// 判断挂在闸上（那里本来就是 async，也本来就是弹窗与等待的地方）。
+#[async_trait::async_trait]
+pub trait SafetyClassifier: Send + Sync + 'static {
+    /// 判断这次调用安不安全。`what` 来自 [`crate::tool::Tool::classifier_input`]。
+    ///
+    /// `[约束]` 任何异常都要返回 [`SafetyVerdict::Hold`]，不能返回 Safe。
+    /// 分类器坏掉（没配模型、超时、输出对不上格式）时该退回问人 ——
+    /// 一个坏掉的判危器静默放行，比没有判危器危险得多。
+    async fn judge(&self, tool: &str, what: &str) -> SafetyVerdict;
+}
+
+/// 不判危的占位实现。没配便宜档模型时用它 —— 所有询问照常弹窗。
+pub struct NoClassifier;
+
+#[async_trait::async_trait]
+impl SafetyClassifier for NoClassifier {
+    async fn judge(&self, _tool: &str, _what: &str) -> SafetyVerdict {
+        SafetyVerdict::Hold
+    }
 }
 
 /// 工具做权限判断时能看到的上下文。
@@ -332,6 +416,11 @@ pub enum PermissionResponse {
     Allow {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remember: Vec<PermissionUpdate>,
+        /// 用户选中的选项 id（只有 [`AskPreview::Choice`] 会用到）。
+        ///
+        /// 空 = 这不是一次提问，或者用户没选任何一项。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        choice: Vec<String>,
     },
     Deny {
         /// 用户可以说明理由，会作为 tool_result 喂回模型。

@@ -22,7 +22,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use riot_protocol::browser::{
     Action, BLANK_PAGE, BrowserAccess, BrowserUnavailable, Command, Event, InteractError,
-    InterceptOp, Nav, NetQuery, Target, TabId, WaitCondition,
+    InterceptOp, MarkedView, Nav, NetQuery, Target, TabId, WaitCondition,
 };
 use tokio::sync::{Mutex, mpsc, oneshot};
 
@@ -79,6 +79,12 @@ pub enum Input {
     /// 按下并抬起。合成一次完整点击，而不是让前端发两条 —— 中间要是
     /// 丢了一条，页面会停在"按住"状态，后续所有交互都不对。
     Click { x: f64, y: f64, button: String },
+    /// 单独的按下 / 抬起。面板转发原生 mousedown/mouseup（而不只是合成的
+    /// click），页面里才拖得动滑块、选得中文字。`click_count` 让双击选词、
+    /// 三击选段成立。丢一条会停在按住态，但那是真实鼠标本来就有的风险，
+    /// 换来的是完整的指针语义。
+    Down { x: f64, y: f64, button: String, click_count: i64 },
+    Up { x: f64, y: f64, button: String, click_count: i64 },
     Move { x: f64, y: f64 },
     /// 滚轮。两个轴都要带。
     ///
@@ -690,6 +696,20 @@ impl HostBrowser {
                     "button": button, "clickCount": 1,
                 })),
             ],
+            Input::Down { x, y, button, click_count } => vec![(
+                "Input.dispatchMouseEvent",
+                serde_json::json!({
+                    "type": "mousePressed", "x": x, "y": y,
+                    "button": button, "clickCount": click_count,
+                }),
+            )],
+            Input::Up { x, y, button, click_count } => vec![(
+                "Input.dispatchMouseEvent",
+                serde_json::json!({
+                    "type": "mouseReleased", "x": x, "y": y,
+                    "button": button, "clickCount": click_count,
+                }),
+            )],
             Input::Move { x, y } => vec![(
                 "Input.dispatchMouseEvent",
                 serde_json::json!({ "type": "mouseMoved", "x": x, "y": y }),
@@ -977,6 +997,36 @@ impl BrowserAccess for HostBrowser {
         // 同一个号指向不同元素，合并会让"[3] 到底是谁"没有答案。
         *self.snap_refs.lock().await = Some((id, refs));
         Ok(text)
+    }
+
+    async fn snapshot_marked(&self) -> Result<MarkedView, BrowserUnavailable> {
+        let (b, id) = self.active().await?;
+        let tab = Tab { browser: &b, id };
+        let (listing, refs) = ops::snapshot(tab)
+            .await
+            .map_err(|e| BrowserUnavailable(e.to_string()))?;
+
+        // 视口尺寸（CSS 像素）。没 resize 过就不做视口过滤 —— 宁可多画几个框，
+        // 也不因为不知道视口大小而一个都不画。
+        let (vw, vh) = (*self.view.lock().await)
+            .map_or((f64::MAX, f64::MAX), |(w, h, _)| (f64::from(w), f64::from(h)));
+
+        // 只框可交互、有几何、在视口内的；按编号排序，让框的出现顺序和清单一致。
+        let mut marks: Vec<(u32, ops::Rect)> = refs
+            .iter()
+            .filter(|(_, r)| ops::is_markable(&r.label))
+            .filter_map(|(n, r)| r.rect.map(|rc| (*n, rc)))
+            .filter(|(_, rc)| rc.intersects_viewport(vw, vh))
+            .collect();
+        marks.sort_by_key(|(n, _)| *n);
+
+        // 编号跟最新快照走（和 snapshot 一致）——交互方法用的就是这套号。
+        *self.snap_refs.lock().await = Some((id, refs));
+
+        let screenshot = ops::screenshot_marked(tab, &marks)
+            .await
+            .map_err(|e| BrowserUnavailable(e.to_string()))?;
+        Ok(MarkedView { listing, screenshot })
     }
 
     async fn console(&self) -> Result<Vec<String>, BrowserUnavailable> {

@@ -55,6 +55,8 @@ pub struct Scheduler {
     web: Arc<dyn riot_protocol::web::WebAccess>,
     /// 注入的浏览器能力。默认 NoBrowser —— 没装配就明说用不了。
     browser: Arc<dyn riot_protocol::browser::BrowserAccess>,
+    /// 注入的终端面板。长期服务跑在这里。默认 NoTerminal。
+    terminal: Arc<dyn riot_protocol::terminal::TerminalAccess>,
     /// 图片能力。默认 [`riot_protocol::vision::NoVision`]（模型不收图片、
     /// 也没有兼容模型）。
     vision: Arc<dyn riot_protocol::vision::VisionAccess>,
@@ -101,6 +103,7 @@ impl Scheduler {
             clock,
             web: Arc::new(riot_protocol::web::NoWeb),
             browser: Arc::new(riot_protocol::browser::NoBrowser),
+            terminal: Arc::new(riot_protocol::terminal::NoTerminal),
             vision: Arc::new(riot_protocol::vision::NoVision),
             web_injected: false,
             gate: None,
@@ -140,6 +143,14 @@ impl Scheduler {
         browser: Arc<dyn riot_protocol::browser::BrowserAccess>,
     ) -> Self {
         self.browser = browser;
+        self
+    }
+
+    pub fn with_terminal(
+        mut self,
+        terminal: Arc<dyn riot_protocol::terminal::TerminalAccess>,
+    ) -> Self {
+        self.terminal = terminal;
         self
     }
 
@@ -196,6 +207,7 @@ impl ToolRunner for Scheduler {
         let clock = Arc::clone(&self.clock);
         let web = Arc::clone(&self.web);
         let browser = Arc::clone(&self.browser);
+        let terminal = Arc::clone(&self.terminal);
         let vision = Arc::clone(&self.vision);
         let ids = Arc::clone(&self.ids);
         let cwd = self.prompt_ctx.cwd.clone();
@@ -242,6 +254,7 @@ impl ToolRunner for Scheduler {
                             clock: Arc::clone(&clock),
                             web: Arc::clone(&web),
                             browser: Arc::clone(&browser),
+                            terminal: Arc::clone(&terminal),
                             vision: Arc::clone(&vision),
                             cwd: cwd.clone(),
                             artifacts_dir: artifacts_dir.clone(),
@@ -333,6 +346,7 @@ struct ToolDeps {
     clock: Arc<dyn riot_protocol::tool::Clock>,
     web: Arc<dyn riot_protocol::web::WebAccess>,
     browser: Arc<dyn riot_protocol::browser::BrowserAccess>,
+    terminal: Arc<dyn riot_protocol::terminal::TerminalAccess>,
     vision: Arc<dyn riot_protocol::vision::VisionAccess>,
     cwd: std::path::PathBuf,
     artifacts_dir: std::path::PathBuf,
@@ -478,6 +492,7 @@ async fn run_one(
         proc: deps.proc,
         web: deps.web,
         browser: deps.browser,
+        terminal: deps.terminal,
         vision: deps.vision,
         clock: deps.clock,
     };
@@ -522,6 +537,8 @@ fn outcome_preview(outcome: &ToolOutcome) -> String {
             ToolResultContent::Image { .. } | ToolResultContent::DescribedImage { .. } => {
                 "(图片结果)".into()
             }
+            // 编号清单是纯文本，喂 hook 安全又有用；图片本体照旧不给。
+            ToolResultContent::MarkedImage { text, .. } => text.clone(),
         },
         ToolOutcome::Failed { error_for_model, .. } => error_for_model.clone(),
         ToolOutcome::Cancelled => String::new(),

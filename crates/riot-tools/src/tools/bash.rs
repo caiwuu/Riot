@@ -43,6 +43,10 @@ struct Input {
     /// 超时毫秒数。默认 120000，最大 600000。
     #[serde(default)]
     timeout_ms: Option<u64>,
+    /// 长期服务（dev server、watch 编译）设 true：命令跑在用户的终端
+    /// 面板里，立刻返回终端 id，不等它结束。
+    #[serde(default)]
+    background: bool,
 }
 
 pub struct Bash;
@@ -67,6 +71,10 @@ impl Tool for Bash {
              - 环境是非交互的：没有 stdin，编辑器和分页器都被禁用。需要输入的命令\
              会失败而不是挂住，请改用非交互参数（例如 `git commit -m`）。\n\
              - 默认 {}s 超时，最长 {}s。\n\
+             - **长期服务**（dev server、watch、任何不会自己结束的东西）必须\
+             设 `background: true`：它会跑在用户的终端面板里，立刻返回终端 id。\
+             不设的话命令要么卡到超时、要么在收尾时连同整个进程组被杀掉。\
+             起完用 TerminalOutput 看日志、TerminalKill 停。\n\
              - 输出过长时会保留开头和结尾，中间省略。\n\
              - 查找文件用 Glob、搜索内容用 Grep，它们比 `find` 和 `grep` 更快，\
              也不会被输出上限截断。\n\
@@ -179,6 +187,10 @@ impl Tool for Bash {
             Ok(p) => p,
             Err(e) => return ToolOutcome::failed(schema_hint(&e)),
         };
+
+        if parsed.background {
+            return spawn_service(&parsed, &ctx).await;
+        }
 
         let timeout_ms = parsed
             .timeout_ms
@@ -341,8 +353,16 @@ fn render(
     if timed_out {
         // 超时前的输出照样给。它往往正好指出卡在哪一步 ——
         // 只说"超时了"等于让模型从零开始猜。
+        // 不给下一步的话，模型最常见的反应是原样重跑一遍，然后再超时一次。
+        // 三条出路按适用场景排：长期服务、慢但会结束、以及缩小范围。
         parts.push(format!(
-            "命令在 {}s 后超时，已被终止。以下是超时前的输出：",
+            "命令在 {}s 后超时，已被终止。\n\
+             下一步选一条，别原样重跑：\n\
+             - 这是长期服务（dev server、watch）→ 用 `background: true` 重跑，\
+               然后用 TerminalOutput 的 `wait_for` 等它就绪；\n\
+             - 确实需要跑更久 → 调大 `timeout_ms`（上限 10 分钟）；\n\
+             - 只是范围太大 → 缩小它（跑单个测试、单个包）。\n\
+             以下是超时前的输出，它通常直接指出卡在哪一步：",
             timeout_ms / 1000
         ));
     }
@@ -402,6 +422,36 @@ fn spawn_hint(e: &std::io::Error) -> String {
         }
         std::io::ErrorKind::PermissionDenied => "没有执行命令的权限。".to_owned(),
         _ => format!("启动命令失败：{e}"),
+    }
+}
+
+/// 把长期服务交给终端面板。
+///
+/// 不能走 `ctx.proc`：那条路收尾时会清掉整个进程组（见 riot-runtime 的
+/// proc），dev server 活不过这一次调用。而模型为了让它活下来只能 `setsid`
+/// 逃出去 —— 那就成了谁都管不着的幽灵进程。放进终端面板，用户看得见、
+/// 能 Ctrl-C，模型能读能停。
+async fn spawn_service(parsed: &Input, ctx: &ToolContext) -> ToolOutcome {
+    let title = parsed
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map_or_else(|| clamp_chars(parsed.command.trim(), 30), str::to_owned);
+
+    match ctx.terminal.spawn(&parsed.command, &title).await {
+        Ok(id) => ToolOutcome::Ok {
+            model_content: riot_protocol::message::ToolResultContent::text(format!(
+                "已在终端 {id} 起了：{}\n\
+                 它在用户的终端面板里跑着（用户能看到、也能自己停）。\
+                 用 TerminalOutput(id={id}) 读输出，TerminalKill(id={id}) 停掉。\n\
+                 服务通常要几秒才就绪，别立刻去读。",
+                parsed.command.trim()
+            )),
+            ui_payload: None,
+            side_messages: Vec::new(),
+        },
+        Err(e) => ToolOutcome::failed(e.0),
     }
 }
 

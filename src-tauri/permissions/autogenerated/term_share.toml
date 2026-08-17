@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-term-share"
+description = "Enables the term_share command without any pre-configured scope."
+commands.allow = ["term_share"]
+
+[[permission]]
+identifier = "deny-term-share"
+description = "Denies the term_share command without any pre-configured scope."
+commands.deny = ["term_share"]

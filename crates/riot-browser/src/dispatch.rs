@@ -274,6 +274,17 @@ fn run_on_ui(cmd: Command) {
                 // 面板从外接屏拖回内置屏，尺寸变了、清晰度没变。
                 host.notify_screen_info_changed();
                 host.was_resized();
+                // `[约束]` 紧跟一次强制重绘，不能省。was_resized 让 CEF 进入
+                // "resize hold"：冻结合成，等一帧尺寸恰好等于新视口的绘制来
+                // 释放。CEF 126 起这个释放条件会因内部缓存的旧边界而永远
+                // 凑不齐（cef#3856），此后每条 resize 都被 hold 吞掉 ——
+                // 现象是面板拖大后页面永远停在旧宽度，右侧一条黑，而拖小
+                // 看起来正常（旧帧被面板等比缩小，黑边不明显）。invalidate
+                // 强制渲染进程立刻按当前视口出一帧，给 hold 一个能命中的
+                // 释放时机；顺带也把 screencast 的抓拍器踢醒 —— 静止页面
+                // resize 后若抓拍器错过了那一帧（cef#3826），没有新的合成
+                // 提交它就再也不出帧。
+                host.invalidate(PaintElementType::VIEW);
             }
         }
 

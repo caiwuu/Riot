@@ -544,6 +544,61 @@ pub struct AppConfig {
     /// 配置下等于不存在）、或者给一份有损但可用的描述。第三个最不坏。
     #[serde(default)]
     pub vision_model: String,
+    /// 子 agent 的便宜模型，格式 `providerId/model`。空 = 跟主模型。
+    ///
+    /// 只有**只读侦察**类型（`explore`）会走它 —— 那类任务是"到处翻翻然后
+    /// 汇报"，产出是一份文字报告，不需要主模型的推理深度，但吃掉的 token
+    /// 往往比主对话还多（几十次 Grep/Read 的结果全进它的上下文）。
+    ///
+    /// `[取舍]` 也可以按"便宜模型跑全部子 agent"来设计，但 `general-purpose`
+    /// 会改代码，那是写操作 —— 省下的钱不值得让一个更笨的模型去动文件。
+    /// 成本收缩只加在只读的那一档上。
+    #[serde(default)]
+    pub subagent_model: String,
+    /// 命令的 OS 级隔离。
+    ///
+    /// 默认开。这不只是安全设置 —— 决策链里"沙箱内自动放行"那一档
+    /// （`bash::decide`）要它开着才成立，关掉之后每个非只读命令又回到
+    /// "要么弹窗、要么全部放行"的二选一。
+    ///
+    /// 平台不支持时自动降级成不隔离，`sandboxed` 也跟着回 false ——
+    /// 见 [`riot_runtime::SandboxPolicy::activate`]。
+    #[serde(default)]
+    pub sandbox: SandboxMode,
+}
+
+/// 命令隔离的强度。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SandboxMode {
+    /// 读全开、写限于工作区和构建缓存、联网照常。
+    #[default]
+    WorkspaceWrite,
+    /// 同上，另外掐掉网络。`npm install` 之类会失败，换取"数据出不去"。
+    WorkspaceWriteNoNet,
+    /// 不隔离。只剩策略层拦着。
+    Off,
+}
+
+impl SandboxMode {
+    /// 翻译成执行器认识的策略。
+    pub fn policy(self, workspace: &std::path::Path) -> riot_runtime::SandboxPolicy {
+        match self {
+            Self::Off => riot_runtime::SandboxPolicy::Off,
+            Self::WorkspaceWrite => riot_runtime::SandboxPolicy::workspace_write(workspace),
+            Self::WorkspaceWriteNoNet => {
+                match riot_runtime::SandboxPolicy::workspace_write(workspace) {
+                    riot_runtime::SandboxPolicy::WorkspaceWrite { writable, .. } => {
+                        riot_runtime::SandboxPolicy::WorkspaceWrite {
+                            writable,
+                            allow_network: false,
+                        }
+                    }
+                    other => other,
+                }
+            }
+        }
+    }
 }
 
 /// 权限弹窗默认等 60 秒。
@@ -600,6 +655,8 @@ impl Default for AppConfig {
             mcp_servers: Vec::new(),
             compact_threshold_tokens: default_compact_threshold_tokens(),
             vision_model: String::new(),
+            subagent_model: String::new(),
+            sandbox: SandboxMode::default(),
         }
     }
 }
@@ -631,6 +688,18 @@ impl AppConfig {
         }
         let (p, m) = self.vision_model.trim().split_once('/')?;
         (!p.is_empty() && !m.is_empty()).then_some((p, m))
+    }
+
+    /// 子 agent 的便宜模型，拆成 `(providerId, model)`。
+    ///
+    /// 指到主模型自己时返回 `None` —— 那样 `provider_for` 会白建一个一模一样
+    /// 的客户端，还会让"这轮用的是便宜档"的提示说谎。
+    pub fn subagent_target(&self) -> Option<(&str, &str)> {
+        let (p, m) = self.subagent_model.trim().split_once('/')?;
+        if p.is_empty() || m.is_empty() {
+            return None;
+        }
+        (p != self.active_provider || m != self.active_model).then_some((p, m))
     }
 
     /// 配置能不能保存：active 必须指向存在的 provider。
@@ -823,6 +892,21 @@ pub fn config_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("riot")
         .join("config.json")
+}
+
+/// 所有会话的浏览器 profile 都放在这个目录下，一个会话一个子目录。
+///
+/// `[约束]` 推导规则只能有这一份。会话装配浏览器时要按它建目录、删会话时
+/// 要按它删目录 —— 两处各写一遍的话，改了一处就会留下一地删不掉的孤儿，
+/// 而每个孤儿是一百多 MB。
+///
+/// 参数化 `config_path` 的理由同 [`load_at`]：删除路径有单元测试，而它
+/// 绝不能落到用户真实的目录上。
+pub fn profiles_dir(config_path: &Path) -> PathBuf {
+    config_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("browser-profiles")
 }
 
 /// 密钥文件。和 `config.json` 同目录但分开存 —— 分享配置时不至于连密钥一起分享。
@@ -1104,6 +1188,8 @@ fn migrate(old: LegacyConfig) -> AppConfig {
         mcp_servers: Vec::new(),
         compact_threshold_tokens: default_compact_threshold_tokens(),
         vision_model: String::new(),
+        subagent_model: String::new(),
+        sandbox: SandboxMode::default(),
     }
 }
 

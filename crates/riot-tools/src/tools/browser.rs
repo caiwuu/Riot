@@ -321,6 +321,97 @@ impl Tool for BrowserScreenshot {
     }
 }
 
+// ── 带编号框的视口快照（Set-of-Marks）────────────────────
+
+pub struct BrowserView;
+
+#[async_trait::async_trait]
+impl Tool for BrowserView {
+    fn name(&self) -> &'static str {
+        "BrowserView"
+    }
+
+    fn prompt(&self, _ctx: &PromptContext) -> String {
+        "看当前视口:一张给每个可交互元素叠了编号框的截图，外加「编号 → 元素」\
+         清单。图上第 [n] 个框就是清单里的 [n]，BrowserClick / BrowserType 用这个\
+         编号指目标。纯文本快照（BrowserSnapshot）说不清「是哪一个」时（多个同名\
+         按钮、密集布局）用它 —— 看图一眼就能分辨。编号只对这次调用有效，\
+         页面一变（导航、脚本改 DOM）就要重新看。"
+            .to_owned()
+    }
+
+    fn input_schema(&self) -> schemars::Schema {
+        schemars::schema_for!(NoInput)
+    }
+
+    fn describe(&self, _input: &serde_json::Value) -> String {
+        "看当前视口（带编号框）".to_owned()
+    }
+
+    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+
+    fn result_budget(&self) -> ResultBudget {
+        // 图按自己的上限管，不走文本预算（同 BrowserScreenshot）。
+        ResultBudget::Unlimited
+    }
+
+    fn check_permissions(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &PermissionContext,
+    ) -> PermissionResult {
+        read_current_page()
+    }
+
+    async fn call(&self, _input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
+        let view = match ctx.browser.snapshot_marked().await {
+            Ok(v) => v,
+            Err(e) => return ToolOutcome::failed(unavailable_hint(&e)),
+        };
+        let listing = if view.listing.trim().is_empty() {
+            "页面上没有可识别的结构。可能还没导航，或者页面是空的。".to_owned()
+        } else {
+            view.listing
+        };
+
+        // 纯文本模型看不了图，带框截图对它没意义 —— 退回编号清单文本
+        // （等同 BrowserSnapshot）。
+        if !ctx.vision.accepts_images() {
+            return ToolOutcome::ok_text(listing);
+        }
+
+        // 落盘原图给界面，压缩图给模型（同 BrowserScreenshot 那套）。
+        let raw =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &view.screenshot)
+                .ok();
+        let path = match &raw {
+            Some(bytes) => stash_original(&ctx, bytes).await,
+            None => None,
+        };
+        let (data, media_type) = match raw.as_deref().and_then(super::shrink::for_model) {
+            Some(s) => (s.data, s.media_type),
+            None => (view.screenshot, riot_protocol::browser::SHOT_MEDIA_TYPE),
+        };
+        // 压完还超上限说明图不正常 —— 退回纯清单，编号本身已经够指目标。
+        if data.len() > MAX_SHOT_B64 {
+            return ToolOutcome::ok_text(listing);
+        }
+
+        ToolOutcome::Ok {
+            model_content: ToolResultContent::MarkedImage {
+                media_type: media_type.into(),
+                data,
+                path,
+                text: listing,
+            },
+            ui_payload: None,
+            side_messages: Vec::new(),
+        }
+    }
+}
+
 /// 截图原图落盘（工件目录，会话专属），返回写成的路径。
 ///
 /// 写不进返回 `None`，工具照常出结果 —— 界面拿压缩图兜底显示。落盘是
@@ -2560,6 +2651,7 @@ pub fn tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(BrowserNavigate),
         Arc::new(BrowserSnapshot),
         Arc::new(BrowserScreenshot),
+        Arc::new(BrowserView),
         Arc::new(BrowserConsole),
         Arc::new(BrowserClick),
         Arc::new(BrowserType),
@@ -2635,6 +2727,7 @@ mod tests {
             proc: Arc::new(NullProc),
             web: Arc::new(riot_protocol::web::NoWeb),
             browser,
+            terminal: Arc::new(riot_protocol::terminal::NoTerminal),
             vision: Arc::new(vision),
             clock: Arc::new(FixedClock::default()),
         }

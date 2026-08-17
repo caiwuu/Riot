@@ -153,6 +153,18 @@ pub enum ToolResultContent {
         /// 给模型的转述，自带"当作亲眼所见"的使用指示。
         text: String,
     },
+    /// 图 + 编号清单（Set-of-Marks）。和 [`Image`](Self::Image) 一样，图是
+    /// 给**能看图**的模型的（压缩图放 `data`，原图落盘走 `path`）；但多带一段
+    /// `text`（编号清单），两路一起发:模型看图上第 [n] 个框、照清单查 [n] 是
+    /// 什么。给纯文本模型时产出方不该用这个变体（图对它没用），退回
+    /// [`Text`](Self::Text)。
+    MarkedImage {
+        media_type: String,
+        data: String,
+        path: Option<PathBuf>,
+        /// 编号清单，和图上的框一一对应；编号同 [`crate::browser::MarkedView`]。
+        text: String,
+    },
 }
 
 impl ToolResultContent {

@@ -32,6 +32,22 @@ export interface Sampling {
   maxOutputTokens?: number | null;
 }
 
+/** 思考力度档。取值与 OpenAI 的 reasoning_effort 对齐，DeepSeek / GLM 也认。 */
+export type ThinkingLevel = "low" | "medium" | "high";
+
+/**
+ * 会话级思考策略（与宿主 riot-protocol 的 ThinkingPolicy 序列化形状一致）。
+ * - default：不发任何思考参数，端点默认行为；
+ * - adaptive：首请求中档、工具续轮低档；
+ * - disabled：显式关闭思考（部分端点不支持，如 GLM-5.3 / OpenAI 官方）；
+ * - fixed：每次请求固定档位。
+ */
+export type ThinkingPolicy =
+  | { mode: "default" }
+  | { mode: "adaptive" }
+  | { mode: "disabled" }
+  | { mode: "fixed"; level: ThinkingLevel };
+
 /** 一个模型服务方。**不含 API key** —— 密钥存宿主侧的 auth.json。 */
 export interface ProviderConfig {
   id: string;
@@ -132,7 +148,24 @@ export interface AppConfig {
    * 截图工具会直接说去配一下。
    */
   visionModel: string;
+  /**
+   * 子 agent 的便宜模型，格式 `providerId/model`。空 = 跟主模型。
+   *
+   * 只有只读侦察（`explore`）会走它 —— 那类任务只汇报不改东西，但吃掉的
+   * token 往往比主对话还多。会改代码的 `general-purpose` 始终跟主模型。
+   */
+  subagentModel: string;
+  /**
+   * 命令的 OS 级隔离。
+   *
+   * 不只是安全设置：权限决策链里"沙箱内自动放行"那一档要它开着才成立，
+   * 关掉之后每个非只读命令又回到"要么弹窗、要么全部放行"的二选一。
+   * 目前只有 macOS 能真正生效，其他平台自动降级成不隔离。
+   */
+  sandbox: SandboxMode;
 }
+
+export type SandboxMode = "workspaceWrite" | "workspaceWriteNoNet" | "off";
 
 /** 侧边栏里的一个会话。会话从创建起绑定 root，永不改变。 */
 export interface SessionInfo {
@@ -144,10 +177,14 @@ export interface SessionInfo {
   sampling: Sampling;
   /** 宿主侧的当前权限模式。UI 显示必须以它为准，不能拿全局默认值顶替。 */
   mode: PermissionMode;
+  /** 会话级思考策略。 */
+  thinking: ThinkingPolicy;
   /** 会话级 Python 虚拟环境（venv 根目录）。null = 宿主默认环境。 */
   pythonVenv: string | null;
   /** 会话级追加的系统提示词。null = 只用内置提示词。 */
   systemPrompt: string | null;
+  /** 此刻有没有轮子在跑。侧栏给后台忙碌的会话画指示点用。 */
+  busy: boolean;
 }
 
 export interface ConfigStatus {
@@ -167,6 +204,13 @@ export function hasActiveKey(s: ConfigStatus): boolean {
 /** 事件流句柄。取消订阅只是停止分发，不会中断内核 —— 中断要显式调 interrupt。 */
 export interface Subscription {
   unsubscribe(): void;
+  /**
+   * 宿主已经挂上这个 channel。之后的事件不会再进旧出口。
+   *
+   * 拉历史必须等它：并行的话，结束事件可能还打在已经没人听的旧
+   * channel 上，而历史快照里 busy 仍是 true —— 界面就停在转圈。
+   */
+  ready: Promise<void>;
 }
 
 /**
@@ -203,7 +247,8 @@ export function subscribeSession(
   // [约束] 这里必须处理失败。之前写的是 `void invoke(...)`，于是订阅被
   // ACL 拒绝时什么都不发生 —— 界面正常显示、发消息也不报错，只是永远
   // 收不到任何事件。那个 bug 藏了整整一个开发回合。
-  invoke("subscribe_session", { sessionId, epoch, onEvent: channel }).catch(
+  const ready = invoke("subscribe_session", { sessionId, epoch, onEvent: channel }).then(
+    () => undefined,
     (e: unknown) => {
       if (active) onError?.(String(e));
     },
@@ -213,6 +258,7 @@ export function subscribeSession(
     unsubscribe() {
       active = false;
     },
+    ready,
   };
 }
 
@@ -240,8 +286,23 @@ export interface SlashCommand {
   name: string;
   description: string;
   argumentHint?: string;
-  /** `builtin` / `global` / `project`。 */
+  /** `builtin` / `project` / `global` / `skill`。 */
   source: string;
+  /**
+   * 敲 `/名字` 时是否就地展开成提示词。
+   *
+   * 规则是「模型加载不了的才展开」：命令展开；普通技能不展开（把名字发给
+   * 模型，由它用 Skill 工具按需加载正文，几 KB 正文不该进用户可见的消息）；
+   * 写了 `disable-model-invocation` 的技能展开 —— 模型的清单里没有它。
+   */
+  expandInline: boolean;
+  /**
+   * 技能自己的层级（`builtin` / `global` / `project`）。只有 `source === "skill"` 才有。
+   *
+   * 有它才能在命令页写出「内置技能」而不是光写「技能」—— 后者会让同一个东西
+   * 在 Skills 页和命令页显示成两个不同的标签。
+   */
+  skillSource?: string;
 }
 
 /** 可用的斜杠命令（内置 + 项目 + 全局）。root 为 null 时只列内置和全局。 */
@@ -349,9 +410,42 @@ export async function pickFiles(imagesOnly = false): Promise<string[]> {
   return Array.isArray(picked) ? picked : [picked];
 }
 
-/** 中断当前轮。内核会补齐所有悬空的 tool_result，见 invariants::check_tool_pairing。 */
-export function interrupt(sessionId: string): Promise<void> {
-  return invoke("interrupt", { sessionId });
+/**
+ * 中断当前轮。内核会补齐所有悬空的 tool_result，见 invariants::check_tool_pairing。
+ *
+ * 返回是否真的取消了一轮。`false` = 宿主已经闲着，界面上的忙碌是残留，
+ * 调用方该把停止键收掉。
+ */
+export function interrupt(sessionId: string): Promise<boolean> {
+  return invoke<boolean>("interrupt", { sessionId });
+}
+
+/** 一处连续的差异。`header` 是 `@@ -1,4 +1,6 @@` 那一行。 */
+export interface DiffHunk {
+  header: string;
+  lines: { kind: "context" | "add" | "del"; text: string }[];
+}
+
+/** 一个文件在本次会话里的净改动。 */
+export interface FileChange {
+  /** 相对项目根的路径。 */
+  path: string;
+  status: "created" | "modified" | "deleted";
+  added: number;
+  removed: number;
+  hunks: DiffHunk[];
+  /** 差异太大，hunks 只是前一截。 */
+  truncated: boolean;
+}
+
+/**
+ * 本次会话改了哪些文件、哪些行。
+ *
+ * 只含经 Edit / Write 落下的改动 —— 这正是它和 `git diff` 的区别：
+ * 后者把用户自己没提交的改动也算进来，答不了"这个会话动了什么"。
+ */
+export function sessionChanges(sessionId: string): Promise<FileChange[]> {
+  return invoke<FileChange[]>("session_changes", { sessionId });
 }
 
 /** 回应一个权限询问。askId 来自 PermissionRequest 事件。 */
@@ -369,6 +463,14 @@ export function setSessionSampling(sessionId: string, sampling: Sampling): Promi
 }
 
 /**
+ * 探测会话根目录下的常见虚拟环境（.venv / venv）。
+ * 系统选择框默认藏起点开头的目录，探测结果用来做一键填入。
+ */
+export function detectVenvs(sessionId: string): Promise<string[]> {
+  return invoke<string[]>("detect_venvs", { sessionId });
+}
+
+/**
  * 会话的 Python 虚拟环境。空字符串清除；下一轮生效。
  * 宿主会验证目录里有没有 `bin/python`，不像 venv 时 reject。
  */
@@ -379,6 +481,11 @@ export function setSessionPythonVenv(sessionId: string, path: string): Promise<v
 /** 会话级追加的系统提示词（附在内置提示词之后）。空字符串清除；下一轮生效。 */
 export function setSessionSystemPrompt(sessionId: string, prompt: string): Promise<void> {
   return invoke("set_session_system_prompt", { sessionId, prompt });
+}
+
+/** 会话级思考策略。下一轮生效。 */
+export function setSessionThinking(sessionId: string, thinking: ThinkingPolicy): Promise<void> {
+  return invoke("set_session_thinking", { sessionId, thinking });
 }
 
 export function setPermissionMode(
@@ -445,9 +552,10 @@ export function mcpImportJson(raw: string): Promise<ConfigStatus> {
 export interface SkillInfo {
   name: string;
   description: string;
-  /** SKILL.md 的完整路径。 */
+  /** SKILL.md 的完整路径。内置技能编在二进制里，没有路径，给空串。 */
   path: string;
-  source: "global" | "project";
+  /** `builtin` 随应用分发；`global` / `project` 是用户写的。 */
+  source: "builtin" | "global" | "project";
   /** 解析失败的原因。没有 = 可用。 */
   error?: string | null;
 }
@@ -478,8 +586,13 @@ export function listSessions(): Promise<SessionInfo[]> {
  * 忙碌状态跟着历史一起回：分两次问会在中间留一个窗口，那一瞬间界面
  * 显示空闲（没有停止键），而模型正在干活。
  */
-export function getHistory(sessionId: string): Promise<{ messages: Message[]; busy: boolean }> {
-  return invoke<{ messages: Message[]; busy: boolean }>("get_history", { sessionId });
+export function getHistory(sessionId: string): Promise<{
+  messages: Message[];
+  archived: Message[];
+  busy: boolean;
+  compacting: boolean;
+}> {
+  return invoke("get_history", { sessionId });
 }
 
 /** 删除会话（正在跑的轮子会被中断）。幂等。 */
@@ -517,6 +630,10 @@ export interface BrowserFrame {
  */
 export type BrowserInput =
   | { kind: "click"; x: number; y: number; button: string }
+  /** 鼠标按下/抬起。面板转发这两条（而不是合成的 click），页面里才能
+   *  拖拽选字、拖滑块、双击选词。clickCount 让双击/三击成立。 */
+  | { kind: "down"; x: number; y: number; button: string; clickCount: number }
+  | { kind: "up"; x: number; y: number; button: string; clickCount: number }
   | { kind: "move"; x: number; y: number }
   /** 两个轴都要发。页面通常比面板宽，只发 deltaY 的话右边那截永远看不到。 */
   | { kind: "scroll"; x: number; y: number; deltaX: number; deltaY: number }
@@ -570,17 +687,19 @@ export function openBrowser(
   channel.onmessage = (f) => {
     if (active) onFrame(f);
   };
-  invoke<PanelState>("browser_open", { sessionId, onFrame: channel })
-    .then((s) => {
+  const ready = invoke<PanelState>("browser_open", { sessionId, onFrame: channel }).then(
+    (s) => {
       if (active) onReady?.(s);
-    })
-    .catch((e: unknown) => {
+    },
+    (e: unknown) => {
       if (active) console.error("打开浏览器面板失败", e);
-    });
+    },
+  );
   return {
     unsubscribe() {
       active = false;
     },
+    ready,
   };
 }
 
@@ -681,6 +800,44 @@ export function termOpen(
   return invoke<number>("term_open", { root, cols, rows, onEvent: channel });
 }
 
+/** 一个已经存在的终端。 */
+export interface TermSummary {
+  id: number;
+  title: string;
+  /** 起它的命令。模型起的服务才有；用户自己开的 shell 是 null。 */
+  command: string | null;
+  running: boolean;
+  /** 用户把这个终端交给模型看了。 */
+  shared: boolean;
+}
+
+/**
+ * 把一个终端交给模型看 / 收回来。
+ *
+ * 只有用户能调这条路 —— 模型侧没有对应接口，它不能给自己开权限。
+ * 共享只给读：它读得到输出，但停不掉这个终端。
+ */
+export function termShare(id: number, shared: boolean): Promise<void> {
+  return invoke("term_share", { id, shared });
+}
+
+/** 现有的终端。面板重建标签栏、发现模型起了新服务，都靠它。 */
+export function termList(): Promise<TermSummary[]> {
+  return invoke<TermSummary[]>("term_list");
+}
+
+/**
+ * 挂到一个已经在跑的终端上，并回放它已有的输出。
+ *
+ * 模型起的服务在面板打开之前就在跑了 —— 没有这条，那些输出永远到不了
+ * 用户眼前。
+ */
+export function termAttach(id: number, onEvent: (ev: TermEvent) => void): Promise<void> {
+  const channel = new Channel<TermEvent>();
+  channel.onmessage = onEvent;
+  return invoke("term_attach", { id, onEvent: channel });
+}
+
 /** 键盘输入原样打进 shell。`data` 是 xterm 的 onData 给的串（含控制序列）。 */
 export function termWrite(id: number, data: string): Promise<void> {
   return invoke("term_write", { id, data });
@@ -696,16 +853,40 @@ export function termClose(id: number): Promise<void> {
   return invoke("term_close", { id });
 }
 
+/** 这个终端的前台有没有正在跑的进程。关标签前的确认用。 */
+export function termBusy(id: number): Promise<boolean> {
+  return invoke<boolean>("term_busy", { id });
+}
+
 /** 在系统文件管理器（访达/资源管理器）里显示这个目录。 */
 export async function revealInFinder(path: string): Promise<void> {
   const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
   await revealItemInDir(path);
 }
 
-/** 弹系统的目录选择框。 */
-export async function pickDirectory(): Promise<string | null> {
+/**
+ * 用系统默认应用打开这个文件 —— 对源码文件通常就是用户的编辑器。
+ *
+ * 打不开（路径不存在、没有关联应用）时静默失败：这是点一下代码引用
+ * 的顺手操作，弹一个错误对话框比没反应更烦人。
+ */
+export async function openInDefaultApp(path: string): Promise<void> {
+  try {
+    const { openPath } = await import("@tauri-apps/plugin-opener");
+    await openPath(path);
+  } catch (e) {
+    console.warn("打不开这个文件", path, e);
+  }
+}
+
+/** 弹系统的目录选择框。`defaultPath` 指定起始目录（如会话根）。 */
+export async function pickDirectory(defaultPath?: string): Promise<string | null> {
   const { open } = await import("@tauri-apps/plugin-dialog");
-  const picked = await open({ directory: true, multiple: false });
+  const picked = await open({
+    directory: true,
+    multiple: false,
+    ...(defaultPath ? { defaultPath } : {}),
+  });
   return typeof picked === "string" ? picked : null;
 }
 

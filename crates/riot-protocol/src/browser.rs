@@ -23,6 +23,18 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// [`BrowserAccess::snapshot_marked`] 的产物:带编号框的视口截图 + 编号清单
+/// （Set-of-Marks）。模型同时拿到"图上第 [n] 个框"和"[n] 是什么"，消解
+/// 纯文本快照里"三个都叫『提交』，点哪个"这类只有看图才分得清的歧义。
+/// 图和清单出自同一次快照、编号一一对应 —— 分两次取会撞上"图旧号新"。
+#[derive(Debug, Clone)]
+pub struct MarkedView {
+    /// 编号清单，和 [`BrowserAccess::snapshot`] 同一套编号（交互方法用它）。
+    pub listing: String,
+    /// 带编号框的**视口**截图，base64 JPEG（见 [`SHOT_MEDIA_TYPE`]）。
+    pub screenshot: String,
+}
+
 /// 工具层能对浏览器做的事。
 ///
 /// 和 [`crate::web::WebAccess`] 同一个路子:工具层只描述**要什么**，真正
@@ -49,6 +61,13 @@ pub trait BrowserAccess: Send + Sync {
     /// 目标。编号只对**这一次快照**有效 —— 页面一变（导航、脚本改 DOM），
     /// 旧编号就指不到东西了。
     async fn snapshot(&self) -> Result<String, BrowserUnavailable>;
+
+    /// 带编号框的视口截图 + 编号清单（Set-of-Marks）。
+    ///
+    /// 比 [`Self::snapshot`] 多一张图:纯文本说不清"哪个"时（多个同名控件、
+    /// 密集布局），图上的编号框一眼可辨。比 [`Self::screenshot`] 多了可
+    /// 操作性:截当前视口，每个可交互元素带着能直接喂给 [`Self::click`] 的编号。
+    async fn snapshot_marked(&self) -> Result<MarkedView, BrowserUnavailable>;
 
     /// 页面 console 里累积的消息。
     async fn console(&self) -> Result<Vec<String>, BrowserUnavailable>;
@@ -297,6 +316,9 @@ impl BrowserAccess for NoBrowser {
         Err(unavailable())
     }
     async fn snapshot(&self) -> Result<String, BrowserUnavailable> {
+        Err(unavailable())
+    }
+    async fn snapshot_marked(&self) -> Result<MarkedView, BrowserUnavailable> {
         Err(unavailable())
     }
     async fn console(&self) -> Result<Vec<String>, BrowserUnavailable> {

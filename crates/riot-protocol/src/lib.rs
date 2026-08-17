@@ -16,6 +16,7 @@ pub mod permission;
 pub mod provider;
 pub mod rpc;
 pub mod runner;
+pub mod terminal;
 pub mod tool;
 pub mod vision;
 pub mod web;
@@ -44,7 +45,7 @@ pub use permission::{
 };
 pub use provider::{
     Provider, ProviderError, ProviderEvent, ProviderRequest, ProviderStream, ThinkingConfig,
-    ToolSpec,
+    ThinkingEffort, ThinkingPolicy, ToolSpec,
 };
 pub use rpc::{RpcEnvelope, RpcError, RpcErrorCode, RpcNotification, RpcRequest, RpcResponse};
 pub use tool::{

@@ -33,11 +33,15 @@ enum Target {
 }
 
 impl Target {
-    fn of(delta: &StreamDelta) -> Self {
+    /// `None` = 这条 delta 不参与合并，见 [`Coalescer::push`]。
+    fn of(delta: &StreamDelta) -> Option<Self> {
         match delta {
-            StreamDelta::Text { message_id, .. } => Target::Text(message_id.clone()),
-            StreamDelta::Thinking { message_id, .. } => Target::Thinking(message_id.clone()),
-            StreamDelta::ToolInput { tool_use_id, .. } => Target::ToolInput(tool_use_id.clone()),
+            StreamDelta::Text { message_id, .. } => Some(Target::Text(message_id.clone())),
+            StreamDelta::Thinking { message_id, .. } => Some(Target::Thinking(message_id.clone())),
+            StreamDelta::ToolInput { tool_use_id, .. } => {
+                Some(Target::ToolInput(tool_use_id.clone()))
+            }
+            StreamDelta::ToolStart { .. } => None,
         }
     }
 
@@ -57,6 +61,8 @@ fn text_of(delta: &StreamDelta) -> &str {
     match delta {
         StreamDelta::Text { text, .. } | StreamDelta::Thinking { text, .. } => text,
         StreamDelta::ToolInput { partial_json, .. } => partial_json,
+        // 没有可累加的正文，不参与合并。
+        StreamDelta::ToolStart { .. } => "",
     }
 }
 
@@ -82,7 +88,14 @@ impl Coalescer {
             return out;
         };
 
-        let target = Target::of(&delta);
+        let Some(target) = Target::of(&delta) else {
+            // 工具开始也是语义边界：它没有可累加的正文，而它的全部价值
+            // 就在于"早" —— 攒一帧再发等于把刚争取到的提前量还回去。
+            let mut out = Vec::with_capacity(2);
+            out.extend(self.take());
+            out.push(AgentEvent::Delta(delta));
+            return out;
+        };
         match &mut self.pending {
             Some((t, buf)) if *t == target => {
                 buf.push_str(text_of(&delta));
@@ -150,6 +163,25 @@ mod tests {
             "Hello, 世界"
         );
         assert!(c.tick().is_none(), "吐过之后不该重复");
+    }
+
+    /// 工具卡片就靠这条事件提前十几秒出现在界面上。攒进缓冲等下一帧
+    /// 是把提前量还回去；排在累积文本前面则会让卡片显示在解释文字上面。
+    #[test]
+    fn 工具开始立刻发出且排在累积文本之后() {
+        let mut c = Coalescer::default();
+        assert!(c.push(text("m1", "先写文件：")).is_empty());
+
+        let start = AgentEvent::Delta(StreamDelta::ToolStart {
+            tool_use_id: ToolUseId::from_raw("u1"),
+            name: "Write".into(),
+        });
+        let out = c.push(start.clone());
+
+        assert_eq!(out.len(), 2, "先吐累积的文本，再吐工具开始");
+        assert_eq!(body(&out[0]), "先写文件：");
+        assert_eq!(out[1], start);
+        assert!(c.tick().is_none(), "它不该留在缓冲里等下一帧");
     }
 
     #[test]

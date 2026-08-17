@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-session-thinking"
+description = "Enables the set_session_thinking command without any pre-configured scope."
+commands.allow = ["set_session_thinking"]
+
+[[permission]]
+identifier = "deny-set-session-thinking"
+description = "Denies the set_session_thinking command without any pre-configured scope."
+commands.deny = ["set_session_thinking"]

@@ -8,8 +8,11 @@
 //! 然后就没法脱离 Tauri 做黄金回放了。
 
 pub mod browser;
+pub mod changes;
+mod classifier;
 pub mod config;
 pub mod fence;
+pub mod git;
 pub mod hooks;
 pub mod kernel;
 pub mod memory;
@@ -21,6 +24,7 @@ pub mod slash;
 pub mod state;
 pub mod subagent;
 pub mod term;
+pub mod term_access;
 pub mod vision;
 pub mod web;
 
@@ -173,8 +177,18 @@ async fn queue_take(
 }
 
 #[tauri::command]
-async fn interrupt(state: tauri::State<'_, AppState>, session_id: String) -> HostResult<()> {
+async fn interrupt(state: tauri::State<'_, AppState>, session_id: String) -> HostResult<bool> {
     state.interrupt(&session_id).await
+}
+
+/// 本会话改了哪些文件、哪些行。只含经 Edit / Write 落下的改动 ——
+/// 用户自己在编辑器里的改动不算，那正是这个视图和 `git diff` 的区别。
+#[tauri::command]
+async fn session_changes(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+) -> HostResult<Vec<changes::FileChange>> {
+    state.changes(&session_id).await
 }
 
 #[tauri::command]
@@ -227,6 +241,18 @@ async fn set_session_sampling(
     state.set_sampling(&session_id, sampling).await
 }
 
+/// 探测会话根目录下的常见虚拟环境（.venv / venv）。
+///
+/// 系统的目录选择框默认隐藏点开头的目录，用户看不到 `.venv` ——
+/// 探测出来给前端做一键填入。
+#[tauri::command]
+async fn detect_venvs(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+) -> HostResult<Vec<String>> {
+    state.detect_venvs(&session_id).await
+}
+
 /// 会话的 Python 虚拟环境。空字符串清除；宿主会验证目录像不像一个 venv。
 #[tauri::command]
 async fn set_session_python_venv(
@@ -245,6 +271,16 @@ async fn set_session_system_prompt(
     prompt: String,
 ) -> HostResult<()> {
     state.set_system_prompt(&session_id, &prompt).await
+}
+
+/// 会话级思考策略。默认不干预（不发思考参数）；下一轮生效。
+#[tauri::command]
+async fn set_session_thinking(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    thinking: riot_protocol::ThinkingPolicy,
+) -> HostResult<()> {
+    state.set_thinking(&session_id, thinking).await
 }
 
 /// 当前模型配置与"密钥在不在、从哪来"。
@@ -542,6 +578,49 @@ async fn term_close(terms: tauri::State<'_, term::Terminals>, id: u32) -> HostRe
     Ok(())
 }
 
+/// 现有的终端。面板重建标签栏、以及发现模型起了新服务，都靠它。
+#[tauri::command]
+async fn term_list(
+    terms: tauri::State<'_, term::Terminals>,
+) -> HostResult<Vec<term::TermSummary>> {
+    Ok(terms.list())
+}
+
+/// 把出口挂到一个已经在跑的终端上，并回放它已有的输出。
+///
+/// 模型起的服务在面板打开之前就在跑了 —— 没有这条，那些输出永远到不了
+/// 用户眼前。
+#[tauri::command]
+async fn term_attach(
+    terms: tauri::State<'_, term::Terminals>,
+    id: u32,
+    on_event: Channel<term::TermEvent>,
+) -> HostResult<()> {
+    terms.attach(id, on_event).map_err(HostError::Term)
+}
+
+/// 把一个终端交给模型看 / 收回来。
+///
+/// `[约束]` 这条命令只有面板会调 —— 模型侧的 `TerminalAccess` 里没有对应
+/// 方法，它不能给自己开权限。共享只给读，停仍然只认模型自己起的终端，
+/// 理由见 `term_access` 的模块文档。
+#[tauri::command]
+async fn term_share(
+    terms: tauri::State<'_, term::Terminals>,
+    id: u32,
+    shared: bool,
+) -> HostResult<()> {
+    terms.set_shared(id, shared);
+    Ok(())
+}
+
+/// 这个终端的前台有没有正在跑的进程。关标签前的确认用 ——
+/// 一键杀掉正忙的 dev server 不该是无声的。
+#[tauri::command]
+async fn term_busy(terms: tauri::State<'_, term::Terminals>, id: u32) -> HostResult<bool> {
+    Ok(terms.is_busy(id))
+}
+
 /// 读一个图片文件，回 base64 和 MIME 类型。
 ///
 /// 给拖进来的图和"选图片"按钮用。前端拿不到磁盘内容:webview 的
@@ -684,13 +763,29 @@ pub fn run() {
         )
         .init();
 
+    // 全局技能目录启动时就建好。设置页的「打开目录」按钮 reveal 的是它 ——
+    // 目录不存在时系统的 reveal 静默失败，按钮看起来就是坏的（用户没写过
+    // 技能之前恰恰是最需要这个按钮的时候）。建不出来只记日志：技能扫描
+    // 对缺目录本来就容忍。
+    // 豁免理由：宿主启动路径，操作自己的配置目录。
+    #[allow(clippy::disallowed_methods)]
+    if let Err(e) = std::fs::create_dir_all(skills::global_dir()) {
+        tracing::warn!(error = %e, "全局技能目录建不出来，设置页的「打开目录」将无效");
+    }
+
+    // restore 而不是空表：会话和历史从上次的磁盘状态恢复。
+    // 必须发生在任何命令可达之前 —— 前端启动第一件事就是 list_sessions。
+    let state = AppState::restore();
+    // 同一份终端句柄两边共享：前端命令用 managed 的那份，会话用 state 里
+    // 那份。各拿各的话，模型起的服务会跑在一个用户永远看不到的面板里。
+    let terminals = state.terminals();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        // restore 而不是空表：会话和历史从上次的磁盘状态恢复。
-        // 必须发生在任何命令可达之前 —— 前端启动第一件事就是 list_sessions。
-        .manage(AppState::restore())
-        .manage(term::Terminals::default())
+        .plugin(tauri_plugin_notification::init())
+        .manage(state)
+        .manage(terminals)
         // [约束] invoke_handler 只能调用一次。调多次只有最后一次生效，
         // 而且是静默失败 —— 前面注册的命令全部变成 "command not found"。
         .invoke_handler(tauri::generate_handler![
@@ -705,11 +800,14 @@ pub fn run() {
             hooks_list,
             search_files,
             interrupt,
+            session_changes,
             respond_permission,
             set_permission_mode,
             set_session_sampling,
+            detect_venvs,
             set_session_python_venv,
             set_session_system_prompt,
+            set_session_thinking,
             browser_open,
             browser_close,
             browser_navigate,
@@ -727,6 +825,10 @@ pub fn run() {
             term_write,
             term_resize,
             term_close,
+            term_list,
+            term_attach,
+            term_share,
+            term_busy,
             read_image,
             get_config,
             set_config,
@@ -753,6 +855,13 @@ pub fn run() {
             let state = app.state::<AppState>().inner().clone();
             tauri::async_runtime::spawn(async move {
                 state.reconcile_mcp().await;
+            });
+            // 顺手收掉没人认领的浏览器 profile。同样放 setup：它要在会话表
+            // 恢复完之后才能判断谁是孤儿，而且删目录要 spawn_blocking。
+            // 不 await —— 启动路径上不该等着删几个 GB 的缓存。
+            let state = app.state::<AppState>().inner().clone();
+            tauri::async_runtime::spawn(async move {
+                state.gc_browser_profiles().await;
             });
             Ok(())
         })

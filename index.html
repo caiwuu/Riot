@@ -3,7 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- CSS 解析前就告诉引擎这是深色页面，省掉冷启动的白闪一帧 -->
+    <meta name="color-scheme" content="dark" />
     <title>Riot</title>
+    <style>
+      /* 兜底底色：样式表到位前 body 先有深色，别白屏一闪 */
+      html {
+        background: #1b1b1e;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>

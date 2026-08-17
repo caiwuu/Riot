@@ -209,25 +209,24 @@ impl Tool for Grep {
         };
 
         if found.lines.is_empty() {
-            // `[约束]` "没搜到"不是失败。报成失败的话模型会去调参数重试，
+            // `[约束]` 搜索没走完的时候**不能**说"没找到"。那是把"没搜"
+            // 说成"不存在"，而模型会拿它当结论 —— 一次超时的搜索会变成
+            // "这个仓库里没有这个东西"。这条路必须是失败，让它缩小范围重来。
+            if found.cut_short {
+                return ToolOutcome::failed(format!(
+                    "搜索没走完（超过 {}s 或文件太多），已经走过的部分里没有匹配 —— \
+                     这**不能**说明它不存在。用 `path` 缩小范围，或者加 `glob` \
+                     过滤文件类型，再搜一次。",
+                    search::TIME_BUDGET_SECS
+                ));
+            }
+            // 真的搜完了没搜到：这不是失败。报成失败的话模型会去调参数重试，
             // 而正确的下一步是换个词或者接受这个事实。
             return ToolOutcome::ok_text(no_match_text(&parsed));
         }
 
         let clamped = clamp(&found.lines.join("\n"), parsed.head_limit);
-        let mut body = clamped.text.clone();
-
-        if let Some(note) = clamped.note {
-            body.push_str(&format!("\n\n<system-reminder>{note}</system-reminder>"));
-        }
-        if found.cut_short {
-            body.push_str(&format!(
-                "\n\n<system-reminder>搜索没走完（超过 {}s 或文件太多），\
-                 上面只是已经找到的部分。用 `path` 缩小范围，或者加 `glob` \
-                 过滤文件类型。</system-reminder>",
-                search::TIME_BUDGET_SECS
-            ));
-        }
+        let body = render_body(&clamped, found.cut_short);
 
         ToolOutcome::Ok {
             model_content: riot_protocol::message::ToolResultContent::text(body),
@@ -237,6 +236,27 @@ impl Tool for Grep {
             side_messages: Vec::new(),
         }
     }
+}
+
+/// 把结果和两种"不完整"提示拼成给模型的正文。
+///
+/// 抽成纯函数是为了能直接测。这两句提示决定模型把手里这份结果当「全部」
+/// 还是「一部分」，而漏掉它们不报错、不崩，只会让结论悄悄变错 —— 那是
+/// 这个仓库里最难查的一类 bug，值得有断言直接守着。
+fn render_body(clamped: &Clamped, cut_short: bool) -> String {
+    let mut body = clamped.text.clone();
+    if let Some(note) = &clamped.note {
+        body.push_str(&format!("\n\n<system-reminder>{note}</system-reminder>"));
+    }
+    if cut_short {
+        body.push_str(&format!(
+            "\n\n<system-reminder>搜索没走完（超过 {}s 或文件太多），\
+             上面只是已经找到的部分。用 `path` 缩小范围，或者加 `glob` \
+             过滤文件类型。</system-reminder>",
+            search::TIME_BUDGET_SECS
+        ));
+    }
+    body
 }
 
 
@@ -313,4 +333,21 @@ fn schema_hint(e: &serde_json::Error) -> String {
         );
     }
     format!("参数格式不对：{raw}。请检查参数类型。")
+}
+
+/// 给同 crate 测试用的窄口子。
+///
+/// 只暴露一个函数，不把 [`Clamped`] 变成公开类型 —— 测试要断言的是
+/// 「这段正文对不对」，不是那个中间结构。
+#[cfg(test)]
+pub(super) mod testing {
+    pub fn render_body(text: &str, note: Option<&str>, cut_short: bool) -> String {
+        super::render_body(
+            &super::Clamped {
+                text: text.to_owned(),
+                note: note.map(ToOwned::to_owned),
+            },
+            cut_short,
+        )
+    }
 }

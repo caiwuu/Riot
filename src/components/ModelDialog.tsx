@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import {
   type ModelConfig,
@@ -6,6 +6,9 @@ import {
   type Sampling,
   testConnection,
 } from "../bridge";
+import { FieldNumber } from "./FieldNumber";
+import { HintTip } from "./HintTip";
+import { Modal } from "./Modal";
 
 /**
  * 一个模型的设置。
@@ -69,12 +72,6 @@ export function ModelDialog({
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
 
-  useEffect(() => {
-    const esc = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", esc);
-    return () => window.removeEventListener("keydown", esc);
-  }, [onClose]);
-
   const adding = model === null;
   const trimmedId = id.trim();
   // 新增时不能和已有的撞名 —— 撞了的话后面按 id 找配置会拿到第一个，
@@ -117,11 +114,7 @@ export function ModelDialog({
   };
 
   return (
-    <div
-      className="modal-backdrop"
-      onMouseDown={(e) => e.target === e.currentTarget && onClose()}
-    >
-      <div className="modal model-dialog">
+    <Modal className="model-dialog" label={adding ? "添加模型" : "编辑模型"} onClose={onClose}>
         <div className="modal-head">
           <span className="modal-title">{adding ? "添加模型" : "编辑模型"}</span>
           <span className="bar-spacer" />
@@ -160,7 +153,12 @@ export function ModelDialog({
             />
           </div>
 
-          <h3 className="model-dialog-section">能力</h3>
+          <h3 className="model-dialog-section">
+            能力
+            <HintTip>
+              关着时，截图和附的图会先交给「视觉兼容模型」转成文字。开错了服务方会拒图。
+            </HintTip>
+          </h3>
           <button
             className="toggle-row"
             onClick={() => setVision(!vision)}
@@ -172,25 +170,22 @@ export function ModelDialog({
             </span>
             <span>视觉（能收图片）</span>
           </button>
-          <p className="hint">
-            关着时，截图和你附的图会先交给「视觉兼容模型」转成文字。
-            开错了的表现很直接：图片发过去被服务方拒。
-          </p>
 
-          <h3 className="model-dialog-section">采样参数</h3>
-          <p className="hint">留空继承服务方的设置，占位符就是继承来的值。</p>
+          <h3 className="model-dialog-section">
+            采样参数
+            <HintTip>留空继承服务方的设置，占位符就是继承来的值。</HintTip>
+          </h3>
           {FIELDS.map((f) => (
             <div className="field-row" key={f.key}>
-              <label>{f.label}</label>
-              <input
-                type="number"
-                step={f.step}
+              <label>
+                {f.label}
+                <HintTip>{f.hint}</HintTip>
+              </label>
+              <FieldNumber
                 value={samp[f.key] ?? ""}
                 onChange={(e) => setSamp({ ...samp, [f.key]: e.target.value })}
                 placeholder={provider.sampling?.[f.key]?.toString() ?? "服务端默认"}
-                spellCheck={false}
               />
-              <span className="field-hint">{f.hint}</span>
             </div>
           ))}
         </div>
@@ -215,7 +210,6 @@ export function ModelDialog({
             </button>
           </div>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

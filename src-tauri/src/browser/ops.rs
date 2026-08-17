@@ -210,6 +210,32 @@ async fn content_height(tab: Tab<'_>) -> Option<f64> {
     (h >= 1.0).then_some(h)
 }
 
+/// 一个元素在视口里的矩形，CSS 像素，左上角是原点。
+///
+/// `[约束]` 是**视口坐标**，不是文档坐标 —— 已经减掉了滚动偏移（见
+/// [`element_rects`]）。点击注入（`Input.dispatchMouseEvent`）和面板叠框
+/// 用的都是视口坐标，存文档坐标的话，一滚动全错位。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+impl Rect {
+    /// 和 `vw×vh` 的视口有没有交集。整个落在视口外（上方/下方/两侧）
+    /// 就是假 —— 那种元素叠框叠不上、直接点也点不中，得先滚进来。
+    pub(crate) fn intersects_viewport(&self, vw: f64, vh: f64) -> bool {
+        self.w > 0.0
+            && self.h > 0.0
+            && self.x < vw
+            && self.y < vh
+            && self.x + self.w > 0.0
+            && self.y + self.h > 0.0
+    }
+}
+
 /// 快照里一个可指名的元素。
 ///
 /// 编号 → 它的映射由快照产出、交互消费。`label` 跟快照里那一行长得一样
@@ -221,6 +247,10 @@ pub struct SnapRef {
     pub backend_id: i64,
     /// 快照行的原文，如 `button "提交"`。
     pub label: String,
+    /// 元素在视口里的位置，CSS 像素。`None` = 拿不到几何:虚拟节点、
+    /// iframe 内的元素（几何只取主文档），或者 `display:none`。给模型叠
+    /// 编号框、以及"要不要先滚动"都看它。
+    pub rect: Option<Rect>,
 }
 
 /// 页面的可访问性快照。返回给模型的文本和「编号 → 元素」映射。
@@ -233,7 +263,71 @@ pub async fn snapshot(tab: Tab<'_>) -> Result<(String, HashMap<u32, SnapRef>), B
     tab.cdp("Accessibility.enable", json!({})).await?;
     let r = tab.cdp("Accessibility.getFullAXTree", json!({})).await?;
     let nodes = r["nodes"].as_array().map_or(&[][..], Vec::as_slice);
-    Ok(render_nodes(nodes))
+    // 几何是**增强**，不是快照的前提:拿不到就退化成"只有文本、没有位置"
+    // 的老形态，而不是让整条快照失败。所以这里吞掉错误给空表。
+    let rects = element_rects(tab).await.unwrap_or_default();
+    Ok(render_nodes(nodes, &rects))
+}
+
+/// 主文档里每个元素的视口矩形，key 是 `backendNodeId`。
+///
+/// `[取舍]` 一次 `DOMSnapshot.captureSnapshot` 拿全，而不是对每个元素
+/// `DOM.getBoxModel`。后者是几百次往返（一个中等页面就有几百个可交互
+/// 元素），前者一次调用给整棵树的布局盒。
+///
+/// `[约束]` `bounds` 是**文档坐标、忽略滚动**（CDP 的定义，实测过），
+/// 这里减掉 `scrollOffset` 换成视口坐标 —— 和点击注入、面板叠框同一个
+/// 坐标系。不减的话，页面一滚动，框和元素就整体错位。
+///
+/// `[取舍]` 只取 `documents[0]`（主文档）。iframe 各有自己的滚动和相对
+/// 父页的偏移，跨源的（Cloudflare、Stripe 那些）a11y 树本来也拿不到 ——
+/// 它们的元素在这里没有几何，[`SnapRef::rect`] 是 `None`，叠不了框但也
+/// 不会错位。
+async fn element_rects(tab: Tab<'_>) -> Result<HashMap<i64, Rect>, BrowserError> {
+    // `[约束]` bounds 是**物理像素**（CSS×dpr），要除以 dpr 换成 CSS 像素。
+    // 实测:Retina 面板上一个 CSS 1069 宽的视口，根节点 bounds 宽 2138。
+    // 不除的话，点击坐标和叠框在 Retina 上会整体偏到两倍远 —— 而在
+    // 非 Retina（dpr=1）上一切正常，是最容易漏测的那类坑（Codex 的截图
+    // 错位 bug 就是同一族的 CSS/DIP 混淆）。
+    let dpr = tab
+        .cdp("Runtime.evaluate", json!({ "expression": "devicePixelRatio", "returnByValue": true }))
+        .await
+        .ok()
+        .and_then(|r| r["result"]["value"].as_f64())
+        .filter(|d| *d > 0.0)
+        .unwrap_or(1.0);
+    // computedStyles 要空数组:样式表很大，而这里只要布局盒。
+    let r = tab
+        .cdp("DOMSnapshot.captureSnapshot", json!({ "computedStyles": [] }))
+        .await?;
+    let doc = &r["documents"][0];
+    let sox = doc["scrollOffsetX"].as_f64().unwrap_or(0.0);
+    let soy = doc["scrollOffsetY"].as_f64().unwrap_or(0.0);
+    let backend = doc["nodes"]["backendNodeId"].as_array();
+    let node_index = doc["layout"]["nodeIndex"].as_array();
+    let bounds = doc["layout"]["bounds"].as_array();
+    let (Some(backend), Some(node_index), Some(bounds)) = (backend, node_index, bounds) else {
+        return Ok(HashMap::new());
+    };
+
+    let mut map = HashMap::with_capacity(node_index.len());
+    for (i, ni) in node_index.iter().enumerate() {
+        // layout 的第 i 项对应 nodes 里第 nodeIndex[i] 个节点。
+        let Some(ni) = ni.as_u64().map(|v| v as usize) else {
+            continue;
+        };
+        let Some(bid) = backend.get(ni).and_then(Value::as_i64) else {
+            continue;
+        };
+        let b = &bounds[i];
+        let (Some(x), Some(y), Some(w), Some(h)) =
+            (b[0].as_f64(), b[1].as_f64(), b[2].as_f64(), b[3].as_f64())
+        else {
+            continue;
+        };
+        map.insert(bid, Rect { x: (x - sox) / dpr, y: (y - soy) / dpr, w: w / dpr, h: h / dpr });
+    }
+    Ok(map)
 }
 
 /// 把 a11y 节点整形成给模型的文本，顺手给每个能定位的元素发号。
@@ -241,7 +335,7 @@ pub async fn snapshot(tab: Tab<'_>) -> Result<(String, HashMap<u32, SnapRef>), B
 /// 编号按**输出行**连续递增，不是按节点下标 —— 模型看到 `[7]` 就该能用 7，
 /// 中间有洞的话它会试着点那些不存在的号。没有 `backendDOMNodeId` 的节点
 /// （虚拟节点）不发号:发了也点不了，还占着一个"看起来能点"的位置。
-fn render_nodes(nodes: &[Value]) -> (String, HashMap<u32, SnapRef>) {
+fn render_nodes(nodes: &[Value], rects: &HashMap<i64, Rect>) -> (String, HashMap<u32, SnapRef>) {
     let total = nodes.len();
     let mut out = String::new();
     let mut refs = HashMap::new();
@@ -254,7 +348,8 @@ fn render_nodes(nodes: &[Value]) -> (String, HashMap<u32, SnapRef>) {
         match node["backendDOMNodeId"].as_i64() {
             Some(backend_id) => {
                 out.push_str(&format!("[{next}] {line}\n"));
-                refs.insert(next, SnapRef { backend_id, label: line });
+                let rect = rects.get(&backend_id).copied();
+                refs.insert(next, SnapRef { backend_id, label: line, rect });
                 next += 1;
             }
             None => {
@@ -289,6 +384,80 @@ fn describe_node(node: &Value) -> Option<String> {
     // 名字可能很长（比如一整段说明文字），截断。
     let name: String = name.chars().take(80).collect();
     Some(format!("{role} \"{name}\""))
+}
+
+// ── Set-of-Marks:给可交互元素叠编号框 ──────────────────
+
+/// 只给这些"叶子控件"叠框。
+///
+/// main / navigation / region 这类容器也有 a11y 角色，但框住的是一整块
+/// 区域 —— 对"点哪个"没帮助，叠上去只会糊满画面、还和真正的控件框重叠。
+const MARKABLE_ROLES: &[&str] = &[
+    "button", "link", "textbox", "searchbox", "checkbox", "radio", "combobox",
+    "menuitem", "menuitemcheckbox", "menuitemradio", "tab", "switch", "slider",
+    "option", "spinbutton", "listbox", "disclosuretriangle",
+];
+
+/// 这个快照标签是不是可叠框的可交互控件。
+///
+/// label 形如 `button "提交"` 或 `button`，取空格/引号前的首词当角色。
+pub fn is_markable(label: &str) -> bool {
+    let role = label.split([' ', '"']).next().unwrap_or("");
+    MARKABLE_ROLES.contains(&role)
+}
+
+/// 注入 overlay 的脚本。`__MARKS__` 换成 `[[n,x,y,w,h],...]`。
+///
+/// `[约束]` 不用 format! 拼:这段 JS 里全是 `{}`，会和 format! 的占位打架。
+/// 字面量 + 替换一个哨兵，井水不犯河水。
+///
+/// overlay 是一个 position:fixed 容器:z-index 顶到天、pointer-events 关掉
+/// （不挡后续点击）、aria-hidden（不进 a11y 树）。截完由 [`REMOVE_MARKS`]
+/// 撤掉，不留痕。
+const INJECT_MARKS: &str = r#"(() => {
+  const marks = __MARKS__;
+  const ID = '__riot_marks__';
+  document.getElementById(ID)?.remove();
+  const box = document.createElement('div');
+  box.id = ID; box.setAttribute('aria-hidden', 'true');
+  box.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;z-index:2147483647;pointer-events:none';
+  for (const [n, x, y, w, h] of marks) {
+    const b = document.createElement('div');
+    b.style.cssText = `position:fixed;left:${x}px;top:${y}px;width:${w}px;height:${h}px;border:2px solid #ff2d55;box-sizing:border-box;pointer-events:none`;
+    const t = document.createElement('div');
+    t.textContent = n;
+    t.style.cssText = `position:fixed;left:${x}px;top:${Math.max(0, y - 15)}px;background:#ff2d55;color:#fff;font:bold 11px/14px monospace;padding:0 3px;pointer-events:none;white-space:nowrap`;
+    box.appendChild(b); box.appendChild(t);
+  }
+  document.body.appendChild(box);
+})()"#;
+
+/// 撤掉 [`INJECT_MARKS`] 注入的 overlay。
+const REMOVE_MARKS: &str = "document.getElementById('__riot_marks__')?.remove()";
+
+/// 给一批元素叠编号框、截当前视口、再撤掉框。
+///
+/// `marks` 是 (编号, 视口矩形 CSS 像素)。截的是**视口**而不是整页 ——
+/// Set-of-Marks 对应"现在看到的这屏"，编号框也只在视口内才有意义。
+///
+/// `[约束]` 无论截图成没成，overlay 都要撤掉。留一份红框在页面上，之后
+/// 普通截图、甚至用户看面板都会看到它，而且它还会进后续的 DOM 快照。
+pub async fn screenshot_marked(
+    tab: Tab<'_>,
+    marks: &[(u32, Rect)],
+) -> Result<String, BrowserError> {
+    let payload: Vec<(u32, f64, f64, f64, f64)> =
+        marks.iter().map(|(n, r)| (*n, r.x, r.y, r.w, r.h)).collect();
+    let json = serde_json::to_string(&payload).unwrap_or_else(|_| "[]".to_owned());
+    let inject = INJECT_MARKS.replace("__MARKS__", &json);
+
+    tab.cdp("Runtime.evaluate", json!({ "expression": inject })).await?;
+    let shot = tab
+        .cdp("Page.captureScreenshot", json!({ "format": "jpeg", "quality": 80 }))
+        .await;
+    let _ = tab.cdp("Runtime.evaluate", json!({ "expression": REMOVE_MARKS })).await;
+
+    Ok(shot?["data"].as_str().unwrap_or_default().to_owned())
 }
 
 // ── 交互原语 ──────────────────────────────────────────
@@ -953,6 +1122,40 @@ pub async fn console(tab: Tab<'_>) -> Result<Vec<String>, BrowserError> {
     Ok(list.into_iter().take(MAX_CONSOLE).collect())
 }
 
+/// 禁掉页面滚到边缘时的橡皮筋回弹。
+///
+/// `[约束]` 只能靠往每个文档注 CSS，别的路都不通:macOS 上 Chromium 的
+/// 回弹跟随系统偏好、代码里对 Apple 平台**写死启用**（见 Chromium
+/// `ui_base_switches_util.cc` 的 `IsElasticOverscrollEnabled`），
+/// `--disable-features=ElasticOverscroll` 只对 Windows/Android 生效。
+///
+/// 为什么要禁:面板的画面是远程帧，回弹发生在另一个进程的合成器里 ——
+/// 用户这边没有触控板的手感配合，看到的只是"整页在窗口里晃了一下再弹
+/// 回去"，像画面故障。更糟的是回弹瞬间会把布局视口外的内容拽进画面，
+/// 排查显示问题时它制造过一整条假线索（"平时看不到的输入框闪出来了"）。
+///
+/// `[约束]` `html` 和 `body` 都要钉。viewport 的 overscroll-behavior 传播
+/// 历史上从 body 读过（和 overflow 的兼容行为一族），只钉 html 等于赌
+/// Chromium 版本行为。`!important` 是防页面自己的样式把它翻回去。
+///
+/// `[约束]` 要处理 `documentElement` 还是 null 的情况。
+/// `addScriptToEvaluateOnNewDocument` 跑在新文档的 DOM 建立**之前** ——
+/// 那一刻 appendChild 直接抛异常，样式一个字都没进去，而且没有任何报错
+/// 冒到宿主（console 钩子不碰 DOM，所以同一条注入路上它毫发无损，
+/// 很容易误以为这条路对 DOM 也是安全的）。等 DOMContentLoaded 再钉。
+const NO_BOUNCE: &str = r#"(() => {
+  const ID = '__riot_no_bounce__';
+  const pin = () => {
+    if (!document.documentElement || document.getElementById(ID)) return;
+    const s = document.createElement('style');
+    s.id = ID;
+    s.textContent = 'html, body { overscroll-behavior: none !important; }';
+    document.documentElement.appendChild(s);
+  };
+  if (document.documentElement) pin();
+  else addEventListener('DOMContentLoaded', pin);
+})()"#;
+
 /// 在页面里装一个 console 缓冲区。
 ///
 /// `[约束]` 必须用 `Page.addScriptToEvaluateOnNewDocument` 而不是直接
@@ -990,6 +1193,18 @@ pub async fn install_console_hook(tab: Tab<'_>) -> Result<(), BrowserError> {
     // 当前这个文档是在注入之前加载的，补一次。
     tab
         .cdp("Runtime.evaluate", json!({ "expression": HOOK }))
+        .await?;
+
+    // 禁回弹和 console 钩子同款:每个新文档注一遍 + 当前文档补一次。
+    // 这个函数本就是"每个标签页一次的初始化"，搭同一趟车。
+    tab
+        .cdp(
+            "Page.addScriptToEvaluateOnNewDocument",
+            json!({ "source": NO_BOUNCE }),
+        )
+        .await?;
+    tab
+        .cdp("Runtime.evaluate", json!({ "expression": NO_BOUNCE }))
         .await?;
 
     // 顺手开 Page 域。JS 对话框（alert/confirm/beforeunload）的事件只在
@@ -1058,7 +1273,7 @@ mod tests {
             json!({ "role": { "value": "textbox" }, "name": { "value": "邮箱" },
                     "backendDOMNodeId": 13 }),
         ];
-        let (text, refs) = render_nodes(&nodes);
+        let (text, refs) = render_nodes(&nodes, &HashMap::new());
 
         assert!(text.contains("[1] button \"提交\""), "{text}");
         assert!(text.contains("[2] textbox \"邮箱\""), "{text}");
@@ -1078,12 +1293,50 @@ mod tests {
             json!({ "role": { "value": "button" }, "name": { "value": "好" },
                     "backendDOMNodeId": 7 }),
         ];
-        let (text, refs) = render_nodes(&nodes);
+        let (text, refs) = render_nodes(&nodes, &HashMap::new());
 
         assert!(text.contains("heading \"标题\"\n"), "无号节点原样输出：{text}");
         assert!(!text.contains("[1] heading"), "不能给它发号：{text}");
         assert!(text.contains("[1] button \"好\""), "号从能点的第一个开始：{text}");
         assert_eq!(refs[&1].backend_id, 7);
+    }
+
+    /// 有几何的元素带上视口矩形，拿不到的留空而不是崩。
+    ///
+    /// `rect` 是给模型叠编号框、判断"要不要先滚动"用的。按 `backendDOMNodeId`
+    /// 关联 —— iframe 内、`display:none` 的元素在几何表里没有条目，那时
+    /// `rect` 必须是 `None`，而不是一个零矩形（零矩形会让框叠在左上角）。
+    #[test]
+    fn 编号元素带上几何() {
+        let nodes = vec![
+            json!({ "role": { "value": "button" }, "name": { "value": "提交" },
+                    "backendDOMNodeId": 11 }),
+            json!({ "role": { "value": "link" }, "name": { "value": "关于" },
+                    "backendDOMNodeId": 99 }),
+        ];
+        let mut rects = HashMap::new();
+        rects.insert(11_i64, Rect { x: 10.0, y: 20.0, w: 80.0, h: 30.0 });
+        // 99 号故意不给几何 —— iframe 内 / display:none 的形态。
+
+        let (_text, refs) = render_nodes(&nodes, &rects);
+
+        assert_eq!(refs[&1].rect, Some(Rect { x: 10.0, y: 20.0, w: 80.0, h: 30.0 }));
+        assert_eq!(refs[&2].rect, None, "拿不到几何的元素 rect 该是 None");
+    }
+
+    /// Set-of-Marks 只框可交互控件，容器角色不框。
+    ///
+    /// 框住 main / navigation 这类整块容器对"点哪个"没帮助，还会糊满画面、
+    /// 和真正的控件框叠在一起。label 形如 `button "提交"`，取首词当角色。
+    #[test]
+    fn 可交互角色才叠框() {
+        assert!(is_markable("button \"提交\""));
+        assert!(is_markable("link \"帮助\""));
+        assert!(is_markable("textbox \"邮箱\""));
+        assert!(is_markable("checkbox"), "无名字的控件也要框");
+        assert!(!is_markable("main"), "容器不叠框");
+        assert!(!is_markable("navigation \"侧栏\""), "容器不叠框");
+        assert!(!is_markable("heading \"标题\""), "标题不是可交互控件");
     }
 
     #[test]

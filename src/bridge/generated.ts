@@ -72,6 +72,11 @@ export type StreamDelta = {
       text: string;
     }
   | {
+      kind: "tool_start";
+      name: string;
+      tool_use_id: string;
+    }
+  | {
       kind: "tool_input";
       partial_json: string;
       tool_use_id: string;
@@ -161,6 +166,16 @@ export type ToolResultContent =
        */
       text: string;
       type: "described_image";
+    }
+  | {
+      data: string;
+      media_type: string;
+      path?: string | null;
+      /**
+       * 编号清单，和图上的框一一对应；编号同 [`crate::browser::MarkedView`]。
+       */
+      text: string;
+      type: "marked_image";
     };
 /**
  * 文件引用、图片、系统提醒。展开时机由上下文管理层决定。
@@ -290,7 +305,8 @@ export type DecisionReason =
       kind: "timeout";
     };
 export type RuleSource = "policy" | "cli_arg" | "session" | "local" | "project" | "user";
-export type PermissionMode = "default" | "acceptEdits" | "plan" | "bypassPermissions" | "unattended" | "dontAsk";
+export type PermissionMode =
+  "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "unattended" | "dontAsk";
 export type SafetyKind =
   | "git_internals"
   | "ssh_config"
@@ -401,6 +417,12 @@ export type Message1 =
  */
 export type PermissionResponse =
   | {
+      /**
+       * 用户选中的选项 id（只有 [`AskPreview::Choice`] 会用到）。
+       *
+       * 空 = 这不是一次提问，或者用户没选任何一项。
+       */
+      choice?: string[];
       decision: "allow";
       remember?: PermissionUpdate[];
     }
@@ -441,6 +463,11 @@ export type StreamDelta1 = {
       kind: "thinking";
       message_id: string;
       text: string;
+    }
+  | {
+      kind: "tool_start";
+      name: string;
+      tool_use_id: string;
     }
   | {
       kind: "tool_input";
@@ -721,7 +748,10 @@ export interface PermissionAsk {
     | {
         bytes: number;
         kind: "file_write";
+        lines: number;
         path: string;
+        preview: string;
+        truncated: boolean;
       }
     | {
         kind: "network_fetch";
@@ -730,6 +760,15 @@ export interface PermissionAsk {
     | {
         kind: "plain";
         text: string;
+      }
+    | {
+        /**
+         * 允许选多项。
+         */
+        allow_multiple: boolean;
+        kind: "choice";
+        options: AskChoiceOption[];
+        question: string;
       };
   reason: DecisionReason;
   suggestions: PermissionUpdate[];
@@ -739,6 +778,20 @@ export interface PermissionAsk {
   summary: string;
   tool_name: string;
   tool_use_id: string;
+}
+/**
+ * 结构化提问的一个候选项。
+ */
+export interface AskChoiceOption {
+  /**
+   * 回传给模型的稳定标识。用它而不是 label —— label 是给人读的文案，
+   * 改一个字就会让模型收到不一样的答案。
+   */
+  id: string;
+  /**
+   * 给用户看的文案。
+   */
+  label: string;
 }
 /**
  * Token 用量。

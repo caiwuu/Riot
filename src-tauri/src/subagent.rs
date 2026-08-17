@@ -13,6 +13,16 @@
 //! - `explore`：**只读**侦察（Read/Grep/Glob/WebFetch/WebSearch），
 //!   给"到处找找"这类任务 —— 便宜、可并行、绝不改东西。
 //!
+//! # 类型声明成本，不只声明工具 ⭐
+//!
+//! [`Kind`] 除了决定给哪些工具，还决定**这一档愿意花多少钱**：用哪个模型、
+//! 最多跑几轮。这不是锦上添花 —— 只读侦察的产出是一份文字报告，却往往比
+//! 主对话吃掉更多 token（几十次 Grep/Read 的结果全进它的上下文），用和主
+//! 循环同一档的模型跑它是这类架构里最容易漏掉的一笔开销。
+//!
+//! `[约束]` 预算属于类型，不属于调用参数。模型填 `subagent_type` 是在选
+//! 一个**已经定好价的档**，它没有任何办法给自己多要预算。
+//!
 //! # 递归与并发
 //!
 //! 子 agent 的注册表里**没有 Task 工具**，递归在结构上就不存在
@@ -44,10 +54,48 @@ use riot_runtime::{MemoryFileState, SystemFs, SystemProcessRunner};
 use riot_tools::registry::Registry;
 use riot_tools::scheduler::Scheduler;
 
+/// 只读侦察档用的便宜模型。
+///
+/// None（[`SubagentDeps::cheap`] 为空）= 没配，全部类型都跟主模型。
+pub struct CheapModel {
+    pub provider: Arc<dyn riot_protocol::provider::Provider>,
+    pub model: String,
+}
+
+impl CheapModel {
+    /// 按配置装便宜档。每轮现装 —— 用户中途换掉它，下一轮生效。
+    ///
+    /// 没配、格式不对、指向主模型自己、provider 找不到、密钥缺失 —— 一律
+    /// 返回 None，降级成"跟主模型"。
+    ///
+    /// `[取舍]` 这里刻意不报错。便宜档是个纯省钱的可选项，配坏了该悄悄失效：
+    /// 用户加它是为了少花钱，不该因此给自己多一个"发消息没反应"的故障点。
+    /// 代价是配错了不容易发现 —— 由进度行里的模型名兜住（见 [`TaskTool::call`]）。
+    pub fn from_config(config: &crate::config::AppConfig) -> Option<Self> {
+        let (provider_id, model) = config.subagent_target()?;
+        let resolved = match config.resolve_named(provider_id, model) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "子 agent 便宜档解析不了，只读侦察改走主模型");
+                return None;
+            }
+        };
+        match crate::session::provider_for(&resolved) {
+            Ok(provider) => Some(Self { provider, model: resolved.model }),
+            Err(e) => {
+                tracing::warn!(error = %e, "子 agent 便宜档建不出客户端，只读侦察改走主模型");
+                None
+            }
+        }
+    }
+}
+
 /// 组装一个子 agent 轮次所需的一切。由 run_inner 从当轮快照。
 pub struct SubagentDeps {
     pub provider: Arc<dyn riot_protocol::provider::Provider>,
     pub model: String,
+    /// 便宜档。只有 [`Kind::prefers_cheap`] 的类型会用到它。
+    pub cheap: Option<CheapModel>,
     /// 和父共用同一个权限闸：弹窗、会话规则、模式全部一致。
     pub gate: Arc<dyn PermissionGate>,
     pub web: Arc<dyn riot_protocol::web::WebAccess>,
@@ -84,11 +132,70 @@ impl TaskTool {
     }
 }
 
-fn kind_of(input: &serde_json::Value) -> &str {
+/// 只读侦察的轮数上限。
+///
+/// 侦察是"找到并汇报"，不是"做完"。一轮里能并发发十个 Grep/Read，16 轮
+/// 足够把一个仓库翻遍；再往上基本是它在原地打转 —— 反复读同一批文件、
+/// 换着关键词搜同一个东西 —— 而每一轮都在往上下文里堆搜索结果。
+///
+/// 到顶不是报错：已有结论照常回传，只附一句"被步数上限停下"。
+const EXPLORE_MAX_TURNS: u32 = 16;
+
+/// 子 agent 类型。见模块文档「类型声明成本」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    GeneralPurpose,
+    Explore,
+}
+
+impl Kind {
+    /// 未知类型返回 None —— 报错要能列出可用的，别让模型猜。
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "general-purpose" => Some(Self::GeneralPurpose),
+            "explore" => Some(Self::Explore),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::GeneralPurpose => "general-purpose",
+            Self::Explore => "explore",
+        }
+    }
+
+    /// 这一档会不会改东西。父调度器据此决定它能不能和别的只读工具同批并行。
+    fn is_read_only(self) -> bool {
+        matches!(self, Self::Explore)
+    }
+
+    /// 愿不愿意降到便宜模型。
+    ///
+    /// `[约束]` 只有只读档能降。`general-purpose` 会改文件，省下的钱不值得
+    /// 让一个更笨的模型去动代码 —— 它改坏一次的代价远超那点 token 差价。
+    fn prefers_cheap(self) -> bool {
+        matches!(self, Self::Explore)
+    }
+
+    /// 这一档的轮数上限。父会话的上限是天花板，只能更小不能更大。
+    fn max_turns(self, parent: u32) -> u32 {
+        match self {
+            Self::GeneralPurpose => parent,
+            Self::Explore => parent.min(EXPLORE_MAX_TURNS),
+        }
+    }
+}
+
+/// 从工具入参里读类型。缺省和**认不出的**都算 general-purpose ——
+/// 这是 fail-closed 的那一侧（会写、不便宜、不被当成只读）。真正的
+/// 拒绝在 [`TaskTool::call`] 里，那里能给模型一句可用清单。
+fn kind_of(input: &serde_json::Value) -> Kind {
     input
         .get("subagent_type")
         .and_then(|v| v.as_str())
-        .unwrap_or("general-purpose")
+        .and_then(Kind::parse)
+        .unwrap_or(Kind::GeneralPurpose)
 }
 
 /// 各类型的工具集。
@@ -96,58 +203,65 @@ fn kind_of(input: &serde_json::Value) -> &str {
 /// `[约束]` 两个清单里都没有 Task —— 递归要在结构上不存在，不能靠
 /// 提示词劝。也没有 TodoWrite（子 agent 的清单父会话看不见，白记）、
 /// Browser*（浏览器是会话级独占资源，并发子 agent 抢一个面板会打架）。
-fn tools_for(kind: &str) -> Vec<Arc<dyn Tool>> {
+fn tools_for(kind: Kind) -> Vec<Arc<dyn Tool>> {
     use riot_tools::tools;
+    let cache = Arc::new(tools::web::PageCache::default());
     match kind {
-        "explore" => {
-            let cache = Arc::new(tools::web::PageCache::default());
-            vec![
-                Arc::new(tools::Read),
-                Arc::new(tools::Grep),
-                Arc::new(tools::Glob),
-                Arc::new(tools::WebSearch),
-                Arc::new(tools::WebFetch::new(cache)),
-            ]
-        }
-        _ => {
-            let cache = Arc::new(tools::web::PageCache::default());
-            vec![
-                Arc::new(tools::Read),
-                Arc::new(tools::Edit),
-                Arc::new(tools::Write),
-                Arc::new(tools::Bash),
-                Arc::new(tools::Grep),
-                Arc::new(tools::Glob),
-                Arc::new(tools::WebSearch),
-                Arc::new(tools::WebFetch::new(cache)),
-            ]
-        }
+        Kind::Explore => vec![
+            Arc::new(tools::Read),
+            Arc::new(tools::Grep),
+            Arc::new(tools::Glob),
+            Arc::new(tools::WebSearch),
+            Arc::new(tools::WebFetch::new(cache)),
+        ],
+        Kind::GeneralPurpose => vec![
+            Arc::new(tools::Read),
+            Arc::new(tools::Edit),
+            Arc::new(tools::Write),
+            Arc::new(tools::Bash),
+            Arc::new(tools::Grep),
+            Arc::new(tools::Glob),
+            Arc::new(tools::WebSearch),
+            Arc::new(tools::WebFetch::new(cache)),
+        ],
     }
 }
 
-fn system_prompt_for(kind: &str, cwd: &std::path::Path) -> String {
+/// 子 agent 的系统提示。
+///
+/// 刻意**不注入** AGENTS.md：那份东西是给"在这个项目里写代码"的人看的，
+/// 而侦察档只汇报。CC 源码注释说 Explore 省掉 CLAUDE.md 一项每周省
+/// 5–15 G token —— 这里的省法一样，只是它从一开始就没接进来。
+fn system_prompt_for(kind: Kind, cwd: &std::path::Path) -> String {
     let base = format!(
         "工作目录：{}\n平台：{}\n\n",
         cwd.display(),
         std::env::consts::OS
     );
     match kind {
-        "explore" => format!(
+        Kind::Explore => format!(
             "你是只读侦察专家，任务是快速、准确地摸清情况并汇报。\n\n{base}\
              规则：\n\
-             - 只读。不修改任何文件、不执行有副作用的操作。\n\
-             - 并行地广撒网（Grep/Glob 可以同批多个），再对命中处精读。\n\
-             - 汇报要可跳转：结论都带文件路径和行号。\n\
+             - 只读。不修改任何文件、不执行有副作用的操作 —— 委托方是按\
+               「只读侦察」放你进来的，越界的写操作绕过了他的审查。\n\
+             - 并行地广撒网（Grep/Glob 可以同批多个），再对命中处精读 —— \
+               串行搜索是这类任务最大的时间浪费。\n\
+             - 汇报要可跳转：结论都带文件路径和行号 —— 委托方要照着你的\
+               报告直接动手，少个行号他就得重找一遍。\n\
              - 你的回复会**原样**作为调查结果交回，写成一份紧凑的报告：\
-               先结论，再证据，不要过程独白。\n\n回答用中文。",
+               先结论，再证据，不要过程独白 —— 过程只消耗委托方的上下文，\
+               不增加信息。\n\n回答用中文。",
         ),
-        _ => format!(
+        Kind::GeneralPurpose => format!(
             "你是自主完成任务的执行者。委托方给你一个任务，你独立做完并汇报。\n\n{base}\
              规则：\n\
-             - 动手前先看清楚：改文件前 Read，找位置用 Grep。\n\
-             - 只做任务描述里的事，不顺手扩展。\n\
+             - 动手前先看清楚：改文件前 Read，找位置用 Grep —— 凭猜测改出的\
+               错误，委托方比你更难发现。\n\
+             - 只做任务描述里的事，不顺手扩展 —— 委托方看不到你的过程，\
+               扩展出的改动他无从审查，只能连你做对的部分一起怀疑。\n\
              - 你的最后一条回复会**原样**作为任务结果交回 —— 写清楚做了什么、\
-               改了哪些文件、验证结果如何；失败就如实说失败和原因。\n\n回答用中文。",
+               改了哪些文件、验证结果如何；失败就如实说失败和原因，粉饰的\
+               「完成」会让委托方带着错误结论继续走。\n\n回答用中文。",
         ),
     }
 }
@@ -179,12 +293,12 @@ impl Tool for TaskTool {
 
     fn describe(&self, input: &serde_json::Value) -> String {
         let desc = input.get("description").and_then(|v| v.as_str()).unwrap_or("子任务");
-        format!("子 agent（{}）：{desc}", kind_of(input))
+        format!("子 agent（{}）：{desc}", kind_of(input).as_str())
     }
 
     /// explore 是只读的（按输入判定）；general-purpose 会写。
     fn is_read_only(&self, input: &serde_json::Value) -> bool {
-        kind_of(input) == "explore"
+        kind_of(input).is_read_only()
     }
 
     /// 并行子 agent 是这个工具的核心价值。写操作的风险由子 agent 内层
@@ -219,24 +333,31 @@ impl Tool for TaskTool {
                 "prompt 是空的。子 agent 看不到本对话 —— 把背景、目标、范围写进去。",
             );
         }
-        let kind = parsed
-            .subagent_type
-            .as_deref()
-            .unwrap_or("general-purpose")
-            .to_owned();
-        if kind != "general-purpose" && kind != "explore" {
+        let requested = parsed.subagent_type.as_deref().unwrap_or("general-purpose");
+        let Some(kind) = Kind::parse(requested) else {
             return ToolOutcome::failed(format!(
-                "没有叫「{kind}」的子 agent 类型。可用：general-purpose、explore。"
+                "没有叫「{requested}」的子 agent 类型。可用：general-purpose、explore。"
             ));
-        }
+        };
+
+        // ── 成本模型 ──────────────────────────────────────
+        // 只读侦察走便宜档（配了的话）；轮数上限按档收窄。父会话的上限
+        // 是天花板 —— 用户把主对话调到 8 轮，子 agent 不该偷偷跑 16 轮。
+        let (provider, model) = match (kind.prefers_cheap(), self.deps.cheap.as_ref()) {
+            (true, Some(c)) => (Arc::clone(&c.provider), c.model.clone()),
+            _ => (Arc::clone(&self.deps.provider), self.deps.model.clone()),
+        };
+        let max_turns = kind.max_turns(self.deps.max_turns);
 
         let agent_id = self.deps.ids.agent_id();
         ctx.progress.send(ProgressPayload::Status {
-            text: format!("[{}] {} 启动", kind, parsed.description),
+            // 模型名进进度里：不显示的话，"便宜档到底有没有生效"只能去翻日志，
+            // 而这正是用户配完之后第一个想确认的事。
+            text: format!("[{}·{}] {} 启动", kind.as_str(), model, parsed.description),
         });
 
         // ── 装配子 agent 的一轮 ────────────────────────────
-        let tools = tools_for(&kind);
+        let tools = tools_for(kind);
         let prompt_ctx = PromptContext {
             cwd: self.deps.cwd.clone(),
             platform: std::env::consts::OS.to_owned(),
@@ -265,10 +386,12 @@ impl Tool for TaskTool {
 
         let sub_session = SessionId::from_raw(agent_id.as_str().to_owned());
         let deps = AgentDeps {
-            provider: Arc::clone(&self.deps.provider),
+            provider: Arc::clone(&provider),
+            // 压缩也走这一档的模型：便宜档的历史该由便宜模型来总结，
+            // 换回主模型等于在省钱的那条路上偷偷把最贵的一步加回去。
             compactor: Arc::new(riot_core::Layered::new(
-                Arc::clone(&self.deps.provider),
-                self.deps.model.clone(),
+                Arc::clone(&provider),
+                model.clone(),
                 Arc::clone(&self.deps.ids),
                 ctx.cancel.child_token(),
             )),
@@ -289,11 +412,11 @@ impl Tool for TaskTool {
             }],
             meta: Default::default(),
         };
-        let state = AgentState::new(sub_session.clone(), self.deps.model.clone())
+        let state = AgentState::new(sub_session.clone(), model.clone())
             .with_messages(vec![user_msg.clone()])
-            .with_max_turns(self.deps.max_turns);
+            .with_max_turns(max_turns);
         let state = AgentState {
-            system: system_prompt_for(&kind, &self.deps.cwd),
+            system: system_prompt_for(kind, &self.deps.cwd),
             ..state
         };
 
@@ -365,8 +488,9 @@ impl Tool for TaskTool {
 
         // ── 收尾 ──────────────────────────────────────────
         let footer = format!(
-            "\n\n[子任务 {}：{} tokens · {} 次工具调用]",
+            "\n\n[子任务 {}：{} · {} tokens · {} 次工具调用]",
             agent_id.as_str(),
+            model,
             usage.input_tokens + usage.output_tokens,
             tool_uses,
         );
@@ -475,6 +599,7 @@ mod tests {
         SubagentDeps {
             provider,
             model: "test-model".into(),
+            cheap: None,
             gate: Arc::new(AllowAll),
             web: Arc::new(riot_protocol::web::NoWeb),
             vision: Arc::new(riot_protocol::vision::NoVision),
@@ -503,6 +628,7 @@ mod tests {
                 proc: Arc::new(SystemProcessRunner::default()),
                 web: Arc::new(riot_protocol::web::NoWeb),
                 browser: Arc::new(riot_protocol::browser::NoBrowser),
+                terminal: Arc::new(riot_protocol::terminal::NoTerminal),
                 vision: Arc::new(riot_protocol::vision::NoVision),
                 clock: Arc::new(riot_providers::watchdog::TokioClock),
             },
@@ -580,5 +706,86 @@ mod tests {
         assert!(tool.is_read_only(&serde_json::json!({ "subagent_type": "explore" })));
         assert!(!tool.is_read_only(&serde_json::json!({ "subagent_type": "general-purpose" })));
         assert!(!tool.is_read_only(&serde_json::json!({})), "缺省是 general-purpose，会写");
+        assert!(
+            !tool.is_read_only(&serde_json::json!({ "subagent_type": "ninja" })),
+            "认不出的类型要落在 fail-closed 那侧（会写），不能因为不认识就当只读并行掉"
+        );
+    }
+
+    /// 便宜档存在的全部意义。走错模型不会报错、不会崩，只是账单变贵 ——
+    /// 没有断言守着的话，谁在 `call` 里把 `provider` 换回 `self.deps.provider`
+    /// 都不会有测试变红。
+    #[tokio::test]
+    async fn 只读侦察走便宜档_而_general_purpose_不走() {
+        let script = || {
+            Arc::new(ScriptedProvider::new(vec![vec![ProviderEvent::Message(
+                assistant("报告：看完了"),
+            )]]))
+        };
+
+        for (kind, cheap_used) in [("explore", true), ("general-purpose", false)] {
+            let main = script();
+            let cheap = script();
+            let tool = TaskTool::new(SubagentDeps {
+                cheap: Some(CheapModel {
+                    provider: Arc::clone(&cheap) as Arc<dyn riot_protocol::provider::Provider>,
+                    model: "cheap-model".into(),
+                }),
+                ..deps(Arc::clone(&main))
+            });
+            let (c, _rx) = ctx();
+            let out = tool
+                .call(
+                    serde_json::json!({
+                        "description": "看看",
+                        "prompt": "看看这个仓库",
+                        "subagent_type": kind
+                    }),
+                    c,
+                )
+                .await;
+            assert!(matches!(out, ToolOutcome::Ok { .. }), "{kind} 该成功：{out:?}");
+
+            let (hit, miss) = if cheap_used { (&cheap, &main) } else { (&main, &cheap) };
+            assert_eq!(hit.requests().len(), 1, "{kind} 该打中这一档");
+            assert!(miss.requests().is_empty(), "{kind} 不该打另一档");
+            assert_eq!(
+                hit.requests()[0].model,
+                if cheap_used { "cheap-model" } else { "test-model" },
+                "{kind} 的请求里带的模型名不对"
+            );
+        }
+    }
+
+    /// 没配便宜档时不能悄悄少跑 —— 一切照旧走主模型。
+    #[tokio::test]
+    async fn 没配便宜档时只读侦察也走主模型() {
+        let main = Arc::new(ScriptedProvider::new(vec![vec![ProviderEvent::Message(
+            assistant("报告"),
+        )]]));
+        let tool = TaskTool::new(deps(Arc::clone(&main)));
+        let (c, _rx) = ctx();
+        let out = tool
+            .call(
+                serde_json::json!({ "description": "x", "prompt": "y", "subagent_type": "explore" }),
+                c,
+            )
+            .await;
+        assert!(matches!(out, ToolOutcome::Ok { .. }), "{out:?}");
+        assert_eq!(main.requests()[0].model, "test-model");
+    }
+
+    /// 父会话的上限是天花板：用户把主对话调低，子 agent 不能反而跑更多轮。
+    #[test]
+    fn 轮数上限只能收窄不能放宽() {
+        assert_eq!(Kind::Explore.max_turns(48), EXPLORE_MAX_TURNS, "侦察档要被压到上限");
+        assert_eq!(Kind::Explore.max_turns(4), 4, "父比上限还小时跟父");
+        assert_eq!(Kind::GeneralPurpose.max_turns(48), 48, "执行档跟父");
+        for parent in [1u32, 8, 16, 48, 1000] {
+            assert!(
+                Kind::Explore.max_turns(parent) <= parent,
+                "parent={parent} 时侦察档超过了父会话的上限"
+            );
+        }
     }
 }

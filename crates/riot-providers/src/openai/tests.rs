@@ -58,6 +58,46 @@ fn 基本请求形状() {
     );
 }
 
+/// 思考配置 → wire 参数的映射。
+///
+/// Off 必须一个参数都不发：这是升级后老用户请求不变的底线。
+/// Effort 只发标准 `reasoning_effort`；非标准 `thinking` 对象只在显式
+/// Disabled 时发 —— 它是 DeepSeek / GLM 的约定，OpenAI 官方收到会 400。
+#[test]
+fn 思考配置映射成_wire_参数() {
+    use riot_protocol::provider::ThinkingEffort;
+
+    let mut r = req(vec![user("你好")]);
+    let w = build_request(&r, &[], &RetryContext::initial());
+    assert_eq!(w.reasoning_effort, None, "Off 不发力度");
+    assert_eq!(w.thinking, None, "Off 不发开关");
+
+    r.thinking = ThinkingConfig::Effort { level: ThinkingEffort::Low };
+    let w = build_request(&r, &[], &RetryContext::initial());
+    assert_eq!(w.reasoning_effort, Some("low"));
+    assert_eq!(w.thinking, None, "力度档不捎非标准的开关字段");
+
+    r.thinking = ThinkingConfig::Disabled;
+    let w = build_request(&r, &[], &RetryContext::initial());
+    assert_eq!(w.reasoning_effort, None);
+    assert_eq!(
+        serde_json::to_value(w.thinking).expect("序列化"),
+        serde_json::json!({ "type": "disabled" }),
+        "关闭思考走 DeepSeek / GLM 的 thinking.type 约定"
+    );
+}
+
+/// Budget 在 OpenAI 兼容协议里没有对应参数，折算成最近的档位。
+#[test]
+fn 思考预算折算成档位() {
+    let mut r = req(vec![user("你好")]);
+    for (tokens, expect) in [(2_000, "low"), (10_000, "medium"), (30_000, "high")] {
+        r.thinking = ThinkingConfig::Budget { tokens };
+        let w = build_request(&r, &[], &RetryContext::initial());
+        assert_eq!(w.reasoning_effort, Some(expect), "{tokens} tokens");
+    }
+}
+
 #[test]
 fn 请求里要开_usage_上报() {
     // 不开的话流式响应没有 usage，上下文管理层就没有数据决定何时压缩

@@ -18,6 +18,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tauri::ipc::Channel;
@@ -32,9 +33,10 @@ use riot_protocol::message::{Attachment, Message, MessageMeta, UserContent};
 use riot_protocol::permission::{
     AskPreview, DecisionReason, GateOutcome, PermissionAsk, PermissionContext, PermissionGate,
     PermissionMode, PermissionModeState, PermissionResponse, PermissionResult, PermissionRule,
+    SafetyVerdict,
 };
 use riot_protocol::provider::Provider;
-use riot_protocol::tool::{PromptContext, Tool};
+use riot_protocol::tool::{FileStateCache, PromptContext, Tool};
 use riot_providers::anthropic::request::SystemSection;
 use riot_providers::{
     AnthropicConfig, AnthropicProvider, OpenAiConfig, OpenAiProvider, ReqwestTransport,
@@ -56,6 +58,13 @@ const ASK_TIMEOUT_RANGE: std::ops::RangeInclusive<u64> = 5..=3600;
 /// 单轮最大往返数的合理区间。见 [`crate::config::default_max_turns`]。
 /// 至少 1（0 等于什么都做不了），上限 1000（再多多半是跑飞了）。
 const MAX_TURNS_RANGE: std::ops::RangeInclusive<u32> = 1..=1000;
+
+/// 判危通过之后，等这么久再自动放行。
+///
+/// 存在的理由是防误触：弹窗不该在用户手指正落下的那一刻消失，把这次点击
+/// 漏给底下的界面。它挡不住"看到弹窗、想两秒才点"—— 那时早放行了；挡的是
+/// 判危结果和点击几乎同时到达的那一小段。
+const CLASSIFY_GRACE: Duration = Duration::from_millis(200);
 
 /// 用户随消息附上的一张图。
 ///
@@ -296,6 +305,10 @@ impl riot_core::state::InputQueue for HostInputQueue {
 pub struct TurnCapabilities {
     pub web: Arc<dyn riot_protocol::web::WebAccess>,
     pub vision: Arc<dyn riot_protocol::vision::VisionAccess>,
+    /// 只读侦察档的便宜模型。None = 没配，子 agent 全跟主模型。
+    pub subagent_cheap: Option<crate::subagent::CheapModel>,
+    /// Auto 模式的判危分类器。每轮现装 —— 换了便宜档模型下一轮生效。
+    pub classifier: Arc<dyn riot_protocol::permission::SafetyClassifier>,
     /// 本轮追加的外部工具（MCP、Skill）。每轮现装，和 web/vision 同一条
     /// 规矩：配置或 SKILL.md 中途改了，下一轮生效。
     pub extra_tools: Vec<Arc<dyn Tool>>,
@@ -315,6 +328,8 @@ pub struct TurnLimits {
     /// 历史超过这个 token 数就在开工前做 LLM 总结压缩。
     /// 见 [`crate::config::default_compact_threshold_tokens`]。
     pub compact_threshold_tokens: u32,
+    /// 命令的 OS 级隔离强度。每轮现取 —— 用户在设置里改完，下一轮生效。
+    pub sandbox: crate::config::SandboxMode,
 }
 
 /// 本轮工具装配的产物：注册表、prompt 上下文、延迟加载池。
@@ -376,6 +391,8 @@ pub struct Session {
     /// **追加**在内置提示词之后，不替换它 —— 内置提示词里有工作目录和
     /// 安全准则，替换掉的代价是模型连 cwd 都不知道。下一轮生效。
     system_prompt_extra: Mutex<Option<String>>,
+    /// 会话级思考策略。默认不干预；下一轮生效。
+    thinking_override: Mutex<riot_protocol::ThinkingPolicy>,
     /// 会话内累积的权限规则（用户点了"总是允许"）。
     ///
     /// `Arc` 是刻意的：HostGate 持有同一份，规则在**同一轮内**立即生效。
@@ -408,6 +425,18 @@ pub struct Session {
     hydrated: tokio::sync::OnceCell<()>,
     file_state: Arc<MemoryFileState>,
     ids: Arc<NanoIdGenerator>,
+    /// 此刻是否在压缩。不落盘 —— 和 `running` 一样是活状态，切回会话时
+    /// 跟历史一起回给前端，否则三个点还在、"正在压缩上下文"几个字没了。
+    compacting: AtomicBool,
+    /// 压缩边界之前的消息，只给界面画。模型看的是 `history`（活的那截）。
+    ui_archive: Mutex<Vec<Message>>,
+    /// 模型这一侧的终端面板。宿主创建会话后挂上（见 [`Self::attach_terminals`]）。
+    ///
+    /// 会话级而不是每轮现建：`owned` 集合记着模型起过哪些服务，每轮重建
+    /// 的话上一轮起的 dev server 这一轮就不认了。
+    /// 没挂上时是 `NoTerminal` —— 忘了装配的表现是工具明说"用不了"，
+    /// 不是悄悄退回那条会把服务杀掉的老路。
+    terminal: std::sync::OnceLock<Arc<crate::term_access::HostTerminal>>,
 }
 
 /// 标题截断规则：去空白、取前 40 个字符。
@@ -559,11 +588,8 @@ fn make_browser(id: &SessionId) -> Option<Arc<crate::browser::access::HostBrowse
         tracing::info!("没找到打包好的浏览器，Browser* 工具和面板都不可用");
         None
     })?;
-    let profile = crate::config::config_path()
-        .parent()
-        .unwrap_or(std::path::Path::new("."))
-        .join("browser-profiles")
-        .join(id.as_str());
+    let profile =
+        crate::config::profiles_dir(&crate::config::config_path()).join(id.as_str());
     Some(crate::browser::access::HostBrowser::new(app, profile))
 }
 
@@ -595,6 +621,7 @@ impl Session {
             sampling_override: Mutex::new(Sampling::default()),
             python_venv: Mutex::new(None),
             system_prompt_extra: Mutex::new(None),
+            thinking_override: Mutex::new(riot_protocol::ThinkingPolicy::default()),
             rules: Arc::new(Mutex::new(Vec::new())),
             mode: Arc::new(Mutex::new(PermissionMode::Default)),
             custom_title: Mutex::new(None),
@@ -604,6 +631,9 @@ impl Session {
             hydrated: tokio::sync::OnceCell::new(),
             file_state: MemoryFileState::shared(),
             ids: Arc::new(NanoIdGenerator),
+            compacting: AtomicBool::new(false),
+            ui_archive: Mutex::new(Vec::new()),
+            terminal: std::sync::OnceLock::new(),
         }
     }
 
@@ -632,6 +662,7 @@ impl Session {
             sampling_override: Mutex::new(meta.sampling),
             python_venv: Mutex::new(meta.python_venv.clone()),
             system_prompt_extra: Mutex::new(meta.system_prompt.clone()),
+            thinking_override: Mutex::new(meta.thinking),
             rules: Arc::new(Mutex::new(Vec::new())),
             mode: Arc::new(Mutex::new(meta.mode)),
             custom_title: Mutex::new(meta.custom_title.clone()),
@@ -641,6 +672,25 @@ impl Session {
             hydrated: tokio::sync::OnceCell::new(),
             file_state: MemoryFileState::shared(),
             ids: Arc::new(NanoIdGenerator),
+            compacting: AtomicBool::new(false),
+            ui_archive: Mutex::new(Vec::new()),
+            terminal: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// 挂上终端面板。宿主创建/恢复会话之后调一次。
+    pub fn attach_terminals(&self, terms: crate::term::Terminals) {
+        let _ = self.terminal.set(Arc::new(crate::term_access::HostTerminal::new(
+            terms,
+            self.cwd.clone(),
+        )));
+    }
+
+    /// 这一轮装配给工具的终端能力。
+    fn terminal(&self) -> Arc<dyn riot_protocol::terminal::TerminalAccess> {
+        match self.terminal.get() {
+            Some(t) => Arc::clone(t) as Arc<dyn riot_protocol::terminal::TerminalAccess>,
+            None => Arc::new(riot_protocol::terminal::NoTerminal),
         }
     }
 
@@ -652,15 +702,17 @@ impl Session {
         self.hydrated
             .get_or_init(|| async {
                 let Some(p) = &self.persist else { return };
-                let (_, messages) = p.store.load(&self.id).await;
-                if messages.is_empty() {
+                let parts = p.store.load_parts(&self.id).await;
+                self.restore_baselines(&parts.archived, &parts.live);
+                *self.ui_archive.lock().await = parts.archived;
+                if parts.live.is_empty() {
                     return;
                 }
                 // 自愈：老索引可能没存自动标题，从水合出来的历史找回。
                 {
                     let mut auto = self.auto_title.lock().await;
                     if auto.is_none() {
-                        *auto = messages.iter().find_map(|m| match m {
+                        *auto = parts.live.iter().find_map(|m| match m {
                             Message::User { content, .. } => content.iter().find_map(|c| match c {
                                 UserContent::Text { text } => title_excerpt(text),
                                 _ => None,
@@ -669,7 +721,7 @@ impl Session {
                         });
                     }
                 }
-                *self.history.lock().await = messages;
+                *self.history.lock().await = parts.live;
             })
             .await;
     }
@@ -768,11 +820,24 @@ impl Session {
         *self.system_prompt_extra.lock().await = prompt.filter(|p| !p.trim().is_empty());
     }
 
+    /// 设置会话级思考策略。下一轮生效。
+    pub async fn set_thinking(&self, policy: riot_protocol::ThinkingPolicy) {
+        *self.thinking_override.lock().await = policy;
+    }
+
+    pub async fn thinking(&self) -> riot_protocol::ThinkingPolicy {
+        *self.thinking_override.lock().await
+    }
+
     pub async fn system_prompt_extra(&self) -> Option<String> {
         self.system_prompt_extra.lock().await.clone()
     }
 
-    pub async fn interrupt(&self) {
+    /// 中断本轮。返回是否真的有轮子在跑。
+    ///
+    /// `false` 给前端一个明确信号：宿主已经闲着，该把残留的停止键收掉。
+    /// 只记日志的话，界面还转圈，用户连点停止也毫无反应。
+    pub async fn interrupt(&self) -> bool {
         // 这条日志是"按了停止没反应"唯一能自证的地方：要么没到这里
         //（前端/命令层断了），要么到了但没有正在跑的轮子（界面 busy
         // 是假的），要么取消发出去了而下游没理它。三种病因三种药。
@@ -780,11 +845,15 @@ impl Session {
             Some(t) => {
                 tracing::info!(session = %self.id.as_str(), "中断：向本轮发出取消");
                 t.cancel();
+                true
             }
-            None => tracing::warn!(
-                session = %self.id.as_str(),
-                "中断：这个会话没有正在跑的轮次（界面显示的 busy 可能是残留）"
-            ),
+            None => {
+                tracing::warn!(
+                    session = %self.id.as_str(),
+                    "中断：这个会话没有正在跑的轮次（界面显示的 busy 可能是残留）"
+                );
+                false
+            }
         }
     }
 
@@ -910,6 +979,60 @@ impl Session {
         self.running.lock().await.is_some()
     }
 
+    /// 此刻是否在压缩上下文。切回会话时跟 `is_running` 一起回给前端。
+    pub fn is_compacting(&self) -> bool {
+        self.compacting.load(Ordering::Relaxed)
+    }
+
+    /// 压缩边界之前的消息，只给界面画分割线上面的记录。
+    pub async fn ui_archive(&self) -> Vec<Message> {
+        self.hydrate().await;
+        self.ui_archive.lock().await.clone()
+    }
+
+    /// 本会话经工具改过的文件，及各自改动前的内容。改动视图用。
+    pub async fn changes(&self) -> Vec<crate::changes::FileChange> {
+        // 基线在水合时从磁盘（或对话记录）装回来。不先水合的话，
+        // 重启后只打开改动面板会看到空的 —— 历史还没加载，基线也没有。
+        self.hydrate().await;
+        crate::changes::collect(&self.cwd, self.file_state.baselines()).await
+    }
+
+    fn baselines_path(&self) -> Option<std::path::PathBuf> {
+        self.persist
+            .as_ref()
+            .map(|p| crate::changes::baselines_path(p.store.dir(), self.id.as_str()))
+    }
+
+    /// 重启后把改动基线装回内存。有 sidecar 用 sidecar；老会话没有就
+    /// 从对话里的 Read / Write / Edit 推。推出来的当场落盘，下次不用再走。
+    fn restore_baselines(&self, archived: &[Message], live: &[Message]) {
+        let Some(path) = self.baselines_path() else { return };
+        let loaded = crate::changes::load_baselines(&path);
+        if !loaded.is_empty() {
+            for (p, b) in loaded {
+                self.file_state.note_baseline(p, b);
+            }
+            return;
+        }
+        if archived.is_empty() && live.is_empty() {
+            return;
+        }
+        let mut all = Vec::with_capacity(archived.len() + live.len());
+        all.extend_from_slice(archived);
+        all.extend_from_slice(live);
+        let recovered = crate::changes::reconstruct_baselines(&self.cwd, &all);
+        if recovered.is_empty() {
+            return;
+        }
+        for (p, b) in recovered {
+            self.file_state.note_baseline(p, b);
+        }
+        if let Err(e) = crate::changes::save_baselines(&path, &self.file_state.baselines()) {
+            tracing::warn!(error = %e, "恢复的基线没写上盘");
+        }
+    }
+
     /// 手动设置标题。None 或空串表示清除，回退到自动标题。
     pub async fn set_title(&self, title: Option<String>) {
         *self.custom_title.lock().await = title.filter(|t| !t.trim().is_empty());
@@ -992,6 +1115,40 @@ impl Session {
         result
     }
 
+    /// 会话第一条用户消息前面垫的东西：项目约定 + git 快照。
+    ///
+    /// 只在第一条注入 —— 它随消息进历史和 transcript，往后每轮自然带着；
+    /// 每轮都注的话，同一份内容会在上下文里堆出 N 份。压缩会把这条消息
+    /// 吞掉，那时由 [`Self::compact_history`] 重注一份新的。
+    ///
+    /// 提成函数是为了能测：漏了不会报错，只会让模型少知道一些，而
+    /// "它为什么不知道自己在哪个分支"从日志里看不出来。
+    async fn first_message_prelude(&self) -> Vec<UserContent> {
+        let mut out: Vec<UserContent> = crate::memory::collect(&self.cwd)
+            .into_iter()
+            .map(|m| {
+                UserContent::Attachment(Attachment::Memory {
+                    path: m.path,
+                    content: m.content,
+                })
+            })
+            .collect();
+        if !out.is_empty() {
+            tracing::info!(count = out.len(), "注入记忆文件");
+        }
+
+        // git 快照放这里而不是 system prompt：分支和工作区脏不脏是会变的，
+        // 而 system prompt 是 prompt cache 的前缀 —— 把变化的东西写进去，
+        // 每切一次分支就让整个缓存作废。
+        if let Some(info) = crate::git::probe(&self.cwd).await {
+            tracing::info!(branch = %info.branch, dirty = info.dirty, "注入 git 快照");
+            out.push(UserContent::Attachment(Attachment::Environment {
+                text: crate::git::describe(&info),
+            }));
+        }
+        out
+    }
+
     /// 装配这一轮的工具调度器。
     ///
     /// 单独提出来是为了能被测到。`with_*` 系列每漏一个都是静默降级 ——
@@ -1004,6 +1161,7 @@ impl Session {
         caps: TurnCapabilities,
         gate: Arc<dyn PermissionGate>,
         python_venv: Option<&str>,
+        sandbox: Option<riot_runtime::ActiveSandbox>,
     ) -> Scheduler {
         // venv 每轮现装（和 caps 一个道理）：用户中途在会话设置里换环境，
         // 下一轮就生效。
@@ -1011,17 +1169,31 @@ impl Session {
             Some(v) => Arc::new(VenvRunner::new(v)),
             None => Arc::new(SystemProcessRunner::default()),
         };
+        // 沙箱套在最外层：它改写的是"跑什么"（前面垫一个 sandbox-exec），
+        // venv 改的是环境变量，两件事互不干涉。
+        let proc: Arc<dyn riot_protocol::tool::ProcessRunner> = match sandbox {
+            Some(sb) => Arc::new(riot_runtime::SandboxedRunner::new(proc, sb)),
+            None => proc,
+        };
+        let file_state: Arc<dyn FileStateCache> = match self.baselines_path() {
+            Some(p) => Arc::new(crate::changes::PersistingBaselines::new(
+                Arc::clone(&self.file_state),
+                p,
+            )),
+            None => Arc::clone(&self.file_state) as Arc<dyn FileStateCache>,
+        };
         let scheduler = Scheduler::new(
             tools.registry,
             tools.prompt_ctx,
             Arc::new(SystemFs::new()),
             proc,
-            Arc::clone(&self.file_state) as Arc<dyn riot_protocol::tool::FileStateCache>,
+            file_state,
             Arc::clone(&self.ids) as Arc<dyn IdGenerator>,
             clock,
         )
         .with_web(caps.web)
         .with_browser(self.browser())
+        .with_terminal(self.terminal())
         .with_vision(caps.vision)
         .with_gate(gate)
         .with_artifacts_dir(self.artifacts_dir());
@@ -1044,21 +1216,30 @@ impl Session {
         let before = provider.count_tokens(history);
         // 先说一声再动手。下面那次总结是一个真实的模型调用，几十秒 ——
         // 期间界面上只有那三个点在动，和"模型正在回答"分不出来。
+        self.compacting.store(true, Ordering::Relaxed);
         let _ = sink.send(AgentEvent::Compacting);
         let summary =
             match riot_core::summarize::summarize_history(provider, model, history, cancel).await {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::warn!(error = %e, "历史总结失败");
+                    self.compacting.store(false, Ordering::Relaxed);
                     return None;
                 }
             };
         // 记忆重注：压缩把带着 AGENTS.md 的首条消息吞了，
         // 不重注的话项目约定从此消失（CC 的 postCompactCleanup 同款）。
-        let memory: Vec<Attachment> = crate::memory::collect(&self.cwd)
+        let mut memory: Vec<Attachment> = crate::memory::collect(&self.cwd)
             .into_iter()
             .map(|m| Attachment::Memory { path: m.path, content: m.content })
             .collect();
+        // git 快照同理，而且重注的这份是**新的** —— 压缩前的那几十轮里
+        // 分支和工作区多半已经变了，照抄旧快照比不给还糟。
+        if let Some(info) = crate::git::probe(&self.cwd).await {
+            memory.push(Attachment::Environment {
+                text: crate::git::describe(&info),
+            });
+        }
         // 工作集重注：纯总结不够 —— 压缩后模型立即失去对文件
         // 内容的记忆，下一步就是把刚读过的文件再读一遍。
         let restored = restored_files(self.file_state.as_ref());
@@ -1076,6 +1257,8 @@ impl Session {
             p.log.append(&msg);
         }
         tracing::info!(before, after, "历史压缩完成");
+        self.ui_archive.lock().await.extend(history.iter().cloned());
+        self.compacting.store(false, Ordering::Relaxed);
         let _ = sink.send(AgentEvent::Compacted {
             before_tokens: before,
             after_tokens: after,
@@ -1156,6 +1339,21 @@ impl Session {
         // 下一轮生效）。没配置时各检查点都是零开销的空实现。
         let hook_engine = Arc::new(crate::hooks::HookEngine::load(&self.cwd, self.id.as_str()));
 
+        // 沙箱先算出来：它同时决定"命令怎么跑"（下面的 build_scheduler）
+        // 和"策略层敢不敢放松"（紧接着的 PermissionContext）。
+        //
+        // `[约束]` 两处必须来自**同一次** activate。分别判断的话，一边以为
+        // 有边界、另一边其实没套上 —— 那正好是最坏的组合：决策链按"OS 挡着"
+        // 放行了命令，而实际上什么都没挡。
+        let sandbox = limits.sandbox.policy(&self.cwd).activate();
+        if sandbox.is_none() && limits.sandbox != crate::config::SandboxMode::Off {
+            // 说一声。静默降级的话，用户以为自己开着沙箱。
+            tracing::warn!(
+                session = %self.id.as_str(),
+                "这台机器上沙箱起不来（需要 macOS 的 sandbox-exec），本轮不隔离"
+            );
+        }
+
         // 权限闸先装：工具装配就要用它（Task 子 agent 与父共用同一个闸）。
         let mode = *self.mode.lock().await;
         let gate = Arc::new(HostGate {
@@ -1165,7 +1363,7 @@ impl Session {
             ctx: PermissionContext {
                 mode: PermissionModeState(Some(mode)),
                 rules: self.rules.lock().await.clone(),
-                sandboxed: false,
+                sandboxed: sandbox.is_some(),
                 can_prompt_user: true,
             },
             rules_live: Arc::clone(&self.rules),
@@ -1178,6 +1376,7 @@ impl Session {
                     .clamp(*ASK_TIMEOUT_RANGE.start(), *ASK_TIMEOUT_RANGE.end()),
             ),
             hooks: Arc::clone(&hook_engine),
+            classifier: Arc::clone(&caps.classifier),
         });
 
         // 本轮的工具 = 内置 + 子 agent + 外部（MCP、Skill）。
@@ -1190,6 +1389,7 @@ impl Session {
             crate::subagent::SubagentDeps {
                 provider: Arc::clone(&provider),
                 model: model.model.clone(),
+                cheap: caps.subagent_cheap.take(),
                 gate: Arc::clone(&gate) as Arc<dyn PermissionGate>,
                 web: Arc::clone(&caps.web),
                 vision: Arc::clone(&caps.vision),
@@ -1288,6 +1488,7 @@ impl Session {
             caps,
             gate,
             python_venv.as_deref(),
+            sandbox,
         );
         // PostToolUse hooks：只在真配了的时候装 —— enabled() 为 false 时
         // 调度器连 hook 参数（input 克隆）都不准备。
@@ -1341,20 +1542,10 @@ impl Session {
         // 只注入一次 —— 它随消息进历史和 transcript，往后每轮自然带着；
         // 每轮都注的话，同一份内容会在上下文里堆出 N 份。
         if history.is_empty() {
-            let memories = crate::memory::collect(&self.cwd);
-            if !memories.is_empty() {
-                tracing::info!(count = memories.len(), "注入记忆文件");
-                let mut with_memory: Vec<UserContent> = memories
-                    .into_iter()
-                    .map(|m| {
-                        UserContent::Attachment(Attachment::Memory {
-                            path: m.path,
-                            content: m.content,
-                        })
-                    })
-                    .collect();
-                with_memory.append(&mut content);
-                content = with_memory;
+            let mut prelude = self.first_message_prelude().await;
+            if !prelude.is_empty() {
+                prelude.append(&mut content);
+                content = prelude;
             }
         }
         let user_msg = Message::User {
@@ -1387,6 +1578,7 @@ impl Session {
         let state = AgentState {
             system,
             max_output_tokens_override: model.sampling.max_output_tokens,
+            thinking: self.thinking().await,
             ..state
         };
 
@@ -1408,6 +1600,13 @@ impl Session {
             // 区分"内核没收到取消"和"收到了但界面没更新"。
             if let AgentEvent::Done { reason } = &ev {
                 tracing::info!(session = %self.id.as_str(), ?reason, "本轮结束");
+                self.compacting.store(false, Ordering::Relaxed);
+            }
+            if let AgentEvent::Compacting = &ev {
+                self.compacting.store(true, Ordering::Relaxed);
+            }
+            if let AgentEvent::Compacted { .. } = &ev {
+                self.compacting.store(false, Ordering::Relaxed);
             }
             if let AgentEvent::Message(m) = &ev {
                 // 磁盘和内存在同一处追加 —— 两边各攒各的迟早分叉
@@ -1751,6 +1950,10 @@ struct HostGate {
     /// PreToolUse hooks。deny 一票否决、ask 强制询问、allow 只把
     /// "要问"升级成"放行" —— 内置决策链的 Deny 不可被 hook 压过。
     hooks: Arc<crate::hooks::HookEngine>,
+    /// Auto 模式的判危分类器。没配便宜档模型时是
+    /// [`riot_protocol::permission::NoClassifier`]（永远 Hold），
+    /// Auto 模式于是退化成 Default —— 不会静默放行。
+    classifier: Arc<dyn riot_protocol::permission::SafetyClassifier>,
 }
 
 #[async_trait::async_trait]
@@ -1884,6 +2087,31 @@ fn hook_may_skip_ask(reason: &DecisionReason) -> bool {
     )
 }
 
+/// 把用户选中的选项写进工具输入，交给 `AskUserQuestion` 读。
+///
+/// 走 `updated_input` 而不是另开一条通道：权限层本来就有改写输入的权力
+/// （给命令补安全 flag 用的就是它），提问的答案是同一件事的另一种用法。
+///
+/// 返回 None = 不改输入。空选择必须走这条路：普通的"允许一次"也经过这里，
+/// 给每个工具都塞一个空的 `__chosen` 字段会让工具入参多出一个没人要的键。
+fn inject_choice(
+    input: &serde_json::Value,
+    choice: Vec<String>,
+) -> Option<serde_json::Value> {
+    if choice.is_empty() {
+        return None;
+    }
+    let mut v = input.clone();
+    // 非对象的输入没法插字段。走到这里说明工具入参不成形，validate_input
+    // 会在后面把它拦下 —— 这里静默不改，不要 panic。
+    let obj = v.as_object_mut()?;
+    obj.insert(
+        riot_tools::tools::ask::CHOSEN_KEY.to_owned(),
+        serde_json::Value::Array(choice.into_iter().map(serde_json::Value::String).collect()),
+    );
+    Some(v)
+}
+
 /// 落实"总是允许"里的 AddRule 建议。SetMode 在 [`HostGate::remember`]
 /// 处理（要碰会话的 mode_live 和事件通道）；AddWorkingDirectory 仍然
 /// 明确不支持 —— 扩围栏牵动的状态面更大，明确不支持好过半支持。
@@ -1949,6 +2177,9 @@ impl HostGate {
         spec: AskSpec,
     ) -> GateOutcome {
         let request_id = self.ids.next_id("ask");
+        // 判危要看这个理由（它是安全边界的判据），而下面它会被 move 进
+        // PermissionAsk —— 先留一份。
+        let reason = spec.reason.clone();
         let (tx, rx) = oneshot::channel();
         self.pending.insert(request_id.clone(), tx).await;
 
@@ -1989,8 +2220,19 @@ impl HostGate {
 
         // 这里等的是**用户**，用真实时钟而不是注入的 Clock。黄金回放里
         // 走不到这条路径（那些用例不弹窗），注入只会多一层没人用的间接。
+        //
+        // Auto 模式下弹窗和判危并行跑，先有结果的算（见 classify_race）。
+        tokio::pin!(rx);
+        if let Some(verdict) = self.classify_race(tool, input, &reason, &mut rx, cancel).await {
+            self.pending.forget(&request_id).await;
+            // 告诉界面这个弹窗作废了，理由是分类器 —— 不发的话它挂在那里，
+            // 用户点"允许"毫无反应（操作早就放行并跑完了）。
+            self.resolved(&request_id, verdict);
+            return GateOutcome::Allow { updated_input: None };
+        }
+
         let answer = tokio::select! {
-            r = tokio::time::timeout(timeout, rx) => r,
+            r = tokio::time::timeout(timeout, &mut rx) => r,
             _ = cancel.cancelled() => {
                 self.pending.forget(&request_id).await;
                 self.resolved(&request_id, DecisionReason::UserChoice { remembered: false });
@@ -1999,10 +2241,10 @@ impl HostGate {
         };
 
         match answer {
-            Ok(Ok(PermissionResponse::Allow { remember })) => {
+            Ok(Ok(PermissionResponse::Allow { remember, choice })) => {
                 self.remember(remember).await;
                 GateOutcome::Allow {
-                    updated_input: None,
+                    updated_input: inject_choice(input, choice),
                 }
             }
             Ok(Ok(PermissionResponse::Deny { message })) => GateOutcome::Deny {
@@ -2030,6 +2272,70 @@ impl HostGate {
         }
     }
 
+    /// Auto 模式：判危与弹窗竞速。
+    ///
+    /// 返回 `Some(reason)` = 分类器判它安全，自动放行；`None` = 继续等用户
+    /// （不是 Auto 模式、这类询问不许它判、判不准、或者用户先答了）。
+    ///
+    /// # 三道闸
+    ///
+    /// 1. **模式**：只有 [`PermissionMode::Auto`]。
+    /// 2. **理由**：只有 `yields_to_bypass()` 为真的询问。安全检查和用户
+    ///    亲手写的 ask 规则对它免疫 —— 和 bypass 模式共用同一个谓词，
+    ///    不是另立一套。**这是整个 Auto 模式的安全边界。**
+    /// 3. **工具**：只有覆盖了 `classifier_input()` 的工具。没覆盖的返回
+    ///    None，等于"这个工具不打算被自动判"，照常问人。
+    ///
+    /// # 宽限期
+    ///
+    /// 拿到 Safe 之后不立刻放行，先等 [`CLASSIFY_GRACE`]。这段时间里用户
+    /// 的答案仍然优先 —— 弹窗不会在他手指正落下时消失，把点击漏给底下的
+    /// 界面。它挡不住"用户看到弹窗、想了两秒才点"（那时早放行了），挡的是
+    /// 判危结果和点击几乎同时到达的那一小段。
+    #[allow(clippy::disallowed_methods)]
+    async fn classify_race(
+        &self,
+        tool: &dyn Tool,
+        input: &serde_json::Value,
+        reason: &DecisionReason,
+        rx: &mut std::pin::Pin<&mut oneshot::Receiver<PermissionResponse>>,
+        cancel: &CancellationToken,
+    ) -> Option<DecisionReason> {
+        if *self.mode_live.lock().await != PermissionMode::Auto {
+            return None;
+        }
+        // 这一行是安全边界。改成 `true` 会让 Auto 模式能自动放行写 SSH
+        // 密钥和 shell 启动脚本 —— 而全套测试里只有守着它的那几个会红。
+        if !reason.yields_to_bypass() {
+            return None;
+        }
+        let what = tool.classifier_input(input)?;
+
+        let verdict = tokio::select! {
+            v = self.classifier.judge(tool.name(), &what) => v,
+            // 用户先答了：判危白跑，让下面的正常流程去收他的答案。
+            _ = &mut *rx => return None,
+            _ = cancel.cancelled() => return None,
+        };
+
+        let SafetyVerdict::Safe { confidence } = verdict else {
+            return None;
+        };
+
+        // 宽限期。用户在这段时间里答了就算他的。
+        tokio::select! {
+            _ = &mut *rx => return None,
+            _ = tokio::time::sleep(CLASSIFY_GRACE) => {}
+        }
+
+        tracing::info!(
+            tool = tool.name(),
+            confidence,
+            "判危通过，自动放行（Auto 模式）"
+        );
+        Some(DecisionReason::Classifier { confidence })
+    }
+
     /// 通知界面某个权限请求已经作废。发送失败无所谓 —— 那说明界面已经断开。
     fn resolved(&self, request_id: &str, reason: DecisionReason) {
         let _ = self.sink.send(AgentEvent::PermissionResolved {
@@ -2049,14 +2355,25 @@ fn preview_of(tool: &dyn Tool, input: &serde_json::Value, cwd: &std::path::Path)
                 .to_owned(),
             cwd: cwd.to_path_buf(),
         },
-        "Write" => AskPreview::FileWrite {
-            path: tool.target_path(input).unwrap_or_default(),
-            bytes: input
-                .get("content")
-                .and_then(|v| v.as_str())
-                .map(|s| s.len() as u64)
-                .unwrap_or(0),
-        },
+        "Write" => {
+            let content = input.get("content").and_then(|v| v.as_str()).unwrap_or_default();
+            // 前 40 行够看清"要写个什么东西"，又不至于把整个文件铺进弹窗。
+            const MAX_LINES: usize = 40;
+            let total = content.lines().count();
+            let truncated = total > MAX_LINES;
+            let preview = content
+                .lines()
+                .take(MAX_LINES)
+                .collect::<Vec<_>>()
+                .join("\n");
+            AskPreview::FileWrite {
+                path: tool.target_path(input).unwrap_or_default(),
+                bytes: content.len() as u64,
+                preview,
+                lines: total as u64,
+                truncated,
+            }
+        }
         "Edit" => AskPreview::FileEdit {
             path: tool.target_path(input).unwrap_or_default(),
             diff: format!(
@@ -2071,7 +2388,18 @@ fn preview_of(tool: &dyn Tool, input: &serde_json::Value, cwd: &std::path::Path)
                     .unwrap_or_default(),
             ),
         },
-        // 计划批准弹窗显示计划**原文** —— 摘要等于让用户盲签一份实施方案。
+        // 模型主动提的问题：把选项原样交给界面渲染成对话里的选项卡。
+        // 拆不出来（参数不成形）就退回普通描述 —— validate_input 会在
+        // 权限之后把它拦下，这里不该因为参数坏了就崩。
+        "AskUserQuestion" => riot_tools::tools::ask::preview_parts(input).map_or_else(
+            || AskPreview::Plain { text: tool.describe(input) },
+            |(question, options, allow_multiple)| AskPreview::Choice {
+                question,
+                options,
+                allow_multiple,
+            },
+        ),
+        // 计划批准卡显示计划**原文** —— 摘要等于让用户盲签一份实施方案。
         "ExitPlanMode" => AskPreview::Plain {
             text: input
                 .get("plan")
@@ -2106,15 +2434,51 @@ fn system_prompt(
          - 联网检索与抓取，把外部信息消化进当前任务\n\
          - 跨工具串起来把目标落地，而不是停在「你可以这样」\n\
          \n\
-         行为准则：\n\
-         - 先搞清楚再动手。改代码前用 Read / Grep 看过相关位置；\
-           碰外部系统前先确认现状。\n\
-         - 一次只做被要求的事。顺手重构、顺手加注释、顺手改格式都会让 review 变难。\n\
-         - 写代码要像周围的代码。命名、注释密度、错误处理方式都跟着现有风格走。\n\
-         - 不确定就问，别猜。猜错的代价比多问一句大。\n\
-         - 工具失败时读错误信息再动作，不要换个参数重试同一件事。\n\
-         - 多步任务用 TodoWrite 拆解和跟踪：做完一项立刻标记完成，不要攒一批再改。\n\
+         行为准则（每条都带着理由，理由是让你能推断没写到的情况）：\n\
+         - 先搞清楚再动手。改代码前用 Read / Grep 看过相关位置，碰外部系统前\
+           先确认现状 —— 基于猜测的修改错了之后，用户得先理解你改了什么\
+           才能撤销，比从头做还慢。\n\
+         - 一次只做被要求的事。顺手重构、顺手加注释、顺手改格式，会让 diff 里\
+           混进无关改动 —— review 的人分不清哪些是任务本身、哪些是顺手，\
+           只能整体不信任。\n\
+         - 写代码要像周围的代码。命名、注释密度、错误处理方式都跟着现有风格走 —— \
+           风格突变会让后来的维护者以为这里有特殊原因，白花时间考古。\n\
+         - 自主性按后果分档。可逆的操作（改文件、跑测试、装依赖）直接做完再汇报，\
+           停下来问「要继续吗」只是让用户干等；破坏性操作（删数据、覆盖未提交的\
+           改动、对外发布）和真正的需求歧义才停下来确认 —— 这两类猜错了没法撤销。\n\
+         - 工具失败时先读错误信息再动作，不要换个参数重试同一件事 —— \
+           错误没消化，重试只是把同一堵墙撞第二遍。\n\
+         - 多步任务用 TodoWrite 拆解和跟踪：做完一项立刻标记完成，不要攒一批再改 —— \
+           清单是用户看进度的窗口，攒着改等于窗口失真。\n\
+         - 说「做完了」之前先验证：能编译的编译，能跑的跑一遍 —— \
+           没验证过的「完成」是把调试成本转嫁给用户。测试没过就如实报告，\
+           不要粉饰成完成。\n\
+         - 不要擅自提交。`git commit` 只在用户明确要求时做 —— 他多半想先\
+           看看改了什么；同理不要擅自 push、切分支、stash、reset。\n\
          - 自我介绍时不要把自己缩成「编程助手」；你是全能智能体。\n\
+         \n\
+         引用仓库里**已有**的代码时，代码块的语言位置写成 `起始行:结束行:路径`：\n\
+         \n\
+         ```12:14:src/main.rs\n\
+         fn main() {{\n\
+             run();\n\
+         }}\n\
+         ```\n\
+         \n\
+         界面会把它渲染成带路径标题、点一下能打开文件的块。\
+         路径按工作目录的相对路径写，行号照文件里的实际行号。\
+         你**新写的**代码不要用这个格式 —— 那是普通代码块（写语言名，如 ```rust），\
+         两者在界面上是不同的东西：前者是「去看这里」，后者是「这是我建议加的」。\n\
+         \n\
+         流程图、时序图、状态图用 mermaid 围栏直接写在回复里：\n\
+         \n\
+         ```mermaid\n\
+         flowchart LR\n\
+             A --> B\n\
+         ```\n\
+         \n\
+         界面会把它画成图。不要为了给人看图去写 HTML、引 mermaid.js、再打开浏览器 —— \
+         浏览器是用来核对自己改过的页面，不是当画板。\n\
          \n\
          回答用中文。代码和标识符保持原文。",
         cwd.display(),
@@ -2440,12 +2804,109 @@ mod tests {
         assert_eq!(rules.len(), 1);
     }
 
+    /// 提问的卡片要拿到真的选项，而不是一句摘要。
+    ///
+    /// 退回 Plain 的话界面上是一行 describe 文本、没有按钮 —— 用户只能
+    /// 点"跳过"，而模型在等一个选择。
+    #[test]
+    fn 提问工具的预览是带选项的_choice() {
+        let input = serde_json::json!({
+            "question": "缓存放哪？",
+            "options": [
+                { "id": "mem", "label": "内存" },
+                { "id": "disk", "label": "磁盘（推荐）" }
+            ],
+            "allow_multiple": false
+        });
+        let p = preview_of(
+            &riot_tools::tools::ask::AskUserQuestion,
+            &input,
+            std::path::Path::new("/tmp"),
+        );
+        let AskPreview::Choice { question, options, allow_multiple } = p else {
+            panic!("该是 Choice：{p:?}");
+        };
+        assert_eq!(question, "缓存放哪？");
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[1].id, "disk");
+        assert!(!allow_multiple);
+    }
+
+    /// 用户的选择必须真的走到工具手里 —— 这是整条链路的命门。
+    ///
+    /// 断言跨过宿主与工具的边界：宿主写进输入，工具读出来给模型。中间
+    /// 任何一环把键名写错，两边各自的单测都还是绿的。
+    #[tokio::test]
+    async fn 用户的选择经输入改写送到工具() {
+        let input = serde_json::json!({
+            "question": "缓存放哪？",
+            "options": [
+                { "id": "mem", "label": "内存" },
+                { "id": "disk", "label": "磁盘" }
+            ]
+        });
+
+        let updated = inject_choice(&input, vec!["disk".into()]).expect("有选择就该改写输入");
+        assert_eq!(
+            updated.get("question").and_then(|v| v.as_str()),
+            Some("缓存放哪？"),
+            "改写不能弄丢原有字段"
+        );
+
+        let out = riot_tools::tools::ask::AskUserQuestion
+            .call(updated, tool_ctx())
+            .await;
+        let riot_protocol::tool::ToolOutcome::Ok { model_content, .. } = out else {
+            panic!("工具该拿到选择并成功：{out:?}");
+        };
+        let text = format!("{model_content:?}");
+        assert!(text.contains("磁盘"), "模型要收到用户点的那个 label：{text}");
+    }
+
+    /// 「其他」走同一条 `__chosen` 通道，编码前缀不能漏给模型。
+    #[tokio::test]
+    async fn 自己填写的其他经输入改写送到工具() {
+        let input = serde_json::json!({
+            "question": "缓存放哪？",
+            "options": [
+                { "id": "mem", "label": "内存" },
+                { "id": "disk", "label": "磁盘" }
+            ]
+        });
+        let updated = inject_choice(
+            &input,
+            vec![format!("{}用 sqlite", riot_tools::tools::ask::OTHER_PREFIX)],
+        )
+        .expect("有填写就该改写输入");
+        let out = riot_tools::tools::ask::AskUserQuestion
+            .call(updated, tool_ctx())
+            .await;
+        let riot_protocol::tool::ToolOutcome::Ok { model_content, .. } = out else {
+            panic!("工具该拿到填写并成功：{out:?}");
+        };
+        let text = format!("{model_content:?}");
+        assert!(text.contains("自己填写：用 sqlite"), "{text}");
+        assert!(
+            !text.contains(riot_tools::tools::ask::OTHER_PREFIX),
+            "编码前缀不该漏给模型：{text}"
+        );
+    }
+
+    /// 普通的"允许一次"不该给工具入参塞一个空字段。
+    #[test]
+    fn 没有选择时不改写输入() {
+        let input = serde_json::json!({ "command": "ls" });
+        assert!(inject_choice(&input, vec![]).is_none(), "空选择不该改写");
+        // 参数不成形时静默不改，交给 validate_input 去报错。
+        assert!(inject_choice(&serde_json::json!("字符串"), vec!["x".into()]).is_none());
+    }
+
     #[tokio::test]
     async fn 回应不存在的请求不会崩() {
         // 用户在超时之后才点按钮，这时候什么都不该发生
         let p = PendingAsks::default();
         assert!(
-            !p.resolve("nope", PermissionResponse::Allow { remember: vec![] })
+            !p.resolve("nope", PermissionResponse::Allow { remember: vec![], choice: vec![] })
                 .await
         );
     }
@@ -2457,13 +2918,13 @@ mod tests {
         p.insert("a1".into(), tx).await;
 
         assert!(
-            p.resolve("a1", PermissionResponse::Allow { remember: vec![] })
+            p.resolve("a1", PermissionResponse::Allow { remember: vec![], choice: vec![] })
                 .await
         );
         assert!(rx.await.is_ok());
         // 第二次应该找不到 —— 否则重复点击会让同一个操作跑两遍
         assert!(
-            !p.resolve("a1", PermissionResponse::Allow { remember: vec![] })
+            !p.resolve("a1", PermissionResponse::Allow { remember: vec![], choice: vec![] })
                 .await
         );
     }
@@ -2482,6 +2943,42 @@ mod tests {
         assert!(!p.contains("规划模式"), "默认模式不该带规划段落");
     }
 
+    /// 代码引用的格式约定必须在提示词里，而且要说清和普通代码块的区别。
+    ///
+    /// 只在前端实现渲染是没用的：模型不知道有这个格式就永远不会产出它，
+    /// 那段渲染代码等于死代码。而不说清区别的话，它会把新写的代码也标上
+    /// 行号和路径 —— 用户点开发现文件里根本不是那样。
+    #[test]
+    fn 提示词里有代码引用的格式约定() {
+        let p = system_prompt(
+            std::path::Path::new("/tmp/proj"),
+            None,
+            None,
+            PermissionMode::Default,
+            false,
+        );
+        assert!(p.contains("起始行:结束行:路径"), "要给出格式");
+        assert!(p.contains("```12:14:src/main.rs"), "要给一个具体例子");
+        assert!(p.contains("新写的"), "要说清新代码不用这个格式");
+    }
+
+    /// mermaid 围栏能画成图这件事必须写进提示词。
+    ///
+    /// 只在前端接渲染、不告诉模型的话，它会写一个 HTML 再打开浏览器
+    /// 「测效果」—— 用户要的是对话里的图，不是多出来的测试页。
+    #[test]
+    fn 提示词里有_mermaid_围栏会画成图() {
+        let p = system_prompt(
+            std::path::Path::new("/tmp/proj"),
+            None,
+            None,
+            PermissionMode::Default,
+            false,
+        );
+        assert!(p.contains("```mermaid"), "要给出围栏写法");
+        assert!(p.contains("不要为了给人看图"), "要禁止借浏览器当画板");
+    }
+
     #[test]
     fn 会话设置会附加进系统提示() {
         // venv 不进提示词的话，模型会自己 source activate 或另建环境；
@@ -2496,6 +2993,40 @@ mod tests {
         assert!(p.contains("/tmp/proj"), "内置部分必须还在");
         assert!(p.contains("/tmp/proj/.venv"));
         assert!(p.contains("pytest -x"));
+    }
+
+    /// 自主性必须按后果分档，不能只写一句「不确定就问」。
+    ///
+    /// 裸的「不确定就问」会让模型向保守面倒：改个文件也停下来问「要继续吗」，
+    /// 用户干等。拆成可逆/破坏性两档后，模型能推断没列举到的操作该归哪档。
+    #[test]
+    fn 自主性按后果分档() {
+        let p = system_prompt(
+            std::path::Path::new("/tmp/proj"),
+            None,
+            None,
+            PermissionMode::Default,
+            false,
+        );
+        assert!(p.contains("可逆"), "可逆操作要直接做完");
+        assert!(p.contains("破坏性"), "破坏性操作才停下来确认");
+    }
+
+    /// 「做完了」之前必须验证，且不许粉饰失败。
+    ///
+    /// 不写这条的话，模型倾向于改完就宣布完成 —— 编译错误留给用户发现，
+    /// 等于把调试成本转嫁出去；测试失败时还可能措辞含糊地带过。
+    #[test]
+    fn 声称完成前要先验证() {
+        let p = system_prompt(
+            std::path::Path::new("/tmp/proj"),
+            None,
+            None,
+            PermissionMode::Default,
+            false,
+        );
+        assert!(p.contains("先验证"), "要求完成前验证");
+        assert!(p.contains("如实报告"), "失败不许粉饰");
     }
 
     #[test]
@@ -2547,6 +3078,29 @@ mod tests {
         );
     }
 
+    /// 一个不碰 fs / 进程 / 网络的工具上下文。给 AskUserQuestion 这类
+    /// 纯对话工具用 —— 它只把用户的选择转成一句话。
+    fn tool_ctx() -> riot_protocol::tool::ToolContext {
+        let id = riot_protocol::id::ToolUseId::from_raw("t1");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        riot_protocol::tool::ToolContext {
+            session_id: SessionId::from_raw("s1"),
+            tool_use_id: id.clone(),
+            cwd: "/tmp".into(),
+            artifacts_dir: std::env::temp_dir(),
+            cancel: CancellationToken::new(),
+            progress: riot_protocol::tool::ProgressSink::new(id, tx),
+            file_state: MemoryFileState::shared(),
+            fs: Arc::new(SystemFs::new()),
+            proc: Arc::new(SystemProcessRunner::default()),
+            web: Arc::new(riot_protocol::web::NoWeb),
+            browser: Arc::new(riot_protocol::browser::NoBrowser),
+            terminal: Arc::new(riot_protocol::terminal::NoTerminal),
+            vision: Arc::new(riot_protocol::vision::NoVision),
+            clock: Arc::new(riot_providers::watchdog::TokioClock),
+        }
+    }
+
     /// 一个丢弃全部事件的出口。
     fn test_sink() -> SessionSink {
         let s = SessionSink::default();
@@ -2578,7 +3132,144 @@ mod tests {
             // 短超时：hook 要真卡住，测试该很快失败而不是挂十分钟。
             ask_timeout: Duration::from_secs(2),
             hooks: Arc::new(crate::hooks::HookEngine::from_config_json(hooks, &s.cwd)),
+            classifier: Arc::new(riot_protocol::permission::NoClassifier),
         }
+    }
+
+    /// 一个把什么都判成安全的分类器。用它来试探边界:凡是它也放不过去的，
+    /// 就是被别的机制挡住的。
+    struct AlwaysSafe;
+
+    #[async_trait::async_trait]
+    impl riot_protocol::permission::SafetyClassifier for AlwaysSafe {
+        async fn judge(&self, _tool: &str, _what: &str) -> SafetyVerdict {
+            SafetyVerdict::Safe { confidence: 1.0 }
+        }
+    }
+
+    /// Auto 模式 + 有求必应的分类器。
+    async fn gate_auto(s: &Session) -> HostGate {
+        s.set_mode(PermissionMode::Auto).await;
+        HostGate {
+            classifier: Arc::new(AlwaysSafe),
+            ..gate_with_hooks(s, serde_json::json!({}))
+        }
+    }
+
+    /// 跑一次竞速。`_tx` 要留着 —— 提前 drop 的话 rx 立刻出错返回，
+    /// 会被当成"用户已经答了"，测的就不是判危了。
+    async fn race(
+        gate: &HostGate,
+        tool: &dyn Tool,
+        input: &serde_json::Value,
+        reason: &DecisionReason,
+    ) -> Option<DecisionReason> {
+        let (_tx, rx) = oneshot::channel();
+        tokio::pin!(rx);
+        gate.classify_race(tool, input, reason, &mut rx, &CancellationToken::new())
+            .await
+    }
+
+    /// **Auto 模式的安全边界。**
+    ///
+    /// 分类器的权力不能超过 bypass 模式：安全检查（写 SSH 密钥、shell 启动
+    /// 脚本）和用户亲手写下的 ask 规则，它一律碰不到。把 classify_race 里
+    /// 那句 `yields_to_bypass()` 判断删掉，只有这个用例会红。
+    #[tokio::test]
+    async fn 分类器压不过安全检查和用户规则() {
+        let s = Session::new(SessionId::from_raw("s1"), std::env::temp_dir(), None);
+        let gate = gate_auto(&s).await;
+        let bash = tool_named("Bash");
+        let input = serde_json::json!({ "command": "echo hi >> ~/.zshrc" });
+
+        for reason in [
+            DecisionReason::SafetyCheck {
+                safety: riot_protocol::permission::SafetyKind::ShellRc,
+            },
+            DecisionReason::SafetyCheck {
+                safety: riot_protocol::permission::SafetyKind::SshConfig,
+            },
+            DecisionReason::Rule {
+                source: riot_protocol::permission::RuleSource::User,
+                pattern: "rm *".into(),
+            },
+        ] {
+            assert!(
+                race(&gate, bash.as_ref(), &input, &reason).await.is_none(),
+                "{reason:?} 触发的询问被分类器放行了 —— 这是 Auto 模式的安全边界"
+            );
+        }
+    }
+
+    /// 例行同意请求可以被判危放行 —— 这是 Auto 模式存在的意义。
+    /// 一个什么都放不过的 Auto 模式等于 Default，白加一档。
+    #[tokio::test]
+    async fn 例行询问可以被判危放行() {
+        let s = Session::new(SessionId::from_raw("s1"), std::env::temp_dir(), None);
+        let gate = gate_auto(&s).await;
+        let bash = tool_named("Bash");
+
+        let got = race(
+            &gate,
+            bash.as_ref(),
+            &serde_json::json!({ "command": "cargo check" }),
+            &DecisionReason::Consent { what: "跑一条命令".into() },
+        )
+        .await;
+
+        assert!(
+            matches!(got, Some(DecisionReason::Classifier { .. })),
+            "该被自动放行，且理由要记成 Classifier（日志和界面要解释得清是谁批的）：{got:?}"
+        );
+    }
+
+    /// 只有 Auto 模式才问分类器。别的模式下它装了也不该被咨询 ——
+    /// 用户选 Default 就是要自己看每一个。
+    #[tokio::test]
+    async fn 非_auto_模式不咨询分类器() {
+        let s = Session::new(SessionId::from_raw("s1"), std::env::temp_dir(), None);
+        let gate = gate_auto(&s).await;
+        let bash = tool_named("Bash");
+        let input = serde_json::json!({ "command": "cargo check" });
+        let consent = DecisionReason::Consent { what: "x".into() };
+
+        for mode in [
+            PermissionMode::Default,
+            PermissionMode::AcceptEdits,
+            PermissionMode::Plan,
+        ] {
+            s.set_mode(mode).await;
+            assert!(
+                race(&gate, bash.as_ref(), &input, &consent).await.is_none(),
+                "{mode:?} 下不该咨询分类器"
+            );
+        }
+    }
+
+    /// 没覆盖 classifier_input 的工具等于"不参与自动判定"，照常问人。
+    ///
+    /// 这条是 fail-closed 的那一侧：新加的工具默认不被自动放行，要放行
+    /// 得由工具作者显式交出判定文本。
+    #[tokio::test]
+    async fn 没给判定文本的工具不被自动放行() {
+        let s = Session::new(SessionId::from_raw("s1"), std::env::temp_dir(), None);
+        let gate = gate_auto(&s).await;
+        let write = tool_named("Write");
+        assert!(
+            write.classifier_input(&serde_json::json!({ "path": "a.txt" })).is_none(),
+            "前提变了：Write 现在交了判定文本，这个用例要重写"
+        );
+        assert!(
+            race(
+                &gate,
+                write.as_ref(),
+                &serde_json::json!({ "path": "a.txt", "content": "x" }),
+                &DecisionReason::Consent { what: "写文件".into() },
+            )
+            .await
+            .is_none(),
+            "工具没交判定文本就不该被自动放行"
+        );
     }
 
     fn tool_named(name: &str) -> Arc<dyn Tool> {
@@ -2755,6 +3446,7 @@ mod tests {
             cwd: s.cwd.clone(),
             ask_timeout: Duration::from_secs(60),
             hooks: Arc::new(crate::hooks::HookEngine::empty()),
+            classifier: Arc::new(riot_protocol::permission::NoClassifier),
         });
 
         let scheduler = s.build_scheduler(
@@ -2774,14 +3466,68 @@ mod tests {
             TurnCapabilities {
                 web: Arc::new(riot_protocol::web::NoWeb),
                 vision: Arc::new(riot_protocol::vision::NoVision),
+                subagent_cheap: None,
+                classifier: Arc::new(riot_protocol::permission::NoClassifier),
                 extra_tools: Vec::new(),
             },
             gate,
+            None,
             None,
         );
 
         assert!(scheduler.has_gate(), "没装权限闸，所有操作都会静默放行");
         assert!(scheduler.has_web(), "没装联网能力，联网工具会一律报未配置");
+    }
+
+    /// 模型开口之前就该知道自己在哪个分支。
+    ///
+    /// 不给的话它有两条路，都不好：先花一整轮跑 `git status`，或者干脆
+    /// 不查 —— 后者更常见，表现是它在一个有未提交改动的工作区里
+    /// checkout，或者若无其事地往 main 上提交。
+    #[tokio::test]
+    async fn 首条消息带上_git_快照() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("仓库根")
+            .to_path_buf();
+        let s = Session::new(SessionId::from_raw("s1"), repo, None);
+
+        let env_text = s
+            .first_message_prelude()
+            .await
+            .into_iter()
+            .find_map(|c| match c {
+                UserContent::Attachment(Attachment::Environment { text }) => Some(text),
+                _ => None,
+            });
+
+        let Some(text) = env_text else {
+            // 源码树不是 git 仓库（打包场景）时没得注，这条不算失败。
+            eprintln!("这里不是 git 仓库，跳过");
+            return;
+        };
+        assert!(text.contains("Git 仓库"), "{text}");
+        assert!(
+            text.contains("当前分支：") || text.contains("detached"),
+            "总得说清在不在分支上：{text}"
+        );
+    }
+
+    /// 不是 git 仓库时不该硬塞一段空快照进去。
+    #[tokio::test]
+    async fn 非仓库目录不注入_git() {
+        let dir = std::env::temp_dir().join(format!("riot-nogit-sess-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("建目录");
+        let s = Session::new(SessionId::from_raw("s1"), dir.clone(), None);
+
+        assert!(
+            !s.first_message_prelude().await.iter().any(|c| matches!(
+                c,
+                UserContent::Attachment(Attachment::Environment { .. })
+            )),
+            "非 git 目录不该有环境快照"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -2802,6 +3548,8 @@ mod tests {
         let caps = TurnCapabilities {
             web: Arc::new(riot_protocol::web::NoWeb),
             vision: Arc::new(riot_protocol::vision::NoVision),
+            subagent_cheap: None,
+            classifier: Arc::new(riot_protocol::permission::NoClassifier),
             extra_tools: Vec::new(),
         };
         let input = TurnInput { text: "hi".into(), ..Default::default() };
@@ -2809,6 +3557,7 @@ mod tests {
             ask_timeout_secs: 60,
             max_turns: 48,
             compact_threshold_tokens: 100_000,
+            sandbox: crate::config::SandboxMode::Off,
         };
         let _ = s.run_turn(input, model, caps, ch, limits).await;
         assert!(s.running.lock().await.is_none(), "失败路径没有清理 running");
@@ -2830,6 +3579,8 @@ mod tests {
         TurnCapabilities {
             web: Arc::new(riot_protocol::web::NoWeb),
             vision: Arc::new(riot_protocol::vision::NoVision),
+            subagent_cheap: None,
+            classifier: Arc::new(riot_protocol::permission::NoClassifier),
             extra_tools: Vec::new(),
         }
     }
@@ -2839,6 +3590,9 @@ mod tests {
             ask_timeout_secs: 60,
             max_turns: 48,
             compact_threshold_tokens: 100_000,
+            // 测试跑真命令，沙箱会把临时目录外的写拦掉 —— 那是另一组
+            // 用例的事（riot-runtime::sandbox），这里只测调度和权限。
+            sandbox: crate::config::SandboxMode::Off,
         }
     }
 

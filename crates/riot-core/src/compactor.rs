@@ -217,6 +217,8 @@ fn result_bytes(c: &ToolResultContent) -> usize {
         // 模型只收到转述文字（provider 不发图），上下文占用按文字算。
         // 图片的 base64 只活在本地 transcript 里，不占模型预算。
         ToolResultContent::DescribedImage { text, .. } => text.len(),
+        // 模型两路都收:图（data）+ 编号清单（text），都算进预算。
+        ToolResultContent::MarkedImage { data, text, .. } => data.len() + text.len(),
         ToolResultContent::Cleared => 0,
     }
 }

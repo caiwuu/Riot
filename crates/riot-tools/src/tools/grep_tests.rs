@@ -60,6 +60,7 @@ fn harness() -> Harness {
         proc: Arc::new(FakeProc::new()),
         web: Arc::new(riot_protocol::web::NoWeb),
         browser: Arc::new(riot_protocol::browser::NoBrowser),
+        terminal: Arc::new(riot_protocol::terminal::NoTerminal),
         vision: Arc::new(riot_protocol::vision::NoVision),
         clock: Arc::new(crate::testing::FixedClock::default()),
     };
@@ -278,6 +279,87 @@ async fn 结果不多时不加提示() {
     let h = harness();
     let o = grep(&h, serde_json::json!({ "pattern": "let x" })).await;
     assert!(!text_of(&o).contains("system-reminder"), "别加多余的噪音");
+}
+
+// ── 不完整的结果必须说出来 ────────────────────────────
+//
+// 这三条守的是同一件事：模型不能把一份不完整的搜索结果当成全部。
+// 错了不报错、不崩，只是结论悄悄变错 —— 这个仓库里最难查的一类。
+
+/// 搜索没走完而且一条都没找到时，**不能**说"没有找到"。
+///
+/// 那是把"没搜"说成"不存在"，而模型会拿它当结论：一次超时的搜索会变成
+/// "这个仓库里没有这个东西"，然后它据此往下做决定。
+#[tokio::test]
+async fn 没走完且零结果时不能说没找到() {
+    let h = harness();
+    // 取消会让遍历立刻收工（cut_short = true，0 个文件）。
+    h.ctx.cancel.cancel();
+
+    let o = grep(&h, serde_json::json!({ "pattern": "foo" })).await;
+    let t = text_of(&o);
+    assert!(!is_ok(&o), "没走完的搜索不该报成一个干净的「没找到」：{t}");
+    assert!(t.contains("没走完"), "要说清是没搜完：{t}");
+    assert!(
+        !t.contains("没有找到匹配"),
+        "这句话会被模型当成「不存在」的证据：{t}"
+    );
+    assert!(t.contains("缩小范围"), "要给下一步：{t}");
+}
+
+/// 有结果但没走完时，正文里必须带那句提示。
+///
+/// 直接测纯函数：把 cut_short 走通整条管线要精确控制时钟和遍历顺序，
+/// 那样的用例脆得多，而这里要断言的东西就在这一个函数里。
+#[test]
+fn 没走完的结果要带提示() {
+    use super::grep::testing::render_body;
+
+    let complete = render_body("src/a.rs:1:foo", None, false);
+    assert!(
+        !complete.contains("没走完"),
+        "走完了就别加这句噪音：{complete}"
+    );
+
+    let partial = render_body("src/a.rs:1:foo", None, true);
+    assert!(partial.contains("没走完"), "没走完必须说出来：{partial}");
+    assert!(partial.contains("src/a.rs:1:foo"), "已有结果照样要给：{partial}");
+}
+
+/// 截断提示和"没走完"提示是两件事，可以同时出现。
+#[test]
+fn 截断和没走完可以同时提示() {
+    let body = super::grep::testing::render_body(
+        "a:1:x",
+        Some("共 99 条结果，这里显示前 1 条。"),
+        true,
+    );
+    assert!(body.contains("共 99 条结果"), "{body}");
+    assert!(body.contains("没走完"), "{body}");
+}
+
+// ── 围栏 ──────────────────────────────────────────────
+
+/// `path` 必须过围栏。
+///
+/// 这条此前没有任何测试守着 —— 变异测试把它标出来了。把 `path::resolve`
+/// 换成 `PathBuf::from` 全套测试照样绿，而后果是 `path: "/etc"` 就能
+/// 翻工作目录外面的东西。
+#[tokio::test]
+async fn 搜索根越界要被拒() {
+    let h = harness();
+    for escape in ["/etc", "..", "../..", "/"] {
+        let o = grep(
+            &h,
+            serde_json::json!({ "pattern": "foo", "path": escape }),
+        )
+        .await;
+        assert!(
+            !is_ok(&o),
+            "`path: {escape}` 越出了工作目录，不该被接受：{}",
+            text_of(&o)
+        );
+    }
 }
 
 #[tokio::test]

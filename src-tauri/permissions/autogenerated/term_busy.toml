@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-term-busy"
+description = "Enables the term_busy command without any pre-configured scope."
+commands.allow = ["term_busy"]
+
+[[permission]]
+identifier = "deny-term-busy"
+description = "Denies the term_busy command without any pre-configured scope."
+commands.deny = ["term_busy"]

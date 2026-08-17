@@ -74,6 +74,16 @@ pub struct TranscriptMeta {
     pub created_at_ms: u64,
 }
 
+/// 一次读盘的拆分结果：模型看 `live`，界面看 `archived` + 分割线 + `live`。
+#[derive(Debug, Clone, Default)]
+pub struct LoadedTranscript {
+    pub meta: Option<TranscriptMeta>,
+    /// 最后一条压缩边界之后的活历史。
+    pub live: Vec<Message>,
+    /// 边界之前的消息。文件里还在，只是不再进模型上下文。
+    pub archived: Vec<Message>,
+}
+
 /// 扫描一个 transcript 得到的摘要。索引重建用。
 #[derive(Debug, Clone)]
 pub struct ScannedTranscript {
@@ -120,18 +130,29 @@ impl Transcripts {
     /// 的语义。跳过要留日志：静默丢历史和静默丢配置一样，是最难排查的
     /// 一类"我的东西没了"。
     pub async fn load(&self, id: &SessionId) -> (Option<TranscriptMeta>, Vec<Message>) {
+        let parts = self.load_parts(id).await;
+        (parts.meta, parts.live)
+    }
+
+    /// 一次读盘拆出活历史和压缩前的归档。
+    ///
+    /// 模型只看 `live`（边界之后）。界面要画完整对话流，归档还在文件里，
+    /// 丢掉的话用户切回会话只能看到一条"已压缩"，以为聊天记录没了。
+    pub async fn load_parts(&self, id: &SessionId) -> LoadedTranscript {
+        let empty = LoadedTranscript { meta: None, live: Vec::new(), archived: Vec::new() };
         let path = self.path_of(id);
         let bytes = match tokio::fs::read(&path).await {
             Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (None, Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return empty,
             Err(e) => {
                 tracing::error!(error = %e, path = %path.display(), "transcript 读不出来，本次按空历史处理");
-                return (None, Vec::new());
+                return empty;
             }
         };
 
         let mut meta = None;
-        let mut messages = Vec::new();
+        let mut live = Vec::new();
+        let mut archived = Vec::new();
         let mut skipped = 0usize;
         for (i, line) in bytes.split(|&b| b == b'\n').enumerate() {
             if line.is_empty() {
@@ -145,12 +166,10 @@ impl Transcripts {
                         meta = Some(m);
                     }
                 }
-                Ok(Record::Message { message }) => messages.push(*message),
+                Ok(Record::Message { message }) => live.push(*message),
                 Ok(Record::CompactBoundary { .. }) => {
-                    // 活历史从边界重新开始。之前的消息已经被总结吞并 ——
-                    // 一起加载的话，总结 + 原文双份内容会把上下文撑得比
-                    // 压缩前还大。
-                    messages.clear();
+                    // 活历史从边界重新开始。归档留下给界面画分割线上面的记录。
+                    archived.append(&mut live);
                 }
                 Err(e) => {
                     skipped += 1;
@@ -165,7 +184,7 @@ impl Transcripts {
                 "transcript 里有 {skipped} 行读不懂，已跳过（多半是上次崩溃留下的半行）"
             );
         }
-        (meta, messages)
+        LoadedTranscript { meta, live, archived }
     }
 
     /// 扫描目录里所有 transcript 的首行元数据和第一句用户输入。
@@ -684,6 +703,14 @@ mod tests {
             vec![user("m3", "带总结的续接消息"), user("m4", "压缩后的新对话")],
             "边界之前的消息不进活历史（文件里仍在，可审计）"
         );
+
+        let parts = store.load_parts(&SessionId::from_raw("s1")).await;
+        assert_eq!(
+            parts.archived,
+            vec![user("m1", "压缩前的旧话"), user("m2", "也被总结吞掉")],
+            "界面要能画出压缩前的记录"
+        );
+        assert_eq!(parts.live, msgs);
 
         // 原文还在盘上 —— 边界丢的是加载，不是数据
         let raw = std::fs::read_to_string(d.path().join("s1.jsonl")).expect("读原文");

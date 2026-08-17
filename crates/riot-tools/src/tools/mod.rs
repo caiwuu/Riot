@@ -6,7 +6,9 @@
 //! - [`path`] —— 路径解析与围栏复查。执行时再查一遍防 TOCTOU。
 //! - [`precondition`] —— 先读后写协议。
 
+pub mod ask;
 pub mod browser;
+pub mod diagnostics;
 pub mod bash;
 pub mod edit;
 pub mod glob;
@@ -27,6 +29,7 @@ pub mod todo;
 pub mod tool_search;
 pub mod text;
 pub mod web;
+pub mod terminal;
 pub mod write;
 
 pub use bash::Bash;
@@ -68,6 +71,13 @@ pub fn builtin() -> Vec<Arc<dyn Tool>> {
     tools.extend(browser::tools());
     // 追加在末尾（prompt cache 前缀稳定性，见函数注释）。
     tools.push(Arc::new(todo::TodoWrite));
+    // 长期服务的读与停。起服务在 Bash 的 background 参数上 —— 那是同一件事
+    // 的入口，不该再多一个工具。
+    tools.push(Arc::new(terminal::TerminalOutput));
+    tools.push(Arc::new(terminal::TerminalKill));
+    // 让模型能把决定交回给用户。放末尾同上：追加不动前缀。
+    tools.push(Arc::new(ask::AskUserQuestion));
+    tools.push(Arc::new(diagnostics::Diagnostics));
     tools
 }
 

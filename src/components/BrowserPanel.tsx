@@ -42,6 +42,11 @@ export function BrowserPanel({
   const [panel, setPanel] = useState<PanelState>(EMPTY_PANEL);
   const [address, setAddress] = useState("");
   const [busy, setBusy] = useState(false);
+  /** 导航失败给一行原因 —— 之前 go() 无 catch，慢站/打不开时画面停在原地，
+   *  用户分不清"在加载/挂了/没点上"。 */
+  const [navError, setNavError] = useState("");
+  /** IME 落点区是否聚焦。聚焦时给画面区描边，"键盘现在打进页面"才有视觉表达。 */
+  const [imeFocused, setImeFocused] = useState(false);
   const viewRef = useRef<HTMLDivElement>(null);
   const imeRef = useRef<HTMLTextAreaElement>(null);
   /** 上一次点击的位置。输入法的候选窗口贴着它弹。 */
@@ -70,7 +75,9 @@ export function BrowserPanel({
     const sub = openBrowser(sessionId, setFrame, apply);
     return () => {
       sub.unsubscribe();
-      // 让宿主也停下来。只取消本地订阅的话，另一头还在编码 JPEG。
+      // 只停宿主的 JPEG 编码 —— 没人看的时候继续推是白烧 CPU。
+      // 浏览器进程和标签页都留着：收起面板 ≠ 关浏览器，切去看一眼
+      // 改动再切回来，页面还是原样。
       void closeBrowser(sessionId);
     };
   }, [sessionId, apply]);
@@ -220,8 +227,12 @@ export function BrowserPanel({
     // 是真的落在哪儿（重定向之后的地址、跳转到的登录页）。
     setAddress(url);
     setBusy(true);
+    setNavError("");
     try {
       await browserNavigate(sessionId, url);
+    } catch (e) {
+      // DNS 错、拒绝连接 —— 画面停在原地，不给一行原因用户会以为是自己的问题。
+      setNavError(`打不开：${String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -280,11 +291,19 @@ export function BrowserPanel({
             <span
               className="browser-tab-close"
               role="button"
+              tabIndex={0}
               aria-label="关闭标签页"
               onClick={(e) => {
                 // 不冒泡给外层的"切到这一页" —— 否则关掉的同时又切了过去。
                 e.stopPropagation();
                 void browserCloseTab(sessionId, t.id).then(closed).catch(() => {});
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  void browserCloseTab(sessionId, t.id).then(closed).catch(() => {});
+                }
               }}
             >
               <CloseIcon />
@@ -300,7 +319,8 @@ export function BrowserPanel({
           <PlusIcon />
         </button>
         <span className="browser-tabs-spacer" />
-        <button className="icon" onClick={onClose} title="关闭面板">
+        {/* 收起 ≠ 关闭：浏览器进程和标签页都留着，再点开还是原样 */}
+        <button className="icon" onClick={onClose} title="收起面板（页面保留）">
           <PanelIcon />
         </button>
       </div>
@@ -331,10 +351,13 @@ export function BrowserPanel({
           <ReloadIcon />
         </button>
         <div className="browser-address">
+          {/* 加载中转个圈 —— 慢站上除此之外画面没有任何"在加载"的迹象 */}
+          {busy ? <span className="browser-spinner" aria-label="加载中" /> : null}
           <input
             ref={addressRef}
             value={address}
             onChange={(e) => setAddress(e.target.value)}
+            onFocus={(e) => e.currentTarget.select()}
             onKeyDown={(e) => {
               // 回车之后把焦点交出去。地址栏这才重新开始跟着页面走，而键盘
               // 也回到页面上 —— 打完地址接着就能在页面里打字。
@@ -342,33 +365,66 @@ export function BrowserPanel({
                 void go();
                 e.currentTarget.blur();
               }
-              // Esc 放弃这次编辑。失焦之后下一次同步会把真实地址填回来。
-              if (e.key === "Escape") e.currentTarget.blur();
+              // Esc 放弃这次编辑：立即把真实地址填回来（不等下一拍轮询），
+              // 再失焦 —— 否则这一秒里地址栏显示的是打了一半的"假地址"。
+              if (e.key === "Escape") {
+                setAddress(active?.url ?? "");
+                e.currentTarget.blur();
+              }
             }}
-            placeholder="输入 URL"
+            // 启动期导航会静默失败 —— 与其让人输完地址没反应，不如先禁掉
+            disabled={starting}
+            placeholder={starting ? "浏览器启动中…" : "输入 URL"}
+            aria-label="地址栏"
             spellCheck={false}
           />
           <button
             className="icon"
             onClick={() => void go()}
-            disabled={busy || !address.trim()}
+            disabled={starting || busy || !address.trim()}
             title="打开"
           >
             <OpenIcon />
           </button>
         </div>
       </div>
+      {navError ? <div className="browser-nav-error">{navError}</div> : null}
 
       <div
-        className="browser-view"
+        className={imeFocused ? "browser-view focused" : "browser-view"}
         ref={viewRef}
-        onClick={(e) => {
+        onMouseDown={(e) => {
+          // 转发原生 down（带 button 和 clickCount）而不是等 onClick 合成 ——
+          // 页面里选字、拖滑块、双击选词、三击选段全靠这条真实的按下序列。
           const p = toPage(e);
-          if (p) send({ kind: "click", ...p, button: "left" });
+          if (p) {
+            send({
+              kind: "down",
+              ...p,
+              button: mouseButton(e.button),
+              clickCount: e.detail || 1,
+            });
+          }
           // 焦点交给下面那个隐藏的 textarea，键盘的事都由它接。
           const r = viewRef.current?.getBoundingClientRect();
           if (r) setCaret({ x: e.clientX - r.left, y: e.clientY - r.top });
           imeRef.current?.focus();
+        }}
+        onMouseUp={(e) => {
+          const p = toPage(e);
+          if (p) {
+            send({
+              kind: "up",
+              ...p,
+              button: mouseButton(e.button),
+              clickCount: e.detail || 1,
+            });
+          }
+        }}
+        onContextMenu={(e) => {
+          // 右键已经作为 down/up 转发给页面了。这里拦掉外壳 webview 自己的
+          // 上下文菜单，否则会弹出 Tauri 的菜单穿帮。
+          e.preventDefault();
         }}
         onMouseMove={(e) => {
           const p = toPage(e);
@@ -394,11 +450,22 @@ export function BrowserPanel({
         <textarea
           className="browser-ime"
           ref={imeRef}
+          aria-label="页面键盘输入"
           style={{ left: caret.x, top: caret.y }}
+          onFocus={() => setImeFocused(true)}
+          onBlur={() => setImeFocused(false)}
           // 输入法自己有候选和纠错，浏览器再插一手只会打架。
           spellCheck={false}
           autoCapitalize="off"
           autoCorrect="off"
+          onPaste={(e) => {
+            // 粘贴不能走 onInput：InputEvent.data 对粘贴常是 null，
+            // 整段剪贴板内容会一声不响地丢掉。这里显式读出来发走，
+            // 再拦掉默认行为，防止 onInput 那条路再来一遍造成重复。
+            const text = e.clipboardData.getData("text/plain");
+            e.preventDefault();
+            if (text) send({ kind: "text", text });
+          }}
           onInput={(e) => {
             const ev = e.nativeEvent as InputEvent;
             // 组字中间态交给 composition 那条路。这里也收的话，一个字会
@@ -450,7 +517,7 @@ export function BrowserPanel({
               <>
                 <GlobeIcon size={30} />
                 <p className="browser-empty-title">开始浏览</p>
-                <p className="hint">输入网址打开页面。这是远程渲染的画面，和模型看到的是同一帧。</p>
+                <p className="hint">输入网址，与模型同看。</p>
               </>
             ) : (
               <p className="hint">浏览器启动中…</p>
@@ -481,6 +548,11 @@ const MIN_VIEWPORT = 80;
 
 /** 尺寸稳定多久之后才同步。拖动过程中每一帧都发的话，页面会一直在重排。 */
 const RESIZE_QUIET_MS = 120;
+
+/** DOM 的 MouseEvent.button（0/1/2）→ CDP 认的名字。 */
+function mouseButton(b: number): string {
+  return b === 2 ? "right" : b === 1 ? "middle" : "left";
+}
 
 /** 交给宿主处理的功能键。列表外的组合键留给系统。 */
 const FUNCTION_KEYS = new Set([

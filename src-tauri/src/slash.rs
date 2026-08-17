@@ -59,8 +59,28 @@ pub struct SlashCommand {
     /// 一份几十 KB 的模板过 IPC 是白花的钱。
     #[serde(skip)]
     pub body: String,
-    /// `builtin` / `global` / `project`。
+    /// `builtin` / `project` / `global` / `skill`。
     pub source: String,
+    /// 用户敲 `/名字` 时，是否就地展开成提示词。
+    ///
+    /// 规则是「模型加载不了的才展开」：
+    ///
+    /// - 命令 → true。它本来就是提示词模板，没有别的加载路径。
+    /// - 普通技能 → **false**。把名字发给模型，由它用 Skill 工具按需加载
+    ///   正文 —— 渐进披露的意义就在这里，几 KB 正文不该塞进用户可见的消息。
+    /// - 写了 `disable-model-invocation` 的技能 → true。模型的清单里没有它，
+    ///   不展开的话它谁都跑不了。
+    pub expand_inline: bool,
+    /// 技能自己的层级：`builtin` / `global` / `project`。只有 `source == "skill"` 才有。
+    ///
+    /// 需要它是因为光说「技能」会在设置页造成两个页面**两个标签**：
+    /// Skills 页把 `extend-riot` 标成「内置」，命令页标成「技能」，同一个东西
+    /// 说两套话。带上层级之后两边的词汇是同一套（「内置技能」/「内置」）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_source: Option<String>,
+    /// 技能目录，用来展开 `${SKILL_DIR}`。只有技能才有。
+    #[serde(skip)]
+    pub dir: Option<PathBuf>,
 }
 
 /// 全局命令目录。
@@ -86,7 +106,50 @@ pub fn discover(project_root: Option<&Path>) -> Vec<SlashCommand> {
         scan(&project_dir(root), "project", &mut out);
     }
     scan(&global_dir(), "global", &mut out);
+    // 技能（含内置技能）排最后 = 优先级最低。没有活跃项目时也要走这条：
+    // 内置技能不依赖项目，设置页里该看得到。
+    add_skills(project_root, &mut out);
     out
+}
+
+/// 把技能也放进 `/` 菜单。
+///
+/// 技能和命令本来是两套东西：技能给模型按需加载，命令给用户敲。但用户
+/// 侧的心智模型只有一个 —— 敲 `/` 看有什么可用。同一份 `SKILL.md` 既然
+/// 已经写清了"什么时候、怎么做"，没有理由让用户为了自己调它再抄一份
+/// `commands/verify.md`。
+///
+/// 排在最后 = 优先级最低。同名时命令赢：命令是专门为 `/` 写的，技能只是
+/// 顺带可调用；反过来的话，用户写的命令会被一个同名技能悄悄顶掉。
+fn add_skills(root: Option<&Path>, out: &mut Vec<SlashCommand>) {
+    let found = crate::skills::discover_opt(root);
+    let skills_global = crate::skills::global_dir();
+    for card in found.cards {
+        if out.iter().any(|c| c.name == card.name) {
+            tracing::debug!(name = %card.name, "已有同名斜杠命令，技能不进菜单");
+            continue;
+        }
+        // 模型加载不了的才就地展开，见 `expand_inline` 的说明。
+        let expand_inline = found.slash_only.contains(&card.name);
+        // 内置的先判：它的 dir 是空路径，落到前缀判断会被误认成 project。
+        let skill_source = if found.builtin.contains(&card.name) {
+            "builtin"
+        } else if card.dir.starts_with(&skills_global) {
+            "global"
+        } else {
+            "project"
+        };
+        out.push(SlashCommand {
+            name: card.name,
+            description: card.description,
+            argument_hint: None,
+            body: card.body,
+            source: "skill".to_owned(),
+            expand_inline,
+            skill_source: Some(skill_source.to_owned()),
+            dir: Some(card.dir),
+        });
+    }
 }
 
 /// 展开一条命令：`/name args` → 发给模型的 prompt。
@@ -95,7 +158,16 @@ pub fn discover(project_root: Option<&Path>) -> Vec<SlashCommand> {
 /// 没有模板可展开）。
 pub fn expand(project_root: Option<&Path>, name: &str, args: &str) -> Option<String> {
     let cmd = discover(project_root).into_iter().find(|c| c.name == name)?;
-    (!cmd.body.is_empty()).then(|| substitute(&cmd.body, args))
+    if cmd.body.is_empty() {
+        return None;
+    }
+    let mut text = substitute(&cmd.body, args);
+    // 技能正文里可以写 ${SKILL_DIR}（模型调用那条路会替换它）。走 `/`
+    // 这条路时也得替换，否则用户会在提示词里看到一个字面量占位符。
+    if let Some(dir) = cmd.dir.as_deref() {
+        text = text.replace("${SKILL_DIR}", &dir.display().to_string());
+    }
+    Some(text)
 }
 
 /// 参数替换（规则对齐 CC）：
@@ -183,6 +255,10 @@ fn builtin() -> Vec<SlashCommand> {
         argument_hint: None,
         body: String::new(),
         source: "builtin".into(),
+        // 内置命令由前端按名字执行，没有模板可展开。
+        expand_inline: false,
+        skill_source: None,
+        dir: None,
     }]
 }
 
@@ -214,6 +290,10 @@ fn scan(dir: &Path, source: &str, out: &mut Vec<SlashCommand>) {
                 argument_hint,
                 body,
                 source: source.into(),
+                // 命令就是提示词模板，没有别的加载路径。
+                expand_inline: true,
+                skill_source: None,
+                dir: None,
             }),
             Err(reason) => {
                 tracing::warn!(path = %path.display(), reason = %reason, "命令解析失败，跳过");
@@ -304,6 +384,155 @@ mod tests {
     #[test]
     fn 空正文报错() {
         assert!(parse("---\ndescription: x\n---\n\n").is_err());
+    }
+
+    /// 技能要出现在 `/` 菜单里，而且 `${SKILL_DIR}` 要被替换掉。
+    ///
+    /// 不替换的话用户在提示词里看到的是一个字面量占位符 —— 模型收到它只会
+    /// 困惑，而这个 bug 在模型调用那条路上不存在（那边替换了），所以很容易
+    /// 只修一半。
+    #[test]
+    fn 技能能当斜杠命令调用() {
+        let t = tempfile::tempdir().expect("临时目录");
+        let root = t.path();
+        let dir = root.join(".riot/skills/verify");
+        std::fs::create_dir_all(&dir).expect("建目录");
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: verify\ndescription: 跑验证\n---\n按 ${SKILL_DIR} 里的清单跑，参数：$ARGUMENTS\n",
+        )
+        .expect("写技能");
+
+        let list = discover(Some(root));
+        let found = list.iter().find(|c| c.name == "verify").expect("技能该在 / 菜单里");
+        assert_eq!(found.source, "skill", "来源要标出来，用户得知道这是技能");
+
+        let text = expand(Some(root), "verify", "只跑 clippy").expect("该展开");
+        assert!(text.contains("只跑 clippy"), "$ARGUMENTS 要替换：{text}");
+        assert!(!text.contains("${SKILL_DIR}"), "占位符不能漏到提示词里：{text}");
+        assert!(text.contains("verify"), "SKILL_DIR 该指向技能目录：{text}");
+    }
+
+    /// 「模型加载不了的才就地展开」这条规则。
+    ///
+    /// 两头都得对：普通技能展开了，就把几 KB 正文塞进了用户可见的消息，
+    /// 渐进披露白做；而 `disable-model-invocation` 的技能不展开，就成了一个
+    /// 谁都跑不了的死技能 —— 模型的清单里没有它，用户敲了也只是把名字发出去。
+    #[test]
+    fn 只有模型加载不了的技能才就地展开() {
+        let t = tempfile::tempdir().expect("临时目录");
+        let root = t.path();
+        let base = root.join(".riot/skills");
+
+        for (name, front) in [
+            ("normal", "---\nname: normal\ndescription: d\n---\n正文\n"),
+            (
+                "handsoff",
+                "---\nname: handsoff\ndescription: d\ndisable-model-invocation: true\n---\n正文\n",
+            ),
+        ] {
+            let dir = base.join(name);
+            std::fs::create_dir_all(&dir).expect("建目录");
+            std::fs::write(dir.join("SKILL.md"), front).expect("写技能");
+        }
+
+        let list = discover(Some(root));
+        let normal = list.iter().find(|c| c.name == "normal").expect("有");
+        let handsoff = list.iter().find(|c| c.name == "handsoff").expect("有");
+
+        assert!(
+            !normal.expand_inline,
+            "普通技能不该就地展开 —— 该由模型用 Skill 工具按需加载"
+        );
+        assert!(
+            handsoff.expand_inline,
+            "模型调不了的技能必须就地展开，否则谁都跑不了它"
+        );
+    }
+
+    /// 同名时命令赢。反过来的话，用户亲手写的命令会被一个同名技能悄悄顶掉。
+    #[test]
+    fn 同名时斜杠命令压过技能() {
+        let t = tempfile::tempdir().expect("临时目录");
+        let root = t.path();
+
+        let sk = root.join(".riot/skills/dup");
+        std::fs::create_dir_all(&sk).expect("建目录");
+        std::fs::write(sk.join("SKILL.md"), "---\nname: dup\ndescription: 技能版\n---\n技能正文\n")
+            .expect("写技能");
+
+        let cmd = root.join(".riot/commands");
+        std::fs::create_dir_all(&cmd).expect("建目录");
+        std::fs::write(cmd.join("dup.md"), "---\ndescription: 命令版\n---\n命令正文\n")
+            .expect("写命令");
+
+        let list = discover(Some(root));
+        let hits: Vec<&SlashCommand> = list.iter().filter(|c| c.name == "dup").collect();
+        assert_eq!(hits.len(), 1, "不该出现两条同名");
+        assert_eq!(hits[0].description, "命令版", "命令必须赢");
+    }
+
+    /// 内置技能要出现在 `/` 菜单里，而且不依赖有没有活跃项目。
+    ///
+    /// 内置技能和内置命令走的是同一条管道：写一个内置技能就等于多了一条
+    /// `/名字`。所以「内置命令」不需要另一套机制。
+    #[test]
+    fn 内置技能也是斜杠命令() {
+        let list = discover(None);
+        assert!(
+            list.iter().any(|c| c.source == "skill"),
+            "没有活跃项目时也该列出内置技能，实际：{:?}",
+            list.iter().map(|c| (&c.name, &c.source)).collect::<Vec<_>>()
+        );
+    }
+
+    /// 技能在 `/` 菜单里要带上自己的层级。
+    ///
+    /// 只报 `source: "skill"` 的话，同一个 extend-riot 在 Skills 页显示
+    /// 「内置」、在命令页显示「技能」—— 同一个东西两套说法，用户会问
+    /// 「显示技能什么意思」（真发生过）。两边得用同一套词。
+    #[test]
+    fn 技能在命令清单里带着自己的层级() {
+        let t = tempfile::tempdir().expect("临时目录");
+        let root = t.path();
+        let dir = root.join(".riot/skills/mine");
+        std::fs::create_dir_all(&dir).expect("建目录");
+        std::fs::write(dir.join("SKILL.md"), "---\nname: mine\ndescription: d\n---\n正文\n")
+            .expect("写技能");
+
+        let list = discover(Some(root));
+
+        let mine = list.iter().find(|c| c.name == "mine").expect("项目技能该在");
+        assert_eq!(mine.source, "skill");
+        assert_eq!(mine.skill_source.as_deref(), Some("project"));
+
+        // 内置技能同理，而它的 dir 是空路径 —— 不特判会被误认成 project。
+        let builtin_skill = list
+            .iter()
+            .find(|c| c.source == "skill" && c.skill_source.as_deref() == Some("builtin"))
+            .expect("内置技能该带 builtin 层级");
+        assert!(!builtin_skill.name.is_empty());
+
+        // 命令文件和内置命令没有这个字段 —— 它们不是技能。
+        let compact = list.iter().find(|c| c.name == "compact").expect("内置命令该在");
+        assert_eq!(compact.source, "builtin");
+        assert!(compact.skill_source.is_none());
+    }
+
+    /// 内置命令不能被顶掉 —— 它们的行为要可预期。
+    #[test]
+    fn 技能顶不掉内置命令() {
+        let t = tempfile::tempdir().expect("临时目录");
+        let root = t.path();
+        let sk = root.join(".riot/skills/compact");
+        std::fs::create_dir_all(&sk).expect("建目录");
+        std::fs::write(sk.join("SKILL.md"), "---\nname: compact\ndescription: 冒名\n---\n正文\n")
+            .expect("写技能");
+
+        let list = discover(Some(root));
+        let hits: Vec<&SlashCommand> = list.iter().filter(|c| c.name == "compact").collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].source, "builtin", "内置必须赢");
     }
 
     #[test]

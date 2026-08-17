@@ -22,13 +22,17 @@ use crate::fence::Fence;
 use crate::session::Session;
 use crate::{HostError, HostResult};
 
-/// 切回一个会话时前端要的两样东西。
+/// 切回一个会话时前端要的东西。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryOut {
     pub messages: Vec<Message>,
+    /// 压缩边界之前的消息。模型看不见，界面画在分割线上面。
+    pub archived: Vec<Message>,
     /// 此刻有没有轮子在跑。决定界面显示停止键还是发送键。
     pub busy: bool,
+    /// 此刻是否在压缩。不回的话切回来只剩三个点，"正在压缩上下文"丢了。
+    pub compacting: bool,
 }
 
 /// 侧边栏需要知道的会话信息。**不含历史内容** —— 列表要快，内容按需拉。
@@ -51,10 +55,15 @@ pub struct SessionInfo {
     /// 「每次询问」，而宿主这边仍然是放行的 —— 用户以为每步都会问他，
     /// 实际全部静默放行。**权限状态的显示必须以宿主为准。**
     pub mode: riot_protocol::permission::PermissionMode,
+    /// 会话级思考策略。和 `sampling` 同理，前端刷新后靠它恢复显示。
+    pub thinking: riot_protocol::ThinkingPolicy,
     /// 会话级 Python 虚拟环境（venv 根目录）。None = 用宿主默认环境。
     pub python_venv: Option<String>,
     /// 会话级追加的系统提示词。None = 只用内置提示词。
     pub system_prompt: Option<String>,
+    /// 此刻有没有轮子在跑。侧栏靠它给后台忙碌的会话画指示点 ——
+    /// 没订阅事件的会话，前端只有这一条途径知道它在干活。
+    pub busy: bool,
 }
 
 /// 一个会话的事件出口，带上它是"第几次订阅"。
@@ -113,6 +122,9 @@ struct Inner {
     /// MCP 连接枢纽。应用级、会话共享（ARCHITECTURE.md §2.4）——
     /// 每会话各起一份的话，三个会话配三个服务器就是九个常驻子进程。
     mcp: Arc<riot_mcp::McpHub>,
+    /// 终端面板。应用级：终端跟着应用走不跟着会话走（见 term.rs），
+    /// 而模型起的服务要出现在用户眼前那一个面板里，不是各自一份。
+    terminals: crate::term::Terminals,
 }
 
 impl Inner {
@@ -131,6 +143,7 @@ impl Inner {
             seq: AtomicU64::default(),
             index_lock: Mutex::default(),
             mcp: Arc::new(riot_mcp::McpHub::new()),
+            terminals: crate::term::Terminals::default(),
         }
     }
 }
@@ -174,6 +187,7 @@ impl AppState {
                     log,
                 }),
             );
+            session.attach_terminals(inner.terminals.clone());
             map.insert(
                 p.id.clone(),
                 Registered {
@@ -286,6 +300,7 @@ impl AppState {
                 log,
             }),
         ));
+        s.attach_terminals(self.0.terminals.clone());
         if let Some(m) = default_mode {
             s.set_mode(m).await;
         }
@@ -308,8 +323,10 @@ impl AppState {
             // 从会话读回而不是直接用 default_mode：上面那个 if 是
             // Option，两边各写一遍迟早对不上。
             mode: s.mode().await,
+            thinking: riot_protocol::ThinkingPolicy::default(),
             python_venv: None,
             system_prompt: None,
+            busy: false,
         })
     }
 
@@ -333,8 +350,10 @@ impl AppState {
                 seq,
                 sampling: s.sampling().await,
                 mode: s.mode().await,
+                thinking: s.thinking().await,
                 python_venv: s.python_venv().await,
                 system_prompt: s.system_prompt_extra().await,
+                busy: s.is_running().await,
             });
         }
         out.sort_by_key(|i| i.seq);
@@ -349,11 +368,14 @@ impl AppState {
         let s = self.session(session_id).await?;
         Ok(HistoryOut {
             messages: s.history().await,
+            archived: s.ui_archive().await,
             busy: s.is_running().await,
+            compacting: s.is_compacting(),
         })
     }
 
-    /// 删除会话：中断正在跑的轮子，摘掉事件出口，**删掉磁盘上的 transcript**。
+    /// 删除会话：中断正在跑的轮子，摘掉事件出口，**删掉磁盘上的 transcript、
+    /// 基线和浏览器 profile**。
     ///
     /// 幂等 —— 删一个不存在的会话是成功，不是错误。用户连点两次删除、
     /// 或者两个窗口先后删同一个，第二次都不该弹报错。
@@ -370,7 +392,87 @@ impl AppState {
             if let Err(e) = self.0.transcripts.remove(&r.session.id).await {
                 tracing::warn!(error = %e, "transcript 删除失败，磁盘上可能留下孤儿文件");
             }
+            crate::changes::remove_baselines(&crate::changes::baselines_path(
+                &self.0.sessions_dir,
+                session_id,
+            ));
+            self.remove_browser_profile(session_id).await;
             self.persist_index().await;
+        }
+    }
+
+    /// 删掉一个会话的浏览器 profile 目录。
+    ///
+    /// `[约束]` 必须跟着会话一起删。profile 里除了 cookie 和 localStorage，
+    /// 还有 Chromium 自己塞的一堆缓存 —— 一个用过的 profile 是几十上百 MB，
+    /// 而目录名就是会话 id，会话没了就再也没有人会认领它。漏掉这一步的后果
+    /// 是缓存目录随着用过的会话数无上限增长，而用户从界面上完全看不到它。
+    ///
+    /// `[约束]` 必须在 `interrupt()` 之后。浏览器进程握着 profile 里的
+    /// SingletonLock 和一批 leveldb 文件，边写边删会留下删不干净的残骸。
+    ///
+    /// 删不掉只告警。会话在逻辑上已经删除了，为一个缓存目录把整个操作报成
+    /// 失败说不通 —— 残留的那份下次启动由 [`Self::gc_browser_profiles`] 收。
+    async fn remove_browser_profile(&self, session_id: &str) {
+        let dir = crate::config::profiles_dir(&self.0.config_path).join(session_id);
+        if !dir.is_dir() {
+            return;
+        }
+        // spawn_blocking：删的是上百 MB、几千个文件，同步做会把执行器的
+        // 一个线程按住几百毫秒。
+        let path = dir.clone();
+        let done = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&path)).await;
+        match done {
+            Ok(Ok(())) => tracing::info!(dir = %dir.display(), "已删除会话的浏览器 profile"),
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, dir = %dir.display(), "浏览器 profile 没删掉");
+            }
+            Err(e) => tracing::warn!(error = %e, "删 profile 的任务没跑完"),
+        }
+    }
+
+    /// 清掉没有会话认领的浏览器 profile 目录。
+    ///
+    /// [`Self::delete_session`] 已经会顺手删自己那份，所以这里收的是另外两类：
+    /// 旧版本留下的（那时删会话不删 profile），以及应用被强杀、删到一半的。
+    ///
+    /// `[约束]` 判定依据是**内存里的会话表**。它在 `restore_at` 之后就是索引
+    /// 的全部内容，所以这个方法只能在恢复完成之后调。拿磁盘上的 transcript
+    /// 文件当依据是不够的：一个刚建好、还没写过消息的会话在索引里但没有
+    /// transcript，照那个判会把它正在用的 profile 删掉。
+    pub async fn gc_browser_profiles(&self) {
+        let root = crate::config::profiles_dir(&self.0.config_path);
+        let live: std::collections::HashSet<String> =
+            self.0.sessions.lock().await.keys().cloned().collect();
+
+        let cleaned = tokio::task::spawn_blocking(move || {
+            let mut cleaned = Vec::new();
+            // 目录还不存在 = 一次浏览器都没用过，没什么可收的。
+            let Ok(entries) = std::fs::read_dir(&root) else {
+                return cleaned;
+            };
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if live.contains(&name) || !e.path().is_dir() {
+                    continue;
+                }
+                match std::fs::remove_dir_all(e.path()) {
+                    Ok(()) => cleaned.push(name),
+                    Err(err) => {
+                        tracing::warn!(error = %err, dir = %name, "孤儿 profile 没删掉");
+                    }
+                }
+            }
+            cleaned
+        })
+        .await;
+
+        match cleaned {
+            Ok(v) if !v.is_empty() => {
+                tracing::info!(count = v.len(), "清掉了 {} 个没人认领的浏览器 profile", v.len());
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "清理孤儿 profile 的任务没跑完"),
         }
     }
 
@@ -417,6 +519,7 @@ impl AppState {
                 sampling: s.sampling().await,
                 python_venv: s.python_venv().await,
                 system_prompt: s.system_prompt_extra().await,
+                thinking: s.thinking().await,
             });
         }
         sessions.sort_by_key(|p| p.seq);
@@ -568,20 +671,32 @@ impl AppState {
         for p in &skills.problems {
             tracing::warn!(path = %p.path.display(), reason = %p.reason, "有技能没能加载");
         }
-        if !skills.cards.is_empty() {
+        // 只把模型能调的那些给 Skill 工具。写了 disable-model-invocation 的
+        // 只出现在 `/` 菜单里 —— 拿全量的话那个开关就是骗人的。
+        let model_cards = skills.model_cards();
+        if !model_cards.is_empty() {
             // 没有技能就不装 Skill 工具 —— 一个"可用技能：（无）"的工具
             // 描述是每轮都付的上下文税，还会引诱模型去调它。
-            extra_tools.push(Arc::new(riot_tools::tools::skill::SkillTool::new(skills.cards)));
+            extra_tools.push(Arc::new(riot_tools::tools::skill::SkillTool::new(model_cards)));
         }
         let caps = crate::session::TurnCapabilities {
             web: Arc::new(crate::web::HostWeb::from_config(&config)),
             vision: Arc::new(crate::vision::HostVision::from_config(&config)),
+            subagent_cheap: crate::subagent::CheapModel::from_config(&config),
+            // 判危分类器同理每轮现装。装不出来（没配便宜档）就给占位实现 ——
+            // Auto 模式于是退化成 Default，照常弹窗，不会静默放行。
+            classifier: crate::classifier::HostClassifier::from_config(&config).map_or_else(
+                || Arc::new(riot_protocol::permission::NoClassifier)
+                    as Arc<dyn riot_protocol::permission::SafetyClassifier>,
+                |c| Arc::new(c) as Arc<dyn riot_protocol::permission::SafetyClassifier>,
+            ),
             extra_tools,
         };
         let limits = crate::session::TurnLimits {
             ask_timeout_secs: config.ask_timeout_secs,
             max_turns: config.max_turns,
             compact_threshold_tokens: config.compact_threshold_tokens,
+            sandbox: config.sandbox,
         };
 
         // 第一句话定下自动标题，立刻落索引 —— 重启后侧边栏就靠它显示名字。
@@ -658,9 +773,13 @@ impl AppState {
             }))
     }
 
-    pub async fn interrupt(&self, session_id: &str) -> HostResult<()> {
-        self.session(session_id).await?.interrupt().await;
-        Ok(())
+    pub async fn interrupt(&self, session_id: &str) -> HostResult<bool> {
+        Ok(self.session(session_id).await?.interrupt().await)
+    }
+
+    /// 本会话改了哪些文件、哪些行。给 review 视图。
+    pub async fn changes(&self, session_id: &str) -> HostResult<Vec<crate::changes::FileChange>> {
+        Ok(self.session(session_id).await?.changes().await)
     }
 
     pub async fn set_mode(&self, session_id: &str, mode: PermissionMode) -> HostResult<()> {
@@ -689,6 +808,33 @@ impl AppState {
         Ok(())
     }
 
+    /// 设置会话级思考策略。下一轮生效。
+    pub async fn set_thinking(
+        &self,
+        session_id: &str,
+        thinking: riot_protocol::ThinkingPolicy,
+    ) -> HostResult<()> {
+        self.session(session_id).await?.set_thinking(thinking).await;
+        self.persist_index().await;
+        Ok(())
+    }
+
+    /// 探测会话根目录下的常见虚拟环境（`.venv` / `venv`）。
+    ///
+    /// 存在的意义：系统目录选择框默认**隐藏**点开头的目录，而 venv 最常见
+    /// 的名字恰恰是 `.venv` —— 用户在选择框里根本看不到它。探测出来让前端
+    /// 一键填入，多数情况下连选择框都不用开。校验标准与 [`Self::set_python_venv`]
+    /// 一致（有没有 python 可执行文件）。
+    pub async fn detect_venvs(&self, session_id: &str) -> HostResult<Vec<String>> {
+        let s = self.session(session_id).await?;
+        Ok([".venv", "venv"]
+            .iter()
+            .map(|name| s.cwd.join(name))
+            .filter(|dir| venv_python(dir).exists())
+            .map(|dir| dir.display().to_string())
+            .collect())
+    }
+
     /// 设置会话的 Python 虚拟环境。空字符串清除；下一轮生效。
     ///
     /// 在这里验证目录：venv 路径写错的表现是"pip 装到了系统环境里"，
@@ -701,9 +847,7 @@ impl AppState {
             self.persist_index().await;
             return Ok(());
         }
-        let python = std::path::Path::new(trimmed)
-            .join(if cfg!(windows) { "Scripts" } else { "bin" })
-            .join(if cfg!(windows) { "python.exe" } else { "python" });
+        let python = venv_python(std::path::Path::new(trimmed));
         // 宿主层验证用户亲手填的路径，直接查真实文件系统。
         if !python.exists() {
             return Err(HostError::Provider(format!(
@@ -765,6 +909,12 @@ impl AppState {
         self.0.mcp.reconcile(specs).await;
     }
 
+    /// 终端面板的句柄。Tauri 那边 `manage` 的和会话用的必须是同一份 ——
+    /// 各拿各的话，模型起的服务会跑在一个用户永远看不到的面板里。
+    pub fn terminals(&self) -> crate::term::Terminals {
+        self.0.terminals.clone()
+    }
+
     /// MCP 服务器的连接状态，给设置页看。
     pub async fn mcp_statuses(&self) -> Vec<riot_mcp::ServerStatus> {
         self.0.mcp.statuses().await
@@ -802,6 +952,15 @@ impl AppState {
         // 留下的孤儿会一直活到关机。
         self.0.mcp.shutdown().await;
     }
+}
+
+/// venv 根目录里 python 可执行文件的位置。
+///
+/// 探测和校验共用这一个定义 —— 各写一遍的话，某天有人只改了一边，
+/// 表现是"探测说有，填进去却报不像虚拟环境"。
+fn venv_python(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join(if cfg!(windows) { "Scripts" } else { "bin" })
+        .join(if cfg!(windows) { "python.exe" } else { "python" })
 }
 
 #[cfg(test)]
@@ -1051,6 +1210,52 @@ mod tests {
         // 用户连点两次删除，第二次不该弹报错
         let state = state().await;
         state.delete_session("s_ghost").await;
+    }
+
+    /// 摆一个"这个会话用过浏览器"的 profile 目录。
+    ///
+    /// 测试环境里没有打包好的浏览器，会话装的是 `NoBrowser`，不会真的建
+    /// 目录 —— 而这几个用例要验的正是"目录该不该被删"。
+    fn 摆个profile(state: &AppState, id: &str) -> PathBuf {
+        let dir = crate::config::profiles_dir(&state.0.config_path).join(id);
+        std::fs::create_dir_all(dir.join("Default")).expect("建 profile");
+        std::fs::write(dir.join("Default").join("Cookies"), b"x").expect("写点东西进去");
+        dir
+    }
+
+    /// 删会话必须连浏览器 profile 一起删。
+    ///
+    /// 盯着的是一个用户完全看不见的泄漏：一个用过的 profile 是几十上百 MB，
+    /// 目录名就是会话 id，会话删了就再没人会认领它。漏掉这一步的现象是
+    /// "应用数据目录不知不觉涨到好几个 G"，而界面上一个会话都没有。
+    #[tokio::test]
+    async fn 删除会话连浏览器profile一起删() {
+        let state = state().await;
+        let info = state.create_session(&temp_ws("prof-del")).await.expect("会话");
+        let dir = 摆个profile(&state, &info.id);
+
+        state.delete_session(&info.id).await;
+
+        assert!(!dir.exists(), "会话删了 profile 还留着，缓存会无上限增长");
+    }
+
+    /// 启动时的清理只收孤儿，不碰活着的会话。
+    ///
+    /// `[约束]` 判定必须按会话表，不能按磁盘上的 transcript 文件。这个用例
+    /// 里的会话刚建好、一条消息都没写过，所以它**没有** transcript ——
+    /// 照 transcript 判的话，它正在用的 profile 会被当孤儿删掉，用户的现象
+    /// 是"新建会话里浏览器的登录态莫名其妙丢了"。
+    #[tokio::test]
+    async fn 清理孤儿profile不碰活着的会话() {
+        let state = state().await;
+        let info = state.create_session(&temp_ws("prof-gc")).await.expect("会话");
+        let live = 摆个profile(&state, &info.id);
+        let orphan = 摆个profile(&state, "ses_早就没了");
+
+        state.gc_browser_profiles().await;
+
+        assert!(live.is_dir(), "活着的会话的 profile 不能动");
+        assert!(!orphan.exists(), "没人认领的 profile 该收掉");
     }
 
     #[tokio::test]

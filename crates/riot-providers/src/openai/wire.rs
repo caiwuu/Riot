@@ -25,6 +25,27 @@ pub struct WireRequest {
     /// 不带这个的话流式响应里没有 usage，上下文管理就没有数据可用。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<StreamOptions>,
+    /// 思考力度。OpenAI 官方参数；DeepSeek / GLM 的兼容端点也认，
+    /// 取值交集是 low/medium/high（它们把 medium 映射到 high）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<&'static str>,
+    /// 思考开关。**非** OpenAI 标准字段 —— DeepSeek / GLM 的约定
+    /// （`{"type": "enabled"/"disabled"}`），OpenAI 官方端点收到会 400。
+    /// 只在用户显式选择"关闭思考"时才发送。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<WireThinkingToggle>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct WireThinkingToggle {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+}
+
+impl WireThinkingToggle {
+    pub fn disabled() -> Self {
+        Self { kind: "disabled" }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]

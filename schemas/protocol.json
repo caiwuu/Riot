@@ -360,6 +360,24 @@
         }
       ]
     },
+    "AskChoiceOption": {
+      "description": "结构化提问的一个候选项。",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "回传给模型的稳定标识。用它而不是 label —— label 是给人读的文案，\n改一个字就会让模型收到不一样的答案。",
+          "type": "string"
+        },
+        "label": {
+          "description": "给用户看的文案。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ]
+    },
     "AskPreview": {
       "oneOf": [
         {
@@ -403,6 +421,7 @@
           ]
         },
         {
+          "description": "写整文件。`preview` 是内容的前若干行 —— 只显示路径和字节数\n等于让用户盲签，而这个文件顶上的约束明说了不能这样。`lines`\n是总行数，`truncated` 标记 preview 是否被截断。",
           "type": "object",
           "properties": {
             "bytes": {
@@ -414,14 +433,28 @@
               "type": "string",
               "const": "file_write"
             },
+            "lines": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
             "path": {
               "type": "string"
+            },
+            "preview": {
+              "type": "string"
+            },
+            "truncated": {
+              "type": "boolean"
             }
           },
           "required": [
             "kind",
             "path",
-            "bytes"
+            "bytes",
+            "preview",
+            "lines",
+            "truncated"
           ]
         },
         {
@@ -454,6 +487,35 @@
           "required": [
             "kind",
             "text"
+          ]
+        },
+        {
+          "description": "模型主动提的结构化问题（`AskUserQuestion` 工具）。\n\n`[取舍]` 复用权限的 ask 通道而不是另建一条问答链路。理由是这条通道\n已经解决了同一批难题：等用户时的超时（按拒绝处理）、中断时补齐\ntool_result 配对、子 agent 不许弹窗（`can_prompt_user`）。另建一条\n就要把这些全部重做一遍，而它们每一个都是踩过坑才对的。\n\n代价是\"提问\"被塞进了权限语义 —— 用户的选择经 [`PermissionResponse::Allow`]\n的 `choice` 回来，再由宿主写进工具输入。",
+          "type": "object",
+          "properties": {
+            "allow_multiple": {
+              "description": "允许选多项。",
+              "type": "boolean"
+            },
+            "kind": {
+              "type": "string",
+              "const": "choice"
+            },
+            "options": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AskChoiceOption"
+              }
+            },
+            "question": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "question",
+            "options",
+            "allow_multiple"
           ]
         }
       ]
@@ -1037,6 +1099,11 @@
           "const": "plan"
         },
         {
+          "description": "小模型判危：明确安全的自动放行，其余照常弹窗。\n\n定位是 [`Self::Default`] 和 [`Self::Unattended`] 之间缺的那一档。\n长任务里的绝大多数询问是 `cargo check`、`ls`、读一个文件这类东西，\n逐个点\"允许\"会把人训练成无脑点 —— 而无脑点的人在真正危险的那次\n也会点。让小模型先筛掉显然安全的，剩下的才值得打断人。\n\n`[约束]` 分类器的权力**不超过** [`Self::BypassPermissions`]：只有\n`yields_to_bypass()` 为真的询问才可能被它自动放行。安全检查\n（SSH 密钥、shell 启动脚本）和用户亲手写的 ask 规则对它免疫 ——\n判据和分层免疫是同一条，见 [`DecisionReason::yields_to_bypass`]。",
+          "type": "string",
+          "const": "auto"
+        },
+        {
           "description": "全部放行 —— 但敏感操作安全检查仍然生效。",
           "type": "string",
           "const": "bypassPermissions"
@@ -1059,6 +1126,13 @@
         {
           "type": "object",
           "properties": {
+            "choice": {
+              "description": "用户选中的选项 id（只有 [`AskPreview::Choice`] 会用到）。\n\n空 = 这不是一次提问，或者用户没选任何一项。",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
             "decision": {
               "type": "string",
               "const": "allow"
@@ -2182,6 +2256,27 @@
           ]
         },
         {
+          "description": "工具调用**开始**：模型已经选定工具，参数还一个字都没生成。\n\n`[约束]` 必须早于同一个 `tool_use_id` 的第一条 [`Self::ToolInput`]。\n\n存在的理由是一段真实的静默：完整的 tool_use 要等整条消息收尾才到，\n而生成一份文件的参数要几十秒。在那之前界面连\"它要调什么工具\"都\n不知道，画不出卡片 —— 屏幕上什么都没有，和卡死没有区别。工具名\n在两家 provider 的首帧里就有，丢掉它等于让用户对着静止的屏幕干等。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "tool_start"
+            },
+            "name": {
+              "type": "string"
+            },
+            "tool_use_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "tool_use_id",
+            "name"
+          ]
+        },
+        {
           "description": "工具参数增量。\n\n这里刻意只传原始字符串片段，**不做增量 JSON 解析** ——\n每个 delta 都 parse 是 O(n²)，大工具参数下很明显。\n完整参数在 Message 事件里给出。见 ARCHITECTURE.md §11.3",
           "type": "object",
           "properties": {
@@ -2448,6 +2543,38 @@
             "type": {
               "type": "string",
               "const": "described_image"
+            }
+          },
+          "required": [
+            "type",
+            "media_type",
+            "data",
+            "text"
+          ]
+        },
+        {
+          "description": "图 + 编号清单（Set-of-Marks）。和 [`Image`](Self::Image) 一样，图是\n给**能看图**的模型的（压缩图放 `data`，原图落盘走 `path`）；但多带一段\n`text`（编号清单），两路一起发:模型看图上第 [n] 个框、照清单查 [n] 是\n什么。给纯文本模型时产出方不该用这个变体（图对它没用），退回\n[`Text`](Self::Text)。",
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "string"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text": {
+              "description": "编号清单，和图上的框一一对应；编号同 [`crate::browser::MarkedView`]。",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "marked_image"
             }
           },
           "required": [

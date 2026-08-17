@@ -225,6 +225,18 @@ pub enum StreamDelta {
     Text { message_id: MessageId, text: String },
     /// 思考过程增量。
     Thinking { message_id: MessageId, text: String },
+    /// 工具调用**开始**：模型已经选定工具，参数还一个字都没生成。
+    ///
+    /// `[约束]` 必须早于同一个 `tool_use_id` 的第一条 [`Self::ToolInput`]。
+    ///
+    /// 存在的理由是一段真实的静默：完整的 tool_use 要等整条消息收尾才到，
+    /// 而生成一份文件的参数要几十秒。在那之前界面连"它要调什么工具"都
+    /// 不知道，画不出卡片 —— 屏幕上什么都没有，和卡死没有区别。工具名
+    /// 在两家 provider 的首帧里就有，丢掉它等于让用户对着静止的屏幕干等。
+    ToolStart {
+        tool_use_id: ToolUseId,
+        name: String,
+    },
     /// 工具参数增量。
     ///
     /// 这里刻意只传原始字符串片段，**不做增量 JSON 解析** ——
@@ -327,6 +339,10 @@ mod tests {
             AgentEvent::Delta(StreamDelta::Thinking {
                 message_id: MessageId::from_raw("m1"),
                 text: "hmm".into(),
+            }),
+            AgentEvent::Delta(StreamDelta::ToolStart {
+                tool_use_id: ToolUseId::from_raw("u1"),
+                name: "Write".into(),
             }),
             AgentEvent::Delta(StreamDelta::ToolInput {
                 tool_use_id: ToolUseId::from_raw("u1"),

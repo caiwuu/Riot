@@ -177,6 +177,7 @@ mod tests {
             proc: Arc::new(NullProc),
             web: Arc::new(riot_protocol::web::NoWeb),
             browser: Arc::new(riot_protocol::browser::NoBrowser),
+            terminal: Arc::new(riot_protocol::terminal::NoTerminal),
             vision: Arc::new(riot_protocol::vision::NoVision),
             clock: Arc::new(FixedClock::default()),
         }

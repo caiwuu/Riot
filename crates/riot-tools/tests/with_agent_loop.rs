@@ -87,6 +87,7 @@ fn initial() -> AgentState {
         compact_failure_streak: 0,
         max_output_tokens_override: None,
         stop_hook_blocks: 0,
+        thinking: riot_protocol::ThinkingPolicy::Default,
         transition: None,
     }
 }

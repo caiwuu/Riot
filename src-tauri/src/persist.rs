@@ -52,6 +52,9 @@ pub struct PersistedSession {
     pub python_venv: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    /// 会话级思考策略。默认 = 不干预（不发任何思考参数）。
+    #[serde(default, skip_serializing_if = "riot_protocol::ThinkingPolicy::is_default")]
+    pub thinking: riot_protocol::ThinkingPolicy,
 }
 
 fn default_mode() -> PermissionMode {
@@ -133,6 +136,7 @@ fn rebuild(transcripts: &riot_store::Transcripts) -> SessionIndex {
             sampling: Sampling::default(),
             python_venv: None,
             system_prompt: None,
+            thinking: riot_protocol::ThinkingPolicy::default(),
         })
         .collect();
     tracing::info!("会话索引已从 transcript 重建");
@@ -188,6 +192,7 @@ mod tests {
             sampling: Sampling::default(),
             python_venv: None,
             system_prompt: None,
+            thinking: riot_protocol::ThinkingPolicy::default(),
         }
     }
 
@@ -259,5 +264,9 @@ mod tests {
         assert_eq!(idx.sessions.len(), 1);
         assert_eq!(idx.sessions[0].mode, PermissionMode::Default);
         assert!(idx.sessions[0].custom_title.is_none());
+        assert!(
+            idx.sessions[0].thinking.is_default(),
+            "缺 thinking 字段回默认 = 不发思考参数，老会话行为不变"
+        );
     }
 }

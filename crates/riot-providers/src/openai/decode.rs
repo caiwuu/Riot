@@ -20,6 +20,9 @@ struct ToolAcc {
     id: String,
     name: String,
     args: String,
+    /// 已经报过"开始"了。没有块边界事件，只能自己记，否则每来一个
+    /// 参数分片就重报一次。
+    started: bool,
 }
 
 #[derive(Debug, Default)]
@@ -131,6 +134,16 @@ impl StreamDecoder {
                     if let Some(n) = f.name {
                         // 名字也可能是分片来的
                         slot.name.push_str(&n);
+                    }
+                    // 名字一到就报开始，**必须早于第一条 ToolInput**。参数
+                    // 可能要生成几十秒，等它流完界面上一直是空的。名字万一
+                    // 是分片来的，前端会在完整消息到达时按 id 修正。
+                    if !slot.started && !slot.id.is_empty() && !slot.name.is_empty() {
+                        slot.started = true;
+                        out.push(ProviderEvent::Delta(StreamDelta::ToolStart {
+                            tool_use_id: ToolUseId::from_raw(slot.id.clone()),
+                            name: slot.name.clone(),
+                        }));
                     }
                     if let Some(a) = f.arguments
                         && !a.is_empty()

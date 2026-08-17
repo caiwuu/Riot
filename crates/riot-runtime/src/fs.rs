@@ -148,6 +148,9 @@ struct Inner {
     map: HashMap<PathBuf, FileState>,
     /// 访问顺序，最新在后。压缩后恢复工作集要按这个顺序。
     order: Vec<PathBuf>,
+    /// 被改过的文件 → 本会话第一次动它之前的内容（None = 那时不存在）。
+    /// 和 `map` 分开：那个跟着每次读写更新，这个一旦写下就不再变。
+    baseline: HashMap<PathBuf, Option<String>>,
 }
 
 impl MemoryFileState {
@@ -187,6 +190,21 @@ impl FileStateCache for MemoryFileState {
             .rev()
             .take(limit)
             .filter_map(|p| g.map.get(p).map(|s| (p.clone(), s.clone())))
+            .collect()
+    }
+
+    fn note_baseline(&self, path: PathBuf, before: Option<String>) {
+        let Ok(mut g) = self.inner.lock() else { return };
+        g.baseline.entry(path).or_insert(before);
+    }
+
+    fn baselines(&self) -> Vec<(PathBuf, Option<String>)> {
+        let Ok(g) = self.inner.lock() else {
+            return Vec::new();
+        };
+        g.baseline
+            .iter()
+            .map(|(p, b)| (p.clone(), b.clone()))
             .collect()
     }
 }

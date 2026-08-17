@@ -3,6 +3,8 @@ import { createPortal } from "react-dom";
 
 import { readImage } from "../bridge";
 import type { Item } from "../hooks/useSession";
+import { Chevron } from "./Chevron";
+import { useEscLayer } from "./Modal";
 
 type Tool = Extract<Item, { kind: "tool" }>;
 
@@ -31,21 +33,54 @@ export const ToolCard = memo(function ToolCard({ tool }: { tool: Tool }) {
   const [userToggle, setUserToggle] = useState<boolean | null>(null);
   // 图片结果（截图、读图）默认展开：截图的意义就是给人看，藏在"展开"
   // 后面的话用户不知道图已经在这里了，会转头让模型"把图贴出来"。
-  // 任务清单同理 —— 它存在的意义就是让用户看到进度。
+  // Edit / Write 也默认展开：用户要看的就是改了什么、写了什么。
   // 文本结果维持默认折叠 —— 一次 cargo build 的输出会把对话冲走。
+  //
+  // TodoWrite 刻意**不**默认展开：进度由输入框上方的常驻面板就地更新，
+  // 对话流里的每次调用只是历史快照 —— 都展开的话，一个十步任务会在
+  // 对话里铺十张几乎相同的清单。摘要行说清"几之几、正在干什么"，
+  // 点开看的是"那一刻清单长什么样"。
   const open =
     userToggle ??
-    (Boolean(tool.resultImage || tool.resultImagePath) || tool.name === "TodoWrite");
+    (Boolean(tool.resultImage || tool.resultImagePath) ||
+      tool.name === "Edit" ||
+      tool.name === "Write");
   const detail = renderDetail(tool);
+  const summary = summarize(tool);
+
+  // 摘要行被 CSS 截成一行，title 兜底让全文悬停可见 —— 长 Bash 命令
+  // 在展开区还有完整版（见 renderDetail）。
+  const head = (
+    <>
+      {/* 运行中转起来 —— 静止的 ◐ 和卡死看起来一模一样 */}
+      <span className={tool.status === "running" ? "tool-icon tool-icon-spin" : "tool-icon"}>
+        {icon(tool.status)}
+      </span>
+      <span className="tool-name">{tool.name}</span>
+      {/* 失败不能只靠 12px 图标变红 —— 扫视时根本发现不了 */}
+      {tool.status === "error" ? <span className="tool-fail">失败</span> : null}
+      <span className="tool-summary" title={summary}>
+        {summary}
+      </span>
+    </>
+  );
 
   return (
     <div className={`tool tool-${tool.status}`}>
-      <button className="tool-head" onClick={() => setUserToggle(!open)} type="button">
-        <span className="tool-icon">{icon(tool.status)}</span>
-        <span className="tool-name">{tool.name}</span>
-        <span className="tool-summary">{summarize(tool)}</span>
-        {detail ? <span className="tool-chevron">{open ? "收起" : "展开"}</span> : null}
-      </button>
+      {detail ? (
+        <button
+          className="tool-head"
+          onClick={() => setUserToggle(!open)}
+          type="button"
+          aria-expanded={open}
+        >
+          {head}
+          <Chevron open={open} />
+        </button>
+      ) : (
+        // 没有详情就别渲染成按钮 —— 可点但点了毫无反应，比不可点更糟
+        <div className="tool-head">{head}</div>
+      )}
 
       {open && detail ? <div className="tool-detail">{detail}</div> : null}
     </div>
@@ -84,6 +119,12 @@ function summarize(t: Tool): string {
     }
     case "Bash":
       return str("command");
+    // 计划正文由下面的草稿卡/批准卡承担。不写这条的话会落到 default，
+    // 把整份计划 dump 进摘要行。
+    case "ExitPlanMode":
+      return "撰写计划";
+    case "AskUserQuestion":
+      return str("question") || "提问";
     case "Read":
     case "Write":
     case "Edit":
@@ -97,7 +138,7 @@ function summarize(t: Tool): string {
       return `${verb} ${target()}`;
     }
     case "BrowserType":
-      return `在 ${target("target_text")} 输入 ${str("text").slice(0, 40)}${i?.submit === true ? " ⏎" : ""}`;
+      return `在 ${target("target_text")} 输入 ${clip(str("text"), 40)}${i?.submit === true ? " ⏎" : ""}`;
     case "BrowserKey":
       return `按 ${str("key")}`;
     case "BrowserScroll": {
@@ -123,7 +164,7 @@ function summarize(t: Tool): string {
     case "BrowserTabs":
       return `标签页: ${str("action") || "list"}`;
     case "BrowserEvaluate":
-      return `执行 JS: ${str("expression").slice(0, 60)}`;
+      return `执行 JS: ${clip(str("expression"), 60)}`;
     case "BrowserCookies":
       return "读 Cookie";
     case "BrowserNetwork":
@@ -149,11 +190,18 @@ function summarize(t: Tool): string {
       return `生成渗透报告（${n} 条发现）`;
     }
     default:
-      return Object.entries(i ?? {})
-        .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
-        .join(" ")
-        .slice(0, 120);
+      return clip(
+        Object.entries(i ?? {})
+          .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+          .join(" "),
+        120,
+      );
   }
+}
+
+/** 超长才截，截了要看得出来 —— 没有省略号的硬截像话说了一半。 */
+function clip(s: string, max: number): string {
+  return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
 }
 
 /**
@@ -187,6 +235,18 @@ function renderDetail(t: Tool): React.ReactNode {
 
   const parts: React.ReactNode[] = [];
 
+  // 长命令的摘要行被截断，全文在这里 —— 审计的核心信息不能在界面上无处可看。
+  if (t.name === "Bash") {
+    const cmd = str("command");
+    if (cmd) {
+      parts.push(
+        <pre key="cmd" className="tool-body tool-cmd">
+          {cmd}
+        </pre>,
+      );
+    }
+  }
+
   if (t.name === "Edit") {
     const oldS = str("old_string");
     const newS = str("new_string");
@@ -209,13 +269,17 @@ function renderDetail(t: Tool): React.ReactNode {
   } else if (t.name === "Write") {
     const content = str("content");
     if (content) {
-      // 预览开头就够了 —— 用户要确认的是"写了个什么东西"，不是逐行审阅
       const lines = content.split("\n");
-      const preview = lines.slice(0, 30).join("\n");
+      // 写的过程中跟着尾巴走：定在开头的话，写到第 100 行时画面已经
+      // 十几秒没动过了，和卡住一样。落定之后回到开头 —— 那时用户要
+      // 确认的是"写了个什么东西"，不是逐行审阅。
+      const live = t.status === "running";
+      const from = live ? Math.max(0, lines.length - 30) : 0;
       parts.push(
         <pre key="w" className="tool-body">
-          {preview}
-          {lines.length > 30 ? `\n… 共 ${lines.length} 行` : ""}
+          {from > 0 ? `… 前 ${from} 行\n` : ""}
+          {lines.slice(from, from + 30).join("\n")}
+          {!live && lines.length > 30 ? `\n… 共 ${lines.length} 行` : ""}
         </pre>,
       );
     }
@@ -226,6 +290,7 @@ function renderDetail(t: Tool): React.ReactNode {
     parts.push(
       <ShotImage
         key="img"
+        alt={`${t.name} 结果图`}
         {...(t.resultImagePath !== undefined ? { path: t.resultImagePath } : {})}
         {...(t.resultImage !== undefined ? { fallback: t.resultImage } : {})}
       />,
@@ -256,7 +321,16 @@ function renderDetail(t: Tool): React.ReactNode {
  * 整页截图是极端长图，卡片里按容器宽显示、限高纵向滚；点击开查看器
  * 看大图。
  */
-function ShotImage({ path, fallback }: { path?: string; fallback?: string }) {
+function ShotImage({
+  path,
+  fallback,
+  // 每张结果图都叫"工具结果图片"的话，读屏用户分不清哪张是哪次调用的
+  alt = "工具结果图片",
+}: {
+  path?: string;
+  fallback?: string;
+  alt?: string;
+}) {
   const [src, setSrc] = useState<string | undefined>(fallback);
   const [viewer, setViewer] = useState(false);
 
@@ -278,15 +352,16 @@ function ShotImage({ path, fallback }: { path?: string; fallback?: string }) {
   if (!src) return null;
   return (
     <>
-      <div className="tool-shot-wrap">
-        <img
-          className="tool-shot"
-          src={src}
-          alt="工具结果图片"
-          onClick={() => setViewer(true)}
-        />
-      </div>
-      {viewer ? <ShotViewer src={src} onClose={() => setViewer(false)} /> : null}
+      {/* button 包一层：键盘可达 + 读屏知道可点开大图，不再是"只能鼠标点" */}
+      <button
+        type="button"
+        className="tool-shot-wrap"
+        onClick={() => setViewer(true)}
+        aria-label={`放大查看：${alt}`}
+      >
+        <img className="tool-shot" src={src} alt={alt} />
+      </button>
+      {viewer ? <ShotViewer src={src} alt={alt} onClose={() => setViewer(false)} /> : null}
     </>
   );
 }
@@ -297,14 +372,18 @@ function ShotImage({ path, fallback }: { path?: string; fallback?: string }) {
  * portal 到 body —— 卡片在带 overflow 的滚动容器里，fixed 遮罩留在原地
  * 会被裁掉。
  */
-function ShotViewer({ src, onClose }: { src: string; onClose: () => void }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+function ShotViewer({
+  src,
+  alt = "工具结果图片",
+  onClose,
+}: {
+  src: string;
+  alt?: string;
+  onClose: () => void;
+}) {
+  // Esc 走公共栈 —— 查看器开在权限卡之上时，Esc 只关查看器，
+  // 不会顺手把底下的权限请求也拒了。
+  useEscLayer(onClose);
 
   return createPortal(
     // 点空白处（遮罩本身）关闭；点图不关，方便拖滚动条。
@@ -325,7 +404,7 @@ function ShotViewer({ src, onClose }: { src: string; onClose: () => void }) {
           />
         </svg>
       </button>
-      <img src={src} alt="工具结果图片（原图）" />
+      <img src={src} alt={`${alt}（原图）`} />
     </div>,
     document.body,
   );

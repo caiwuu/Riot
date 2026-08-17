@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { type KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import {
   type AppConfig,
@@ -11,6 +11,7 @@ import {
   type Protocol,
   type ProviderConfig,
   type Sampling,
+  type SandboxMode,
   type SkillInfo,
   type SlashCommand,
   type WebConfig,
@@ -28,8 +29,12 @@ import {
   testConnection,
   testSearchBackend,
 } from "../bridge";
+import { FieldNumber } from "./FieldNumber";
+import { FieldSelect } from "./FieldSelect";
+import { HintTip } from "./HintTip";
 import { ModelDialog } from "./ModelDialog";
 import { ConfirmDialog, type ConfirmRequest } from "./ConfirmDialog";
+import { Modal } from "./Modal";
 
 interface Props {
   status: ConfigStatus;
@@ -41,7 +46,14 @@ interface Props {
 
 type AskConfirm = (req: ConfirmRequest) => void;
 
-type Tab = "provider" | "web" | "permission" | "mcp" | "skills" | "hooks" | "about";
+/**
+ * 离开当前分区前的拦截：返回 null 放行，返回确认内容则先问一句。
+ * 目前只有 MCP 的 JSON 视图用 —— 那里可能躺着用户刚粘贴、还没保存的
+ * 一整段配置，Esc/点遮罩/切标签任何一条路都不该无声地丢掉它。
+ */
+type LeaveGuard = () => Omit<ConfirmRequest, "action"> | null;
+
+type Tab = "provider" | "web" | "permission" | "mcp" | "skills" | "commands" | "hooks" | "about";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "provider", label: "Provider" },
@@ -49,9 +61,28 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "permission", label: "权限" },
   { id: "mcp", label: "MCP" },
   { id: "skills", label: "Skills" },
-  { id: "hooks", label: "Hooks / 命令" },
+  { id: "commands", label: "命令" },
+  { id: "hooks", label: "Hooks" },
   { id: "about", label: "关于" },
 ];
+
+/** "失焦提交"的单行输入统一支持回车：Enter → blur，提交仍走 onBlur 一条路。 */
+function blurOnEnter(e: KeyboardEvent<HTMLInputElement>) {
+  if (e.key === "Enter") e.currentTarget.blur();
+}
+
+/** 底部错误行。出现时滚进视野 —— 长页面里它可能在两屏之外，等于没报。 */
+function FormError({ text }: { text: string }) {
+  const ref = useRef<HTMLParagraphElement>(null);
+  useEffect(() => {
+    ref.current?.scrollIntoView({ block: "nearest" });
+  }, [text]);
+  return (
+    <p ref={ref} className="form-error">
+      {text}
+    </p>
+  );
+}
 
 /**
  * 设置弹层，左侧分区导航。
@@ -63,22 +94,47 @@ export function Settings({ status, onStatus, onClose, activeRoot }: Props) {
   const [tab, setTab] = useState<Tab>("provider");
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      // 确认框打开时 Esc 只关确认，不连带关掉设置
-      if (e.key === "Escape" && !confirm) onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, confirm]);
+  /** 「已保存 ✓」瞬时提示。计数器当 key：连续保存也能重启淡出动画。 */
+  const [savedTick, setSavedTick] = useState(0);
+  const flashSaved = useCallback(() => setSavedTick((t) => t + 1), []);
+
+  /** 当前分区注册的离开拦截。ref 而不是 state：它只在离开的瞬间被读一次。 */
+  const leaveGuard = useRef<LeaveGuard | null>(null);
+  const registerLeaveGuard = useCallback((g: LeaveGuard | null) => {
+    leaveGuard.current = g;
+  }, []);
+
+  /** 关闭 / 切分区都从这儿走：有未保存的内容就先问，没有就直接做。 */
+  const guarded = useCallback(
+    (proceed: () => void) => {
+      const ask = leaveGuard.current?.();
+      if (ask) {
+        setConfirm({
+          ...ask,
+          action: () => {
+            leaveGuard.current = null;
+            proceed();
+          },
+        });
+      } else {
+        proceed();
+      }
+    },
+    [],
+  );
+  const requestClose = useCallback(() => {
+    // 关窗前把焦点从输入框上拿走，让"失焦提交"的字段先落地 ——
+    // 不做的话，正在编辑的 baseUrl/系统提示词随组件卸载无声蒸发。
+    (document.activeElement as HTMLElement | null)?.blur?.();
+    guarded(onClose);
+  }, [guarded, onClose]);
 
   return (
     <>
-      <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-        <div className="modal settings">
+      <Modal className="settings" label="设置" onClose={requestClose}>
           <div className="settings-head">
             <span className="settings-head-title">设置</span>
-            <button className="settings-close" onClick={onClose} title="关闭 (Esc)" aria-label="关闭">
+            <button className="settings-close" onClick={requestClose} title="关闭 (Esc)" aria-label="关闭">
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
                 <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
               </svg>
@@ -86,12 +142,14 @@ export function Settings({ status, onStatus, onClose, activeRoot }: Props) {
           </div>
 
           <div className="settings-main">
-            <div className="settings-nav">
+            <div className="settings-nav" role="tablist" aria-label="设置分区">
               {TABS.map((t) => (
                 <button
                   key={t.id}
+                  role="tab"
+                  aria-selected={tab === t.id}
                   className={tab === t.id ? "settings-tab active" : "settings-tab"}
-                  onClick={() => setTab(t.id)}
+                  onClick={() => guarded(() => setTab(t.id))}
                 >
                   {t.label}
                 </button>
@@ -113,17 +171,38 @@ export function Settings({ status, onStatus, onClose, activeRoot }: Props) {
               </div>
             ) : null}
             {tab === "provider" ? (
-              <ProviderPane status={status} onStatus={onStatus} askConfirm={setConfirm} />
+              <ProviderPane
+                status={status}
+                onStatus={onStatus}
+                askConfirm={setConfirm}
+                onSaved={flashSaved}
+              />
             ) : null}
-            {tab === "web" ? <WebPane status={status} onStatus={onStatus} /> : null}
+            {tab === "web" ? (
+              <WebPane status={status} onStatus={onStatus} onSaved={flashSaved} />
+            ) : null}
             {tab === "permission" ? (
-              <PermissionPane status={status} onStatus={onStatus} askConfirm={setConfirm} />
+              <PermissionPane
+                status={status}
+                onStatus={onStatus}
+                askConfirm={setConfirm}
+                onSaved={flashSaved}
+              />
             ) : null}
             {tab === "mcp" ? (
-              <McpPane status={status} onStatus={onStatus} askConfirm={setConfirm} />
+              <McpPane
+                status={status}
+                onStatus={onStatus}
+                askConfirm={setConfirm}
+                registerLeaveGuard={registerLeaveGuard}
+                onSaved={flashSaved}
+              />
             ) : null}
             {tab === "skills" ? (
               <SkillsPane status={status} activeRoot={activeRoot ?? null} />
+            ) : null}
+            {tab === "commands" ? (
+              <CommandsPane status={status} activeRoot={activeRoot ?? null} />
             ) : null}
             {tab === "hooks" ? (
               <HooksPane status={status} activeRoot={activeRoot ?? null} />
@@ -131,8 +210,13 @@ export function Settings({ status, onStatus, onClose, activeRoot }: Props) {
             {tab === "about" ? <AboutPane status={status} /> : null}
             </div>
           </div>
-        </div>
-      </div>
+          {/* 低调的保存回执：各 Pane 的失焦提交原本全程静默，成功与否只能猜。 */}
+          {savedTick > 0 ? (
+            <span key={savedTick} className="save-flash" role="status">
+              已保存 ✓
+            </span>
+          ) : null}
+      </Modal>
       {confirm ? <ConfirmDialog c={confirm} onClose={() => setConfirm(null)} /> : null}
     </>
   );
@@ -144,13 +228,17 @@ function ProviderPane({
   status,
   onStatus,
   askConfirm,
+  onSaved,
 }: {
   status: ConfigStatus;
   onStatus: (s: ConfigStatus) => void;
   askConfirm: AskConfirm;
+  onSaved: () => void;
 }) {
   const cfg = status.config;
   const [selId, setSelId] = useState(cfg.activeProvider);
+  /** 刚新建的服务方：编辑器聚焦到名称，省得用户自己找第一个待填字段。 */
+  const [justAdded, setJustAdded] = useState("");
   const [error, setError] = useState("");
 
   const sel = cfg.providers.find((p) => p.id === selId) ?? cfg.providers[0];
@@ -159,6 +247,7 @@ function ProviderPane({
     setError("");
     try {
       onStatus(await setConfig(next));
+      onSaved();
       return true;
     } catch (e) {
       setError(String(e));
@@ -166,9 +255,10 @@ function ProviderPane({
     }
   };
 
+  // 把成功与否交回给调用方 —— 失焦提交失败时，编辑器要用它决定是否回滚草稿。
   const patchSel = (patch: Partial<ProviderConfig>) => {
-    if (!sel) return;
-    void commit({
+    if (!sel) return Promise.resolve(false);
+    return commit({
       ...cfg,
       providers: cfg.providers.map((p) => (p.id === sel.id ? { ...p, ...patch } : p)),
     });
@@ -188,7 +278,10 @@ function ProviderPane({
       sampling: {},
     };
     void commit({ ...cfg, providers: [...cfg.providers, p] }).then((ok) => {
-      if (ok) setSelId(id);
+      if (ok) {
+        setSelId(id);
+        setJustAdded(id);
+      }
     });
   };
 
@@ -243,6 +336,7 @@ function ProviderPane({
       {/* 全局设置放在最上面，而且不在任何一个服务方的编辑器里面 ——
           放在下面的话它看着就像"当前这家的设置"，而它管的是所有模型。 */}
       <VisionFallback cfg={cfg} onCommit={commit} />
+      <SubagentModel cfg={cfg} onCommit={commit} />
 
       <section>
         <h2>服务方</h2>
@@ -251,7 +345,10 @@ function ProviderPane({
             <button
               key={p.id}
               className={p.id === sel.id ? "prov-tab active" : "prov-tab"}
-              onClick={() => setSelId(p.id)}
+              onClick={() => {
+                setSelId(p.id);
+                setJustAdded("");
+              }}
             >
               {p.name}
               {p.id === cfg.activeProvider ? <span className="prov-dot" title="使用中" /> : null}
@@ -268,6 +365,7 @@ function ProviderPane({
         provider={sel}
         cfg={cfg}
         keySource={status.keyStatus[sel.id] ?? null}
+        autoFocusName={sel.id === justAdded}
         onPatch={patchSel}
         onCommit={commit}
         onStatus={onStatus}
@@ -276,7 +374,7 @@ function ProviderPane({
         onError={setError}
       />
 
-      {error ? <p className="form-error">{error}</p> : null}
+      {error ? <FormError text={error} /> : null}
     </>
   );
 }
@@ -324,45 +422,39 @@ function VisionFallback({
       })),
   );
   const active = cfg.providers.find((p) => p.id === cfg.activeProvider);
-  const activeSeesImages = active?.models.some(
-    (m) => m.id === cfg.activeModel && m.vision,
-  );
+  const activeModel = active?.models.find((m) => m.id === cfg.activeModel);
+  const activeSeesImages = Boolean(activeModel?.vision);
   const known = options.some((o) => o.value === cfg.visionModel);
 
   return (
     <section>
-      <h2>视觉兼容（全局）</h2>
-      {activeSeesImages ? (
-        <p className="hint">
-          当前模型「{cfg.activeModel}」自己能收图片，截图会直接给它，不需要兼容模型。
-        </p>
-      ) : (
+      <h2>
+        视觉兼容（全局）
+        <HintTip>
+          {activeSeesImages
+            ? `当前模型「${activeModel?.name?.trim() || cfg.activeModel}」自己能收图片，截图会直接给它，不需要兼容模型。`
+            : "没勾「视觉」的模型走这里：先让这个模型看图、转成文字，再交给主模型。转述有损，精确像素判断不要依赖它。"}
+        </HintTip>
+      </h2>
+      {activeSeesImages ? null : (
         <>
           <div className="field-row">
             <label>兼容模型</label>
-            <select
+            <FieldSelect
               value={known ? cfg.visionModel : ""}
-              onChange={(e) => void onCommit({ ...cfg, visionModel: e.target.value })}
+              onChange={(v) => void onCommit({ ...cfg, visionModel: v })}
               disabled={options.length === 0}
-            >
-              <option value="">不转（截图工具会说用不了）</option>
-              {options.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
+              options={[
+                { value: "", label: "不转（截图工具会说用不了）" },
+                ...options,
+              ]}
+            />
           </div>
           {options.length === 0 ? (
             <p className="hint">
               还没有标记为能看图的模型。先在上面的模型列表里给一个视觉模型点上「看图」。
             </p>
-          ) : (
-            <p className="hint">
-              所有没勾「视觉」的模型都走这里：先让这个模型看图、转成结构化文字，
-              再交给主模型。转述有损，涉及精确像素的判断不要依赖它。
-            </p>
-          )}
+          ) : null}
           {cfg.visionModel && !known ? (
             <p className="key-state warn">
               <code>{cfg.visionModel}</code> 已不可用（模型被删了，或者它的「看图」被
@@ -371,6 +463,60 @@ function VisionFallback({
           ) : null}
         </>
       )}
+    </section>
+  );
+}
+
+/**
+ * 子 agent 的便宜档。
+ *
+ * 和视觉兼容摆在一起:两者都是"主模型之外再指一个模型"，形状一样
+ * （`providerId/model`），失效方式也一样（指向的模型被删掉）。
+ */
+function SubagentModel({
+  cfg,
+  onCommit,
+}: {
+  cfg: AppConfig;
+  onCommit: (next: AppConfig) => Promise<boolean>;
+}) {
+  // 这里不筛模型：任何模型都能读文件、写报告。视觉兼容要筛是因为
+  // 挑错了每次截图都是个 400，而这里挑错了只是慢一点或笨一点。
+  const options = cfg.providers.flatMap((p) =>
+    p.models.map((m) => ({
+      value: `${p.id}/${m.id}`,
+      label: `${p.name} · ${m.name?.trim() || m.id}`,
+    })),
+  );
+  const activeValue = `${cfg.activeProvider}/${cfg.activeModel}`;
+  const known = options.some((o) => o.value === cfg.subagentModel);
+
+  return (
+    <section>
+      <h2>
+        子 agent 便宜档（全局）
+        <HintTip>
+          只读侦察的子 agent 走这一档。翻代码、写报告不改东西，但搜索结果全进上下文，往往更吃
+          token。会改代码的子 agent 始终用主模型。
+        </HintTip>
+      </h2>
+      <div className="field-row">
+        <label>侦察模型</label>
+        <FieldSelect
+          value={known ? cfg.subagentModel : ""}
+          onChange={(v) => void onCommit({ ...cfg, subagentModel: v })}
+          disabled={options.length === 0}
+          options={[
+            { value: "", label: "跟主模型" },
+            ...options.filter((o) => o.value !== activeValue),
+          ]}
+        />
+      </div>
+      {cfg.subagentModel && !known ? (
+        <p className="key-state warn">
+          <code>{cfg.subagentModel}</code> 已不可用（模型被删了），侦察当前走主模型。
+        </p>
+      ) : null}
     </section>
   );
 }
@@ -387,6 +533,16 @@ const SAMPLING_FIELDS: {
   { key: "topK", label: "top_k", hint: "仅 Anthropic 协议发送。", step: "1", integer: true },
   { key: "maxOutputTokens", label: "max tokens", hint: "单次回复的输出上限。", step: "256", integer: true },
 ];
+
+/** 采样值转回输入框草稿。初始化和"提交失败回滚"共用同一条真值来源。 */
+function samplingDraft(s: Sampling): Record<string, string> {
+  return {
+    temperature: s.temperature?.toString() ?? "",
+    topP: s.topP?.toString() ?? "",
+    topK: s.topK?.toString() ?? "",
+    maxOutputTokens: s.maxOutputTokens?.toString() ?? "",
+  };
+}
 
 /** 把输入框草稿解析成采样值：空/非法 = null（不设置）。 */
 function parseSampling(draft: Record<string, string>): Sampling {
@@ -415,6 +571,7 @@ function ProviderEditor({
   provider: p,
   cfg,
   keySource,
+  autoFocusName,
   onPatch,
   onCommit,
   onStatus,
@@ -425,7 +582,9 @@ function ProviderEditor({
   provider: ProviderConfig;
   cfg: AppConfig;
   keySource: string | null;
-  onPatch: (patch: Partial<ProviderConfig>) => void;
+  /** 刚新建时聚焦名称输入框。 */
+  autoFocusName?: boolean;
+  onPatch: (patch: Partial<ProviderConfig>) => Promise<boolean>;
   onCommit: (next: AppConfig) => Promise<boolean>;
   onStatus: (s: ConfigStatus) => void;
   onRemove: (() => void) | null;
@@ -445,12 +604,9 @@ function ProviderEditor({
   const [fetching, setFetching] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
-  const [sampDraft, setSampDraft] = useState<Record<string, string>>({
-    temperature: p.sampling.temperature?.toString() ?? "",
-    topP: p.sampling.topP?.toString() ?? "",
-    topK: p.sampling.topK?.toString() ?? "",
-    maxOutputTokens: p.sampling.maxOutputTokens?.toString() ?? "",
-  });
+  const [sampDraft, setSampDraft] = useState<Record<string, string>>(() =>
+    samplingDraft(p.sampling),
+  );
 
   const blurCommit = () => {
     const patch: Partial<ProviderConfig> = {};
@@ -461,12 +617,24 @@ function ProviderEditor({
     // 所以这里不能像 name / baseUrl 那样跳过空值。
     const path = apiPath.trim();
     if (path !== (p.apiPath ?? "")) patch.apiPath = path;
-    if (Object.keys(patch).length) onPatch(patch);
+    if (!Object.keys(patch).length) return;
+    void onPatch(patch).then((ok) => {
+      // 保存被拒时草稿退回真值 —— 留着用户输入的话，框里显示的和
+      // 实际生效的从此分叉，之后每一次调试都建立在假象上。
+      if (!ok) {
+        setName(p.name);
+        setBaseUrl(p.baseUrl);
+        setApiPath(p.apiPath ?? "");
+      }
+    });
   };
 
   const commitSampling = () => {
     const next = parseSampling(sampDraft);
-    if (JSON.stringify(next) !== JSON.stringify(p.sampling)) onPatch({ sampling: next });
+    if (JSON.stringify(next) === JSON.stringify(p.sampling)) return;
+    void onPatch({ sampling: next }).then((ok) => {
+      if (!ok) setSampDraft(samplingDraft(p.sampling));
+    });
   };
 
   const saveKey = async () => {
@@ -489,13 +657,13 @@ function ProviderEditor({
   const addModel = (m: string) => {
     const id = m.trim();
     if (!id || p.models.some((x) => x.id === id)) return;
-    onPatch({ models: [...p.models, { id }] });
+    void onPatch({ models: [...p.models, { id }] });
   };
 
   /** 弹窗保存:已有的替换掉，新的追加。 */
   const saveModel = (m: ModelConfig) => {
     const exists = p.models.some((x) => x.id === m.id);
-    onPatch({
+    void onPatch({
       models: exists ? p.models.map((x) => (x.id === m.id ? m : x)) : [...p.models, m],
     });
   };
@@ -518,7 +686,7 @@ function ProviderEditor({
             providers: cfg.providers.map((x) => (x.id === p.id ? { ...x, models } : x)),
           });
         } else {
-          onPatch({ models });
+          void onPatch({ models });
         }
       },
     });
@@ -564,16 +732,25 @@ function ProviderEditor({
       <section>
         <div className="field-row">
           <label>名称</label>
-          <input value={name} onChange={(e) => setName(e.target.value)} onBlur={blurCommit} spellCheck={false} />
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onBlur={blurCommit}
+            onKeyDown={blurOnEnter}
+            autoFocus={autoFocusName}
+            spellCheck={false}
+          />
         </div>
         <div className="field-row">
           <label>协议</label>
-          <div className="radio-row">
+          <div className="radio-row" role="radiogroup" aria-label="协议">
             {(["openai", "anthropic"] as Protocol[]).map((proto) => (
               <button
                 key={proto}
+                role="radio"
+                aria-checked={p.protocol === proto}
                 className={p.protocol === proto ? "radio-pill active" : "radio-pill"}
-                onClick={() => onPatch({ protocol: proto })}
+                onClick={() => void onPatch({ protocol: proto })}
               >
                 {proto === "openai" ? "OpenAI 兼容" : "Anthropic"}
               </button>
@@ -586,16 +763,24 @@ function ProviderEditor({
             value={baseUrl}
             onChange={(e) => setBaseUrl(e.target.value)}
             onBlur={blurCommit}
+            onKeyDown={blurOnEnter}
             placeholder="https://api.example.com"
             spellCheck={false}
           />
         </div>
         <div className="field-row">
-          <label>API 路径</label>
+          <label>
+            API 路径
+            <HintTip>
+              OpenAI 兼容：DeepSeek、Kimi、vLLM、Ollama 及各家中转。路径留空按主机猜；接口不在常规位置时（如智谱的{" "}
+              <code>/api/paas/v4/chat/completions</code>）在这里填。
+            </HintTip>
+          </label>
           <input
             value={apiPath}
             onChange={(e) => setApiPath(e.target.value)}
             onBlur={blurCommit}
+            onKeyDown={blurOnEnter}
             placeholder={defaultPath(p.protocol)}
             spellCheck={false}
           />
@@ -604,11 +789,6 @@ function ProviderEditor({
             报错里没有任何线索指向它 —— 而在这里一眼就能看出来。 */}
         <p className="url-preview">
           {joinUrl(baseUrl, apiPath.trim() || defaultPath(p.protocol))}
-        </p>
-        <p className="hint">
-          OpenAI 兼容：DeepSeek、Kimi、vLLM、Ollama 及各家中转。
-          路径留空按主机猜；服务方的接口不在常规位置时（比如智谱的
-          <code>/api/paas/v4/chat/completions</code>）在这里填。
         </p>
       </section>
 
@@ -644,13 +824,15 @@ function ProviderEditor({
       <section>
         <h2>模型</h2>
         {p.models.length === 0 ? <p className="hint">还没有模型。手动输入，或从 API 获取。</p> : null}
-        <div className="model-list">
+        <div className="model-list" role="radiogroup" aria-label="当前模型">
           {p.models.map((m) => {
             const active = isActive && cfg.activeModel === m.id;
             return (
               <div key={m.id} className={active ? "model-row active" : "model-row"}>
                 <button
                   className="model-name"
+                  role="radio"
+                  aria-checked={active}
                   onClick={() => activate(m.id)}
                   title={active ? "使用中" : "设为当前模型"}
                 >
@@ -678,9 +860,12 @@ function ProviderEditor({
 
         <div className="key-row">
           <button onClick={() => setAdding(true)}>添加模型…</button>
-          <button onClick={() => void doFetch()} disabled={fetching || !keySource}>
-            {fetching ? "获取中…" : "从 API 获取"}
-          </button>
+          {/* disabled 按钮吞掉 title，先决条件挂在外层 span 上才看得见 */}
+          <span className="tip-wrap" title={!keySource ? "先在上面保存 API key，才能从接口获取模型列表" : undefined}>
+            <button onClick={() => void doFetch()} disabled={fetching || !keySource}>
+              {fetching ? "获取中…" : "从 API 获取"}
+            </button>
+          </span>
         </div>
 
         {fetched ? (
@@ -720,24 +905,25 @@ function ProviderEditor({
       ) : null}
 
       <section>
-        <h2>采样参数（这一家的默认值）</h2>
-        <p className="hint">
-          模型没单独设的字段用这里的值。单个模型的参数在它的编辑弹窗里改；
-          对话里还能再按会话临时覆盖。
-        </p>
+        <h2>
+          采样参数（这一家的默认值）
+          <HintTip>
+            模型没单独设的字段用这里的值。单个模型在它的编辑弹窗里改；对话里还能按会话临时覆盖。
+          </HintTip>
+        </h2>
         {SAMPLING_FIELDS.map((f) => (
           <div className="field-row" key={f.key}>
-            <label>{f.label}</label>
-            <input
-              type="number"
-              step={f.step}
+            <label>
+              {f.label}
+              <HintTip>{f.hint}</HintTip>
+            </label>
+            <FieldNumber
               value={sampDraft[f.key] ?? ""}
               onChange={(e) => setSampDraft({ ...sampDraft, [f.key]: e.target.value })}
               onBlur={commitSampling}
+              onKeyDown={blurOnEnter}
               placeholder="默认"
-              spellCheck={false}
             />
-            <span className="field-hint">{f.hint}</span>
           </div>
         ))}
       </section>
@@ -756,9 +942,11 @@ function ProviderEditor({
               删除
             </button>
           ) : null}
-          <button className="primary" onClick={() => void doTest()} disabled={testing || !keySource}>
-            {testing ? "测试中…" : "测试连接"}
-          </button>
+          <span className="tip-wrap" title={!keySource ? "先在上面保存 API key，才能测试连接" : undefined}>
+            <button className="primary" onClick={() => void doTest()} disabled={testing || !keySource}>
+              {testing ? "测试中…" : "测试连接"}
+            </button>
+          </span>
         </div>
       </div>
     </>
@@ -773,7 +961,15 @@ function ProviderEditor({
  * 排布顺序对应用户配置的顺序：先决定让不让上网，再配搜索后端，
  * 最后是可选的辅助模型。把辅助模型放前面会让人以为它是必填项。
  */
-function WebPane({ status, onStatus }: { status: ConfigStatus; onStatus: (s: ConfigStatus) => void }) {
+function WebPane({
+  status,
+  onStatus,
+  onSaved,
+}: {
+  status: ConfigStatus;
+  onStatus: (s: ConfigStatus) => void;
+  onSaved: () => void;
+}) {
   const web = status.config.web;
   const [url, setUrl] = useState(web.searxngUrl);
   const [error, setError] = useState("");
@@ -784,8 +980,11 @@ function WebPane({ status, onStatus }: { status: ConfigStatus; onStatus: (s: Con
     setError("");
     try {
       onStatus(await setConfig({ ...status.config, web: { ...web, ...p } }));
+      onSaved();
+      return true;
     } catch (e) {
       setError(String(e));
+      return false;
     }
   };
 
@@ -810,13 +1009,15 @@ function WebPane({ status, onStatus }: { status: ConfigStatus; onStatus: (s: Con
   return (
     <>
       <section>
-        <h2>网页抓取</h2>
+        <h2>
+          网页抓取
+          <HintTip>首次访问每个域名会询问。内网地址一律拒绝。</HintTip>
+        </h2>
         <Toggle
           on={web.fetchEnabled}
           onChange={(v) => void patch({ fetchEnabled: v })}
           label="允许模型抓取网页（WebFetch）"
         />
-        <p className="hint">首次访问每个域名会询问。内网地址一律拒绝。</p>
       </section>
 
       <section>
@@ -827,52 +1028,71 @@ function WebPane({ status, onStatus }: { status: ConfigStatus; onStatus: (s: Con
           label="允许模型联网搜索（WebSearch）"
         />
         <div className="field-row">
-          <label>SearXNG</label>
+          <label>
+            SearXNG
+            <HintTip>
+              需自建实例，公共实例会限流。要求 <code>server.limiter: false</code>，且{" "}
+              <code>search.formats</code> 含 <code>json</code>。
+            </HintTip>
+          </label>
           <div className="input-with-btn">
             <input
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              onBlur={() => url.trim() !== web.searxngUrl && void patch({ searxngUrl: url.trim() })}
+              onBlur={() => {
+                const v = url.trim();
+                if (v === web.searxngUrl) return;
+                void patch({ searxngUrl: v }).then((ok) => {
+                  // 保存被拒时退回真值，别让输入框展示一个没生效的地址
+                  if (!ok) setUrl(web.searxngUrl);
+                });
+              }}
+              onKeyDown={blurOnEnter}
               placeholder="http://127.0.0.1:8080"
               spellCheck={false}
               disabled={!web.searchEnabled}
             />
-            <button
-              className="btn-compact"
-              onClick={() => void doTest()}
-              disabled={testing || !url.trim()}
-              title="会真发一次查询"
+            <span
+              className="tip-wrap"
+              title={
+                !web.searchEnabled
+                  ? "先打开上面的搜索开关"
+                  : !url.trim()
+                    ? "先填写 SearXNG 地址"
+                    : "会真发一次查询"
+              }
             >
-              {testing ? "测试中…" : "测试"}
-            </button>
+              <button
+                className="btn-compact"
+                onClick={() => void doTest()}
+                disabled={testing || !web.searchEnabled || !url.trim()}
+              >
+                {testing ? "测试中…" : "测试"}
+              </button>
+            </span>
           </div>
         </div>
-        <p className="hint">
-          需自建实例，公共实例会限流。要求 <code>server.limiter: false</code>，
-          且 <code>search.formats</code> 含 <code>json</code>。
-        </p>
         {testResult ? (
           <p className={testResult.ok ? "test-result ok" : "test-result err"}>{testResult.text}</p>
         ) : null}
       </section>
 
       <section>
-        <h2>正文蒸馏</h2>
+        <h2>
+          正文蒸馏
+          <HintTip>用便宜的模型把网页压成摘要，省上下文。留空则直接截断。</HintTip>
+        </h2>
         <div className="field-row">
           <label>辅助模型</label>
-          <select
+          <FieldSelect
             value={allModels.some((m) => m.value === web.distillModel) ? web.distillModel : ""}
-            onChange={(e) => void patch({ distillModel: e.target.value })}
-          >
-            <option value="">不蒸馏（返回截断的正文）</option>
-            {allModels.map((m) => (
-              <option key={m.value} value={m.value}>
-                {m.label}
-              </option>
-            ))}
-          </select>
+            onChange={(v) => void patch({ distillModel: v })}
+            options={[
+              { value: "", label: "不蒸馏（返回截断的正文）" },
+              ...allModels,
+            ]}
+          />
         </div>
-        <p className="hint">用便宜的模型把网页压成摘要，省上下文。留空则直接截断。</p>
         {web.distillModel && !allModels.some((m) => m.value === web.distillModel) ? (
           <p className="key-state warn">
             <code>{web.distillModel}</code> 已不存在，当前不会蒸馏。
@@ -880,7 +1100,7 @@ function WebPane({ status, onStatus }: { status: ConfigStatus; onStatus: (s: Con
         ) : null}
       </section>
 
-      {error ? <p className="form-error">{error}</p> : null}
+      {error ? <FormError text={error} /> : null}
     </>
   );
 }
@@ -909,6 +1129,25 @@ const MIN_COMPACT_AT = 8_000;
 const MAX_COMPACT_AT = 1_000_000;
 const DEFAULT_COMPACT_AT = 100_000;
 
+const SANDBOX_MODES: { id: SandboxMode; name: string; desc: string; danger?: boolean }[] = [
+  {
+    id: "workspaceWrite",
+    name: "隔离（推荐）",
+    desc: "只能改工作区和构建缓存，读和联网不受限。",
+  },
+  {
+    id: "workspaceWriteNoNet",
+    name: "隔离并断网",
+    desc: "另外掐掉命令的网络。npm、cargo 拉依赖会失败。",
+  },
+  {
+    id: "off",
+    name: "不隔离",
+    desc: "命令能改任何文件，只剩规则判断拦着。",
+    danger: true,
+  },
+];
+
 const MODES: { id: PermissionMode; name: string; desc: string; danger?: boolean }[] = [
   { id: "default", name: "每次询问", desc: "写文件、执行命令前询问。" },
   { id: "acceptEdits", name: "自动接受编辑", desc: "文件修改放行，命令仍询问。" },
@@ -916,6 +1155,13 @@ const MODES: { id: PermissionMode; name: string; desc: string; danger?: boolean 
     id: "plan",
     name: "规划模式",
     desc: "只读侦察并产出计划，批准后才动手。",
+  },
+  {
+    id: "auto",
+    name: "自动判危",
+    // 不写"自动放行安全操作"就完了 —— 用户会以为它替他做了全部判断。
+    // 要点出两件事：靠的是小模型（所以要配便宜档），以及它压不过安全检查。
+    desc: "小模型先判一遍，明确安全的不再问；安全检查与你写的规则仍然拦。需要配「子 agent 便宜档」。",
   },
   {
     id: "bypassPermissions",
@@ -937,10 +1183,12 @@ function PermissionPane({
   status,
   onStatus,
   askConfirm,
+  onSaved,
 }: {
   status: ConfigStatus;
   onStatus: (s: ConfigStatus) => void;
   askConfirm: (c: ConfirmRequest) => void;
+  onSaved: () => void;
 }) {
   const [error, setError] = useState("");
   const current = status.config.defaultMode ?? "default";
@@ -953,14 +1201,30 @@ function PermissionPane({
     String(status.config.compactThresholdTokens ?? DEFAULT_COMPACT_AT),
   );
 
+  // 夹紧发生时在字段旁说一声 —— 不说的话，99999 无声变 3600 像是输入被吞了。
+  const [clamp, setClamp] = useState<{ key: string; text: string } | null>(null);
+  const clampTimer = useRef(0);
+  const noteClamp = (key: string, raw: number, v: number) => {
+    if (raw === v) return;
+    setClamp({ key, text: raw > v ? `已调整为最大值 ${v}` : `已调整为最小值 ${v}` });
+    window.clearTimeout(clampTimer.current);
+    clampTimer.current = window.setTimeout(() => setClamp(null), 2500);
+  };
+
+  const saved = (s: ConfigStatus) => {
+    onStatus(s);
+    onSaved();
+  };
+
   const commitTimeout = () => {
     const n = Number.parseInt(timeout, 10);
     const v = Number.isFinite(n) ? Math.min(Math.max(n, MIN_TIMEOUT), MAX_TIMEOUT) : status.config.askTimeoutSecs;
+    if (Number.isFinite(n)) noteClamp("timeout", n, v);
     setTimeout_(String(v));
     if (v === status.config.askTimeoutSecs) return;
     setError("");
     setConfig({ ...status.config, askTimeoutSecs: v })
-      .then(onStatus)
+      .then(saved)
       .catch((e: unknown) => setError(String(e)));
   };
 
@@ -968,11 +1232,12 @@ function PermissionPane({
     const cur = status.config.maxTurns ?? DEFAULT_TURNS;
     const n = Number.parseInt(turns, 10);
     const v = Number.isFinite(n) ? Math.min(Math.max(n, MIN_TURNS), MAX_TURNS) : cur;
+    if (Number.isFinite(n)) noteClamp("turns", n, v);
     setTurns(String(v));
     if (v === cur) return;
     setError("");
     setConfig({ ...status.config, maxTurns: v })
-      .then(onStatus)
+      .then(saved)
       .catch((e: unknown) => setError(String(e)));
   };
 
@@ -980,21 +1245,44 @@ function PermissionPane({
     const cur = status.config.compactThresholdTokens ?? DEFAULT_COMPACT_AT;
     const n = Number.parseInt(compactAt, 10);
     const v = Number.isFinite(n) ? Math.min(Math.max(n, MIN_COMPACT_AT), MAX_COMPACT_AT) : cur;
+    if (Number.isFinite(n)) noteClamp("compactAt", n, v);
     setCompactAt(String(v));
     if (v === cur) return;
     setError("");
     setConfig({ ...status.config, compactThresholdTokens: v })
-      .then(onStatus)
+      .then(saved)
       .catch((e: unknown) => setError(String(e)));
   };
 
   const apply = async (mode: PermissionMode) => {
     setError("");
     try {
-      onStatus(await setConfig({ ...status.config, defaultMode: mode }));
+      saved(await setConfig({ ...status.config, defaultMode: mode }));
     } catch (e) {
       setError(String(e));
     }
+  };
+
+  const sandbox = status.config.sandbox ?? "workspaceWrite";
+  const pickSandbox = (mode: SandboxMode) => {
+    // 关沙箱要确认一次。它和"无人值守"是同一类决定：关掉之后唯一挡在
+    // 危险命令前面的就只剩规则判断了，而判断是会错的。
+    const commit = () => {
+      setError("");
+      setConfig({ ...status.config, sandbox: mode })
+        .then(saved)
+        .catch((e: unknown) => setError(String(e)));
+    };
+    if (mode === "off" && sandbox !== "off") {
+      askConfirm({
+        title: "关掉命令隔离？",
+        body: "之后命令能改工作区以外的任何文件，只剩规则判断拦着。规则读不懂「python -c \"...\"」里的代码。",
+        confirmLabel: "确认关闭",
+        action: commit,
+      });
+      return;
+    }
+    commit();
   };
 
   const pick = (mode: PermissionMode) => {
@@ -1016,12 +1304,16 @@ function PermissionPane({
   return (
     <>
       <section>
-        <h2>新会话的默认模式</h2>
-        <p className="hint">只影响之后创建的会话。当前会话在输入框左下角切换。</p>
-        <div className="mode-cards">
+        <h2>
+          新会话的默认模式
+          <HintTip>只影响之后创建的会话。当前会话在输入框左下角切换。</HintTip>
+        </h2>
+        <div className="mode-cards" role="radiogroup" aria-label="新会话的默认模式">
           {MODES.map((m) => (
             <button
               key={m.id}
+              role="radio"
+              aria-checked={current === m.id}
               className={current === m.id ? "mode-card active" : "mode-card"}
               onClick={() => pick(m.id)}
             >
@@ -1035,64 +1327,108 @@ function PermissionPane({
         </div>
       </section>
       <section>
-        <h2>等待授权的时间</h2>
-        <p className="hint">弹窗多久没人回应就放弃。超时按拒绝处理。</p>
+        <h2>
+          命令隔离
+          <HintTip>
+            由操作系统限制命令能改什么。开着时，没有规则命中、也不是只读的命令可以直接放行 ——
+            边界由内核守着。目前只有 macOS 能真正生效。
+          </HintTip>
+        </h2>
+        <div className="mode-cards" role="radiogroup" aria-label="命令隔离">
+          {SANDBOX_MODES.map((m) => (
+            <button
+              key={m.id}
+              role="radio"
+              aria-checked={sandbox === m.id}
+              className={sandbox === m.id ? "mode-card active" : "mode-card"}
+              onClick={() => pickSandbox(m.id)}
+            >
+              <span className="mode-card-name">
+                {m.name}
+                {m.danger ? <span className="mode-card-flag">高风险</span> : null}
+              </span>
+              <span className="mode-card-desc">{m.desc}</span>
+            </button>
+          ))}
+        </div>
+      </section>
+      <section>
+        <h2>
+          等待授权的时间
+          <HintTip>
+            弹窗多久没人回应就放弃，超时按拒绝处理。范围 {MIN_TIMEOUT}–{MAX_TIMEOUT} 秒。
+          </HintTip>
+        </h2>
         <label className="field-inline">
-          <input
-            type="number"
-            min={MIN_TIMEOUT}
-            max={MAX_TIMEOUT}
+          <FieldNumber
             value={timeout}
             onChange={(e) => setTimeout_(e.target.value)}
             onBlur={commitTimeout}
+            onKeyDown={blurOnEnter}
           />
           <span className="field-unit">秒</span>
+          {clamp?.key === "timeout" ? (
+            <span className="clamp-note" role="status">
+              {clamp.text}
+            </span>
+          ) : null}
         </label>
       </section>
       <section>
-        <h2>单轮最大步数</h2>
-        <p className="hint">
-          一句话之内模型最多自主往返多少步（每步 = 调一次模型 + 跑它要的工具）。
-          到顶就停下等你再说一句 —— 不是报错。浏览器自动化、渗透这类多步任务
-          容易吃满，可以调高。
-        </p>
+        <h2>
+          单轮最大步数
+          <HintTip>
+            一句话之内模型最多自主往返多少步。到顶就停下等你再说，不是报错。浏览器自动化、渗透这类多步任务容易吃满，可以调高。范围{" "}
+            {MIN_TURNS}–{MAX_TURNS} 步。
+          </HintTip>
+        </h2>
         <label className="field-inline">
-          <input
-            type="number"
-            min={MIN_TURNS}
-            max={MAX_TURNS}
+          <FieldNumber
             value={turns}
             onChange={(e) => setTurns(e.target.value)}
             onBlur={commitTurns}
+            onKeyDown={blurOnEnter}
           />
           <span className="field-unit">步</span>
+          {clamp?.key === "turns" ? (
+            <span className="clamp-note" role="status">
+              {clamp.text}
+            </span>
+          ) : null}
         </label>
       </section>
       <section>
-        <h2>上下文压缩阈值</h2>
-        <p className="hint">
-          会话历史估算超过这个 token 数时，自动做一次摘要压缩再继续。
-          按你所用模型的上下文窗口设：默认值适配 128k 窗口；窗口更小的模型请调低。
-        </p>
+        <h2>
+          上下文压缩阈值
+          <HintTip>
+            会话历史估算超过这个 token 数时自动摘要压缩。默认适配 128k 窗口，更小的模型请调低。范围{" "}
+            {MIN_COMPACT_AT.toLocaleString()}–{MAX_COMPACT_AT.toLocaleString()}。
+          </HintTip>
+        </h2>
         <label className="field-inline">
-          <input
-            type="number"
-            min={MIN_COMPACT_AT}
-            max={MAX_COMPACT_AT}
+          <FieldNumber
             value={compactAt}
             onChange={(e) => setCompactAt(e.target.value)}
             onBlur={commitCompactAt}
+            onKeyDown={blurOnEnter}
           />
           <span className="field-unit">token</span>
+          {clamp?.key === "compactAt" ? (
+            <span className="clamp-note" role="status">
+              {clamp.text}
+            </span>
+          ) : null}
         </label>
       </section>
       <section>
-        <h2>会话内规则</h2>
-        <p className="hint">
-          点「总是允许」记住的规则（如 <code>Bash(npm run *)</code>）只在当前会话有效。
-        </p>
+        <h2>
+          会话内规则
+          <HintTip>
+            点「总是允许」记住的规则（如 <code>Bash(npm run *)</code>）只在当前会话有效。
+          </HintTip>
+        </h2>
       </section>
-      {error ? <p className="form-error">{error}</p> : null}
+      {error ? <FormError text={error} /> : null}
     </>
   );
 }
@@ -1110,26 +1446,52 @@ function McpPane({
   status,
   onStatus,
   askConfirm,
+  registerLeaveGuard,
+  onSaved,
 }: {
   status: ConfigStatus;
   onStatus: (s: ConfigStatus) => void;
   askConfirm: AskConfirm;
+  registerLeaveGuard: (g: LeaveGuard | null) => void;
+  onSaved: () => void;
 }) {
   const cfg = status.config;
   const servers = cfg.mcpServers;
   const [selId, setSelId] = useState(servers[0]?.id ?? "");
+  /** 刚新建的服务器：编辑器聚焦到名称，省得用户自己找第一个待填字段。 */
+  const [justAdded, setJustAdded] = useState("");
   const [error, setError] = useState("");
   const [live, setLive] = useState<McpServerStatus[]>([]);
   /** null = 表单视图；字符串 = JSON 视图的编辑内容。 */
   const [jsonDraft, setJsonDraft] = useState<string | null>(null);
+  /** 打开 JSON 视图那一刻的导出值。和它相同 = 没改过，关掉不用问。 */
+  const [jsonBase, setJsonBase] = useState("");
   const [jsonBusy, setJsonBusy] = useState(false);
 
   const sel = servers.find((s) => s.id === selId) ?? servers[0];
 
+  // 用户粘了一整段 JSON、还没保存 —— 关设置或切分区前得先问一句。
+  // 这可能是他花了几分钟从 README 里拼出来的东西。
+  const jsonDirty = jsonDraft !== null && jsonDraft !== jsonBase;
+  useEffect(() => {
+    registerLeaveGuard(
+      jsonDirty
+        ? () => ({
+            title: "放弃未保存的 JSON 配置？",
+            body: "JSON 视图里的改动还没保存，离开会丢掉它们。",
+            confirmLabel: "放弃",
+          })
+        : null,
+    );
+    return () => registerLeaveGuard(null);
+  }, [jsonDirty, registerLeaveGuard]);
+
   const openJson = async () => {
     setError("");
     try {
-      setJsonDraft(await mcpExportJson());
+      const s = await mcpExportJson();
+      setJsonBase(s);
+      setJsonDraft(s);
     } catch (e) {
       setError(String(e));
     }
@@ -1142,6 +1504,7 @@ function McpPane({
     try {
       const s = await mcpImportJson(jsonDraft);
       onStatus(s);
+      onSaved();
       setJsonDraft(null);
       setSelId(s.config.mcpServers[0]?.id ?? "");
     } catch (e) {
@@ -1176,6 +1539,7 @@ function McpPane({
     setError("");
     try {
       onStatus(await setConfig(next));
+      onSaved();
       return true;
     } catch (e) {
       setError(String(e));
@@ -1198,7 +1562,10 @@ function McpPane({
     const id = `server-${n}`;
     const s: McpServerConfig = { id, command: "", args: [], env: {}, enabled: true };
     void commit({ ...cfg, mcpServers: [...servers, s] }).then((ok) => {
-      if (ok) setSelId(id);
+      if (ok) {
+        setSelId(id);
+        setJustAdded(id);
+      }
     });
   };
 
@@ -1222,11 +1589,13 @@ function McpPane({
   if (jsonDraft !== null) {
     return (
       <section>
-        <h2>MCP 服务器 · JSON</h2>
-        <p className="hint">
-          标准格式，和 Claude Desktop / Cursor / Cline 通用 —— 各家 README
-          里的 <code>mcpServers</code> 片段可以整段粘贴。保存会整体替换当前列表。
-        </p>
+        <h2>
+          MCP 服务器 · JSON
+          <HintTip>
+            标准格式，和 Claude Desktop / Cursor / Cline 通用。README 里的{" "}
+            <code>mcpServers</code> 片段可以整段粘贴。保存会整体替换当前列表。
+          </HintTip>
+        </h2>
         <textarea
           className="mcp-json-input"
           value={jsonDraft}
@@ -1237,7 +1606,25 @@ function McpPane({
         <div className="editor-foot">
           {error ? <span className="test-result err">{error}</span> : <span />}
           <div className="editor-foot-actions">
-            <button onClick={() => { setJsonDraft(null); setError(""); }} disabled={jsonBusy}>
+            <button
+              onClick={() => {
+                const back = () => {
+                  setJsonDraft(null);
+                  setError("");
+                };
+                if (jsonDirty) {
+                  askConfirm({
+                    title: "放弃未保存的 JSON 配置？",
+                    body: "改动还没保存，返回表单视图会丢掉它们。",
+                    confirmLabel: "放弃",
+                    action: back,
+                  });
+                } else {
+                  back();
+                }
+              }}
+              disabled={jsonBusy}
+            >
               取消
             </button>
             <button className="primary" onClick={() => void applyJson()} disabled={jsonBusy}>
@@ -1275,7 +1662,12 @@ function McpPane({
     <>
       <section>
         <div className="skills-head">
-          <h2>MCP 服务器</h2>
+          <h2>
+            MCP 服务器
+            <HintTip>
+              工具名是 <code>mcp__服务器id__…</code>，权限规则按它匹配。每个工具首次调用会像内置工具一样询问。
+            </HintTip>
+          </h2>
           <div className="mcp-head-actions">
             <button className="ghost" onClick={addServer}>
               添加
@@ -1287,7 +1679,7 @@ function McpPane({
         </div>
         {/* 竖排列表而不是 pill 铺排：几十个服务器时 pill 会糊成一片，
             长名字还会把整行撑爆。行内名字省略号截断，超高滚动。 */}
-        <ul className="mcp-list" role="listbox">
+        <ul className="mcp-list">
           {servers.map((s) => {
             const st = live.find((l) => l.id === s.id);
             const state = s.enabled === false ? "off" : (st?.state ?? "off");
@@ -1305,7 +1697,10 @@ function McpPane({
               <li key={s.id}>
                 <button
                   className={s.id === sel.id ? "mcp-row active" : "mcp-row"}
-                  onClick={() => setSelId(s.id)}
+                  onClick={() => {
+                    setSelId(s.id);
+                    setJustAdded("");
+                  }}
                   title={s.name || s.id}
                 >
                   <span className={`mcp-dot ${state}`} />
@@ -1322,25 +1717,32 @@ function McpPane({
         key={sel.id}
         server={sel}
         live={live.find((l) => l.id === sel.id) ?? null}
+        autoFocusName={sel.id === justAdded}
         onPatch={patchSel}
         onRemove={removeServer}
         onError={setError}
       />
 
-      {error ? <p className="form-error">{error}</p> : null}
+      {error ? <FormError text={error} /> : null}
     </>
   );
 }
 
+/** 已连接服务器的工具名默认只铺这么多个，其余收起 —— 几十个全量平铺会把配置区挤到两屏外。 */
+const MCP_TOOLS_SHOWN = 12;
+
 function McpServerEditor({
   server,
   live,
+  autoFocusName,
   onPatch,
   onRemove,
   onError,
 }: {
   server: McpServerConfig;
   live: McpServerStatus | null;
+  /** 刚新建时聚焦名称输入框。 */
+  autoFocusName?: boolean;
   onPatch: (p: Partial<McpServerConfig>) => void;
   onRemove: () => void;
   onError: (e: string) => void;
@@ -1354,6 +1756,7 @@ function McpServerEditor({
       .join("\n"),
   );
   const [restarting, setRestarting] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(false);
 
   const commitArgs = () => {
     const list = args
@@ -1415,7 +1818,12 @@ function McpServerEditor({
       </div>
       {state === "connected" && live && live.tools.length > 0 ? (
         <p className="hint mcp-tools">
-          {live.tools.join("、")}
+          {(toolsOpen ? live.tools : live.tools.slice(0, MCP_TOOLS_SHOWN)).join("、")}
+          {live.tools.length > MCP_TOOLS_SHOWN ? (
+            <button className="mcp-tools-more" onClick={() => setToolsOpen(!toolsOpen)}>
+              {toolsOpen ? "收起" : `还有 ${live.tools.length - MCP_TOOLS_SHOWN} 个`}
+            </button>
+          ) : null}
         </p>
       ) : null}
 
@@ -1431,6 +1839,8 @@ function McpServerEditor({
           value={name}
           onChange={(e) => setName(e.target.value)}
           onBlur={() => name.trim() !== (server.name ?? "") && onPatch({ name: name.trim() })}
+          onKeyDown={blurOnEnter}
+          autoFocus={autoFocusName}
           placeholder={server.id}
           spellCheck={false}
         />
@@ -1441,6 +1851,7 @@ function McpServerEditor({
           value={command}
           onChange={(e) => setCommand(e.target.value)}
           onBlur={() => command.trim() !== server.command && onPatch({ command: command.trim() })}
+          onKeyDown={blurOnEnter}
           placeholder="npx / uvx / 可执行文件路径"
           spellCheck={false}
         />
@@ -1467,11 +1878,6 @@ function McpServerEditor({
           spellCheck={false}
         />
       </div>
-      <p className="hint">
-        工具名是 <code>mcp__{server.id}__…</code>，权限规则按它匹配。
-        每个工具的首次调用会像内置工具一样弹窗询问。
-      </p>
-
       <div className="editor-foot">
         <span />
         <div className="editor-foot-actions">
@@ -1492,14 +1898,18 @@ function McpServerEditor({
  */
 function SkillsPane({ status, activeRoot }: { status: ConfigStatus; activeRoot: string | null }) {
   const [skills, setSkills] = useState<SkillInfo[] | null>(null);
+  const [loadError, setLoadError] = useState("");
   const configDir = status.configPath.replace(/\/[^/]*$/, "");
   const globalDir = `${configDir}/skills`;
 
   const refresh = async () => {
+    setLoadError("");
     try {
       setSkills(await skillsList(activeRoot));
-    } catch {
-      setSkills([]);
+    } catch (e) {
+      // 读失败不能装成"还没有技能"：空状态会引导用户去建目录，而不是去修权限
+      setSkills(null);
+      setLoadError(String(e));
     }
   };
   useEffect(() => {
@@ -1510,22 +1920,27 @@ function SkillsPane({ status, activeRoot }: { status: ConfigStatus; activeRoot: 
   return (
     <>
       <section>
-        <h2>Skills</h2>
-        <p className="hint">
-          把常用流程或领域知识写成 <code>SKILL.md</code>，模型在对话里按需加载
-          （清单进上下文，正文只在用到时读取）。改完文件下一轮对话即生效。
-        </p>
+        <h2>
+          Skills
+          <HintTip>
+            写成 <code>SKILL.md</code>，模型按需加载（清单进上下文，正文用到才读）。优先级{" "}
+            <strong>项目 &gt; 全局 &gt; 内置</strong>，同名即可盖掉内置。
+            名字和描述每轮都在上下文里，所以描述写「什么时候用」。只想自己敲{" "}
+            <code>/</code>、不想占上下文的，去「命令」页。
+            {activeRoot ? (
+              <>
+                {" "}
+                项目级放 <code>{activeRoot}/.riot/skills/</code>。
+              </>
+            ) : null}
+          </HintTip>
+        </h2>
         <div className="about-row">
           <code>{globalDir}/&lt;名字&gt;/SKILL.md</code>
-          <button className="ghost" onClick={() => void revealInFinder(configDir)}>
+          <button className="ghost" onClick={() => void revealInFinder(globalDir)}>
             打开目录
           </button>
         </div>
-        {activeRoot ? (
-          <p className="hint">
-            项目级技能放 <code>{activeRoot}/.riot/skills/</code>，同名时覆盖全局。
-          </p>
-        ) : null}
       </section>
 
       <section>
@@ -1535,7 +1950,14 @@ function SkillsPane({ status, activeRoot }: { status: ConfigStatus; activeRoot: 
             刷新
           </button>
         </div>
-        {skills === null ? (
+        {loadError ? (
+          <div className="empty-state">
+            <p className="form-error" style={{ margin: 0 }}>
+              读取失败：{loadError}
+            </p>
+            <button onClick={() => void refresh()}>重试</button>
+          </div>
+        ) : skills === null ? (
           <p className="hint">读取中…</p>
         ) : skills.length === 0 ? (
           <div className="empty-state">
@@ -1553,10 +1975,19 @@ description: 发布新版本时用。跑测试、打 tag、更新 changelog。
         ) : (
           <ul className="skill-list">
             {skills.map((s) => (
-              <li key={s.path} className={s.error ? "skill-item bad" : "skill-item"}>
+              <li
+                key={s.path || `builtin-${s.name}`}
+                className={s.error ? "skill-item bad" : "skill-item"}
+              >
                 <div className="skill-item-head">
                   <span className="skill-name">{s.name}</span>
-                  <span className="skill-source">{s.source === "project" ? "项目" : "全局"}</span>
+                  <span className="skill-source">
+                    {s.source === "builtin"
+                      ? "内置"
+                      : s.source === "project"
+                        ? "项目"
+                        : "全局"}
+                  </span>
                 </div>
                 <p className={s.error ? "form-error" : "hint"} style={{ margin: "2px 0 0" }}>
                   {s.error ?? s.description}
@@ -1570,7 +2001,114 @@ description: 发布新版本时用。跑测试、打 tag、更新 changelog。
   );
 }
 
-/* ---------- Hooks 与命令 ---------- */
+/* ---------- 命令 ---------- */
+
+/** 技能在命令页的层级前缀。和 Skills 页用同一套词。 */
+const SKILL_TIER: Record<string, string> = {
+  builtin: "内置",
+  global: "全局",
+  project: "项目",
+};
+
+function CommandsPane({ status, activeRoot }: { status: ConfigStatus; activeRoot: string | null }) {
+  const [commands, setCommands] = useState<SlashCommand[] | null>(null);
+  const [loadError, setLoadError] = useState("");
+  const configDir = status.configPath.replace(/\/[^/]*$/, "");
+
+  const refresh = async () => {
+    setLoadError("");
+    try {
+      setCommands(await slashCommands(activeRoot));
+    } catch (e) {
+      setCommands(null);
+      setLoadError(String(e));
+    }
+  };
+  useEffect(() => {
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeRoot]);
+
+  return (
+    <section>
+      <div className="skills-head">
+        <h2>
+          斜杠命令
+          <HintTip>
+            输入框敲 <code>/</code> 调用。<code>$ARGUMENTS</code> 换整段参数，
+            <code>$1 $2</code> 换第 N 个。子目录是命名空间（<code>git/pr.md</code> →{" "}
+            <code>/git:pr</code>）。
+            <strong>模型看不到命令</strong>，只有你敲了才展开，不占上下文；技能的描述每轮都在，模型能自己决定用。优先级{" "}
+            <strong>内置命令 &gt; 命令文件 &gt; 技能</strong>。
+            {activeRoot ? (
+              <>
+                {" "}
+                项目级放 <code>{activeRoot}/.riot/commands/</code>。
+              </>
+            ) : null}
+          </HintTip>
+        </h2>
+        <button className="ghost" onClick={() => void refresh()}>
+          刷新
+        </button>
+      </div>
+      <div className="about-row">
+        <code>{configDir}/commands/&lt;名字&gt;.md</code>
+        <button className="ghost" onClick={() => void revealInFinder(configDir)}>
+          打开目录
+        </button>
+      </div>
+      {loadError ? (
+        <div className="empty-state">
+          <p className="form-error" style={{ margin: 0 }}>
+            读取失败：{loadError}
+          </p>
+          <button onClick={() => void refresh()}>重试</button>
+        </div>
+      ) : commands === null ? (
+        <p className="hint">读取中…</p>
+      ) : commands.length === 0 ? (
+        <div className="empty-state">
+          <p className="empty-title">还没有命令</p>
+          <p className="hint">
+            在上面的目录里放一个 <code>.md</code> 文件就有了：文件名是命令名，正文是敲
+            <code>/</code> 后发出去的提示词。
+          </p>
+          <pre className="skill-example">{`# review.md
+帮我审查当前改动，重点看：$ARGUMENTS`}</pre>
+        </div>
+      ) : (
+        <ul className="skill-list">
+          {commands.map((c) => (
+            <li key={c.name} className="skill-item">
+              <div className="skill-item-head">
+                <span className="skill-name">/{c.name}</span>
+                {c.argumentHint ? <code className="hook-matcher">{c.argumentHint}</code> : null}
+                {/* 技能带上自己的层级 —— 只写「技能」的话，同一个
+                    extend-riot 在 Skills 页是「内置」、这里是「技能」，
+                    同一个东西两套说法。 */}
+                <span className="skill-source">
+                  {c.source === "builtin"
+                    ? "内置"
+                    : c.source === "skill"
+                      ? `${SKILL_TIER[c.skillSource ?? ""] ?? ""}技能`
+                      : c.source === "project"
+                        ? "项目"
+                        : "全局"}
+                </span>
+              </div>
+              <p className="hint" style={{ margin: "2px 0 0" }}>
+                {c.description}
+              </p>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/* ---------- Hooks ---------- */
 
 const HOOK_EVENT_HINT: Record<string, string> = {
   PreToolUse: "工具执行前。exit 2 = 拦下这次调用",
@@ -1581,16 +2119,17 @@ const HOOK_EVENT_HINT: Record<string, string> = {
 
 function HooksPane({ status, activeRoot }: { status: ConfigStatus; activeRoot: string | null }) {
   const [hooks, setHooks] = useState<HookInfo[] | null>(null);
-  const [commands, setCommands] = useState<SlashCommand[] | null>(null);
+  const [loadError, setLoadError] = useState("");
   const configDir = status.configPath.replace(/\/[^/]*$/, "");
 
   const refresh = async () => {
-    const [h, c] = await Promise.all([
-      hooksList(activeRoot).catch(() => [] as HookInfo[]),
-      slashCommands(activeRoot).catch(() => [] as SlashCommand[]),
-    ]);
-    setHooks(h);
-    setCommands(c);
+    setLoadError("");
+    try {
+      setHooks(await hooksList(activeRoot));
+    } catch (e) {
+      setHooks(null);
+      setLoadError(String(e));
+    }
   };
   useEffect(() => {
     void refresh();
@@ -1598,36 +2137,45 @@ function HooksPane({ status, activeRoot }: { status: ConfigStatus; activeRoot: s
   }, [activeRoot]);
 
   return (
-    <>
-      <section>
-        <div className="skills-head">
-          <h2>Hooks</h2>
-          <button className="ghost" onClick={() => void refresh()}>
-            刷新
-          </button>
-        </div>
-        <p className="hint">
-          在固定检查点跑你自己的脚本：stdin 收一行事件 JSON，
-          <b>exit 2 表示拦下</b>（stderr 是给模型看的理由），exit 0 的 stdout
-          作为补充上下文。改完下一轮生效。
-        </p>
-        <div className="about-row">
-          <code>{configDir}/hooks.json</code>
-          <button className="ghost" onClick={() => void revealInFinder(configDir)}>
-            打开目录
-          </button>
-        </div>
-        {activeRoot ? (
-          <p className="hint">
-            项目级放 <code>{activeRoot}/.riot/hooks.json</code>，和全局的<b>叠加</b>（都会跑）。
+    <section>
+      <div className="skills-head">
+        <h2>
+          Hooks
+          <HintTip>
+            固定检查点跑脚本：stdin 收一行事件 JSON，<b>exit 2 拦下</b>（stderr
+            给模型看），exit 0 的 stdout 作补充上下文。事件：PreToolUse / PostToolUse / Stop /
+            UserPromptSubmit。matcher 支持工具名、<code>A|B</code>、正则。
+            {activeRoot ? (
+              <>
+                {" "}
+                项目级 <code>{activeRoot}/.riot/hooks.json</code> 和全局叠加。
+              </>
+            ) : null}
+          </HintTip>
+        </h2>
+        <button className="ghost" onClick={() => void refresh()}>
+          刷新
+        </button>
+      </div>
+      <div className="about-row">
+        <code>{configDir}/hooks.json</code>
+        <button className="ghost" onClick={() => void revealInFinder(configDir)}>
+          打开目录
+        </button>
+      </div>
+      {loadError ? (
+        <div className="empty-state">
+          <p className="form-error" style={{ margin: 0 }}>
+            读取失败：{loadError}
           </p>
-        ) : null}
-        {hooks === null ? (
-          <p className="hint">读取中…</p>
-        ) : hooks.length === 0 ? (
-          <div className="empty-state">
-            <p className="empty-title">还没有 hooks</p>
-            <pre className="skill-example">{`{
+          <button onClick={() => void refresh()}>重试</button>
+        </div>
+      ) : hooks === null ? (
+        <p className="hint">读取中…</p>
+      ) : hooks.length === 0 ? (
+        <div className="empty-state">
+          <p className="empty-title">还没有 hooks</p>
+          <pre className="skill-example">{`{
   "PreToolUse": [
     { "matcher": "Bash",
       "hooks": [{ "type": "command", "command": "./scripts/check-cmd.sh" }] }
@@ -1636,74 +2184,29 @@ function HooksPane({ status, activeRoot }: { status: ConfigStatus; activeRoot: s
     { "hooks": [{ "type": "command", "command": "cargo test -q" }] }
   ]
 }`}</pre>
-            <p className="hint">
-              事件：PreToolUse / PostToolUse / Stop / UserPromptSubmit。
-              matcher 支持工具名、<code>A|B</code>、正则；省略 = 全部。
-            </p>
-          </div>
-        ) : (
-          <ul className="skill-list">
-            {hooks.map((h, i) => (
-              <li key={`${h.event}-${h.command}-${i}`} className={h.error ? "skill-item bad" : "skill-item"}>
-                <div className="skill-item-head">
-                  <span className="skill-name">{h.error ? "配置有问题" : h.event}</span>
-                  {h.matcher ? <code className="hook-matcher">{h.matcher}</code> : null}
-                  <span className="skill-source">{h.source === "project" ? "项目" : "全局"}</span>
-                </div>
-                <p className={h.error ? "form-error" : "hint"} style={{ margin: "2px 0 0" }}>
-                  {h.error ? `${h.command}：${h.error}` : h.command}
-                </p>
-                {!h.error ? (
-                  <p className="hint" style={{ margin: "2px 0 0" }}>
-                    {HOOK_EVENT_HINT[h.event] ?? ""}（超时 {h.timeoutSecs}s）
-                  </p>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      <section>
-        <h2>斜杠命令</h2>
-        <p className="hint">
-          把常用提示词存成 <code>.md</code>，在输入框敲 <code>/</code> 调用。
-          模板里 <code>$ARGUMENTS</code> 换成整段参数，<code>$1 $2</code> 换成第 N 个。
-          子目录变命名空间（<code>git/pr.md</code> → <code>/git:pr</code>）。
-        </p>
-        <div className="about-row">
-          <code>{configDir}/commands/&lt;名字&gt;.md</code>
-          <button className="ghost" onClick={() => void revealInFinder(configDir)}>
-            打开目录
-          </button>
         </div>
-        {activeRoot ? (
-          <p className="hint">
-            项目级放 <code>{activeRoot}/.riot/commands/</code>，同名时覆盖全局。
-          </p>
-        ) : null}
-        {commands === null ? (
-          <p className="hint">读取中…</p>
-        ) : (
-          <ul className="skill-list">
-            {commands.map((c) => (
-              <li key={c.name} className="skill-item">
-                <div className="skill-item-head">
-                  <span className="skill-name">/{c.name}</span>
-                  {c.argumentHint ? <code className="hook-matcher">{c.argumentHint}</code> : null}
-                  <span className="skill-source">
-                    {c.source === "builtin" ? "内置" : c.source === "project" ? "项目" : "全局"}
-                  </span>
-                </div>
+      ) : (
+        <ul className="skill-list">
+          {hooks.map((h, i) => (
+            <li key={`${h.event}-${h.command}-${i}`} className={h.error ? "skill-item bad" : "skill-item"}>
+              <div className="skill-item-head">
+                <span className="skill-name">{h.error ? "配置有问题" : h.event}</span>
+                {h.matcher ? <code className="hook-matcher">{h.matcher}</code> : null}
+                <span className="skill-source">{h.source === "project" ? "项目" : "全局"}</span>
+              </div>
+              <p className={h.error ? "form-error" : "hint"} style={{ margin: "2px 0 0" }}>
+                {h.error ? `${h.command}：${h.error}` : h.command}
+              </p>
+              {!h.error ? (
                 <p className="hint" style={{ margin: "2px 0 0" }}>
-                  {c.description}
+                  {HOOK_EVENT_HINT[h.event] ?? ""}（超时 {h.timeoutSecs}s）
                 </p>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-    </>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -1714,23 +2217,25 @@ function AboutPane({ status }: { status: ConfigStatus }) {
   return (
     <>
       <section>
-        <h2>Riot</h2>
+        <h2>
+          Riot
+          <HintTip>侧栏、浏览器抽屉、终端的边缘可以拖，调整大小；双击恢复默认。</HintTip>
+        </h2>
         <p className="hint">本地 coding agent。Tauri + Rust。</p>
-        <p className="hint">
-          侧栏、浏览器抽屉、终端的边缘可以拖，调整大小；双击恢复默认。
-        </p>
       </section>
       <section>
-        <h2>配置文件</h2>
+        <h2>
+          配置文件
+          <HintTip>
+            API key 单独存在同目录的 <code>auth.json</code>。
+          </HintTip>
+        </h2>
         <div className="about-row">
           <code>{status.configPath}</code>
           <button className="ghost" onClick={() => void revealInFinder(configDir)}>
             在访达中显示
           </button>
         </div>
-        <p className="hint">
-          API key 单独存在同目录的 <code>auth.json</code>。
-        </p>
       </section>
     </>
   );
