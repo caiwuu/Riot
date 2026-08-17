@@ -4,7 +4,7 @@
 
 模型走你自己配的 API（OpenAI 兼容或 Anthropic）。工具在本机执行；写文件、跑命令会走权限确认，默认先问再做。
 
-现在能对着真实模型日常用。内核是独立进程（`riot-kernel` 二进制），宿主经 stdio 上的 JSON-RPC 驱动它——agent 崩溃或阻塞不再拖垮窗口。终端/浏览器工具的跨进程反向 RPC 还在路上（面板功能不受影响）。桌面端以 macOS 为主；CI 在 Linux 跑内核测试，在 macOS / Windows 跑宿主。Linux 桌面不是首发目标。
+现在能对着真实模型日常用。内核是独立进程（`riot-kernel` 二进制），宿主经 stdio 上的 JSON-RPC 驱动它——agent 崩溃或阻塞不再拖垮窗口；终端/浏览器等宿主能力经同一条管道反向调用。桌面端以 macOS 为主；CI 在 Linux 跑内核测试，在 macOS / Windows 跑宿主。Linux 桌面不是首发目标。
 
 ## 要求
 

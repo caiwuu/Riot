@@ -96,7 +96,7 @@ Agent 的正确性大部分体现在**编译器检查不到的地方**:中断后
 
 判断何时进入阶段 B:当内核的单次操作开始出现 >200ms 的阻塞,或者第一次遇到 panic 拖垮窗口。
 
-**当前状态:阶段 B 已落地。**会话装配在 `crates/riot-kernel`(`SessionManager`),宿主 `AppState` 是 RPC 客户端(`kernel/client.rs`),职责划分:宿主是会话注册表与设置的权威(id/标题/mode 等,纯本地),内核会话是按需水合的运行时投影(`session.resume` 幂等),每轮配置随 `TurnConfig` 传输。尚未接:终端/浏览器的反向 RPC(§2.4)、externalBin 打包、崩溃自动重启。
+**当前状态:阶段 B 已落地。**会话装配在 `crates/riot-kernel`(`SessionManager`),宿主 `AppState` 是 RPC 客户端(`kernel/client.rs`),职责划分:宿主是会话注册表与设置的权威(id/标题/mode 等,纯本地),内核会话是按需水合的运行时投影(`session.resume` 幂等),每轮配置随 `TurnConfig` 传输。终端/浏览器走反向 RPC(`protocol::hostcall`,内核经同一条 stdio 管道调宿主)。尚未接:externalBin 打包、崩溃自动重启。
 
 ### 2.3 内核进程的 spawn 与关闭 ⭐
 
@@ -1486,7 +1486,9 @@ tokio::select! {
 - 权限往返已跨进程:内核发 `PermissionAsked` 事件 → 前端弹窗 → `permission.respond` RPC 回内核的待答表。
 - 每轮配置(模型端点含明文 key、联网/视觉目标、limits、会话设置)由宿主打包成 `TurnConfig` 随 `turn.submit` 传入 —— 内核不读 config.json / auth.json。
 
-还欠:终端/浏览器工具的反向 RPC(内核 → 宿主,见 §2.4 的宿主能力划分)、externalBin 打包、崩溃自动重启(supervisor 的 `RestartPolicy` 已就位,还没接进事件循环)。
+- 终端/浏览器工具走**反向 RPC**(`protocol::hostcall`):内核往 stdout 写带 id+method 的请求,宿主执行(PTY / Chromium 都登记在宿主)后把应答写回内核 stdin。两个方向的 id 空间独立,靠"有无 method 字段"区分请求与应答。
+
+还欠:externalBin 打包、崩溃自动重启(supervisor 的 `RestartPolicy` 已就位,还没接进事件循环)。
 
 ---
 
