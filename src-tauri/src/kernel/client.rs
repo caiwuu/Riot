@@ -16,10 +16,18 @@ use tauri::ipc::Channel;
 use tokio::sync::{Mutex, mpsc};
 
 use riot_protocol::event::AgentEvent;
+use riot_protocol::hostcall::{HostCallErrorKind, HostRequest, HostResponse};
 use riot_protocol::rpc::{RpcNotification, RpcRequest, RpcResponse};
 
 use super::coalesce::{Coalescer, FRAME};
 use super::supervisor::{Kernel, KernelError, KernelHandle};
+
+/// 宿主对内核反向请求(终端/浏览器)的处理端。AppState 实现它 ——
+/// 真正的 PTY 和 Chromium 都登记在那边。
+#[async_trait::async_trait]
+pub trait HostCallHandler: Send + Sync {
+    async fn handle(&self, req: HostRequest) -> HostResponse;
+}
 
 /// 前端事件出口表:session_id → 最新的 Channel。窗口刷新会 attach 新的,
 /// 旧 channel 发送失败即自然淘汰。
@@ -52,6 +60,9 @@ pub struct KernelClient {
     sinks: Sinks,
     host_tx: mpsc::UnboundedSender<HostNotice>,
     host_rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<HostNotice>>>,
+    /// 反向请求的处理端。RwLock<Option>:启动早期(还没注入)收到请求
+    /// 就回"未就绪",不会丢应答。
+    host_service: Arc<std::sync::RwLock<Option<Arc<dyn HostCallHandler>>>>,
 }
 
 impl KernelClient {
@@ -65,6 +76,7 @@ impl KernelClient {
             sinks: Arc::default(),
             host_tx,
             host_rx: std::sync::Mutex::new(Some(host_rx)),
+            host_service: Arc::default(),
         }
     }
 
@@ -72,6 +84,11 @@ impl KernelClient {
     /// 消费任务,更新 busy / mode 登记。
     pub fn take_host_notices(&self) -> Option<mpsc::UnboundedReceiver<HostNotice>> {
         self.host_rx.lock().expect("host_rx 锁").take()
+    }
+
+    /// 注入反向请求的处理端(AppState 启动时调一次)。
+    pub fn set_host_service(&self, svc: Arc<dyn HostCallHandler>) {
+        *self.host_service.write().expect("host_service 锁") = Some(svc);
     }
 
     /// 确保内核进程活着;没起过就 spawn 并接上事件分发。幂等。
@@ -90,7 +107,13 @@ impl KernelClient {
             tx,
         )
         .await?;
-        spawn_dispatch(rx, Arc::clone(&self.sinks), self.host_tx.clone());
+        spawn_dispatch(
+            rx,
+            Arc::clone(&self.sinks),
+            self.host_tx.clone(),
+            kernel.handle(),
+            Arc::clone(&self.host_service),
+        );
         *self.handle.write().expect("handle 锁") = Some(kernel.handle());
         *guard = Some(kernel);
         tracing::info!(exe = %self.exe.display(), "内核进程已启动");
@@ -156,6 +179,8 @@ fn spawn_dispatch(
     mut rx: mpsc::UnboundedReceiver<Value>,
     sinks: Sinks,
     host_tx: mpsc::UnboundedSender<HostNotice>,
+    handle: KernelHandle,
+    host_service: Arc<std::sync::RwLock<Option<Arc<dyn HostCallHandler>>>>,
 ) {
     tokio::spawn(async move {
         let mut coalescers: HashMap<String, Coalescer> = HashMap::new();
@@ -169,6 +194,23 @@ fn spawn_dispatch(
                         tracing::warn!("内核事件流结束");
                         break;
                     };
+                    // 反向请求(id + method):内核要用宿主的终端/浏览器。
+                    // 处理可能很慢(浏览器 wait_for 合法地等几十秒),
+                    // 必须 spawn 出去 —— 堵住这里就是堵住整个事件流。
+                    if v.get("method").is_some()
+                        && let Some(id) = v.get("id").and_then(Value::as_u64)
+                    {
+                        let svc = host_service.read().expect("host_service 锁").clone();
+                        let handle = handle.clone();
+                        tokio::spawn(async move {
+                            let resp = serve_host_call(svc, &v).await;
+                            let result = serde_json::to_value(&resp).unwrap_or(Value::Null);
+                            if let Err(e) = handle.respond(id, result) {
+                                tracing::warn!(error = %e, id, "反向应答写不回内核");
+                            }
+                        });
+                        continue;
+                    }
                     match serde_json::from_value::<RpcNotification>(v) {
                         Ok(RpcNotification::Agent { session_id, event }) => {
                             let sid = session_id.as_str().to_owned();
@@ -221,6 +263,31 @@ fn spawn_dispatch(
             }
         }
     });
+}
+
+/// 解析一条反向请求并交给处理端。任何一步失败都回一条 Error 应答 ——
+/// 静默不回会让内核那边的工具调用永远挂着。
+async fn serve_host_call(svc: Option<Arc<dyn HostCallHandler>>, envelope: &Value) -> HostResponse {
+    let reconstructed = serde_json::json!({
+        "method": envelope.get("method"),
+        "params": envelope.get("params"),
+    });
+    let req: HostRequest = match serde_json::from_value(reconstructed) {
+        Ok(r) => r,
+        Err(e) => {
+            return HostResponse::Error {
+                kind: HostCallErrorKind::Unavailable,
+                message: format!("宿主解析不了这条反向请求:{e}"),
+            };
+        }
+    };
+    match svc {
+        Some(s) => s.handle(req).await,
+        None => HostResponse::Error {
+            kind: HostCallErrorKind::Unavailable,
+            message: "宿主服务端还没就绪".to_owned(),
+        },
+    }
 }
 
 /// 定位内核二进制。

@@ -62,17 +62,37 @@ pub struct SessionManager {
     mcp: Arc<riot_mcp::McpHub>,
     ids: Arc<NanoIdGenerator>,
     out: Outbound,
+    /// 反向 RPC 的桥。每个会话的终端/浏览器代理共享它。
+    bridge: Arc<crate::bridge::HostBridge>,
 }
 
 impl SessionManager {
-    pub fn new(out: Outbound, sessions_dir: PathBuf) -> Self {
+    pub fn new(
+        out: Outbound,
+        sessions_dir: PathBuf,
+        bridge: Arc<crate::bridge::HostBridge>,
+    ) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
             transcripts: Arc::new(riot_store::Transcripts::new(&sessions_dir)),
             mcp: Arc::new(riot_mcp::McpHub::new()),
             ids: Arc::new(NanoIdGenerator),
             out,
+            bridge,
         }
+    }
+
+    /// 给一个新建/水合的会话挂上宿主能力的远程代理。
+    /// 终端和浏览器都在宿主进程 —— 这两个代理把 trait 调用变成反向 RPC。
+    fn attach_host_proxies(&self, session: &Session, id: &SessionId) {
+        session.attach_terminal(Arc::new(crate::bridge::RemoteTerminal {
+            session_id: id.clone(),
+            bridge: Arc::clone(&self.bridge),
+        }));
+        session.attach_browser(Arc::new(crate::bridge::RemoteBrowser {
+            session_id: id.clone(),
+            bridge: Arc::clone(&self.bridge),
+        }));
     }
 
     fn now_ms() -> u64 {
@@ -106,6 +126,7 @@ impl SessionManager {
             session_id: id.clone(),
             out: self.out.clone(),
         }));
+        self.attach_host_proxies(&session, &id);
         self.sessions
             .lock()
             .await
@@ -149,6 +170,7 @@ impl SessionManager {
             session_id: id.clone(),
             out: self.out.clone(),
         }));
+        self.attach_host_proxies(&session, &id);
         let history = session.history().await;
         let archived = session.ui_archive().await;
         self.sessions

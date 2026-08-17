@@ -26,6 +26,7 @@ use std::io::Write as _;
 // crate 归属 ≠ 进程归属:宿主进程和内核进程都链接本 crate,只是入口不同。
 // config 的文件读写代码在这里,宿主进程照常在自己进程内调用它(设置页归宿主);
 // 内核进程不碰配置文件,每轮所需的配置值随 RPC 传入。
+pub mod bridge;
 pub mod changes;
 pub mod classifier;
 pub mod config;
@@ -84,9 +85,17 @@ where
 {
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
 
+    // 反向 RPC 的桥:内核 → 宿主(终端/浏览器是宿主能力)。请求走同一个
+    // 出站通道,应答由下面的读循环按 id 送回来。
+    let host_bridge = bridge::HostBridge::new(out_tx.clone());
+
     // 会话管理器:活会话 + turn 驱动 + MCP。它持有 out_tx 的一份 clone,
     // 用来给每个会话 attach 事件出口(会话事件 → event.agent 通知)。
-    let manager = std::sync::Arc::new(manager::SessionManager::new(out_tx.clone(), sessions_dir));
+    let manager = std::sync::Arc::new(manager::SessionManager::new(
+        out_tx.clone(),
+        sessions_dir,
+        std::sync::Arc::clone(&host_bridge),
+    ));
 
     // 单个 writer 任务串行写出,保证每条消息独占一行。
     let writer_task = tokio::spawn(async move {
@@ -114,7 +123,28 @@ where
                 // (JSON-RPC 用 id 配对,不依赖到达顺序)。
                 let out = out_tx.clone();
                 let mgr = std::sync::Arc::clone(&manager);
+                let br = std::sync::Arc::clone(&host_bridge);
                 tokio::spawn(async move {
+                    // 反向应答:有 id 没 method —— 宿主对内核所发请求的回话。
+                    // (正向请求带 method;两个方向的 id 空间各自独立。)
+                    if let Ok(v) = serde_json::from_str::<Value>(&line)
+                        && v.get("method").is_none()
+                        && let Some(id) = v.get("id").and_then(Value::as_u64)
+                    {
+                        let resp = serde_json::from_value::<
+                            riot_protocol::hostcall::HostResponse,
+                        >(
+                            v.get("result").cloned().unwrap_or(Value::Null)
+                        )
+                        .unwrap_or_else(|e| riot_protocol::hostcall::HostResponse::Error {
+                            kind: riot_protocol::hostcall::HostCallErrorKind::Unavailable,
+                            message: format!("宿主应答解析失败:{e}"),
+                        });
+                        if !br.resolve(id, resp).await {
+                            tracing::warn!(id, "收到无人等待的反向应答");
+                        }
+                        return;
+                    }
                     if let Some(resp) = handle_line(&line, &mgr).await {
                         let _ = out.send(resp);
                     }
@@ -339,8 +369,9 @@ mod tests {
     fn test_manager() -> manager::SessionManager {
         let (out_tx, _rx) = mpsc::unbounded_channel();
         manager::SessionManager::new(
-            out_tx,
+            out_tx.clone(),
             std::env::temp_dir().join("riot-kernel-test-sessions"),
+            bridge::HostBridge::new(out_tx),
         )
     }
 

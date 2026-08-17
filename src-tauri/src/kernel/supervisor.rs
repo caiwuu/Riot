@@ -110,6 +110,16 @@ impl KernelHandle {
             }
         }
     }
+
+    /// 给内核的反向请求写回应答(`{jsonrpc, id, result}`,方向:宿主 → 内核)。
+    pub fn respond(&self, id: u64, result: Value) -> Result<(), KernelError> {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "result": result,
+        }))?;
+        self.stdin_tx
+            .send(payload)
+            .map_err(|_| KernelError::NotRunning)
+    }
 }
 
 pub struct Kernel {
@@ -171,7 +181,7 @@ impl Kernel {
             drop(stdin); // ← 内核在这一刻收到 EOF
         });
 
-        // 读线程：分发响应到 pending 表，通知转发给上层。
+        // 读线程：分发响应到 pending 表，通知与反向请求转发给上层。
         let pending_rx = Arc::clone(&pending);
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
@@ -180,6 +190,13 @@ impl Kernel {
                     tracing::warn!(raw = %line, "内核输出非法 JSON");
                     continue;
                 };
+                // 有 id 且有 method = 内核发来的**反向请求**(终端/浏览器,
+                // 见 riot_protocol::hostcall)。和通知走同一条上行通道,
+                // 由 KernelClient 那边按形状分流 —— 这里只管搬运。
+                if msg.get("method").is_some() {
+                    let _ = on_notification.send(msg);
+                    continue;
+                }
                 match msg.get("id").and_then(Value::as_u64) {
                     Some(id) => {
                         if let Some(tx) = pending_rx.lock().await.remove(&id) {

@@ -245,9 +245,13 @@ impl AppState {
         }))
     }
 
-    /// 起一个任务消费内核事件里宿主也关心的那几件(busy / mode)。
+    /// 起一个任务消费内核事件里宿主也关心的那几件(busy / mode),并注入
+    /// 反向请求(终端/浏览器)的处理端。
     /// Tauri setup 时调一次 —— `restore` 是同步的,不能在那里 spawn。
     pub fn spawn_host_bridge(&self) {
+        self.0
+            .kernel
+            .set_host_service(Arc::new(HostCalls(self.clone())));
         let Some(mut rx) = self.0.kernel.take_host_notices() else {
             return;
         };
@@ -1246,6 +1250,185 @@ fn sandbox_kind(mode: crate::config::SandboxMode) -> riot_protocol::SandboxKind 
             riot_protocol::SandboxKind::WorkspaceWriteNoNet
         }
         crate::config::SandboxMode::Off => riot_protocol::SandboxKind::Off,
+    }
+}
+
+/// 内核反向请求(终端/浏览器)的宿主处理端。
+///
+/// 持有 `AppState` 的一份浅拷贝,于是 AppState → KernelClient → HostCalls
+/// → AppState 形成一个引用环 —— 无害:三者都是进程级单例,活到进程结束,
+/// 没有"该被回收却被环撑着"的对象。
+struct HostCalls(AppState);
+
+fn host_unavailable(message: impl Into<String>) -> riot_protocol::hostcall::HostResponse {
+    riot_protocol::hostcall::HostResponse::Error {
+        kind: riot_protocol::hostcall::HostCallErrorKind::Unavailable,
+        message: message.into(),
+    }
+}
+
+fn interact_resp(e: riot_protocol::browser::InteractError) -> riot_protocol::hostcall::HostResponse {
+    use riot_protocol::browser::InteractError;
+    use riot_protocol::hostcall::{HostCallErrorKind, HostResponse};
+    match e {
+        InteractError::Unavailable(u) => HostResponse::Error {
+            kind: HostCallErrorKind::Unavailable,
+            message: u.0,
+        },
+        InteractError::Target(m) => HostResponse::Error {
+            kind: HostCallErrorKind::Target,
+            message: m,
+        },
+    }
+}
+
+/// 把一次浏览器调用分发到会话的 [`HostBrowser`](crate::browser::access::HostBrowser)。
+async fn browser_call(
+    b: Arc<crate::browser::access::HostBrowser>,
+    call: riot_protocol::hostcall::BrowserCall,
+) -> riot_protocol::hostcall::HostResponse {
+    use riot_protocol::browser::{BrowserAccess, InteractError};
+    use riot_protocol::hostcall::{BrowserCall as C, HostResponse as R};
+
+    fn text(r: Result<String, InteractError>) -> R {
+        match r {
+            Ok(text) => R::Text { text },
+            Err(e) => interact_resp(e),
+        }
+    }
+
+    match call {
+        C::Navigate { url } => match b.navigate(&url).await {
+            Ok(()) => R::Ok,
+            Err(e) => host_unavailable(e.0),
+        },
+        C::Screenshot => match b.screenshot().await {
+            Ok(text) => R::Text { text },
+            Err(e) => host_unavailable(e.0),
+        },
+        C::Snapshot => match b.snapshot().await {
+            Ok(text) => R::Text { text },
+            Err(e) => host_unavailable(e.0),
+        },
+        C::SnapshotMarked => match b.snapshot_marked().await {
+            Ok(m) => R::Marked {
+                listing: m.listing,
+                screenshot: m.screenshot,
+            },
+            Err(e) => host_unavailable(e.0),
+        },
+        C::Console => match b.console().await {
+            Ok(lines) => R::Lines { lines },
+            Err(e) => host_unavailable(e.0),
+        },
+        C::CurrentUrl => R::Text {
+            text: b.current_url().await,
+        },
+        C::Click { target } => text(b.click(target).await),
+        C::TypeText {
+            target,
+            text: t,
+            submit,
+        } => text(b.type_text(target, &t, submit).await),
+        C::PressKey { key } => text(b.press_key(&key).await),
+        C::Scroll { delta_y } => text(b.scroll(delta_y).await),
+        C::WaitFor { cond, timeout_ms } => text(b.wait_for(cond, timeout_ms).await),
+        C::Act { action } => text(b.act(action).await),
+        C::Browse { nav } => text(b.browse(nav).await),
+        C::Evaluate { expr } => text(b.evaluate(&expr).await),
+        C::Upload { target, paths } => text(b.upload(target, paths).await),
+        C::Cookies => text(b.cookies().await),
+        C::Network { query } => text(b.network(query).await),
+        C::Replay {
+            url,
+            method,
+            headers,
+            body,
+        } => text(b.replay(&url, &method, headers, body).await),
+        C::Intercept { op } => text(b.intercept(op).await),
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::kernel::HostCallHandler for HostCalls {
+    async fn handle(
+        &self,
+        req: riot_protocol::hostcall::HostRequest,
+    ) -> riot_protocol::hostcall::HostResponse {
+        use riot_protocol::hostcall::{HostRequest as Req, HostResponse as R};
+        use riot_protocol::terminal::TerminalAccess;
+
+        // 终端面板是应用级的,但 spawn 的 cwd 是会话的项目根 ——
+        // 每次按会话现建一个轻量的 HostTerminal 包装。
+        let terminal = |root: PathBuf| {
+            crate::term_access::HostTerminal::new(self.0.0.terminals.clone(), root)
+        };
+
+        match req {
+            Req::TerminalSpawn {
+                session_id,
+                command,
+                title,
+            } => {
+                let root = match self.0.session_root(session_id.as_str()).await {
+                    Ok(r) => r,
+                    Err(_) => return host_unavailable("会话不存在,起不了终端"),
+                };
+                match terminal(root).spawn(&command, &title).await {
+                    Ok(id) => R::TerminalId { id },
+                    Err(e) => host_unavailable(e.0),
+                }
+            }
+            Req::TerminalRead {
+                session_id,
+                id,
+                lines,
+            } => {
+                let root = match self.0.session_root(session_id.as_str()).await {
+                    Ok(r) => r,
+                    Err(_) => return host_unavailable("会话不存在"),
+                };
+                match terminal(root).read(id, lines).await {
+                    Ok(text) => R::Text { text },
+                    Err(e) => host_unavailable(e.0),
+                }
+            }
+            Req::TerminalKill { session_id, id } => {
+                let root = match self.0.session_root(session_id.as_str()).await {
+                    Ok(r) => r,
+                    Err(_) => return host_unavailable("会话不存在"),
+                };
+                match terminal(root).kill(id).await {
+                    Ok(()) => R::Ok,
+                    Err(e) => host_unavailable(e.0),
+                }
+            }
+            Req::TerminalList { session_id } => {
+                let root = match self.0.session_root(session_id.as_str()).await {
+                    Ok(r) => r,
+                    Err(_) => return host_unavailable("会话不存在"),
+                };
+                R::Terminals {
+                    items: terminal(root).list().await,
+                }
+            }
+            Req::BrowserCall { session_id, call } => {
+                let browser = self
+                    .0
+                    .0
+                    .browsers
+                    .lock()
+                    .await
+                    .get(session_id.as_str())
+                    .cloned();
+                match browser {
+                    Some(b) => browser_call(b, call).await,
+                    None => host_unavailable(
+                        "这个构建没有内置浏览器。开发时先跑 scripts/build-browser.sh。",
+                    ),
+                }
+            }
+        }
     }
 }
 

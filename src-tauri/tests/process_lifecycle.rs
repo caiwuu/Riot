@@ -94,6 +94,61 @@ async fn read_child_pid(path: &Path) -> Option<u32> {
     found
 }
 
+/// 反向 RPC 的传输层往返:内核发 `{id, method}` 的请求,宿主读循环要把它
+/// **转给上层**(而不是当成"无人等待的应答"丢掉),应答经 respond 写回
+/// 内核 stdin。这条链路断了的表现是 agent 的终端/浏览器工具永远挂着 ——
+/// 没有超时、没有报错,只有一个不会结束的工具调用。
+#[tokio::test]
+async fn 反向请求转给上层_应答写回内核() {
+    let dir = tempfile::tempdir().unwrap();
+    let reply_file = dir.path().join("reply.json");
+    let script = dir.path().join("fake_kernel_hostcall.sh");
+    let body = format!(
+        r#"#!/bin/sh
+# 一起来就发一条反向请求(带 id + method):内核要用宿主的终端。
+printf '{{"jsonrpc":"2.0","id":7,"method":"terminal.list","params":{{"session_id":"s1"}}}}\n'
+# 宿主的应答从 stdin 回来,原样落盘供断言。
+IFS= read -r line
+printf '%s' "$line" > "{reply}"
+"#,
+        reply = reply_file.display(),
+    );
+    std::fs::write(&script, body).expect("写脚本");
+    let mut perm = std::fs::metadata(&script).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o755);
+    std::fs::set_permissions(&script, perm).expect("加执行位");
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let kernel = Kernel::spawn(script, &[], tx).await.expect("启动假内核");
+
+    let msg = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("5 秒内该收到反向请求")
+        .expect("通道不该先关");
+    assert_eq!(msg["method"], "terminal.list", "带 method 的消息是反向请求");
+    let id = msg["id"].as_u64().expect("反向请求带 id");
+
+    kernel
+        .handle()
+        .respond(
+            id,
+            serde_json::json!({ "result": "terminals", "data": { "items": [] } }),
+        )
+        .expect("应答写回内核");
+
+    assert!(
+        eventually(Duration::from_secs(5), || {
+            std::fs::read_to_string(&reply_file)
+                .map(|s| s.contains("\"terminals\"") && s.contains("\"id\":7"))
+                .unwrap_or(false)
+        })
+        .await,
+        "内核该在 stdin 上收到那条应答(id 原样、载荷完整)"
+    );
+
+    kernel.shutdown().await;
+}
+
 #[tokio::test]
 async fn 关闭时内核收到_eof_有机会收尾() {
     let dir = tempfile::tempdir().unwrap();

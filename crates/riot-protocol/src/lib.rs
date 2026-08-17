@@ -11,6 +11,7 @@ pub mod changes;
 pub mod compact;
 pub mod event;
 pub mod hook;
+pub mod hostcall;
 pub mod id;
 pub mod message;
 pub mod permission;

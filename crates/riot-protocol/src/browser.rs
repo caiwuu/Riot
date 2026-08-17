@@ -166,7 +166,7 @@ pub trait BrowserAccess: Send + Sync {
 }
 
 /// 拦截规则的操作。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum InterceptOp {
     /// 拦截 URL 含某子串的请求，直接失败（BlockedByClient）。
     Block { url_pattern: String },
@@ -184,7 +184,7 @@ pub enum InterceptOp {
 }
 
 /// 网络观察的三种查询。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NetQuery {
     /// 列出抓到的请求（方法、URL、状态、类型、大小），可按 URL 子串过滤。
     List { filter: Option<String> },
@@ -196,7 +196,7 @@ pub enum NetQuery {
 }
 
 /// 元素级动作。定位统一走 [`Target`]。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Action {
     /// 把鼠标移上去（不点）—— 触发悬停菜单、tooltip。
     Hover(Target),
@@ -213,7 +213,7 @@ pub enum Action {
 }
 
 /// 页面级操作。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Nav {
     /// 后退一步。
     Back,
@@ -237,7 +237,7 @@ pub enum Nav {
 /// `[取舍]` 三种方式并存，不是只留编号。编号 `[n]` 来自快照、最省 token，
 /// 但页面一变就失效；CSS 选择器和文本跨快照稳定，适合"点那个叫登录的按钮"
 /// 这种意图明确、但不想先拍快照的场景。让模型按情况挑。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Target {
     /// 最近一次 [`BrowserAccess::snapshot`] 输出里行首的编号 `[n]`。
     Ref(u32),
@@ -259,7 +259,7 @@ impl Target {
 }
 
 /// [`BrowserAccess::wait_for`] 等的条件。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WaitCondition {
     /// 某 CSS 选择器匹配到元素（出现）。
     Selector(String),
