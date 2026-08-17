@@ -195,7 +195,8 @@ impl AppState {
         Self::restore_at(crate::config::config_path())
     }
 
-    /// 从指定配置路径恢复。路径参数化是为了能测（同 `config::load_at` 的理由）。
+    /// 从指定配置路径恢复。路径参数化是为了能测（同 `config::load_at` 的
+    /// 理由;pub 是给集成测试用 —— 它们在 tests/ 目录里是外部 crate）。
     ///
     /// 同步执行且不碰任何锁 —— 它跑在 Tauri runtime 起来之前。会话表在
     /// 构造 `Inner` 时整体塞入，历史留给各会话惰性水合。
@@ -203,7 +204,7 @@ impl AppState {
     /// `[约束]` root 目录已经不存在的会话**照样恢复**。目录没了不等于对话
     /// 没价值 —— 历史仍然可读，工具会在使用时报真实错误；跳过它的话，
     /// 下一次索引落盘会把它永久抹掉，用户连历史都找不回。
-    pub(crate) fn restore_at(config_path: PathBuf) -> Self {
+    pub fn restore_at(config_path: PathBuf) -> Self {
         let inner = Inner::at(config_path);
         let index = crate::persist::load(&inner.sessions_dir, &inner.transcripts);
 
@@ -270,6 +271,14 @@ impl AppState {
                         }
                         // 持久化:不记的话下一轮 TurnConfig 又把旧模式传回去。
                         state.persist_index().await;
+                    }
+                    HostNotice::KernelGone => {
+                        // 重启后的内核是一张白纸:所有会话都要重新水合,
+                        // 也没有任何轮子还在跑。
+                        for m in state.0.sessions.lock().await.values_mut() {
+                            m.hydrated = false;
+                            m.busy = false;
+                        }
                     }
                 }
             }

@@ -211,6 +211,10 @@ impl Kernel {
                     }
                 }
             }
+            // 读循环结束 = 内核 stdout 没了(进程退出/崩溃)。清掉在途请求,
+            // drop 掉的 oneshot 会让等待者立刻拿到 NotRunning —— 不清的话
+            // 它们对着一个死进程永远等下去。
+            pending_rx.lock().await.clear();
         });
 
         // stderr 直接进日志。内核的 panic backtrace 从这里出来，

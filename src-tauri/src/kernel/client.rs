@@ -15,12 +15,12 @@ use serde_json::Value;
 use tauri::ipc::Channel;
 use tokio::sync::{Mutex, mpsc};
 
-use riot_protocol::event::AgentEvent;
+use riot_protocol::event::{AgentError, AgentEvent, TerminalReason};
 use riot_protocol::hostcall::{HostCallErrorKind, HostRequest, HostResponse};
 use riot_protocol::rpc::{RpcNotification, RpcRequest, RpcResponse};
 
 use super::coalesce::{Coalescer, FRAME};
-use super::supervisor::{Kernel, KernelError, KernelHandle};
+use super::supervisor::{Kernel, KernelError, KernelHandle, RestartPolicy};
 
 /// 宿主对内核反向请求(终端/浏览器)的处理端。AppState 实现它 ——
 /// 真正的 PTY 和 Chromium 都登记在那边。
@@ -48,6 +48,10 @@ pub enum HostNotice {
         session_id: String,
         mode: riot_protocol::permission::PermissionMode,
     },
+    /// 内核进程没了(崩溃或退出)。宿主要把所有会话的"已水合"标记清掉 ——
+    /// 重启后的内核是一张白纸,带着旧标记会把 turn.submit 发到一个
+    /// 不存在的会话上。
+    KernelGone,
 }
 
 pub struct KernelClient {
@@ -63,6 +67,10 @@ pub struct KernelClient {
     /// 反向请求的处理端。RwLock<Option>:启动早期(还没注入)收到请求
     /// 就回"未就绪",不会丢应答。
     host_service: Arc<std::sync::RwLock<Option<Arc<dyn HostCallHandler>>>>,
+    /// 内核死亡标志。分发循环结束(stdout 关闭 = 进程没了)时置位,
+    /// 下一次 ensure_running 看到它就收尸旧进程、按退避重启。
+    dead: Arc<std::sync::atomic::AtomicBool>,
+    restart: Mutex<RestartPolicy>,
 }
 
 impl KernelClient {
@@ -77,6 +85,8 @@ impl KernelClient {
             host_tx,
             host_rx: std::sync::Mutex::new(Some(host_rx)),
             host_service: Arc::default(),
+            dead: Arc::default(),
+            restart: Mutex::new(RestartPolicy::default()),
         }
     }
 
@@ -92,10 +102,37 @@ impl KernelClient {
     }
 
     /// 确保内核进程活着;没起过就 spawn 并接上事件分发。幂等。
+    ///
+    /// 内核崩溃后(dead 置位)走这里自动重启:收尸旧进程树,按
+    /// [`RestartPolicy`] 的退避序列等待;连续崩太多次就放弃并报错 ——
+    /// 无限重启会把"内核起不来"的 bug 变成 CPU 打满的死循环。
     pub async fn ensure_running(&self) -> Result<(), KernelError> {
+        use std::sync::atomic::Ordering;
+
         let mut guard = self.kernel.lock().await;
-        if guard.is_some() {
+        if guard.is_some() && !self.dead.load(Ordering::SeqCst) {
             return Ok(());
+        }
+        if let Some(old) = guard.take() {
+            // 崩溃路径:进程已经没了,但进程组里可能还有它 spawn 的子进程,
+            // 无条件清一遍(kill_now 对空组是无害的 ESRCH)。
+            *self.handle.write().expect("handle 锁") = None;
+            old.kill_now().await;
+        }
+        if self.dead.load(Ordering::SeqCst) {
+            match self.restart.lock().await.next_delay() {
+                Some(d) => {
+                    tracing::warn!(delay = ?d, "内核死了,退避后重启");
+                    tokio::time::sleep(d).await;
+                    self.dead.store(false, Ordering::SeqCst);
+                }
+                None => {
+                    // 不清 dead:之后每次调用都走到这里、立刻报错,
+                    // 直到用户重启应用。
+                    let n = self.restart.lock().await.failures();
+                    return Err(KernelError::RestartExhausted(n));
+                }
+            }
         }
         let (tx, rx) = mpsc::unbounded_channel();
         let kernel = Kernel::spawn(
@@ -113,6 +150,7 @@ impl KernelClient {
             self.host_tx.clone(),
             kernel.handle(),
             Arc::clone(&self.host_service),
+            Arc::clone(&self.dead),
         );
         *self.handle.write().expect("handle 锁") = Some(kernel.handle());
         *guard = Some(kernel);
@@ -144,6 +182,9 @@ impl KernelClient {
         let params = v.get("params").cloned().unwrap_or(Value::Null);
 
         let result = handle.request(&method, params).await?;
+        // 完成过一次真正的往返才算"这次启动成功"——起来就崩的循环
+        // 不该重置退避计数。
+        self.restart.lock().await.record_success();
         match serde_json::from_value::<RpcResponse>(result)? {
             RpcResponse::Error { error } => Err(KernelError::Rpc(error.message)),
             other => Ok(other),
@@ -181,6 +222,7 @@ fn spawn_dispatch(
     host_tx: mpsc::UnboundedSender<HostNotice>,
     handle: KernelHandle,
     host_service: Arc<std::sync::RwLock<Option<Arc<dyn HostCallHandler>>>>,
+    dead: Arc<std::sync::atomic::AtomicBool>,
 ) {
     tokio::spawn(async move {
         let mut coalescers: HashMap<String, Coalescer> = HashMap::new();
@@ -262,6 +304,35 @@ fn spawn_dispatch(
                 }
             }
         }
+
+        // 走到这里 = 内核进程没了(优雅关闭时 sinks 通常已空,发不发无妨;
+        // 崩溃时这是**唯一**告诉前端"这一轮完了"的机会)。
+        //
+        // `[约束]` Done 必须出现(INV-4):消费者依赖它做清理,缺失的表现
+        // 是 UI 永远转圈。先吐掉累积中的增量再发 Done,顺序反了 UI 会看到
+        // "结束之后又来了半句话"。
+        dead.store(true, std::sync::atomic::Ordering::SeqCst);
+        let sinks_now = sinks.lock().await;
+        for (sid, ch) in sinks_now.iter() {
+            if let Some(c) = coalescers.get_mut(sid)
+                && let Some(e) = c.tick()
+            {
+                let _ = ch.send(e);
+            }
+            let _ = ch.send(AgentEvent::Done {
+                reason: TerminalReason::Error {
+                    error: AgentError::Internal {
+                        message: "内核进程意外退出,这一轮的运行状态已丢失。\
+                                  下一条消息会自动重启内核。"
+                            .to_owned(),
+                    },
+                },
+            });
+            let _ = host_tx.send(HostNotice::Done {
+                session_id: sid.clone(),
+            });
+        }
+        let _ = host_tx.send(HostNotice::KernelGone);
     });
 }
 
@@ -294,18 +365,21 @@ async fn serve_host_call(svc: Option<Arc<dyn HostCallHandler>>, envelope: &Value
 ///
 /// dev 和 bundle 两种情况下它都在宿主可执行文件旁边:dev 是 workspace 的
 /// target/debug/(一起 build),bundle 是 externalBin 进 Contents/MacOS/。
+/// 再试一层上级目录:测试二进制在 target/debug/deps/ 下,内核在上一级。
 pub fn locate_kernel() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| format!("拿不到宿主路径:{e}"))?;
     let dir = exe
         .parent()
         .ok_or_else(|| "宿主路径没有父目录".to_owned())?;
     let name = format!("riot-kernel{}", std::env::consts::EXE_SUFFIX);
-    let candidate = dir.join(&name);
-    if candidate.exists() {
-        return Ok(candidate);
+    for base in [Some(dir), dir.parent()].into_iter().flatten() {
+        let candidate = base.join(&name);
+        if candidate.exists() {
+            return Ok(candidate);
+        }
     }
     Err(format!(
         "找不到内核二进制 {}。开发模式请先 `cargo build -p riot-kernel`。",
-        candidate.display()
+        dir.join(&name).display()
     ))
 }
