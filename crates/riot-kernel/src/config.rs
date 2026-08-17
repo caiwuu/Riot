@@ -840,6 +840,29 @@ impl ResolvedModel {
     pub fn is_anthropic(&self) -> bool {
         self.protocol == Protocol::Anthropic
     }
+
+    /// 解析成跨进程传输的端点:协议、采样转成 protocol 类型,并把明文 key
+    /// 一并解析出来。拆进程后内核拿不到 auth.json,key 必须在宿主这一侧
+    /// 解析完再随 RPC 传进内核(见 riot_protocol::turn 模块文档)。
+    pub fn to_endpoint(&self) -> Result<riot_protocol::ModelEndpoint, ConfigError> {
+        Ok(riot_protocol::ModelEndpoint {
+            protocol: match self.protocol {
+                Protocol::Openai => riot_protocol::ApiProtocol::Openai,
+                Protocol::Anthropic => riot_protocol::ApiProtocol::Anthropic,
+            },
+            base_url: self.base_url.clone(),
+            api_path: self.api_path.clone(),
+            api_key: self.api_key()?,
+            model: self.model.clone(),
+            fallback_model: self.fallback_model.clone(),
+            sampling: riot_protocol::EndpointSampling {
+                temperature: self.sampling.temperature,
+                top_p: self.sampling.top_p,
+                top_k: self.sampling.top_k,
+                max_output_tokens: self.sampling.max_output_tokens,
+            },
+        })
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

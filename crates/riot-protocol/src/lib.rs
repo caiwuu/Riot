@@ -18,6 +18,7 @@ pub mod rpc;
 pub mod runner;
 pub mod terminal;
 pub mod tool;
+pub mod turn;
 pub mod vision;
 pub mod web;
 
@@ -53,6 +54,7 @@ pub use tool::{
     ProcessOutput, ProcessRunner, ProcessSpec, ProgressSink, PromptContext, ResultBudget, Tool,
     ToolContext, ToolOutcome, UiPayload, ValidationError,
 };
+pub use turn::{ApiProtocol, EndpointSampling, ModelEndpoint};
 pub use vision::{DescribeRequest, NoVision, VisionAccess, VisionError};
 pub use web::{
     DistillRequest, NoWeb, SearchHit, SearchQuery, WebAccess, WebError, WebRequest, WebResponse,

@@ -1728,7 +1728,19 @@ impl riot_protocol::tool::ProcessRunner for VenvRunner {
 /// 按配置构建 provider。会话和"测试连接"共用 —— 两处各写一遍的话，
 /// 测试通过而正式请求失败（或反过来）这种事迟早发生。
 pub fn provider_for(model: &ResolvedModel) -> Result<Arc<dyn Provider>, String> {
-    let key = model.api_key().map_err(|e| e.to_string())?;
+    provider_from_endpoint(&model.to_endpoint().map_err(|e| e.to_string())?)
+}
+
+/// 从一个解析好的端点(含明文 key)建 Provider。
+///
+/// 这是建 Provider 的核心入口。阶段 B 拆进程后内核走这条:宿主把
+/// [`riot_protocol::ModelEndpoint`] 随 RPC 传进来,内核不碰 auth.json。
+/// 内嵌期的 [`provider_for`] 也经它 —— 只是多一步从 `ResolvedModel` 把 key
+/// 解析出来。两处共用一份建构逻辑,避免"内嵌能连、RPC 连不上"这类分叉。
+pub fn provider_from_endpoint(
+    model: &riot_protocol::ModelEndpoint,
+) -> Result<Arc<dyn Provider>, String> {
+    let key = model.api_key.clone();
     let transport = Arc::new(ReqwestTransport::new().map_err(|e| e.to_string())?);
     let clock = Arc::new(riot_providers::watchdog::TokioClock);
 
