@@ -100,8 +100,8 @@ pub fn build_request(
         // OpenAI 兼容协议没有预算参数，折算成最近的档位。
         ThinkingConfig::Budget { tokens } => (
             Some(match tokens {
-                ..=4_096 => ThinkingEffort::Low.as_openai_str(),
-                ..=16_384 => ThinkingEffort::Medium.as_openai_str(),
+                0..=4_096 => ThinkingEffort::Low.as_openai_str(),
+                4_097..=16_384 => ThinkingEffort::Medium.as_openai_str(),
                 _ => ThinkingEffort::High.as_openai_str(),
             }),
             None,

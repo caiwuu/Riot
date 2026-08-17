@@ -22,6 +22,19 @@ use crate::fence::Fence;
 use crate::session::Session;
 use crate::{HostError, HostResult};
 
+/// 把会话事件送进前端订阅的 tauri `Channel` 的出口实现(宿主侧)。
+///
+/// 内核只认 [`crate::session::EventSink`] trait;这个具体实现是"内嵌"
+/// 那一端。拆进程后它换成"发 RPC 通知给内核 stdout 的读取器",
+/// 内核侧一行不用动(见 ARCHITECTURE.md §2.2 的 KernelClient 换实现)。
+struct ChannelSink(Channel<AgentEvent>);
+
+impl crate::session::EventSink for ChannelSink {
+    fn send(&self, event: AgentEvent) -> Result<(), crate::session::SinkClosed> {
+        self.0.send(event).map_err(|_| crate::session::SinkClosed)
+    }
+}
+
 /// 切回一个会话时前端要的东西。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -125,6 +138,10 @@ struct Inner {
     /// 终端面板。应用级：终端跟着应用走不跟着会话走（见 term.rs），
     /// 而模型起的服务要出现在用户眼前那一个面板里，不是各自一份。
     terminals: crate::term::Terminals,
+    /// 会话的面板浏览器(HostBrowser)。会话级、**宿主持有** —— 面板的
+    /// screencast / 输入转发是宿主能力,拆进程后浏览器进程完全归宿主。
+    /// 工具用的是同一个实例(经 `dyn BrowserAccess` 注入进 Session)。
+    browsers: Mutex<HashMap<String, Arc<crate::browser::access::HostBrowser>>>,
 }
 
 impl Inner {
@@ -144,6 +161,7 @@ impl Inner {
             index_lock: Mutex::default(),
             mcp: Arc::new(riot_mcp::McpHub::new()),
             terminals: crate::term::Terminals::default(),
+            browsers: Mutex::default(),
         }
     }
 }
@@ -170,6 +188,7 @@ impl AppState {
         let index = crate::persist::load(&inner.sessions_dir, &inner.transcripts);
 
         let mut map = HashMap::new();
+        let mut browsers_map = HashMap::new();
         let mut next_seq = 0u64;
         for p in index.sessions {
             next_seq = next_seq.max(p.seq + 1);
@@ -179,19 +198,39 @@ impl AppState {
                 root: PathBuf::from(&p.root),
                 created_at_ms: p.created_at_ms,
             });
+            let settings = crate::session::SessionSettings {
+                id: p.id.clone(),
+                sampling: p.sampling,
+                mode: p.mode,
+                python_venv: p.python_venv.clone(),
+                system_prompt: p.system_prompt.clone(),
+                thinking: p.thinking,
+                custom_title: p.custom_title.clone(),
+                auto_title: p.auto_title.clone(),
+            };
             let session = Session::restored(
-                &p,
+                &settings,
                 PathBuf::from(&p.root),
                 Some(crate::session::SessionPersist {
                     store: Arc::clone(&inner.transcripts),
                     log,
                 }),
             );
-            session.attach_terminals(inner.terminals.clone());
+            session.attach_terminal(Arc::new(crate::term_access::HostTerminal::new(
+                inner.terminals.clone(),
+                PathBuf::from(&p.root),
+            )));
+            let session = Arc::new(session);
+            if let Some(b) = make_browser(&inner.config_path, &p.id) {
+                session.attach_browser(
+                    Arc::clone(&b) as Arc<dyn riot_protocol::browser::BrowserAccess>
+                );
+                browsers_map.insert(p.id.clone(), b);
+            }
             map.insert(
                 p.id.clone(),
                 Registered {
-                    session: Arc::new(session),
+                    session,
                     seq: p.seq,
                     created_at_ms: p.created_at_ms,
                 },
@@ -204,6 +243,7 @@ impl AppState {
         Self(Arc::new(Inner {
             sessions: Mutex::new(map),
             seq: AtomicU64::new(next_seq),
+            browsers: Mutex::new(browsers_map),
             ..inner
         }))
     }
@@ -248,7 +288,7 @@ impl AppState {
         // 的话这一轮剩下的事件（包括结束）全发给了没人听的旧 channel，
         // 界面就永远停在"它正在做事"。
         if let Some(r) = self.0.sessions.lock().await.get(&session_id) {
-            r.session.attach_sink(channel);
+            r.session.attach_sink(Arc::new(ChannelSink(channel)));
         }
         g.insert(session_id, Sink { epoch });
         true
@@ -300,7 +340,18 @@ impl AppState {
                 log,
             }),
         ));
-        s.attach_terminals(self.0.terminals.clone());
+        s.attach_terminal(Arc::new(crate::term_access::HostTerminal::new(
+            self.0.terminals.clone(),
+            fence.root().to_path_buf(),
+        )));
+        if let Some(b) = make_browser(&self.0.config_path, id.as_str()) {
+            s.attach_browser(Arc::clone(&b) as Arc<dyn riot_protocol::browser::BrowserAccess>);
+            self.0
+                .browsers
+                .lock()
+                .await
+                .insert(id.as_str().to_owned(), b);
+        }
         if let Some(m) = default_mode {
             s.set_mode(m).await;
         }
@@ -396,6 +447,10 @@ impl AppState {
                 &self.0.sessions_dir,
                 session_id,
             ));
+            // 先摘掉内存里的浏览器句柄:Drop 会关掉 Chromium 进程,而
+            // remove_browser_profile 删的是它锁着的 profile 目录,必须在
+            // 进程退出之后(见 remove_browser_profile 的约束)。
+            self.0.browsers.lock().await.remove(session_id);
             self.remove_browser_profile(session_id).await;
             self.persist_index().await;
         }
@@ -469,7 +524,11 @@ impl AppState {
 
         match cleaned {
             Ok(v) if !v.is_empty() => {
-                tracing::info!(count = v.len(), "清掉了 {} 个没人认领的浏览器 profile", v.len());
+                tracing::info!(
+                    count = v.len(),
+                    "清掉了 {} 个没人认领的浏览器 profile",
+                    v.len()
+                );
             }
             Ok(_) => {}
             Err(e) => tracing::warn!(error = %e, "清理孤儿 profile 的任务没跑完"),
@@ -565,12 +624,19 @@ impl AppState {
         &self,
         id: &str,
     ) -> HostResult<Arc<crate::browser::access::HostBrowser>> {
-        self.session(id)
-            .await?
-            .panel_browser()
-            .ok_or_else(|| HostError::Browser(riot_protocol::browser::BrowserUnavailable(
-                "这个构建没有内置浏览器。开发时先跑 scripts/build-browser.sh。".into(),
-            )))
+        // 先确认会话存在(给出一致的 NoSession 错误),再取它的浏览器。
+        self.session(id).await?;
+        self.0
+            .browsers
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or_else(|| {
+                HostError::Browser(riot_protocol::browser::BrowserUnavailable(
+                    "这个构建没有内置浏览器。开发时先跑 scripts/build-browser.sh。".into(),
+                ))
+            })
     }
 
     async fn session(&self, id: &str) -> HostResult<Arc<Session>> {
@@ -677,7 +743,9 @@ impl AppState {
         if !model_cards.is_empty() {
             // 没有技能就不装 Skill 工具 —— 一个"可用技能：（无）"的工具
             // 描述是每轮都付的上下文税，还会引诱模型去调它。
-            extra_tools.push(Arc::new(riot_tools::tools::skill::SkillTool::new(model_cards)));
+            extra_tools.push(Arc::new(riot_tools::tools::skill::SkillTool::new(
+                model_cards,
+            )));
         }
         let caps = crate::session::TurnCapabilities {
             web: Arc::new(crate::web::HostWeb::from_config(&config)),
@@ -686,8 +754,10 @@ impl AppState {
             // 判危分类器同理每轮现装。装不出来（没配便宜档）就给占位实现 ——
             // Auto 模式于是退化成 Default，照常弹窗，不会静默放行。
             classifier: crate::classifier::HostClassifier::from_config(&config).map_or_else(
-                || Arc::new(riot_protocol::permission::NoClassifier)
-                    as Arc<dyn riot_protocol::permission::SafetyClassifier>,
+                || {
+                    Arc::new(riot_protocol::permission::NoClassifier)
+                        as Arc<dyn riot_protocol::permission::SafetyClassifier>
+                },
                 |c| Arc::new(c) as Arc<dyn riot_protocol::permission::SafetyClassifier>,
             ),
             extra_tools,
@@ -960,7 +1030,26 @@ impl AppState {
 /// 表现是"探测说有，填进去却报不像虚拟环境"。
 fn venv_python(dir: &std::path::Path) -> std::path::PathBuf {
     dir.join(if cfg!(windows) { "Scripts" } else { "bin" })
-        .join(if cfg!(windows) { "python.exe" } else { "python" })
+        .join(if cfg!(windows) {
+            "python.exe"
+        } else {
+            "python"
+        })
+}
+
+/// 给一个会话装配面板浏览器。没打包浏览器时返回 None(工具装 NoBrowser、
+/// 面板报不可用)。profile 目录按会话 id 隔离:同一数据目录不能跑两个
+/// Chromium 实例,共用的话第二个会话一用就报不可用。
+///
+/// 从 Session 移到宿主(阶段 B):浏览器进程和面板都是宿主能力,内核只经
+/// `dyn BrowserAccess` 用同一个实例。
+fn make_browser(
+    config_path: &std::path::Path,
+    id: &str,
+) -> Option<Arc<crate::browser::access::HostBrowser>> {
+    let app = crate::browser::access::locate_app()?;
+    let profile = crate::config::profiles_dir(config_path).join(id);
+    Some(crate::browser::access::HostBrowser::new(app, profile))
 }
 
 #[cfg(test)]
@@ -1017,7 +1106,11 @@ mod tests {
         // 已经不听的 channel 了 —— 而且**全程没有任何报错**：send_turn
         // 查得到出口、整轮照常跑完、历史照常落盘。
         let state = state().await;
-        let id = state.create_session(&temp_ws("epoch")).await.expect("会话").id;
+        let id = state
+            .create_session(&temp_ws("epoch"))
+            .await
+            .expect("会话")
+            .id;
 
         let (new_ch, new_hits) = probe();
         let (old_ch, old_hits) = probe();
@@ -1051,7 +1144,11 @@ mod tests {
         // 停在"它正在做事"的界面 —— 轮子在跑，事件却发给了没人听的那头，
         // 连结束都收不到。
         let state = state().await;
-        let id = state.create_session(&temp_ws("resub")).await.expect("会话").id;
+        let id = state
+            .create_session(&temp_ws("resub"))
+            .await
+            .expect("会话")
+            .id;
 
         let (first, first_hits) = probe();
         assert!(state.attach_sink(id.clone(), 1, first).await);
@@ -1077,7 +1174,11 @@ mod tests {
     async fn 更新的订阅可以顶掉旧的() {
         // 反方向也要成立，否则切走再切回来就再也收不到事件了。
         let state = state().await;
-        let id = state.create_session(&temp_ws("epoch2")).await.expect("会话").id;
+        let id = state
+            .create_session(&temp_ws("epoch2"))
+            .await
+            .expect("会话")
+            .id;
 
         let (first, first_hits) = probe();
         let (second, second_hits) = probe();
@@ -1124,7 +1225,12 @@ mod tests {
         let first = state.create_session(&ws).await.expect("1");
         let second = state.create_session(&ws).await.expect("2");
 
-        let ids: Vec<_> = state.list_sessions().await.into_iter().map(|i| i.id).collect();
+        let ids: Vec<_> = state
+            .list_sessions()
+            .await
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
         assert_eq!(ids, vec![first.id, second.id]);
     }
 
@@ -1231,7 +1337,10 @@ mod tests {
     #[tokio::test]
     async fn 删除会话连浏览器profile一起删() {
         let state = state().await;
-        let info = state.create_session(&temp_ws("prof-del")).await.expect("会话");
+        let info = state
+            .create_session(&temp_ws("prof-del"))
+            .await
+            .expect("会话");
         let dir = 摆个profile(&state, &info.id);
 
         state.delete_session(&info.id).await;
@@ -1248,7 +1357,10 @@ mod tests {
     #[tokio::test]
     async fn 清理孤儿profile不碰活着的会话() {
         let state = state().await;
-        let info = state.create_session(&temp_ws("prof-gc")).await.expect("会话");
+        let info = state
+            .create_session(&temp_ws("prof-gc"))
+            .await
+            .expect("会话");
         let live = 摆个profile(&state, &info.id);
         let orphan = 摆个profile(&state, "ses_早就没了");
 
@@ -1263,7 +1375,10 @@ mod tests {
         let state = state().await;
         let info = state.create_session(&temp_ws("rn")).await.expect("会话");
 
-        state.rename_session(&info.id, "  改过的名字  ").await.expect("重命名");
+        state
+            .rename_session(&info.id, "  改过的名字  ")
+            .await
+            .expect("重命名");
         let listed = state.list_sessions().await;
         assert_eq!(listed[0].title.as_deref(), Some("改过的名字"));
 
@@ -1297,7 +1412,10 @@ mod tests {
             state.set_config(AppConfig::default()).await;
             let a = state.create_session(&ws).await.expect("a");
             let b = state.create_session(&ws).await.expect("b");
-            state.rename_session(&a.id, "改过的名字").await.expect("重命名");
+            state
+                .rename_session(&a.id, "改过的名字")
+                .await
+                .expect("重命名");
             state
                 .set_mode(&b.id, PermissionMode::BypassPermissions)
                 .await
@@ -1341,7 +1459,12 @@ mod tests {
         state.set_config(AppConfig::default()).await;
         let new_id = state.create_session(&ws).await.expect("新会话").id;
 
-        let ids: Vec<_> = state.list_sessions().await.into_iter().map(|i| i.id).collect();
+        let ids: Vec<_> = state
+            .list_sessions()
+            .await
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
         assert_eq!(ids, vec![old_id, new_id], "新会话必须排在老会话后面");
     }
 
@@ -1365,7 +1488,12 @@ mod tests {
         };
 
         let state = AppState::restore_at(cfg);
-        let ids: Vec<_> = state.list_sessions().await.into_iter().map(|i| i.id).collect();
+        let ids: Vec<_> = state
+            .list_sessions()
+            .await
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
         assert_eq!(ids, vec![kept], "删掉的不能复活");
     }
 
@@ -1395,7 +1523,9 @@ mod tests {
             });
             log.append(&Message::User {
                 id: MessageId::from_raw("m1"),
-                content: vec![UserContent::Text { text: "重启前说的话".into() }],
+                content: vec![UserContent::Text {
+                    text: "重启前说的话".into(),
+                }],
                 meta: MessageMeta::default(),
             });
             log.flush().await;
@@ -1448,7 +1578,9 @@ mod tests {
             });
             log.append(&Message::User {
                 id: MessageId::from_raw("m1"),
-                content: vec![UserContent::Text { text: "别丢了我".into() }],
+                content: vec![UserContent::Text {
+                    text: "别丢了我".into(),
+                }],
                 meta: MessageMeta::default(),
             });
             log.flush().await;
@@ -1481,7 +1613,12 @@ mod tests {
         assert_eq!(doomed.len(), 2, "A 项目的两个会话都该被关闭");
         assert!(doomed.contains(&a1.id) && doomed.contains(&a2.id));
 
-        let alive: Vec<_> = state.list_sessions().await.into_iter().map(|i| i.id).collect();
+        let alive: Vec<_> = state
+            .list_sessions()
+            .await
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
         assert_eq!(alive, vec![b1.id], "B 项目的会话必须原样活着");
     }
 }

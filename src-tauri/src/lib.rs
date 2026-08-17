@@ -8,26 +8,21 @@
 //! 然后就没法脱离 Tauri 做黄金回放了。
 
 pub mod browser;
-pub mod changes;
-mod classifier;
-pub mod config;
 pub mod fence;
-pub mod git;
+// 阶段 B:内核逻辑搬进 riot-kernel crate,这里 re-export 维持 `crate::changes`
+// 等旧路径,宿主其它模块无需改动(见 ARCHITECTURE.md §2.2)。
+// 留在宿主的是需要 OS/tauri 能力的部分:browser、term、term_access、fence、
+// persist、gui_env、kernel(进程监管)。
+pub use riot_kernel::{
+    changes, classifier, config, git, hooks, memory, mentions, session, skills, slash, subagent,
+    vision, web,
+};
 mod gui_env;
-pub mod hooks;
 pub mod kernel;
-pub mod memory;
-pub mod mentions;
 pub mod persist;
-pub mod session;
-pub mod skills;
-pub mod slash;
 pub mod state;
-pub mod subagent;
 pub mod term;
 pub mod term_access;
-pub mod vision;
-pub mod web;
 
 use tauri::Manager;
 use tauri::ipc::Channel;
@@ -107,10 +102,7 @@ async fn send_turn(
 
 /// 手动压缩会话历史（`/compact`）。空闲时才能做；完成发 Compacted 事件。
 #[tauri::command]
-async fn session_compact(
-    state: tauri::State<'_, AppState>,
-    session_id: String,
-) -> HostResult<()> {
+async fn session_compact(state: tauri::State<'_, AppState>, session_id: String) -> HostResult<()> {
     state.compact_session(&session_id).await
 }
 
@@ -332,7 +324,9 @@ async fn skills_list(root: Option<String>) -> HostResult<Vec<skills::SkillInfo>>
 /// 当前 MCP 服务器的标准 JSON（`{"mcpServers": {...}}`，生态通用格式）。
 #[tauri::command]
 async fn mcp_export_json(state: tauri::State<'_, AppState>) -> HostResult<String> {
-    Ok(config::mcp_servers_to_json(&state.config().await.mcp_servers))
+    Ok(config::mcp_servers_to_json(
+        &state.config().await.mcp_servers,
+    ))
 }
 
 /// 用标准 JSON **整体替换** MCP 服务器配置。
@@ -548,7 +542,9 @@ async fn term_open(
     rows: u16,
     on_event: Channel<term::TermEvent>,
 ) -> HostResult<u32> {
-    terms.open(root, cols, rows, on_event).map_err(HostError::Term)
+    terms
+        .open(root, cols, rows, on_event)
+        .map_err(HostError::Term)
 }
 
 /// 把键盘输入写进 shell。`data` 是 xterm 给的原始串（含控制序列）。
@@ -581,9 +577,7 @@ async fn term_close(terms: tauri::State<'_, term::Terminals>, id: u32) -> HostRe
 
 /// 现有的终端。面板重建标签栏、以及发现模型起了新服务，都靠它。
 #[tauri::command]
-async fn term_list(
-    terms: tauri::State<'_, term::Terminals>,
-) -> HostResult<Vec<term::TermSummary>> {
+async fn term_list(terms: tauri::State<'_, term::Terminals>) -> HostResult<Vec<term::TermSummary>> {
     Ok(terms.list())
 }
 
@@ -721,12 +715,16 @@ async fn test_connection(
     provider_id: Option<String>,
     model: Option<String>,
 ) -> HostResult<String> {
-    let config = state.config().await;
-    let probe = config::AppConfig {
-        active_provider: provider_id.unwrap_or(config.active_provider.clone()),
-        active_model: model.unwrap_or(config.active_model.clone()),
-        ..config
-    };
+    // 覆盖 active 到"正在编辑的那个"再解析。用可变赋值而不是结构体更新
+    // 语法:config 里有 pub(crate) 的废弃字段,配置类型搬进 riot-kernel 之后,
+    // 跨 crate 的 `..config` 访问不到它们。
+    let mut probe = state.config().await;
+    if let Some(p) = provider_id {
+        probe.active_provider = p;
+    }
+    if let Some(m) = model {
+        probe.active_model = m;
+    }
     let resolved = probe.resolve()?;
     session::test_connection(&resolved)
         .await
@@ -739,7 +737,9 @@ async fn test_connection(
 /// 测试"，要求先保存再测会让他在两个按钮之间来回跑。
 #[tauri::command]
 async fn test_search_backend(base_url: String) -> HostResult<String> {
-    web::test_searxng(&base_url).await.map_err(HostError::Provider)
+    web::test_searxng(&base_url)
+        .await
+        .map_err(HostError::Provider)
 }
 
 /// 拉取某个 provider 的可用模型列表（`GET /v1/models`）。

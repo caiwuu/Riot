@@ -30,6 +30,9 @@ riot-mcp = { path = "crates/riot-mcp" }
 riot-permissions = { path = "crates/riot-permissions" }
 riot-store = { path = "crates/riot-store" }
 riot-runtime = { path = "crates/riot-runtime" }
+# 内核是 lib+bin:bin 是独立进程入口,lib 承载会话装配与内核逻辑,
+# 供宿主在阶段 A 内嵌、阶段 B 由 riot-kernel 二进制承载(见 ARCHITECTURE.md §2.2)。
+riot-kernel = { path = "crates/riot-kernel" }
 
 # 依赖版本在此统一，成员 crate 一律用 { workspace = true }
 anyhow = "1"

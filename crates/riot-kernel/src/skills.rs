@@ -534,9 +534,11 @@ mod tests {
     /// 它的情况下干活，谁都不会注意到。
     #[test]
     fn 仓库自带的技能都能解析() {
+        // CARGO_MANIFEST_DIR 是 crates/riot-kernel;仓库根在上两级。
         let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("src-tauri 的上一级是仓库根");
+            .ancestors()
+            .nth(2)
+            .expect("crates/riot-kernel 的上两级是仓库根");
         let d = discover_dirs(&project_dir(repo), Path::new("/nonexistent-no-global"));
 
         assert!(

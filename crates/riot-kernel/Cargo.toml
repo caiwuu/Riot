@@ -6,7 +6,36 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-riot-protocol = { workspace = true }
 riot-core = { workspace = true }
-tokio = { workspace = true }
+riot-permissions = { workspace = true }
+riot-protocol = { workspace = true }
+riot-providers = { workspace = true }
+riot-runtime = { workspace = true }
+riot-store = { workspace = true }
+riot-tools = { workspace = true }
+
+async-trait = { workspace = true }
+base64 = "0.22"
+encoding_rs = { workspace = true }
+futures = { workspace = true }
+htmd = { workspace = true }
+ignore = "0.4.33"
+regex-lite = "0.1.9"
+reqwest = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+shell-words = { workspace = true }
+similar = { version = "3.1.2", default-features = false, features = ["text", "inline"] }
+thiserror = { workspace = true }
+# io-std:stdin()/stdout() 是内核的 JSON-RPC 传输通道。workspace 基础
+# features 里没有它(其它 crate 不需要),在这里单独追加。
+tokio = { workspace = true, features = ["io-std"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
