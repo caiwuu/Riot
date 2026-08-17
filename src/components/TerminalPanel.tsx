@@ -271,9 +271,30 @@ export function TerminalPanel({
       });
     });
 
+    // attach 对已死终端会立刻补一条 Exit，读线程退出时又发一条 ——
+    // 两条都到时"已退出"那行别写两遍。
+    let sawExit = false;
     const onEvent = (ev: TermEvent) => {
-      if (ev.kind === "data") term.write(b64ToBytes(ev.data));
-      else closeRef.current(tab.uid, { hostDead: true });
+      if (ev.kind === "data") {
+        term.write(b64ToBytes(ev.data));
+        return;
+      }
+      if (sawExit) return;
+      sawExit = true;
+      if (tab.fromAgent) {
+        // 模型起的服务退出后，宿主**保留**条目（模型要读最后的报错），
+        // 只有 termClose 才移除。这里跟着关标签的话，本地没了、宿主还在，
+        // 3 秒一次的认领轮询又把它捡回来 —— 表现为标签几秒闪现一次，
+        // 面板关了也自己弹出来。留着标签展示最后输出，用户点 X 才真正关。
+        term.write("\r\n\x1b[2m[进程已退出。日志留在这里，点标签上的 × 关闭。]\x1b[0m\r\n");
+        setState((prev) => ({
+          ...prev,
+          tabs: prev.tabs.map((t) => (t.uid === tab.uid ? { ...t, exited: true } : t)),
+        }));
+      } else {
+        // 用户自己的 shell：exit/崩溃时宿主已把条目摘掉，这里只收尾界面。
+        closeRef.current(tab.uid, { hostDead: true });
+      }
     };
 
     // 模型起的服务已经在宿主那边跑着了：挂上去接住后续输出，顺便回放
@@ -364,7 +385,13 @@ export function TerminalPanel({
           >
             {/* 标出哪些不是自己开的。用户看到一个没印象的标签在跑东西，
                 第一反应是"这哪来的" —— 这个点直接回答它。 */}
-            {t.hostId != null ? <span className="term-tab-badge">模型</span> : <TermIcon />}
+            {t.hostId != null ? (
+              <span className={t.exited ? "term-tab-badge exited" : "term-tab-badge"}>
+                {t.exited ? "已退出" : "模型"}
+              </span>
+            ) : (
+              <TermIcon />
+            )}
             <span className="term-tab-title">{t.title}</span>
             {/* span 而不是嵌套 button —— button 套 button 是非法 HTML，
                 浏览器会把内层拆出去，点击行为不可预料。tabIndex + 键盘触发
@@ -466,6 +493,8 @@ interface Tab {
   hostId?: number;
   /** 模型起的服务（不是用户自己开的 shell）。 */
   fromAgent?: boolean;
+  /** 服务进程已退出，标签只剩日志。宿主侧条目还在，点 × 才真正移除。 */
+  exited?: boolean;
   /** 用户把这个终端共享给模型了。只对自己开的 shell 有意义。 */
   shared?: boolean;
 }

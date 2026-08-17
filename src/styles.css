@@ -1246,6 +1246,12 @@ pre {
   border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
+/* 服务已退出：褪成灰。蓝色徽标意味着"在跑"，死进程挂着它会骗人。 */
+.term-tab-badge.exited {
+  color: var(--text-faint);
+  border-color: var(--border-strong);
+}
+
 .term-tab-close {
   display: grid;
   place-items: center;
