@@ -73,14 +73,51 @@ pub enum KernelError {
 /// 待响应的请求表。key 是 JSON-RPC id。
 type Pending = Arc<Mutex<std::collections::HashMap<u64, oneshot::Sender<Value>>>>;
 
+/// 请求端句柄。可以 Clone 到任意任务并发发请求 —— 进程的生命周期
+/// (关闭/强杀)由 [`Kernel`] 独占管理。两者分开,请求才不会被
+/// 生命周期锁串行化。
+#[derive(Clone)]
+pub struct KernelHandle {
+    stdin_tx: mpsc::UnboundedSender<Vec<u8>>,
+    pending: Pending,
+    next_id: Arc<AtomicU64>,
+}
+
+impl KernelHandle {
+    /// 发一个 JSON-RPC 请求并等响应。
+    pub async fn request(&self, method: &str, params: Value) -> Result<Value, KernelError> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(id, tx);
+
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": method, "params": params,
+        }))?;
+        self.stdin_tx
+            .send(payload)
+            .map_err(|_| KernelError::NotRunning)?;
+
+        match rx.await {
+            Ok(msg) => {
+                if let Some(err) = msg.get("error") {
+                    return Err(KernelError::Rpc(err.to_string()));
+                }
+                Ok(msg.get("result").cloned().unwrap_or(Value::Null))
+            }
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                Err(KernelError::NotRunning)
+            }
+        }
+    }
+}
+
 pub struct Kernel {
     child: Box<dyn ChildWrapper>,
-    stdin_tx: mpsc::UnboundedSender<Vec<u8>>,
     /// stdin 的关闭开关。drop 掉它会让写线程结束并 drop 真正的 ChildStdin，
     /// 内核那边收到 EOF。这是关闭序列的第 2 步。
     stdin_closer: Option<oneshot::Sender<()>>,
-    pending: Pending,
-    next_id: AtomicU64,
+    handle: KernelHandle,
 }
 
 impl Kernel {
@@ -91,12 +128,16 @@ impl Kernel {
     /// 应用层的 cleanup 钩子在 SIGKILL 面前是不存在的。
     pub async fn spawn(
         exe: PathBuf,
+        envs: &[(String, String)],
         on_notification: mpsc::UnboundedSender<Value>,
     ) -> Result<Self, KernelError> {
         let mut cmd = tokio::process::Command::new(exe);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
 
         let mut wrap = CommandWrap::from(cmd);
         #[cfg(windows)]
@@ -166,38 +207,18 @@ impl Kernel {
 
         Ok(Self {
             child,
-            stdin_tx,
             stdin_closer: Some(closer_tx),
-            pending,
-            next_id: AtomicU64::new(1),
+            handle: KernelHandle {
+                stdin_tx,
+                pending,
+                next_id: Arc::new(AtomicU64::new(1)),
+            },
         })
     }
 
-    /// 发一个 JSON-RPC 请求并等响应。
-    pub async fn request(&self, method: &str, params: Value) -> Result<Value, KernelError> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
-
-        let payload = serde_json::to_vec(&serde_json::json!({
-            "jsonrpc": "2.0", "id": id, "method": method, "params": params,
-        }))?;
-        self.stdin_tx
-            .send(payload)
-            .map_err(|_| KernelError::NotRunning)?;
-
-        match rx.await {
-            Ok(msg) => {
-                if let Some(err) = msg.get("error") {
-                    return Err(KernelError::Rpc(err.to_string()));
-                }
-                Ok(msg.get("result").cloned().unwrap_or(Value::Null))
-            }
-            Err(_) => {
-                self.pending.lock().await.remove(&id);
-                Err(KernelError::NotRunning)
-            }
-        }
+    /// 请求端句柄(可 Clone,并发安全)。
+    pub fn handle(&self) -> KernelHandle {
+        self.handle.clone()
     }
 
     /// 四步关闭序列。见模块文档。
@@ -205,7 +226,7 @@ impl Kernel {
         // 1. 给内核收尾的机会。失败也无所谓 —— 后面还有三步。
         let _ = tokio::time::timeout(
             Duration::from_secs(2),
-            self.request("kernel.shutdown", Value::Null),
+            self.handle.request("kernel.shutdown", Value::Null),
         )
         .await;
 
