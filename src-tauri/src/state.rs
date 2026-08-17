@@ -249,6 +249,11 @@ impl AppState {
     /// 起一个任务消费内核事件里宿主也关心的那几件(busy / mode),并注入
     /// 反向请求(终端/浏览器)的处理端。
     /// Tauri setup 时调一次 —— `restore` 是同步的,不能在那里 spawn。
+    ///
+    /// `[约束]` 这里必须用 `tauri::async_runtime::spawn`,不能用裸
+    /// `tokio::spawn`:setup 回调跑在 macOS 的 AppKit 主线程上,不在任何
+    /// tokio runtime 的上下文里 —— 裸 spawn 会当场 panic
+    /// (no reactor running),App 直接起不来。
     pub fn spawn_host_bridge(&self) {
         self.0
             .kernel
@@ -257,7 +262,7 @@ impl AppState {
             return;
         };
         let state = self.clone();
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             while let Some(n) = rx.recv().await {
                 match n {
                     HostNotice::Done { session_id } => {
