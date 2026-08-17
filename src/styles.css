@@ -34,9 +34,10 @@
   /* 主操作色：开关、选中态、primary 按钮共用。别再用近白底。 */
   --accent: #5a8dd6;
   --accent-dim: #2a3d5c;
-  /* 滚动条 thumb。--border-strong 对底色只有 1.6:1 几乎隐形，
-     这一档专门提亮 —— 别的边框不要借用。 */
-  --scrollbar-thumb: #52525c;
+  /* 滚动条 thumb。用白透明而不是实心灰：叠在 --bg / --bg-side 上都是
+     一条淡痕，不会在侧栏里变成近白的硬条。hover 再抬一档。 */
+  --scrollbar-thumb: #ffffff22;
+  --scrollbar-thumb-hover: #ffffff3a;
 
   /* 层级表：全应用的 z-index 只从这里取。右键菜单在弹窗之上 ——
      弹窗里也能点出右键菜单，反过来不成立。 */
@@ -61,35 +62,35 @@
 /* 全局细滚动条。系统默认那条在深色面板上又宽又亮。
    `[约束]` 两套写法必须互斥。只要 scrollbar-width 取了非初始值，同一个元素上
    的 ::-webkit-scrollbar 规则就会被整体忽略（CSSWG 给旧伪元素定的迁移路径，
-   WebKit 18.2 起实装）—— 叠着写等于自己把自己关掉。 */
-@supports (scrollbar-width: thin) {
+   WebKit 18.2 起实装）。macOS WKWebView 还会给 scrollbar-color 叠一层
+   对比度，#52525c 这种实心灰会被抬成近白硬条 —— 所以标准属性只给
+   Firefox，WebKit / Chromium 走伪元素拿真实颜色。 */
+@supports (-moz-appearance: none) {
   * {
     scrollbar-width: thin;
     scrollbar-color: var(--scrollbar-thumb) transparent;
   }
 }
 
-@supports not (scrollbar-width: thin) {
-  *::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
-  }
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
 
-  *::-webkit-scrollbar-track,
-  *::-webkit-scrollbar-corner {
-    background: transparent;
-  }
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
 
-  *::-webkit-scrollbar-thumb {
-    background: var(--scrollbar-thumb);
-    border-radius: 999px;
-    border: 2px solid transparent;
-    background-clip: padding-box;
-  }
+*::-webkit-scrollbar-thumb {
+  background-color: var(--scrollbar-thumb);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
 
-  *::-webkit-scrollbar-thumb:hover {
-    background: var(--text-faint);
-  }
+*::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scrollbar-thumb-hover);
 }
 
 html,
@@ -480,6 +481,10 @@ pre {
   flex: 1;
   overflow-y: auto;
   margin-top: 14px;
+  /* 滚出侧栏的右内边距，滑块贴着分隔线；padding 把会话行推回原位，
+     避免字和圆角选中底被 8px 槽压住。 */
+  margin-right: -10px;
+  padding-right: 10px;
   display: flex;
   flex-direction: column;
   gap: 14px;
