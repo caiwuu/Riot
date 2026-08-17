@@ -3,6 +3,32 @@
  * 视觉重量全部让给内容本身。
  */
 
+/*
+ * 自带等宽字体，不依赖系统字体名解析。
+ *
+ * WKWebView 在打包应用（自定义协议页面）里解析 `ui-monospace` 时会拿到
+ * CoreText 的内部字体名（.AppleSystemUIFontMonospaced），CoreText 拒绝
+ * 这类名字后回退到一个**非等宽**字体 —— 终端和代码块的列对齐全部挤歪。
+ * dev 从 http://localhost 加载走的是另一条解析路径，看不到这个问题，
+ * 所以它只在发出去的安装包里出现。
+ *
+ * 字体文件是 OFL 协议（见 assets/fonts/OFL.txt），随应用分发合法。
+ */
+@font-face {
+  font-family: 'Riot Mono';
+  src: url('./assets/fonts/JetBrainsMono-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Riot Mono';
+  src: url('./assets/fonts/JetBrainsMono-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   --bg: #1b1b1e;
   --bg-side: #141416;
@@ -47,7 +73,9 @@
   --z-ctx: 110; /* 右键菜单 */
   --z-viewer: 120; /* 全屏图片查看器 */
 
-  --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  /* 自带字体在前；Menlo 排在 ui-monospace 前面 —— 后者在打包的
+     WKWebView 里会错误解析成非等宽（见文件顶部 @font-face 的注释）。 */
+  --mono: 'Riot Mono', Menlo, ui-monospace, 'SF Mono', monospace;
   --sans:
     -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
     'Microsoft YaHei', sans-serif;
@@ -3234,8 +3262,32 @@ pre {
   color: var(--danger);
 }
 
+/* 工具清单：短名 chip 换行，别再顿号糊成一段。超多时封顶滚动。 */
 .mcp-tools {
-  overflow-wrap: anywhere;
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 132px;
+  overflow-y: auto;
+}
+
+.mcp-tool-chip {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 7px;
 }
 
 /* ── Skills 分区 ──────────────────────────── */
@@ -4775,13 +4827,13 @@ pre {
   opacity: 0.35;
 }
 
-/* MCP 工具名的展开/收起。长在 hint 段落里，字号随文字走。 */
+/* MCP 工具名的展开/收起。跟 chip 同高，别再塞进一段正文。 */
 .mcp-tools-more {
   border: none;
   background: none;
-  padding: 0;
-  margin-left: 4px;
-  font-size: inherit;
+  padding: 3px 4px;
+  font-size: 11px;
+  line-height: 1.4;
   color: var(--accent);
   cursor: pointer;
 }

@@ -229,14 +229,16 @@ export function TerminalPanel({
     if (instances.current.has(tab.uid)) return;
 
     const term = new Terminal({
-      fontFamily: 'ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace',
+      // 和 styles.css 的 --mono 一致。自带的 Riot Mono 在前 ——
+      // 打包的 WKWebView 会把 ui-monospace 错误解析成非等宽字体，
+      // 终端里 ls 的列对齐全花（dev 下看不出来，只在安装包里出现）。
+      fontFamily: '"Riot Mono", Menlo, ui-monospace, monospace',
       fontSize: 12,
       scrollback: 5000,
       theme: THEME,
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
-    term.open(el);
 
     const inst: Inst = {
       term,
@@ -246,8 +248,19 @@ export function TerminalPanel({
       ro: new ResizeObserver(() => safeFit(inst)),
     };
     instances.current.set(tab.uid, inst);
-    safeFit(inst);
-    inst.ro.observe(el);
+
+    // 字体就绪后再 open：xterm 在 open 时量字符格宽度，早于字体加载的话
+    // 量的是回退字体，列数和渲染宽度都会错一截。字体是本地资源，这里
+    // 等的通常是几毫秒；加载失败也照常打开（回退 Menlo）。
+    const fontsReady: Promise<unknown> =
+      "fonts" in document ? document.fonts.load('12px "Riot Mono"') : Promise.resolve();
+    void fontsReady.catch(() => {}).then(() => {
+      // 等待期间标签可能已经被关掉，实例没了就别再画
+      if (!instances.current.has(tab.uid)) return;
+      term.open(el);
+      safeFit(inst);
+      inst.ro.observe(el);
+    });
 
     // PTY 还没落地时敲的字先攒着。丢掉的话，面板刚开就打字的人会看到
     // 开头缺了几个字符 —— 而那正是最常见的使用方式。

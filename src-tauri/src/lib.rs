@@ -13,6 +13,7 @@ mod classifier;
 pub mod config;
 pub mod fence;
 pub mod git;
+mod gui_env;
 pub mod hooks;
 pub mod kernel;
 pub mod memory;
@@ -762,6 +763,10 @@ pub fn run() {
                 .unwrap_or_else(|_| "riot=debug,warn".into()),
         )
         .init();
+
+    // Dock / 访达启动的 .app 继承不到终端 PATH。MCP 的 `npx`/`uvx` 会变成
+    // os error 2。必须在 restore 和任何子进程之前补上（set_var 不是线程安全的）。
+    gui_env::inherit_login_path();
 
     // 全局技能目录启动时就建好。设置页的「打开目录」按钮 reveal 的是它 ——
     // 目录不存在时系统的 reveal 静默失败，按钮看起来就是坏的（用户没写过

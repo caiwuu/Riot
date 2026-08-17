@@ -217,7 +217,7 @@ async fn connect_task(spec: ServerSpec, state: Arc<Mutex<ServerState>>, cancel: 
         Err(e) => {
             tracing::warn!(server = %spec.id, error = %e, "MCP 服务器启动失败");
             *state.lock().await = ServerState::Failed {
-                error: format!("启动失败：{e}。检查命令路径和参数。"),
+                error: spawn_error(&spec.command, e),
             };
             return;
         }
@@ -259,6 +259,18 @@ async fn connect_task(spec: ServerSpec, state: Arc<Mutex<ServerState>>, cancel: 
     }
 }
 
+fn spawn_error(command: &str, err: std::io::Error) -> String {
+    if err.kind() == std::io::ErrorKind::NotFound {
+        format!(
+            "启动失败：找不到命令「{command}」。\
+             从访达或 Dock 打开时没有终端里的 PATH，\
+             把命令改成 `which {command}` 给出的绝对路径，或确认 npx / uvx / node 已安装。"
+        )
+    } else {
+        format!("启动失败：{err}。检查命令路径和参数。")
+    }
+}
+
 async fn shutdown_handle(h: Handle) {
     // 还在连接中的任务看到取消会自己杀进程；已就绪的从状态里取出句柄杀。
     h.cancel.cancel();
@@ -267,5 +279,26 @@ async fn shutdown_handle(h: Handle) {
         std::mem::replace(&mut *st, ServerState::Failed { error: "已停止".into() })
     {
         stdio::terminate(child).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 找不到命令时把_path_问题说清楚() {
+        let e = std::io::Error::new(std::io::ErrorKind::NotFound, "os error 2");
+        let s = spawn_error("npx", e);
+        assert!(s.contains("找不到命令「npx」"), "{s}");
+        assert!(s.contains("PATH"), "{s}");
+    }
+
+    #[test]
+    fn 别的启动错误仍指向命令和参数() {
+        let e = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied");
+        let s = spawn_error("npx", e);
+        assert!(s.contains("检查命令路径和参数"), "{s}");
+        assert!(!s.contains("PATH"), "{s}");
     }
 }

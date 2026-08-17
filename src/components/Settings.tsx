@@ -1738,6 +1738,13 @@ function McpPane({
 /** 已连接服务器的工具名默认只铺这么多个，其余收起 —— 几十个全量平铺会把配置区挤到两屏外。 */
 const MCP_TOOLS_SHOWN = 12;
 
+/** `mcp__better-icons__search_icons` → `search_icons`。前缀每条都一样，铺出来只添噪音。 */
+function mcpToolShortName(full: string): string {
+  const parts = full.split("__");
+  if (parts[0] === "mcp" && parts.length >= 3) return parts.slice(2).join("__");
+  return full;
+}
+
 function McpServerEditor({
   server,
   live,
@@ -1824,14 +1831,22 @@ function McpServerEditor({
         ) : null}
       </div>
       {state === "connected" && live && live.tools.length > 0 ? (
-        <p className="hint mcp-tools">
-          {(toolsOpen ? live.tools : live.tools.slice(0, MCP_TOOLS_SHOWN)).join("、")}
+        <ul className="mcp-tools">
+          {(toolsOpen ? live.tools : live.tools.slice(0, MCP_TOOLS_SHOWN)).map((t) => (
+            <li key={t}>
+              <span className="mcp-tool-chip" title={t}>
+                {mcpToolShortName(t)}
+              </span>
+            </li>
+          ))}
           {live.tools.length > MCP_TOOLS_SHOWN ? (
-            <button className="mcp-tools-more" onClick={() => setToolsOpen(!toolsOpen)}>
-              {toolsOpen ? "收起" : `还有 ${live.tools.length - MCP_TOOLS_SHOWN} 个`}
-            </button>
+            <li>
+              <button type="button" className="mcp-tools-more" onClick={() => setToolsOpen(!toolsOpen)}>
+                {toolsOpen ? "收起" : `还有 ${live.tools.length - MCP_TOOLS_SHOWN} 个`}
+              </button>
+            </li>
           ) : null}
-        </p>
+        </ul>
       ) : null}
 
       <Toggle
