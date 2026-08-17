@@ -880,7 +880,7 @@ impl Session {
     pub async fn submit(
         self: &Arc<Self>,
         input: TurnInput,
-        model: ResolvedModel,
+        model: riot_protocol::ModelEndpoint,
         caps: TurnCapabilities,
         sink: SessionSink,
         limits: TurnLimits,
@@ -1074,7 +1074,7 @@ impl Session {
     pub async fn run_turn(
         &self,
         input: TurnInput,
-        model: ResolvedModel,
+        model: riot_protocol::ModelEndpoint,
         caps: TurnCapabilities,
         sink: SessionSink,
         limits: TurnLimits,
@@ -1096,7 +1096,7 @@ impl Session {
     async fn run_locked(
         &self,
         input: TurnInput,
-        model: ResolvedModel,
+        model: riot_protocol::ModelEndpoint,
         caps: TurnCapabilities,
         sink: SessionSink,
         cancel: CancellationToken,
@@ -1285,8 +1285,12 @@ impl Session {
 
     /// 手动压缩（`/compact`）。空闲时才能做 —— 压缩改写历史，
     /// 不能和跑动中的轮子并发。
-    pub async fn compact_now(&self, model: ResolvedModel, sink: SessionSink) -> Result<(), String> {
-        let provider = provider_for(&model)?;
+    pub async fn compact_now(
+        &self,
+        model: riot_protocol::ModelEndpoint,
+        sink: SessionSink,
+    ) -> Result<(), String> {
+        let provider = provider_from_endpoint(&model)?;
         let cancel = CancellationToken::new();
         // 占住 running：期间的插话照常排队，下一轮的收尾 drain 会捞到。
         {
@@ -1337,13 +1341,13 @@ impl Session {
     async fn run_inner(
         &self,
         input: TurnInput,
-        model: ResolvedModel,
+        model: riot_protocol::ModelEndpoint,
         mut caps: TurnCapabilities,
         sink: SessionSink,
         cancel: CancellationToken,
         limits: TurnLimits,
     ) -> Result<(), String> {
-        let provider = provider_for(&model)?;
+        let provider = provider_from_endpoint(&model)?;
         let clock: Arc<dyn riot_protocol::tool::Clock> =
             Arc::new(riot_providers::watchdog::TokioClock);
 
@@ -1741,6 +1745,12 @@ pub fn provider_from_endpoint(
     model: &riot_protocol::ModelEndpoint,
 ) -> Result<Arc<dyn Provider>, String> {
     let key = model.api_key.clone();
+    // 空 key = 宿主没解析出密钥(环境变量 / auth.json 都没有)。在这里立即
+    // 失败,不建 provider、不发请求 —— 和拆进程前 provider_for 缺 key 的行为
+    // 一致(那时靠 ResolvedModel::api_key() 报 MissingKey)。
+    if key.trim().is_empty() {
+        return Err("缺少 API key".to_owned());
+    }
     let transport = Arc::new(ReqwestTransport::new().map_err(|e| e.to_string())?);
     let clock = Arc::new(riot_providers::watchdog::TokioClock);
 
@@ -3677,15 +3687,7 @@ mod tests {
             std::path::PathBuf::from("/tmp"),
             None,
         );
-        let model = ResolvedModel {
-            protocol: crate::config::Protocol::Openai,
-            base_url: "https://api.deepseek.com".into(),
-            api_path: String::new(),
-            api_key_env: "RIOT_NOT_SET".into(),
-            model: "deepseek-chat".into(),
-            fallback_model: None,
-            sampling: Sampling::default(),
-        };
+        let model = test_model();
         // 第一轮会因为缺 key 立刻失败，但它必须把 running 清干净，
         // 否则会话就卡死了 —— 用户看到的是"发消息没反应"
         let ch = test_sink();
@@ -3710,15 +3712,17 @@ mod tests {
         assert!(s.running.lock().await.is_none(), "失败路径没有清理 running");
     }
 
-    fn test_model() -> ResolvedModel {
-        ResolvedModel {
-            protocol: crate::config::Protocol::Openai,
+    fn test_model() -> riot_protocol::ModelEndpoint {
+        riot_protocol::ModelEndpoint {
+            protocol: riot_protocol::ApiProtocol::Openai,
             base_url: "https://api.deepseek.com".into(),
             api_path: String::new(),
-            api_key_env: "RIOT_NOT_SET".into(),
+            // 空 key:让 provider_from_endpoint 立即失败,不真打网络。这些测试
+            // 验的是"轮子失败后清干净 running / 不并发",不关心失败的具体原因。
+            api_key: String::new(),
             model: "deepseek-chat".into(),
             fallback_model: None,
-            sampling: Sampling::default(),
+            sampling: riot_protocol::EndpointSampling::default(),
         }
     }
 

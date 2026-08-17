@@ -779,7 +779,9 @@ impl AppState {
         // submit 而不是 run_turn：上一轮还在跑时插话会排队（内核在安全点
         // 注入），而不是报错"上一轮还在进行中" —— 模型干活时说话是常态。
         // 开轮的话轮子已经被 submit 丢进后台，这里立刻返回。
-        Ok(session.submit(input, model, caps, sink, limits).await)
+        Ok(session
+            .submit(input, model.to_endpoint()?, caps, sink, limits)
+            .await)
     }
 
     /// 手动压缩会话历史（`/compact`）。完成时发 Compacted 事件。
@@ -791,7 +793,7 @@ impl AppState {
         let mut model = config.resolve()?;
         model.sampling = session.sampling().await.or(model.sampling);
         session
-            .compact_now(model, sink)
+            .compact_now(model.to_endpoint()?, sink)
             .await
             .map_err(HostError::Provider)
     }
