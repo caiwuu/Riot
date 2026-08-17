@@ -32,10 +32,17 @@ async fn main() {
 
     install_panic_hook();
 
+    // 会话 transcript 的落盘目录。宿主 spawn 内核时通过 RIOT_SESSIONS_DIR 传入
+    // (决策:配置/路径由宿主定)。缺省给一个临时目录,只用于脱离宿主的调试。
+    let sessions_dir = std::env::var_os("RIOT_SESSIONS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("riot-sessions"));
+
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
+        sessions_dir = %sessions_dir.display(),
         "内核启动,等待 stdin 上的 JSON-RPC"
     );
-    riot_kernel::serve(tokio::io::stdin(), tokio::io::stdout()).await;
+    riot_kernel::serve(tokio::io::stdin(), tokio::io::stdout(), sessions_dir).await;
     tracing::info!("stdin 关闭,内核退出");
 }

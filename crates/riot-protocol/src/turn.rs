@@ -155,3 +155,24 @@ pub struct TurnConfig {
     #[serde(default)]
     pub thinking: ThinkingPolicy,
 }
+
+/// 用户随消息附上的一张图。只走内容不走路径(剪贴板截图没有路径)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageInput {
+    pub media_type: String,
+    pub data: String,
+}
+
+/// 用户这一轮发来的原始输入。图片转述、`@` 展开、UserPromptSubmit hook 都在
+/// 内核完成 —— 所以这里只传原始三样,内核据此构造最终消息(内核有 vision /
+/// mentions / hooks,宿主没有,不能在宿主构造一半)。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnInput {
+    pub text: String,
+    #[serde(default)]
+    pub images: Vec<ImageInput>,
+    #[serde(default)]
+    pub refs: Vec<String>,
+}

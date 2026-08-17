@@ -584,7 +584,7 @@ export type RpcRequest =
       method: "turn.submit";
       params: {
         config: TurnConfig;
-        content: UserContent[];
+        input: TurnInput;
         session_id: string;
       };
     }
@@ -997,6 +997,21 @@ export interface WebSetup {
    * SearXNG 实例地址。空 = 搜索不可用。
    */
   searxng_url?: string;
+}
+/**
+ * 用户原始输入(text/images/refs)。图片转述、`@` 展开、hook 都在内核做。
+ */
+export interface TurnInput {
+  images?: ImageInput[];
+  refs?: string[];
+  text: string;
+}
+/**
+ * 用户随消息附上的一张图。只走内容不走路径(剪贴板截图没有路径)。
+ */
+export interface ImageInput {
+  data: string;
+  mediaType: string;
 }
 export interface SessionSummary {
   cwd: string;

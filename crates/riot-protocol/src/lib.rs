@@ -55,8 +55,8 @@ pub use tool::{
     ToolContext, ToolOutcome, UiPayload, ValidationError,
 };
 pub use turn::{
-    ApiProtocol, EndpointSampling, ModelEndpoint, SandboxKind, TurnConfig, TurnLimits, VisionSetup,
-    WebSetup,
+    ApiProtocol, EndpointSampling, ImageInput, ModelEndpoint, SandboxKind, TurnConfig, TurnInput,
+    TurnLimits, VisionSetup, WebSetup,
 };
 pub use vision::{DescribeRequest, NoVision, VisionAccess, VisionError};
 pub use web::{

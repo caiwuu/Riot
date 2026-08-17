@@ -99,3 +99,93 @@ async fn multiple_requests_pair_by_id() {
     drop(stdin);
     let _ = timeout(Duration::from_secs(5), child.wait()).await;
 }
+
+async fn write_line(stdin: &mut tokio::process::ChildStdin, v: &serde_json::Value) {
+    let mut s = v.to_string();
+    s.push('\n');
+    stdin.write_all(s.as_bytes()).await.expect("写请求");
+    stdin.flush().await.expect("flush");
+}
+
+async fn read_json<R: tokio::io::AsyncBufRead + Unpin>(
+    lines: &mut tokio::io::Lines<R>,
+) -> serde_json::Value {
+    let line = timeout(Duration::from_secs(5), lines.next_line())
+        .await
+        .expect("5 秒内该有一行")
+        .expect("读 stdout")
+        .expect("stdout 不该提前结束");
+    serde_json::from_str(&line).expect("每行都是合法 JSON")
+}
+
+/// 端到端:内核作为独立进程,通过 stdio 建会话、跑一轮,事件从 stdout 回流。
+///
+/// 用空 key 让这一轮在 provider 建构处立即失败(不真打网络),重点验的是
+/// **链路**:session.create 拿到 id、turn.submit 被接受、这一轮的 Done 事件
+/// 经 event.agent 通知推回来。这就是"内核能作为进程跑会话"的证据。
+#[tokio::test]
+async fn create_then_submit_streams_done_event() {
+    let mut child = spawn_kernel();
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut lines = BufReader::new(child.stdout.take().expect("stdout")).lines();
+
+    // 1. 建会话
+    write_line(
+        &mut stdin,
+        &serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "session.create",
+            "params": { "cwd": "/tmp", "model": "m" }
+        }),
+    )
+    .await;
+    let resp = read_json(&mut lines).await;
+    assert_eq!(resp["id"], 1);
+    let session_id = resp["result"]["data"]["session_id"]
+        .as_str()
+        .expect("session.create 要回 session_id")
+        .to_owned();
+
+    // 2. 提交一轮(空 api_key → provider 建构立即失败 → Done error 事件)
+    let config = serde_json::json!({
+        "model": {
+            "protocol": "openai", "base_url": "https://api.deepseek.com",
+            "api_path": "", "api_key": "", "model": "deepseek-chat"
+        },
+        "web": { "fetch_enabled": false, "search_enabled": false },
+        "vision": { "accepts_images": false },
+        "limits": {
+            "ask_timeout_secs": 60, "max_turns": 4,
+            "compact_threshold_tokens": 100000, "sandbox": "off"
+        },
+        "mode": "default"
+    });
+    write_line(
+        &mut stdin,
+        &serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "turn.submit",
+            "params": { "session_id": session_id, "input": { "text": "hi" }, "config": config }
+        }),
+    )
+    .await;
+
+    // 后续会混着 turn.submit 的应答(带 id）和事件通知（event.agent，无 id）。
+    // 找到这一轮的 Done 事件即算链路打通。
+    let mut saw_done = false;
+    for _ in 0..12 {
+        let v = read_json(&mut lines).await;
+        if v["event"] == "event.agent"
+            && v["data"]["session_id"] == serde_json::json!(session_id)
+            && v["data"]["event"]["type"] == "done"
+        {
+            saw_done = true;
+            break;
+        }
+    }
+    assert!(
+        saw_done,
+        "内核该把这一轮的 Done 事件经 event.agent 通知推回来"
+    );
+
+    drop(stdin);
+    let _ = timeout(Duration::from_secs(5), child.wait()).await;
+}

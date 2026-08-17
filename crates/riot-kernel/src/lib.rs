@@ -31,6 +31,7 @@ pub mod classifier;
 pub mod config;
 pub mod git;
 pub mod hooks;
+pub mod manager;
 pub mod memory;
 pub mod mentions;
 pub mod session;
@@ -76,12 +77,16 @@ pub fn report_kernel_error(message: impl Into<String>, fatal: bool) {
 /// EOF 是宿主发起的标准关闭信号(见 ARCHITECTURE.md §2.3 的关闭序列):
 /// 宿主 drop 掉内核的 stdin,读循环拿到 `Ok(None)`,函数收尾返回,进程随后
 /// 退出。这条路径给了内核 flush 会话、清理子进程的机会,而不是被强杀。
-pub async fn serve<R, W>(reader: R, writer: W)
+pub async fn serve<R, W>(reader: R, writer: W, sessions_dir: std::path::PathBuf)
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
+
+    // 会话管理器:活会话 + turn 驱动 + MCP。它持有 out_tx 的一份 clone,
+    // 用来给每个会话 attach 事件出口(会话事件 → event.agent 通知)。
+    let manager = std::sync::Arc::new(manager::SessionManager::new(out_tx.clone(), sessions_dir));
 
     // 单个 writer 任务串行写出,保证每条消息独占一行。
     let writer_task = tokio::spawn(async move {
@@ -108,8 +113,9 @@ where
                 // 结果通过 out_tx 汇聚回 writer,顺序由完成时刻决定
                 // (JSON-RPC 用 id 配对,不依赖到达顺序)。
                 let out = out_tx.clone();
+                let mgr = std::sync::Arc::clone(&manager);
                 tokio::spawn(async move {
-                    if let Some(resp) = handle_line(&line).await {
+                    if let Some(resp) = handle_line(&line, &mgr).await {
                         let _ = out.send(resp);
                     }
                 });
@@ -123,9 +129,12 @@ where
         }
     }
 
-    // 松开我们这份 sender,让 writer 在处理完在途消息后自然收尾。
-    // 还在跑的请求任务持有各自的 clone,它们发完最后一条,writer 才退出。
+    // stdin EOF:宿主要关了。此刻 SessionManager 和后台轮子可能仍持有 out_tx
+    // 的 clone(给会话发事件用),等 channel 自然关闭会挂住 —— 而已经没有
+    // 消费者了(宿主没了)。正常关闭走 kernel.shutdown,那条路已经中断会话、
+    // flush 过 transcript;这里直接停掉 writer 作为最终兜底。
     drop(out_tx);
+    writer_task.abort();
     let _ = writer_task.await;
 }
 
@@ -133,7 +142,7 @@ where
 ///
 /// `None` 表示无从应答(连 id 都解析不出来),只记日志。有 id 的一律回一条 ——
 /// 少回一条会让宿主那边的等待挂到超时。
-async fn handle_line(line: &str) -> Option<String> {
+async fn handle_line(line: &str, manager: &manager::SessionManager) -> Option<String> {
     let value: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(e) => {
@@ -147,7 +156,7 @@ async fn handle_line(line: &str) -> Option<String> {
     let id = value.get("id").and_then(Value::as_u64);
 
     let response = match parse_request(&value) {
-        Ok(request) => dispatch(request).await,
+        Ok(request) => dispatch(request, manager).await,
         Err(e) => RpcResponse::Error {
             error: RpcError {
                 code: RpcErrorCode::InvalidParams,
@@ -189,21 +198,72 @@ fn parse_request(value: &Value) -> Result<RpcRequest, serde_json::Error> {
 /// 会话相关的方法(session.*/turn.*/permission.*/config.*/tools.*)会随
 /// M-B2 把会话装配搬进内核后逐个接上;在那之前它们回一条明确的"尚未实现",
 /// 而不是静默无应答 —— 后者会让宿主等到超时,查起来没有任何线索。
-async fn dispatch(request: RpcRequest) -> RpcResponse {
-    if matches!(request, RpcRequest::KernelPing) {
-        return RpcResponse::Pong {
-            version: env!("CARGO_PKG_VERSION").to_owned(),
-        };
-    }
+async fn dispatch(request: RpcRequest, manager: &manager::SessionManager) -> RpcResponse {
+    use riot_protocol::rpc::RpcRequest as Req;
 
+    // 未实现分支要能报出方法名 —— 先算好(下面的 match 会消费 request)。
     let method = serde_json::to_value(&request)
         .ok()
         .and_then(|v| v.get("method").and_then(Value::as_str).map(str::to_owned))
         .unwrap_or_else(|| "unknown".to_owned());
-    RpcResponse::Error {
-        error: RpcError {
-            code: RpcErrorCode::Internal,
-            message: format!("方法「{method}」尚未在内核实现(阶段 B 施工中)"),
+
+    match request {
+        Req::KernelPing => RpcResponse::Pong {
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+        },
+        Req::KernelShutdown => {
+            manager.shutdown().await;
+            RpcResponse::Ok
+        }
+        Req::SessionCreate { cwd, .. } => RpcResponse::SessionCreated {
+            session_id: manager.create(cwd).await,
+        },
+        // 简化版:若会话已在内存里就回它的历史。真正的"从磁盘水合恢复"要
+        // 带 cwd,留待 M-B4d 宿主翻转时补(那时 rpc 加 cwd 字段)。
+        Req::SessionResume { session_id } => {
+            let (messages, _archived) = manager
+                .history(session_id.as_str())
+                .await
+                .unwrap_or_default();
+            RpcResponse::SessionResumed { messages }
+        }
+        Req::SessionDelete { session_id } => {
+            manager.delete(session_id.as_str()).await;
+            RpcResponse::Ok
+        }
+        Req::TurnSubmit {
+            session_id,
+            input,
+            config,
+        } => match manager.submit(session_id.as_str(), input, *config).await {
+            Ok(queued_id) => RpcResponse::TurnSubmitted { queued_id },
+            Err(e) => RpcResponse::Error {
+                error: RpcError {
+                    code: RpcErrorCode::Internal,
+                    message: e,
+                },
+            },
+        },
+        Req::TurnInterrupt { session_id, .. } => {
+            manager.interrupt(session_id.as_str()).await;
+            RpcResponse::Ok
+        }
+        Req::PermissionRespond {
+            request_id,
+            response,
+        } => {
+            manager
+                .respond_permission(request_id.as_str(), response)
+                .await;
+            RpcResponse::Ok
+        }
+        // 其余方法(session.list/history、queue.*、compact、config.set_mode、
+        // tools.list、mcp.* 等)随宿主翻转逐个接上;在那之前明确报未实现。
+        _ => RpcResponse::Error {
+            error: RpcError {
+                code: RpcErrorCode::Internal,
+                message: format!("方法「{method}」尚未在内核实现(阶段 B 施工中)"),
+            },
         },
     }
 }
@@ -212,10 +272,19 @@ async fn dispatch(request: RpcRequest) -> RpcResponse {
 mod tests {
     use super::*;
 
+    fn test_manager() -> manager::SessionManager {
+        let (out_tx, _rx) = mpsc::unbounded_channel();
+        manager::SessionManager::new(
+            out_tx,
+            std::env::temp_dir().join("riot-kernel-test-sessions"),
+        )
+    }
+
     #[tokio::test]
     async fn ping_returns_pong_with_version() {
+        let mgr = test_manager();
         let line = r#"{"jsonrpc":"2.0","id":1,"method":"kernel.ping"}"#;
-        let out = handle_line(line).await.expect("ping 要有应答");
+        let out = handle_line(line, &mgr).await.expect("ping 要有应答");
         let v: Value = serde_json::from_str(&out).expect("应答是合法 JSON");
         assert_eq!(v["id"], 1, "id 要原样回传供配对");
         assert_eq!(v["result"]["result"], "pong");
@@ -229,17 +298,22 @@ mod tests {
     async fn ping_with_null_params_still_parses() {
         // supervisor 的 request(method, params) 对无参方法传的是 params:null。
         // adjacently-tagged 的无参变体不认多余的 content,得在重组时剥掉。
+        let mgr = test_manager();
         let line = r#"{"jsonrpc":"2.0","id":7,"method":"kernel.ping","params":null}"#;
-        let out = handle_line(line).await.expect("带 null params 也要能应答");
+        let out = handle_line(line, &mgr)
+            .await
+            .expect("带 null params 也要能应答");
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["result"]["result"], "pong");
     }
 
     #[tokio::test]
     async fn unknown_method_reports_error_not_silence() {
-        // 尚未搬进内核的方法要回一条明确错误 —— 静默无应答会让宿主等到超时。
-        let line = r#"{"jsonrpc":"2.0","id":2,"method":"session.create","params":{"cwd":"/tmp","model":"m"}}"#;
-        let out = handle_line(line).await.expect("未实现的方法也要应答");
+        // 尚未接上的方法要回一条明确错误 —— 静默无应答会让宿主等到超时。
+        // (session.create 现在已实现,改用一个仍未接的方法。)
+        let mgr = test_manager();
+        let line = r#"{"jsonrpc":"2.0","id":2,"method":"config.set_mode","params":{"session_id":"s1","mode":"default"}}"#;
+        let out = handle_line(line, &mgr).await.expect("未实现的方法也要应答");
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["id"], 2);
         assert_eq!(v["result"]["result"], "error");
@@ -247,13 +321,18 @@ mod tests {
         let msg = v["result"]["data"]["error"]["message"]
             .as_str()
             .unwrap_or_default();
-        assert!(msg.contains("session.create"), "错误要点名是哪个方法:{out}");
+        assert!(
+            msg.contains("config.set_mode"),
+            "错误要点名是哪个方法:{out}"
+        );
     }
 
     #[tokio::test]
     async fn malformed_json_is_dropped_without_panic() {
         assert!(
-            handle_line("{ 这不是 json").await.is_none(),
+            handle_line("{ 这不是 json", &test_manager())
+                .await
+                .is_none(),
             "非法 JSON 无从配对应答,丢弃而不是崩"
         );
     }

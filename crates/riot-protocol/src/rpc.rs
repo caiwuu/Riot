@@ -29,7 +29,8 @@ pub enum RpcRequest {
     #[serde(rename = "turn.submit")]
     TurnSubmit {
         session_id: SessionId,
-        content: Vec<UserContent>,
+        /// 用户原始输入(text/images/refs)。图片转述、`@` 展开、hook 都在内核做。
+        input: crate::turn::TurnInput,
         /// 本轮的完整配置:模型端点、联网/视觉、limits、mode、会话设置。
         /// Box 是因为它比其它变体大得多,不装箱会把整个 enum 撑大。
         config: Box<TurnConfig>,
