@@ -31,6 +31,7 @@ pub mod changes;
 pub mod classifier;
 pub mod config;
 pub mod git;
+pub mod git_changes;
 pub mod hooks;
 pub mod manager;
 pub mod memory;
@@ -316,6 +317,11 @@ async fn dispatch(request: RpcRequest, manager: &manager::SessionManager) -> Rpc
         }
         Req::SessionChanges { session_id } => RpcResponse::Changes {
             changes: manager.changes(session_id.as_str()).await,
+        },
+        Req::SessionGitChanges { session_id, base } => RpcResponse::GitChanges {
+            git: manager
+                .git_changes(session_id.as_str(), base.as_deref())
+                .await,
         },
         Req::SessionSetTitle { session_id, title } => {
             manager.set_title(session_id.as_str(), title).await;

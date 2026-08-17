@@ -42,7 +42,8 @@ import {
 } from "./bridge";
 import { BrowserPanel } from "./components/BrowserPanel";
 import { Chevron } from "./components/Chevron";
-import { ChangesPanel } from "./components/ChangesPanel";
+import { GitChangesPanel } from "./components/GitChangesPanel";
+import { SessionChangesBar } from "./components/SessionChangesBar";
 import { ScopePanel } from "./components/ScopePanel";
 import { SessionSettings } from "./components/SessionSettings";
 import { ConfirmDialog, type ConfirmRequest } from "./components/ConfirmDialog";
@@ -56,7 +57,7 @@ import {
 import { Settings } from "./components/Settings";
 import { useEscLayer } from "./components/Modal";
 import { TerminalPanel } from "./components/TerminalPanel";
-import { TodoPanel } from "./components/TodoPanel";
+import { hasActiveTodos, TodoPanel } from "./components/TodoPanel";
 import { ToolCard } from "./components/ToolCard";
 import { type Item, type QueuedItem, useSession } from "./hooks/useSession";
 
@@ -599,7 +600,7 @@ export function App() {
                 <ScopePanel sessionId={activeSession.id} />
               </>
             ) : (
-              <ChangesPanel
+              <GitChangesPanel
                 key={activeSession.id}
                 sessionId={activeSession.id}
                 refreshKey={changesRev}
@@ -703,7 +704,7 @@ function TopBar({
           title={session.root}
         >
           <span className="tb-title-text">{session.title ?? "新会话"}</span>
-          <span className="tb-caret">▾</span>
+          <Chevron down />
         </button>
       ) : null}
 
@@ -718,8 +719,8 @@ function TopBar({
         className={changesOpen ? "tb-btn active" : "tb-btn"}
         onClick={onToggleChanges}
         disabled={!changesEnabled}
-        title={changesEnabled ? "本次会话的改动" : "先打开一个会话"}
-        aria-label="本次会话的改动"
+        title={changesEnabled ? "Git 改动（未提交的工作区差异）" : "先打开一个会话"}
+        aria-label="Git 改动"
       >
         <DiffIcon />
       </button>
@@ -1259,6 +1260,24 @@ function Chat({
   const empty =
     session.items.length === 0 && !session.streaming && !session.thinking;
 
+  // 每有一次编辑工具落盘就递增,改动条跟着重新比对 —— 跑轮当中改动
+  // 也要实时长出来,不能等轮子结束才一次性冒出一排文件。
+  const editCount = useMemo(
+    () =>
+      session.items.filter(
+        (it) =>
+          it.kind === "tool" &&
+          it.status === "ok" &&
+          (it.name === "Edit" || it.name === "Write"),
+      ).length,
+    [session.items],
+  );
+
+  // 输入框上方那一格的占位规则:跑轮期间有没做完的任务清单,就让
+  // 任务临时顶掉改动条;清单全部完成、或轮子停了(含切回已结束的
+  // 会话),任务自动让位 —— 它是进行时的进度,不是要留档的结果。
+  const todoActive = busy && hasActiveTodos(session.items);
+
   // 计划和选择题都走对话流里的内联卡：它们是对话的一部分，不是危险
   // 操作。Bash / Write 这类权限询问仍弹窗 —— 必须看见原文才能签。
   const isPlanAsk = (a: (typeof session.asks)[number]) =>
@@ -1324,9 +1343,14 @@ function Chat({
             onAnswerChoice={(r) => choiceAsk && void session.answer(r, choiceAsk.requestId)}
           />
           <div className="composer-dock">
-            {/* 任务清单钉在输入框上方、就地更新 —— 它是状态不是事件，
-                只有最新版有意义。对话流里的每次 TodoWrite 只留单行。 */}
-            <TodoPanel items={session.items} />
+            {/* 任务清单和改动条共用输入框上方这一格:跑轮时看进度,
+                其余时间看改动(Cursor 同款)。两个都常驻会叠成两层横条,
+                把输入框越垫越高。 */}
+            {todoActive ? (
+              <TodoPanel items={session.items} />
+            ) : (
+              <SessionChangesBar sessionId={sessionId} refreshKey={editCount} />
+            )}
             {composer}
           </div>
         </>

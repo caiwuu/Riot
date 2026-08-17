@@ -29,7 +29,7 @@ pub use browser::{
     Event as BrowserEvent, InteractError, InterceptOp, Nav as BrowserNav, NetQuery, NoBrowser,
     Target as BrowserTarget, WaitCondition,
 };
-pub use changes::{ChangeStatus, DiffLine, FileChange, Hunk, LineKind};
+pub use changes::{ChangeStatus, DiffLine, FileChange, GitChanges, Hunk, LineKind};
 pub use compact::{CompactBudget, CompactResult, Compactor};
 pub use event::{
     AbortSource, AgentError, AgentEvent, CompactStrategy, ProgressPayload, StreamDelta,

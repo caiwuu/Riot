@@ -70,7 +70,25 @@ fn diff_one(
         }
     };
 
-    let diff = TextDiff::from_lines(before.unwrap_or(""), after.unwrap_or(""));
+    let (added, removed, hunks, truncated) =
+        build_hunks(before.unwrap_or(""), after.unwrap_or(""));
+
+    Some(FileChange {
+        path: rel(root, path),
+        status,
+        added,
+        removed,
+        hunks,
+        truncated,
+        renamed_from: None,
+        binary: false,
+    })
+}
+
+/// 逐行 diff 出 hunks:(added, removed, hunks, truncated)。
+/// 会话改动和 git 改动两个面板共用同一套呈现,所以算法也只有这一份。
+pub(crate) fn build_hunks(before: &str, after: &str) -> (usize, usize, Vec<Hunk>, bool) {
+    let diff = TextDiff::from_lines(before, after);
     let mut added = 0usize;
     let mut removed = 0usize;
     let mut hunks = Vec::new();
@@ -125,14 +143,7 @@ fn diff_one(
         });
     }
 
-    Some(FileChange {
-        path: rel(root, path),
-        status,
-        added,
-        removed,
-        hunks,
-        truncated,
-    })
+    (added, removed, hunks, truncated)
 }
 
 /// 相对项目根的显示路径。不在根下面（模型引了外部文件）就给绝对路径。

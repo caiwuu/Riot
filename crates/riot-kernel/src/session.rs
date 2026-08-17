@@ -996,6 +996,12 @@ impl Session {
         crate::changes::collect(&self.cwd, self.file_state.baselines()).await
     }
 
+    /// 工作区相对所选基线的差异(Git 面板)。跟对话历史无关,
+    /// 不用水合 —— 只是以会话的项目目录为根跑 git。
+    pub async fn git_changes(&self, base: Option<&str>) -> riot_protocol::GitChanges {
+        crate::git_changes::collect(&self.cwd, base).await
+    }
+
     fn baselines_path(&self) -> Option<std::path::PathBuf> {
         self.persist
             .as_ref()

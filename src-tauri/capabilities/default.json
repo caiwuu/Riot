@@ -69,6 +69,7 @@
     "allow-queue-take",
     "allow-session-compact",
     "allow-session-changes",
+    "allow-session-git-changes",
     "allow-slash-commands",
     "allow-slash-expand",
     "allow-hooks-list",

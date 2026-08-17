@@ -355,6 +355,23 @@ impl SessionManager {
         }
     }
 
+    pub async fn git_changes(
+        &self,
+        session_id: &str,
+        base: Option<&str>,
+    ) -> riot_protocol::GitChanges {
+        match self.get(session_id).await {
+            Some(s) => s.git_changes(base).await,
+            None => riot_protocol::GitChanges {
+                repo: false,
+                changes: Vec::new(),
+                branch: None,
+                base: None,
+                refs: Vec::new(),
+            },
+        }
+    }
+
     pub async fn set_mode(&self, session_id: &str, mode: riot_protocol::PermissionMode) {
         if let Some(s) = self.get(session_id).await {
             s.set_mode(mode).await;

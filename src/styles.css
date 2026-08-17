@@ -28,6 +28,15 @@
   font-style: normal;
   font-display: swap;
 }
+/* 文件类型图标字体：Cursor / VS Code 内置的 seti 主题（MIT），
+   字形映射生成在 src/lib/fileIcons.ts。 */
+@font-face {
+  font-family: 'seti';
+  src: url('./assets/fonts/seti.woff') format('woff');
+  font-weight: normal;
+  font-style: normal;
+  font-display: block;
+}
 
 :root {
   --bg: #1b1b1e;
@@ -361,10 +370,14 @@ pre {
   white-space: nowrap;
 }
 
-.tb-caret {
-  font-size: 9px;
-  color: var(--text-faint);
-  flex-shrink: 0;
+.tb-title .chevron {
+  width: 16px;
+  height: 16px;
+}
+
+.tb-title .chevron svg {
+  width: 14px;
+  height: 14px;
 }
 
 .tb-spacer {
@@ -1314,7 +1327,6 @@ pre {
   opacity: 1;
 }
 
-
 /* 终端画布区。每个标签一个 slot，切换只动 display —— xterm 的回滚
    缓冲在实例里，重挂载会全部丢掉。 */
 .term-body {
@@ -1574,7 +1586,7 @@ pre {
 
 .compact-rule::before,
 .compact-rule::after {
-  content: "";
+  content: '';
   flex: 1;
   border-top: 1px dashed var(--border);
 }
@@ -2039,7 +2051,6 @@ pre {
   color: var(--text-dim);
 }
 
-
 .queue-row {
   display: flex;
   align-items: center;
@@ -2350,7 +2361,6 @@ pre {
   background: var(--warn);
   flex-shrink: 0;
 }
-
 
 .bar-spacer {
   flex: 1;
@@ -3129,7 +3139,6 @@ pre {
   color: var(--text-dim);
 }
 
-
 .todo-panel-title {
   flex-shrink: 0;
   font-weight: 500;
@@ -3158,6 +3167,65 @@ pre {
   100% {
     transform: scale(1);
   }
+}
+
+/* ── 会话改动条（输入框上方，和任务面板共用一格）──────
+   外观对齐 todo-panel：同是"挂在输入框上的辅助状态"。 */
+
+.changes-bar {
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  border-radius: 12px;
+  padding: 4px 6px;
+}
+
+/* 钉在 composer-dock 里时和输入框同宽同轴。 */
+.composer-dock .changes-bar {
+  max-width: 720px;
+  margin: 0 auto 4px;
+}
+
+.changes-bar-row {
+  display: flex;
+  align-items: center;
+}
+
+.changes-bar-head {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 12px;
+  padding: 4px 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.changes-bar-head:hover {
+  color: var(--text-dim);
+}
+
+.changes-bar-title {
+  flex-shrink: 0;
+  font-weight: 500;
+}
+
+.changes-bar-stat {
+  font-family: var(--mono);
+}
+
+/* 展开的文件列表：向上长，但不能把对话流顶没了 —— 限高自己滚。 */
+.changes-bar-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 0 6px;
+  max-height: 42vh;
+  overflow-y: auto;
 }
 
 .mcp-head-actions {
@@ -4295,7 +4363,7 @@ pre {
 }
 
 .choice-opt.on::before {
-  content: "✓ ";
+  content: '✓ ';
 }
 
 /* 代码引用（`起始行:结束行:路径`）：标题位是可点的文件路径，点开用默认
@@ -4332,7 +4400,7 @@ pre {
 
 .codeblock-ref-path::before,
 .codeblock-ref-path::after {
-  content: "\200e";
+  content: '\200e';
 }
 
 .codeblock-ref-lines {
@@ -4454,7 +4522,6 @@ pre {
   flex: none;
 }
 
-
 .think-chars {
   font-size: 11px;
   opacity: 0.75;
@@ -4570,15 +4637,28 @@ pre {
   border-bottom: 1px solid var(--border);
 }
 
-.changes-title {
-  font-size: 12px;
-  font-weight: 600;
-  flex-shrink: 0;
+/* 标题栏里的分支下拉：比设置页那套矮一截，长分支名自己截。 */
+.changes-head .changes-branch {
+  max-width: 148px;
+  min-width: 72px;
+  height: 28px;
+  padding: 0 6px 0 8px;
+  gap: 4px;
+  border-radius: 7px;
+  font-size: 13px;
+  font-family: var(--mono);
+  color: var(--text-dim);
+  background: var(--bg);
+}
+
+.changes-head .changes-branch:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--bg-hover);
 }
 
 .changes-total {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-faint);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -4613,13 +4693,13 @@ pre {
 }
 
 .changes-body {
-  padding: 10px;
+  padding: 8px 6px;
   overflow-y: auto;
   min-height: 0;
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 1px;
 }
 
 .changes-empty {
@@ -4638,22 +4718,20 @@ pre {
 .change {
   /* 列表是纵向 flex。子项默认 flex-shrink: 1，文件一多就被压扁塞进
      视口 —— 内容刚好“装下”，overflow-y 永远不亮，看起来挤成一叠
-     还滚不动。卡片按自身高度排，多出来的交给 .changes-body 滚。 */
+     还滚不动。行按自身高度排，多出来的交给 .changes-body 滚。
+     不带边框:行式列表一屏扫二十个文件,一行一个框十个就占满面板。 */
   flex-shrink: 0;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  overflow: hidden;
 }
 
 .change-head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
   width: 100%;
-  padding: 8px 12px;
+  padding: 5px 8px;
   background: transparent;
   border: none;
-  border-radius: 0;
+  border-radius: 7px;
   text-align: left;
   cursor: pointer;
 }
@@ -4662,34 +4740,82 @@ pre {
   background: var(--bg-hover);
 }
 
-
-.change-status {
+/* 状态字母（git 惯例：A 新增 / D 删除 / R 重命名）。"修改"是常态
+   不标，只让例外跳出来 —— 徽章框省下的横向空间全留给路径。 */
+.change-mark {
   flex-shrink: 0;
-  font-size: 11px;
-  padding: 1.5px 7px;
-  border-radius: 999px;
-  border: 1px solid var(--border-strong);
-  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
 }
 
-.change-status.created {
+.change-mark.created {
   color: var(--ok);
-  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
 }
 
-.change-status.deleted {
+.change-mark.deleted {
   color: var(--danger);
-  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+}
+
+.change-mark.renamed {
+  color: var(--accent);
+}
+
+/* 文件类型图标：seti 字体字形，颜色由映射数据内联（跟 Cursor 一致）。
+   字号给到 15px —— seti 的字形设计得偏小，VS Code 自己也放 150%。 */
+.file-icon {
+  flex-shrink: 0;
+  width: 22px;
+  display: grid;
+  place-items: center;
+  font-family: 'seti';
+  font-size: 18px;
+  line-height: 1;
+  font-weight: 400;
+  user-select: none;
 }
 
 .change-path {
-  font-family: var(--mono);
-  font-size: 12px;
-  flex: 1;
+  display: flex;
   min-width: 0;
+  flex: 0 1 auto;
   overflow: hidden;
-  text-overflow: ellipsis;
+  font-family: var(--mono);
+  font-size: 13px;
   white-space: nowrap;
+}
+
+/* 目录和文件名都不压缩。压缩会让目录字溢出来盖在文件名上，
+   而 scrollWidth 还是“没溢出”，tight 判断就失效了。 */
+.change-dir,
+.change-name {
+  flex-shrink: 0;
+}
+
+.change-dir {
+  color: var(--text-faint);
+}
+
+/* 行宽不够装下完整目录时，整段拿掉，只留文件名。 */
+.change-path.tight .change-dir {
+  display: none;
+}
+
+.change-name {
+  /* 介于正文白和目录灰之间：要比路径亮一档，又不能抢中间对话。 */
+  color: #dcdce4;
+}
+
+/* 把复制/展开顶到行尾，+- 贴在文件名后面。 */
+.change-head-grow {
+  flex: 1;
+  min-width: 8px;
+}
+
+/* 删掉的文件划掉名字：状态字母在行尾，扫路径时也得有个信号。 */
+.change-path.deleted {
+  text-decoration: line-through;
+  opacity: 0.75;
 }
 
 .change-stat {
@@ -4699,26 +4825,64 @@ pre {
 }
 
 .change-stat .add,
-.changes-total .add {
+.changes-total .add,
+.changes-bar-stat .add {
   color: var(--ok);
 }
 
 .change-stat .del,
-.changes-total .del {
+.changes-total .del,
+.changes-bar-stat .del {
   color: var(--danger);
 }
 
 /* 抽屉窄，长行横向滚而不是折行 —— diff 折行之后 +/- 对不齐，
-   看的人得数着符号才知道哪行是哪行。 */
+   看的人得数着符号才知道哪行是哪行。行没有框了，diff 块靠底色
+   挂在自己那行下面；左右贴满整行，窄容器里每一列都金贵。 */
 .change-diff {
-  border-top: 1px solid var(--border);
   background: var(--bg-card);
+  border-radius: 8px;
+  margin: 2px 0 6px;
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 11.5px;
   line-height: 1.55;
   overflow-x: auto;
   max-height: 460px;
   overflow-y: auto;
+}
+
+/* 改动条自己就是 bg-card 底，diff 块换一档底色才看得出边界。 */
+.changes-bar-list .change-diff {
+  background: var(--bg-side);
+}
+
+/* 改动视图里的滚动条走隐形路线：平时不占视线，悬停到滚动区域才
+   现身。列表和 diff 都是"看内容"的地方，常驻的滚动条只是噪音。
+   （只盖 thumb 颜色、不动 scrollbar-width —— 见文件顶部的互斥约束。） */
+.changes-bar-list::-webkit-scrollbar-thumb,
+.changes-body::-webkit-scrollbar-thumb,
+.change-diff::-webkit-scrollbar-thumb {
+  background-color: transparent;
+}
+
+.changes-bar-list:hover::-webkit-scrollbar-thumb,
+.changes-body:hover::-webkit-scrollbar-thumb,
+.change-diff:hover::-webkit-scrollbar-thumb {
+  background-color: var(--scrollbar-thumb);
+}
+
+/* hunk 跟最长那一行一样宽，下面每行再 100% 铺满 —— 否则短行的
+   底色只铺到自己的字，横向一滚右边就断成一条竖边。 */
+.hunk {
+  width: max-content;
+  min-width: 100%;
+}
+
+.hunk-head,
+.hunk-line,
+.hunk-more {
+  box-sizing: border-box;
+  min-width: 100%;
 }
 
 .hunk-head {
@@ -4736,9 +4900,6 @@ pre {
   padding: 0 12px;
   white-space: pre;
   color: var(--text-dim);
-  /* 让长行把滚动区撑开。少了它，行会被压到容器宽度，横向滚过去
-     右边是一片没有底色的空白。 */
-  min-width: max-content;
 }
 
 /* 整行铺底色而不是只染文字：扫一眼就知道哪几行动了，不用逐行读符号。 */
@@ -4758,11 +4919,35 @@ pre {
   user-select: none;
 }
 
+.hunk-text {
+  flex: 0 0 auto;
+}
+
 .hunk-more {
   padding: 8px 12px;
   color: var(--text-faint);
   font-size: 12px;
   border-top: 1px dashed var(--border);
+}
+
+/* 没有逐行差异时的说明行：纯重命名、二进制、比不出来。 */
+.change-note {
+  padding: 4px 8px 6px;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  font-family: var(--sans);
+}
+
+.change-note .change-note-from {
+  display: block;
+  margin-top: 4px;
+  font-family: var(--mono);
+  word-break: break-all;
+}
+
+/* 嵌在 diff 块里的"旧路径"行：和下面的 hunk 划开。 */
+.change-diff .change-note {
+  border-bottom: 1px dashed var(--border);
 }
 
 /* 终端共享开关。亮起 = 模型正读得到这个终端的输出 —— 这个状态必须
@@ -5082,21 +5267,31 @@ pre {
   opacity: 0.85;
 }
 
-/* 复制路径按钮：平时藏着不占视线，行 hover 或键盘聚焦时出现；
-   刚复制完（.done）保持可见，确认那一拍不能跟着鼠标跑丢。 */
-.change-copy {
+/* 行尾操作（复制、展开箭头）：平时藏着不占视线，行 hover 或
+   键盘聚焦时出现。刚复制完（.done）保持可见，确认那一拍不能
+   跟着鼠标跑丢。占位留着，悬停时行数统计不会被挤走。 */
+.change-copy,
+.change-head > .chevron {
   flex: none;
   opacity: 0;
-  font-size: 11px;
+}
+
+.change-copy {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
   color: var(--text-dim);
   border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 1px 6px;
-  white-space: nowrap;
+  border-radius: 5px;
+  padding: 0;
   cursor: pointer;
 }
 
 .change-head:hover .change-copy,
+.change-head:hover > .chevron,
+.change-head:focus-visible .change-copy,
+.change-head:focus-visible > .chevron,
 .change-copy:focus-visible,
 .change-copy.done {
   opacity: 1;

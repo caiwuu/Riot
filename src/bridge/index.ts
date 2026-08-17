@@ -12,13 +12,23 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 
 import type {
   AgentEvent,
+  FileChange,
+  GitChanges,
   Message,
   PermissionAsk,
   PermissionMode,
   PermissionResponse,
 } from "./generated";
 
-export type { AgentEvent, Message, PermissionAsk, PermissionMode, PermissionResponse };
+export type {
+  AgentEvent,
+  FileChange,
+  GitChanges,
+  Message,
+  PermissionAsk,
+  PermissionMode,
+  PermissionResponse,
+};
 
 /** 服务方协议。决定请求格式、认证头和哪些采样参数可发送。 */
 export type Protocol = "openai" | "anthropic";
@@ -420,32 +430,28 @@ export function interrupt(sessionId: string): Promise<boolean> {
   return invoke<boolean>("interrupt", { sessionId });
 }
 
-/** 一处连续的差异。`header` 是 `@@ -1,4 +1,6 @@` 那一行。 */
-export interface DiffHunk {
-  header: string;
-  lines: { kind: "context" | "add" | "del"; text: string }[];
-}
-
-/** 一个文件在本次会话里的净改动。 */
-export interface FileChange {
-  /** 相对项目根的路径。 */
-  path: string;
-  status: "created" | "modified" | "deleted";
-  added: number;
-  removed: number;
-  hunks: DiffHunk[];
-  /** 差异太大，hunks 只是前一截。 */
-  truncated: boolean;
-}
-
 /**
- * 本次会话改了哪些文件、哪些行。
+ * 本次会话改了哪些文件、哪些行（输入框上方的改动条）。
  *
- * 只含经 Edit / Write 落下的改动 —— 这正是它和 `git diff` 的区别：
- * 后者把用户自己没提交的改动也算进来，答不了"这个会话动了什么"。
+ * 只含经 Edit / Write 落下的改动，基线是会话自己记的 —— 所以 commit
+ * 之后它还在，回答的是"这个会话动了什么"，不是"工作区还有什么没提交"。
  */
 export function sessionChanges(sessionId: string): Promise<FileChange[]> {
   return invoke<FileChange[]>("session_changes", { sessionId });
+}
+
+/**
+ * 工作区相对所选基线的差异（侧边抽屉的 Git 面板）。
+ *
+ * `base` 空 = 当前分支 / HEAD。只换对比对象，不 checkout。
+ * 跟着 git 走：包含用户自己的手改、bash 写盘、重命名检测。
+ * 会话视角的净改动看上面的 `sessionChanges`。
+ */
+export function sessionGitChanges(sessionId: string, base?: string): Promise<GitChanges> {
+  return invoke<GitChanges>(
+    "session_git_changes",
+    base ? { sessionId, base } : { sessionId },
+  );
 }
 
 /** 回应一个权限询问。askId 来自 PermissionRequest 事件。 */

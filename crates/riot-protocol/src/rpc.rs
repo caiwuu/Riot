@@ -4,7 +4,7 @@
 //! 但所有调用仍然穿过这里定义的类型 —— 这样阶段 B 拆进程时
 //! 只需要换一个 transport 实现。见 ARCHITECTURE.md §2.2
 
-use crate::changes::FileChange;
+use crate::changes::{FileChange, GitChanges};
 use crate::event::AgentEvent;
 use crate::id::{RequestId, SessionId, TurnId};
 use crate::message::Message;
@@ -68,9 +68,17 @@ pub enum RpcRequest {
         session_id: SessionId,
         model: Box<ModelEndpoint>,
     },
-    /// 本会话的净改动(变更面板)。
+    /// 本会话的净改动(输入框上方的会话改动条)。
     #[serde(rename = "session.changes")]
     SessionChanges { session_id: SessionId },
+    /// 工作区相对所选基线的差异(侧边抽屉的 Git 面板)。
+    #[serde(rename = "session.git_changes")]
+    SessionGitChanges {
+        session_id: SessionId,
+        /// 对比基线。空 = 当前分支 / HEAD。只换对比对象,不 checkout。
+        #[serde(default)]
+        base: Option<String>,
+    },
     /// 改会话标题。自定义标题会抑制自动起名。
     #[serde(rename = "session.set_title")]
     SessionSetTitle {
@@ -162,6 +170,9 @@ pub enum RpcResponse {
     },
     Changes {
         changes: Vec<FileChange>,
+    },
+    GitChanges {
+        git: GitChanges,
     },
     ScopeHosts {
         hosts: Vec<String>,

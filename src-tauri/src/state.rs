@@ -1049,6 +1049,26 @@ impl AppState {
         }
     }
 
+    /// 工作区相对所选基线的差异。Git 面板用。
+    pub async fn git_changes(
+        &self,
+        session_id: &str,
+        base: Option<&str>,
+    ) -> HostResult<riot_protocol::GitChanges> {
+        // 会话可能还没进内核内存（刚重启）——先水合，git 才知道以哪个目录为根。
+        self.ensure_hydrated(session_id).await?;
+        match self
+            .kernel_call(RpcRequest::SessionGitChanges {
+                session_id: sid(session_id),
+                base: base.map(str::to_owned),
+            })
+            .await?
+        {
+            RpcResponse::GitChanges { git } => Ok(git),
+            _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc("session.git_changes 回了意外的应答".into()))),
+        }
+    }
+
     pub async fn set_mode(&self, session_id: &str, mode: PermissionMode) -> HostResult<()> {
         {
             let mut g = self.0.sessions.lock().await;

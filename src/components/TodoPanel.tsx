@@ -1,9 +1,14 @@
-//! 常驻任务面板：钉在输入框上方，显示**最新一次** TodoWrite 的清单。
+//! 任务面板：跑轮期间钉在输入框上方，显示**最新一次** TodoWrite 的清单。
 //!
 //! 清单是状态不是事件 —— 模型每次更新进度都整表重传一遍，把每次调用都
 //! 铺在对话流里，一个十步任务就是十张几乎相同的卡片。这里只画一份、
 //! 就地更新（Cursor / Claude Code 同款）；对话流里的每次调用由 ToolCard
 //! 降级成单行，点开才看当时的快照。
+//!
+//! 生命周期由外层（Chat）按 [`hasActiveTodos`] 控制：只在轮子跑着、
+//! 且清单还有没做完的条目时挂载 —— 全部完成或轮子结束就整个消失，
+//! 把输入框上方那格还给会话改动条；切回已结束的会话也不会再冒出来。
+//! 它是进行时的进度条，不是要留档的结果，回看走对话流里的工具卡。
 
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 
@@ -35,6 +40,15 @@ function latest(items: Item[]): { callId: string; todos: TodoEntry[] } | null {
     }
   }
   return null;
+}
+
+/**
+ * 清单里还有没做完的活吗。外层用它决定这一格给任务面板还是改动条 ——
+ * 全部 completed 的清单没有进行时价值，不该继续占着输入框上方。
+ */
+export function hasActiveTodos(items: Item[]): boolean {
+  const found = latest(items);
+  return found !== null && found.todos.some((t) => t.status !== "completed");
 }
 
 /**

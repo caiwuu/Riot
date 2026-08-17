@@ -633,6 +633,16 @@ export type RpcRequest =
       };
     }
   | {
+      method: "session.git_changes";
+      params: {
+        /**
+         * 对比基线。空 = 当前分支 / HEAD。只换对比对象,不 checkout。
+         */
+        base?: string | null;
+        session_id: string;
+      };
+    }
+  | {
       method: "session.set_title";
       params: {
         session_id: string;
@@ -776,6 +786,12 @@ export type RpcResponse =
     }
   | {
       data: {
+        git: GitChanges;
+      };
+      result: "git_changes";
+    }
+  | {
+      data: {
         hosts: string[];
       };
       result: "scope_hosts";
@@ -808,7 +824,7 @@ export type RpcResponse =
       result: "error";
     };
 export type LineKind = "context" | "add" | "del";
-export type ChangeStatus = "created" | "modified" | "deleted";
+export type ChangeStatus = ("created" | "modified" | "deleted") | "renamed";
 export type RpcErrorCode = ("session_not_found" | "invalid_params" | "internal") | "turn_in_progress";
 
 /**
@@ -1169,12 +1185,20 @@ export interface TurnInput1 {
 }
 export interface FileChange {
   added: number;
+  /**
+   * 二进制文件:没有可读的逐行差异,`hunks` 为空、行数为 0。
+   */
+  binary?: boolean;
   hunks: Hunk[];
   /**
    * 相对项目根的路径。绝对路径在界面上又长又没有信息量。
    */
   path: string;
   removed: number;
+  /**
+   * 重命名前的旧路径。仅 status = renamed 时有。
+   */
+  renamedFrom?: string | null;
   status: ChangeStatus;
   /**
    * 差异太大,`hunks` 只是前一截。
@@ -1191,6 +1215,33 @@ export interface Hunk {
 export interface DiffLine {
   kind: LineKind;
   text: string;
+}
+/**
+ * `session.git_changes` 的应答:工作区相对所选基线的差异。
+ *
+ * 和会话改动(`session.changes`)回答的问题不同:那边是"这个会话经
+ * 工具改了什么",commit 之后依然在;这边跟着 git 走。基线默认是
+ * 当前分支(等于 HEAD);用户换分支只换对比对象,不 checkout。
+ */
+export interface GitChanges {
+  /**
+   * 实际用来 `git diff` 的基线(分支名或 HEAD)。
+   */
+  base?: string | null;
+  /**
+   * 当前检出的分支。detached HEAD 时为空。
+   */
+  branch?: string | null;
+  changes: FileChange[];
+  /**
+   * 下拉里的候选:本地分支 + 远程跟踪分支。
+   */
+  refs?: string[];
+  /**
+   * false = 项目目录不是 git 仓库。面板显示引导文案,而不是把
+   * "没有仓库"和"工作区干净"混成同一个空列表。
+   */
+  repo: boolean;
 }
 /**
  * MCP 连接状态快照,给设置页看。

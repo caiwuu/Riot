@@ -20,11 +20,18 @@ export function FieldSelect({
   onChange,
   options,
   disabled,
+  className,
+  title,
+  menuMinWidth,
 }: {
   value: string;
   onChange: (v: string) => void;
   options: FieldOption[];
   disabled?: boolean;
+  className?: string;
+  title?: string;
+  /** 菜单比触发框更宽时用。触发框可以很窄，选项（远程分支名）往往更长。 */
+  menuMinWidth?: number;
 }) {
   const [open, setOpen] = useState(false);
   const btnRef = useRef<HTMLButtonElement>(null);
@@ -45,10 +52,16 @@ export function FieldSelect({
     const below = window.innerHeight - r.bottom - gap - 8;
     const above = r.top - gap - 8;
     const up = below < 160 && above > below;
+    const width = Math.min(
+      window.innerWidth - 16,
+      Math.max(r.width, menuMinWidth ?? 0),
+    );
+    // 菜单比按钮宽时仍贴左边；贴出窗口就往左收。
+    const left = Math.min(r.left, window.innerWidth - width - 8);
     setBox({
       top: up ? r.top - gap : r.bottom + gap,
-      left: r.left,
-      width: r.width,
+      left: Math.max(8, left),
+      width,
       maxH: Math.min(280, Math.max(120, up ? above : below)),
       up,
     });
@@ -87,8 +100,9 @@ export function FieldSelect({
       <button
         ref={btnRef}
         type="button"
-        className="field-select"
+        className={className ? `field-select ${className}` : "field-select"}
         disabled={disabled}
+        title={title}
         aria-haspopup="listbox"
         aria-expanded={open}
         onClick={() => !disabled && setOpen((v) => !v)}

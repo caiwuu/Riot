@@ -184,6 +184,17 @@ async fn session_changes(
     state.changes(&session_id).await
 }
 
+/// 工作区相对所选基线的差异（侧边抽屉的 Git 面板）。
+/// `base` 空 = 当前分支 / HEAD。只换对比对象，不 checkout。
+#[tauri::command]
+async fn session_git_changes(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    base: Option<String>,
+) -> HostResult<riot_protocol::GitChanges> {
+    state.git_changes(&session_id, base.as_deref()).await
+}
+
 #[tauri::command]
 async fn respond_permission(
     state: tauri::State<'_, AppState>,
@@ -808,6 +819,7 @@ pub fn run() {
             search_files,
             interrupt,
             session_changes,
+            session_git_changes,
             respond_permission,
             set_permission_mode,
             set_session_sampling,

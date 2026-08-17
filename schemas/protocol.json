@@ -722,11 +722,20 @@
       ]
     },
     "ChangeStatus": {
-      "type": "string",
-      "enum": [
-        "created",
-        "modified",
-        "deleted"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "created",
+            "modified",
+            "deleted"
+          ]
+        },
+        {
+          "description": "仅 git 视图会产生:git 认出的重命名(`--find-renames`)。\n会话视图按工具落盘记账,认不出改名,不会给出这个值。",
+          "type": "string",
+          "const": "renamed"
+        }
       ]
     },
     "CompactStrategy": {
@@ -1001,6 +1010,11 @@
           "format": "uint",
           "minimum": 0
         },
+        "binary": {
+          "description": "二进制文件:没有可读的逐行差异,`hunks` 为空、行数为 0。",
+          "type": "boolean",
+          "default": false
+        },
         "hunks": {
           "type": "array",
           "items": {
@@ -1015,6 +1029,14 @@
           "type": "integer",
           "format": "uint",
           "minimum": 0
+        },
+        "renamedFrom": {
+          "description": "重命名前的旧路径。仅 status = renamed 时有。",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "status": {
           "$ref": "#/$defs/ChangeStatus"
@@ -1031,6 +1053,50 @@
         "removed",
         "hunks",
         "truncated"
+      ]
+    },
+    "GitChanges": {
+      "description": "`session.git_changes` 的应答:工作区相对所选基线的差异。\n\n和会话改动(`session.changes`)回答的问题不同:那边是\"这个会话经\n工具改了什么\",commit 之后依然在;这边跟着 git 走。基线默认是\n当前分支(等于 HEAD);用户换分支只换对比对象,不 checkout。",
+      "type": "object",
+      "properties": {
+        "base": {
+          "description": "实际用来 `git diff` 的基线(分支名或 HEAD)。",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "branch": {
+          "description": "当前检出的分支。detached HEAD 时为空。",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "changes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FileChange"
+          }
+        },
+        "refs": {
+          "description": "下拉里的候选:本地分支 + 远程跟踪分支。",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "repo": {
+          "description": "false = 项目目录不是 git 仓库。面板显示引导文案,而不是把\n\"没有仓库\"和\"工作区干净\"混成同一个空列表。",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "repo",
+        "changes"
       ]
     },
     "Hunk": {
@@ -2215,7 +2281,7 @@
           ]
         },
         {
-          "description": "本会话的净改动(变更面板)。",
+          "description": "本会话的净改动(输入框上方的会话改动条)。",
           "type": "object",
           "properties": {
             "method": {
@@ -2225,6 +2291,39 @@
             "params": {
               "type": "object",
               "properties": {
+                "session_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session_id"
+              ]
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
+          "description": "工作区相对所选基线的差异(侧边抽屉的 Git 面板)。",
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "session.git_changes"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "base": {
+                  "description": "对比基线。空 = 当前分支 / HEAD。只换对比对象,不 checkout。",
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "default": null
+                },
                 "session_id": {
                   "type": "string"
                 }
@@ -2746,6 +2845,30 @@
             "result": {
               "type": "string",
               "const": "changes"
+            }
+          },
+          "required": [
+            "result",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "object",
+              "properties": {
+                "git": {
+                  "$ref": "#/$defs/GitChanges"
+                }
+              },
+              "required": [
+                "git"
+              ]
+            },
+            "result": {
+              "type": "string",
+              "const": "git_changes"
             }
           },
           "required": [
