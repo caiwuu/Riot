@@ -66,6 +66,21 @@ pnpm tauri dev
 从 Dock 或访达启动的应用**继承不到 shell 的环境变量**，这是 macOS 的行为。
 用 `pnpm tauri dev`，或者从已经 export 过的终端启动。
 
+### 内置浏览器（可选）
+
+浏览器面板跑在独立的 CEF 子进程里，**不随主应用一起构建**（CEF 的二进制
+分发包有 355MB，见根 Cargo.toml 的 exclude 注释）。没打包时其余功能照常，
+浏览器工具会明确告知不可用。
+
+```bash
+# macOS —— 首次要先拉 CEF（见脚本头部注释），产物是 .app
+scripts/build-browser.sh
+
+# Windows（PowerShell）—— CEF 自动下载;需要 VS 的"使用 C++ 的桌面开发"
+# 工作负载（CMake / Ninja 会自动从 VS 里找），产物是平铺目录
+powershell -ExecutionPolicy Bypass -File scripts/build-browser.ps1
+```
+
 换模型：
 
 ```bash
@@ -80,7 +95,7 @@ DeepSeek、Kimi、Qwen、OpenRouter、vLLM、Ollama 都是后者。
 
 ## 扩展点
 
-都是普通文件，改完下一轮对话生效，不用重启。`<配置目录>` 在设置 → 关于里能看到（macOS 是 `~/Library/Application Support/riot`）。
+都是普通文件，改完下一轮对话生效，不用重启。`<配置目录>` 在设置 → 关于里能看到（macOS 是 `~/Library/Application Support/riot`，Windows 是 `%APPDATA%\riot`）。
 
 | 能力 | 全局 | 项目级 | 是什么 |
 |---|---|---|---|

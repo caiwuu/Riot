@@ -200,9 +200,16 @@ mod tests {
 
         #[cfg(unix)]
         std::os::unix::fs::symlink(outside.path().join("secret"), dir.path().join("link")).unwrap();
+        // Windows 上创建符号链接要管理员或开发者模式。CI 的 runner 有这个
+        // 权限，普通开发机常常没有 —— 造不出链接就没得测，跳过而不是红。
         #[cfg(windows)]
-        std::os::windows::fs::symlink_file(outside.path().join("secret"), dir.path().join("link"))
-            .unwrap();
+        if let Err(e) = std::os::windows::fs::symlink_file(
+            outside.path().join("secret"),
+            dir.path().join("link"),
+        ) {
+            eprintln!("跳过：这台机器创建不了符号链接（{e}）");
+            return;
+        }
 
         let err = fence.resolve("link").unwrap_err();
         assert!(

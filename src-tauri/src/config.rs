@@ -968,6 +968,18 @@ fn dirs_config() -> Option<PathBuf> {
     {
         return Some(PathBuf::from(x));
     }
+    // Windows 的惯例位置是 %APPDATA%。不能走下面的 HOME 分支:Windows
+    // 通常没有 HOME 这个变量，掉进"当前目录"兜底的话，装好的应用会把
+    // config.json 和 auth.json 写进 Program Files 或 System32。
+    #[cfg(windows)]
+    {
+        #[allow(clippy::disallowed_methods)]
+        if let Ok(x) = std::env::var("APPDATA")
+            && !x.is_empty()
+        {
+            return Some(PathBuf::from(x));
+        }
+    }
     #[allow(clippy::disallowed_methods)]
     let home = std::env::var("HOME").ok()?;
     #[cfg(target_os = "macos")]

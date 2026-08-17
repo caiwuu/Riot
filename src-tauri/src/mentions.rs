@@ -481,10 +481,17 @@ fn walk(root: &Path) -> Vec<String> {
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
         .filter_map(|e| {
-            e.path()
-                .strip_prefix(root)
-                .ok()
-                .map(|p| p.to_string_lossy().into_owned())
+            let rel = e.path().strip_prefix(root).ok()?;
+            let s = rel.to_string_lossy();
+            // 分隔符统一成 `/`。这串字符串既是菜单项也是 `@` 引用的原文，
+            // Windows 的 `\` 会让补全出来的路径和用户手敲的 `/` 对不上 ——
+            // 同一个文件两种写法，缓存、搜索、解析都得跟着糊。join 的时候
+            // `/` 在 Windows 上照样好使，反过来不成立。
+            Some(if cfg!(windows) {
+                s.replace('\\', "/")
+            } else {
+                s.into_owned()
+            })
         })
         .take(MAX_FILES)
         .collect()

@@ -63,7 +63,12 @@ struct Term {
     /// 键盘输入往这里写。
     writer: Mutex<Box<dyn Write + Send>>,
     /// 只为 resize 留着。
-    master: Mutex<Box<dyn MasterPty + Send>>,
+    ///
+    /// `Option` 是给 Windows 的退出监视用的:ConPTY 只有在 master 关掉后
+    /// 才会给读端 EOF，子进程退出后由监视线程把它取走 drop 掉（见
+    /// [`Terminals::start`] 里的说明），读线程随之解除阻塞走正常收尾。
+    /// Unix 上永远是 `Some`。
+    master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
     /// 前端的事件出口。
     ///
@@ -190,7 +195,7 @@ impl Terminals {
         let id = self.0.next.fetch_add(1, Ordering::Relaxed);
         let term = Arc::new(Term {
             writer: Mutex::new(writer),
-            master: Mutex::new(pty.master),
+            master: Mutex::new(Some(pty.master)),
             child: Mutex::new(child),
             sink: Mutex::new(sink),
             buf: Mutex::new(Vec::new()),
@@ -207,20 +212,40 @@ impl Terminals {
             .expect("终端表锁")
             .insert(id, Arc::clone(&term));
 
+        // Windows 的退出监视要多持一份句柄（见下）。读线程会把 term 移走，
+        // 只能在这之前克隆。
+        #[cfg(windows)]
+        let watcher_term = Arc::clone(&term);
+
         // 读线程。PTY 读端是阻塞 I/O，不能放进 tokio —— 一个终端占一个
         // 线程，面板不会同时开几十个，这个代价可以接受。
         let inner = Arc::clone(&self.0);
         std::thread::spawn(move || {
+            #[cfg(windows)]
+            let mut dsr = DsrFilter::default();
             let mut chunk = [0u8; 8192];
             loop {
                 match reader.read(&mut chunk) {
                     // EOF / 读错都表示这个 PTY 完了，没有恢复路径
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        push_capped(&mut term.buf.lock().expect("缓冲锁"), &chunk[..n]);
+                        // Windows:由宿主应答 conhost 的光标查询并滤掉它，
+                        // 不答的话这个 PTY 一个字节都不会出。见 [`DsrFilter`]。
+                        #[cfg(windows)]
+                        let bytes = dsr.feed(&chunk[..n], || {
+                            let mut w = term.writer.lock().expect("writer 锁");
+                            let _ = w.write_all(b"\x1b[1;1R");
+                            let _ = w.flush();
+                        });
+                        #[cfg(not(windows))]
+                        let bytes = chunk[..n].to_vec();
+                        if bytes.is_empty() {
+                            continue;
+                        }
+                        push_capped(&mut term.buf.lock().expect("缓冲锁"), &bytes);
                         // 前端不在（面板没开）就只进缓冲。这不是错误 ——
                         // 服务照跑，等面板挂上来再回放。
-                        let data = base64::engine::general_purpose::STANDARD.encode(&chunk[..n]);
+                        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
                         let sink = term.sink.lock().expect("出口锁").clone();
                         if let Some(s) = sink
                             && s.send(TermEvent::Data { data }).is_err()
@@ -243,6 +268,52 @@ impl Terminals {
             // 前端收到后关掉对应标签。它不听了也无所谓 —— send 失败没有下文。
             if let Some(s) = term.sink.lock().expect("出口锁").as_ref() {
                 let _ = s.send(TermEvent::Exit);
+            }
+        });
+
+        // `[约束]` Windows 还要盯着子进程本身。ConPTY 的读端在子进程退出后
+        // **不会**给 EOF —— 只要 master 句柄开着，conhost 就一直吊着管道
+        // （实测 exit 之后读线程还能再阻塞一分钟以上）。Unix 那条"读到 EOF
+        // 收尾"的路在这儿永远走不到:敲 exit 标签一直亮着，模型看自己起的
+        // 服务也永远"在跑"。
+        //
+        // 监视线程轮询子进程，退了就把 master 取走 drop 掉 ——
+        // ClosePseudoConsole 让读线程当场解除阻塞，收尾仍然只有读线程
+        // 那一条路径，两个平台共用。不在这里发 Exit、也不动表:那些是
+        // 读线程收尾的职责，做两遍就要处理竞态。
+        #[cfg(windows)]
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                // 读线程已经收过尾（EOF 自己到了，或 close() 杀完进程后
+                // 这里放掉 master 让它收的尾），没事可做了。
+                if !watcher_term
+                    .running
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    return;
+                }
+                let exited = matches!(
+                    watcher_term.child.lock().expect("child 锁").try_wait(),
+                    Ok(Some(_))
+                );
+                if exited {
+                    // `[约束]` 不能立刻关。子进程退出的瞬间 conhost 里往往
+                    // 还有没送出的输出，ClosePseudoConsole 连管道一起丢 ——
+                    // "跑完就退"的服务（比如一条 echo）输出会整段消失，
+                    // 模型读到的是空白。等缓冲静默一拍再关，封顶两秒。
+                    let mut last = watcher_term.buf.lock().expect("缓冲锁").len();
+                    for _ in 0..20 {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        let now = watcher_term.buf.lock().expect("缓冲锁").len();
+                        if now == last {
+                            break;
+                        }
+                        last = now;
+                    }
+                    *watcher_term.master.lock().expect("master 锁") = None;
+                    return;
+                }
             }
         });
 
@@ -326,13 +397,18 @@ impl Terminals {
             .master
             .lock()
             .expect("master 锁")
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
+            .as_ref()
+            // 退出的终端没有 master 了（见字段注释）。面板还留着标签，
+            // 拖动尺寸不该报一堆错 —— 没人在里面跑，尺寸也无所谓。
+            .map_or(Ok(()), |m| {
+                m.resize(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .map_err(|e| format!("调整终端尺寸失败：{e}"))
             })
-            .map_err(|e| format!("调整终端尺寸失败：{e}"))
     }
 
     /// 把一个终端交给模型看 / 收回来。
@@ -379,7 +455,12 @@ impl Terminals {
         }
         #[cfg(unix)]
         {
-            let fg = t.master.lock().expect("master 锁").process_group_leader();
+            let fg = t
+                .master
+                .lock()
+                .expect("master 锁")
+                .as_ref()
+                .and_then(|m| m.process_group_leader());
             let shell = t.child.lock().expect("child 锁").process_id();
             if let (Some(fg), Some(shell)) = (fg, shell) {
                 return fg != shell as i32;
@@ -507,6 +588,58 @@ fn default_shell() -> CommandBuilder {
     CommandBuilder::new("powershell.exe")
 }
 
+/// 应答并滤掉 conhost 的光标位置查询。
+///
+/// `[约束]` 这件事必须由宿主做，不能指望前端。Windows 的 ConPTY 一起来
+/// 就发 `ESC[6n`（查询光标位置），在收到应答**之前不产出任何客户端输出**
+/// —— 实测 `powershell -c`、甚至 `cmd /C echo` 都一个字节不出。而这里的
+/// PTY 不保证有终端挂着:模型起的服务根本没有面板，面板也可能中途关掉，
+/// 表现是"服务起了但读不到任何输出"，和服务自身出错难以区分。
+///
+/// 应答之后还要把查询**从流里滤掉**:留着的话，之后挂上来的 xterm 会对
+/// 回放缓冲里的查询再答一次，那份应答会被当成键盘输入打进 shell ——
+/// 命令行上凭空多出一段 `1;1R`。
+#[cfg(windows)]
+#[derive(Default)]
+struct DsrFilter {
+    /// 上一块结尾处疑似查询前缀的字节。查询可能在任意位置被读断，
+    /// 不留尾巴的话跨块的查询就漏答了。
+    carry: Vec<u8>,
+}
+
+#[cfg(windows)]
+impl DsrFilter {
+    const QUERY: &'static [u8] = b"\x1b[6n";
+
+    /// 过滤一块输出，每发现一个完整查询就调一次 `answer`。
+    /// 返回该继续往缓冲和前端送的字节。
+    fn feed(&mut self, chunk: &[u8], mut answer: impl FnMut()) -> Vec<u8> {
+        let mut data = std::mem::take(&mut self.carry);
+        data.extend_from_slice(chunk);
+        let mut out = Vec::with_capacity(data.len());
+        let mut i = 0;
+        while i < data.len() {
+            if data[i] == 0x1b {
+                let rest = &data[i..];
+                if rest.len() >= Self::QUERY.len() {
+                    if rest.starts_with(Self::QUERY) {
+                        answer();
+                        i += Self::QUERY.len();
+                        continue;
+                    }
+                } else if Self::QUERY.starts_with(rest) {
+                    // 疑似被切断的查询前缀，留到下一块拼上再判。
+                    self.carry = rest.to_vec();
+                    break;
+                }
+            }
+            out.push(data[i]);
+            i += 1;
+        }
+        out
+    }
+}
+
 fn home() -> Option<String> {
     std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -563,10 +696,16 @@ mod tests {
     #[test]
     fn 带命令的终端留下输出且退出后仍可读() {
         let terms = Terminals::default();
+        // 命令按各自 shell 的方言:Windows 的默认 shell 是 PowerShell，
+        // 没有 printf。
+        #[cfg(not(windows))]
+        const CMD: &str = "printf 'riot-spawn-ok\\n'";
+        #[cfg(windows)]
+        const CMD: &str = "echo riot-spawn-ok";
         let id = terms
             .spawn(
                 Some(std::env::temp_dir().display().to_string()),
-                "printf 'riot-spawn-ok\\n'",
+                CMD,
                 "测试服务",
             )
             .expect("起服务");
@@ -614,6 +753,23 @@ mod tests {
         assert_eq!(tail_lines(text, 0), "");
     }
 
+    /// 目前收到的全部输出，按字节拼好再解码。
+    fn decoded(got: &Arc<Mutex<Vec<TermEvent>>>) -> String {
+        let all: Vec<u8> = got
+            .lock()
+            .expect("锁")
+            .iter()
+            .filter_map(|e| match e {
+                TermEvent::Data { data } => {
+                    base64::engine::general_purpose::STANDARD.decode(data).ok()
+                }
+                TermEvent::Exit => None,
+            })
+            .flatten()
+            .collect();
+        String::from_utf8_lossy(&all).into_owned()
+    }
+
     #[test]
     fn 终端能跑命令并回显输出() {
         let terms = Terminals::default();
@@ -622,23 +778,22 @@ mod tests {
             .open(Some(std::env::temp_dir().display().to_string()), 80, 24, ch)
             .expect("开终端");
 
-        terms.write(id, "printf 'riot-term-ok\\n'\r").expect("写命令");
+        // Windows 上 ConPTY 的光标查询由宿主应答（见 DsrFilter），
+        // 等提示符出来再敲命令 —— 应答之前 shell 不收输入。
+        #[cfg(windows)]
+        assert!(
+            wait_until(|| !decoded(&got).is_empty()),
+            "shell 该出提示符"
+        );
 
-        let seen = wait_until(|| {
-            let all: Vec<u8> = got
-                .lock()
-                .expect("锁")
-                .iter()
-                .filter_map(|e| match e {
-                    TermEvent::Data { data } => {
-                        base64::engine::general_purpose::STANDARD.decode(data).ok()
-                    }
-                    TermEvent::Exit => None,
-                })
-                .flatten()
-                .collect();
-            String::from_utf8_lossy(&all).contains("riot-term-ok")
-        });
+        // 命令按各自 shell 的方言写:unix 是 zsh/bash 的 printf，
+        // Windows 是 PowerShell 的 echo。
+        #[cfg(not(windows))]
+        terms.write(id, "printf 'riot-term-ok\\n'\r").expect("写命令");
+        #[cfg(windows)]
+        terms.write(id, "echo riot-term-ok\r").expect("写命令");
+
+        let seen = wait_until(|| decoded(&got).contains("riot-term-ok"));
         assert!(seen, "输出里应该能看到命令的回显");
 
         terms.close(id);
@@ -661,6 +816,13 @@ mod tests {
         let terms = Terminals::default();
         let (ch, got) = probe();
         let id = terms.open(None, 80, 24, ch).expect("开终端");
+
+        // 等提示符:应答光标查询（宿主做，见 DsrFilter）之前 shell 不收输入。
+        #[cfg(windows)]
+        assert!(
+            wait_until(|| !decoded(&got).is_empty()),
+            "shell 该出提示符"
+        );
 
         terms.write(id, "exit\r").expect("写 exit");
 

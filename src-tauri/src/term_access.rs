@@ -219,15 +219,18 @@ mod tests {
         let mine_not = terms.open(None, 80, 24, ch).expect("开终端");
 
         let h = HostTerminal::new(terms.clone(), std::env::temp_dir());
-        let id = h
-            .spawn("printf 'riot-service-up\\n'; sleep 30", "测试服务")
-            .await
-            .expect("起服务");
+        // 命令按 shell 方言走:Windows 的默认 shell 是 PowerShell，没有
+        // printf；echo 和 sleep（Start-Sleep 的别名）两边语义一致。
+        #[cfg(not(windows))]
+        const CMD: &str = "printf 'riot-service-up\\n'; sleep 30";
+        #[cfg(windows)]
+        const CMD: &str = "echo riot-service-up; sleep 30";
+        let id = h.spawn(CMD, "测试服务").await.expect("起服务");
 
         let listed = h.list().await;
         assert_eq!(listed.len(), 1, "只列模型自己起的");
         assert_eq!(listed[0].id, id);
-        assert_eq!(listed[0].command.as_deref(), Some("printf 'riot-service-up\\n'; sleep 30"));
+        assert_eq!(listed[0].command.as_deref(), Some(CMD));
 
         let seen = crate::term::testing::wait_until(|| {
             h.terms

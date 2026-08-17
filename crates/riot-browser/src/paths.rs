@@ -10,12 +10,20 @@
 //!
 //! 这条限制正是 `riot-browser` 独立成一个进程的原因:主应用在 `tauri dev`
 //! 下跑的是裸二进制，永远满足不了它。
+//!
+//! Windows 没有这层束缚:libcef.dll 在链接期挂上、随 exe 同目录加载，
+//! 资源按 dll 所在位置找。所以这里 Windows 只剩两件小事 —— helper 在哪、
+//! 缓存放哪。
 
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::path::Path;
+use std::path::PathBuf;
 
 /// `.framework` 目录名。
+#[cfg(target_os = "macos")]
 const FRAMEWORK: &str = "Chromium Embedded Framework.framework";
 /// 框架二进制在 `.framework` 里的相对位置。
+#[cfg(target_os = "macos")]
 const FRAMEWORK_BIN: &str = "Chromium Embedded Framework.framework/Chromium Embedded Framework";
 
 /// `framework_dir_path` 该填的值。
@@ -25,6 +33,7 @@ const FRAMEWORK_BIN: &str = "Chromium Embedded Framework.framework/Chromium Embe
 /// 填错一层的报错是 `icudtl.dat not found in bundle` —— CEF 会去
 /// `<你给的路径>/Resources/icudtl.dat` 找资源，指到上一层就什么都找不到，
 /// 而错误信息完全不提路径，看起来像是打包漏了文件。
+#[cfg(target_os = "macos")]
 pub fn framework_dir(frameworks: &Path) -> PathBuf {
     frameworks.join(FRAMEWORK)
 }
@@ -34,6 +43,7 @@ pub fn framework_dir(frameworks: &Path) -> PathBuf {
 /// 布局是 `X.app/Contents/MacOS/riot-browser`，所以从可执行文件往上两层
 /// 再进 `Frameworks`。用 `current_exe` 的 parent 而不是它本身，是为了
 /// 兼容通过符号链接启动的情况。
+#[cfg(target_os = "macos")]
 pub fn frameworks_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?.join("../Frameworks").canonicalize().ok()?;
@@ -44,6 +54,10 @@ pub fn frameworks_dir() -> Option<PathBuf> {
 ///
 /// `[约束]` 必须在任何其它 CEF 调用**之前**完成。框架是动态加载的，
 /// 早一步调 `execute_process` 就是空指针解引用。
+///
+/// 只有 macOS 有这一步:`cef::load_library` 这个符号在别的平台上
+/// 根本不存在。
+#[cfg(target_os = "macos")]
 pub fn load_framework(frameworks: &Path) -> bool {
     let bin = frameworks.join(FRAMEWORK_BIN);
     let Ok(c) = std::ffi::CString::new(bin.to_string_lossy().as_bytes()) else {
@@ -57,8 +71,21 @@ pub fn load_framework(frameworks: &Path) -> bool {
 ///
 /// macOS 上 CEF 的每种子进程都要单独的 `.app`（各自的 Info.plist 让它们
 /// 不出现在 Dock 里）。这里指向主 helper，CEF 会按 `--type=` 自己挑。
+#[cfg(target_os = "macos")]
 pub fn helper_exe(frameworks: &Path) -> PathBuf {
     frameworks.join("riot-browser Helper.app/Contents/MacOS/riot-browser Helper")
+}
+
+/// helper 可执行文件的路径:和主 exe 同目录（打包脚本保证的平铺布局）。
+///
+/// `current_exe` 拿不到时退回相对路径，让加载器按工作目录找 —— 那是
+/// 几乎不会发生的分支，但返回空路径会让 CEF 静默用错误的默认 helper 名。
+#[cfg(windows)]
+pub fn helper_exe() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join("riot-browser-helper.exe")))
+        .unwrap_or_else(|| PathBuf::from("riot-browser-helper.exe"))
 }
 
 /// 浏览器数据目录。
@@ -79,6 +106,7 @@ pub fn cache_dir() -> PathBuf {
     default_cache_dir()
 }
 
+#[cfg(not(windows))]
 fn default_cache_dir() -> PathBuf {
     let base = std::env::var("XDG_CONFIG_HOME")
         .ok()
@@ -90,5 +118,17 @@ fn default_cache_dir() -> PathBuf {
             },
             PathBuf::from,
         );
+    base.join("riot").join("browser-profile")
+}
+
+/// Chromium 的 profile 属于本机缓存类数据，放 LocalAppData —— 和 Chrome
+/// 自己的 `User Data` 同级，不进漫游配置（Roaming 会跟着域账户同步，
+/// 几百 MB 的缓存拖着登录漫游走）。
+#[cfg(windows)]
+fn default_cache_dir() -> PathBuf {
+    let base = std::env::var("LOCALAPPDATA")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map_or_else(|| PathBuf::from("."), PathBuf::from);
     base.join("riot").join("browser-profile")
 }

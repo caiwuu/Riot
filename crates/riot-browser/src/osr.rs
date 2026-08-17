@@ -171,6 +171,55 @@ cef::wrap_client! {
         fn load_handler(&self) -> Option<LoadHandler> {
             Some(OsrLoad::new(self.tab))
         }
+
+        fn jsdialog_handler(&self) -> Option<JsdialogHandler> {
+            Some(OsrJsDialog::new())
+        }
+    }
+}
+
+cef::wrap_jsdialog_handler! {
+    pub struct OsrJsDialog;
+
+    impl JsdialogHandler {
+        /// 页面弹 alert / confirm / prompt。一律当场放行 —— 对话框会
+        /// **阻塞页面**直到有人应答，而离屏渲染下没有原生 UI 能承接它。
+        ///
+        /// `[约束]` 不能依赖默认实现，它在各平台的 OSR 下行为不一致:
+        /// macOS 上对话框挂起等人应答（宿主那条 `Page.handleJavaScriptDialog`
+        /// 的 CDP 路径恰好接得住），Windows 上没有父窗口、默认实现**立即
+        /// 取消** —— `confirm()` 永远返回 false，不报错、不留痕迹，看起来
+        /// 像页面自己的逻辑不对。在这里应答让两个平台一致，语义和宿主的
+        /// CDP 自动放行相同:accept，prompt 取默认文本。宿主那条路留着
+        /// 也无害 —— 对话框已经关了，它的应答会被 CDP 拒绝并被忽略。
+        fn on_jsdialog(
+            &self,
+            _browser: Option<&mut Browser>,
+            _origin_url: Option<&CefString>,
+            _dialog_type: JsdialogType,
+            _message_text: Option<&CefString>,
+            default_prompt_text: Option<&CefString>,
+            callback: Option<&mut JsdialogCallback>,
+            _suppress_message: Option<&mut ::std::os::raw::c_int>,
+        ) -> ::std::os::raw::c_int {
+            let Some(cb) = callback else { return 0 };
+            cb.cont(1, default_prompt_text);
+            1
+        }
+
+        /// onbeforeunload 的确认框。accept = 允许离开 —— 导航和关标签页
+        /// 都是明确的指令，不该被页面的挽留框挡住。
+        fn on_before_unload_dialog(
+            &self,
+            _browser: Option<&mut Browser>,
+            _message_text: Option<&CefString>,
+            _is_reload: ::std::os::raw::c_int,
+            callback: Option<&mut JsdialogCallback>,
+        ) -> ::std::os::raw::c_int {
+            let Some(cb) = callback else { return 0 };
+            cb.cont(1, None);
+            1
+        }
     }
 }
 
