@@ -8,6 +8,7 @@ use crate::event::AgentEvent;
 use crate::id::{RequestId, SessionId, TurnId};
 use crate::message::{Message, UserContent};
 use crate::permission::{PermissionMode, PermissionResponse};
+use crate::turn::TurnConfig;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -29,6 +30,9 @@ pub enum RpcRequest {
     TurnSubmit {
         session_id: SessionId,
         content: Vec<UserContent>,
+        /// 本轮的完整配置:模型端点、联网/视觉、limits、mode、会话设置。
+        /// Box 是因为它比其它变体大得多,不装箱会把整个 enum 撑大。
+        config: Box<TurnConfig>,
     },
     /// 中断当前轮。
     #[serde(rename = "turn.interrupt")]
@@ -62,6 +66,11 @@ pub enum RpcRequest {
     /// 健康检查。宿主定期调用，无应答则重启内核。
     #[serde(rename = "kernel.ping")]
     KernelPing,
+
+    /// 优雅关闭:内核 flush 会话、杀掉自己 spawn 的子进程,然后退出。
+    /// 宿主关闭序列的第一步(见 ARCHITECTURE.md §2.3)。
+    #[serde(rename = "kernel.shutdown")]
+    KernelShutdown,
 }
 
 /// 内核 → 宿主，对 [`RpcRequest`] 的应答。
@@ -79,6 +88,11 @@ pub enum RpcResponse {
     },
     TurnStarted {
         turn_id: TurnId,
+    },
+    /// turn.submit 的应答。`queued_id` = Some 表示上一轮在跑、这条消息进了
+    /// 插话队列(条目 id,前端排队面板据此跟踪);None = 直接开轮了。
+    TurnSubmitted {
+        queued_id: Option<String>,
     },
     ToolsList {
         tools: Vec<ToolInfo>,

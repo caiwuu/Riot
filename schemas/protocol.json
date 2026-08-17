@@ -360,6 +360,21 @@
         }
       ]
     },
+    "ApiProtocol": {
+      "description": "说话用的协议。决定请求格式与认证头。\n\n和宿主 `config` 里的 `Protocol` 同构 —— 那个是配置侧(会序列化进\n`config.json`),这个是传输侧(宿主↔内核 RPC)。分开是因为配置类型\n属于宿主、不该进 protocol 这个叶子 crate。",
+      "oneOf": [
+        {
+          "description": "OpenAI Chat Completions 兼容。",
+          "type": "string",
+          "const": "openai"
+        },
+        {
+          "description": "Anthropic Messages。",
+          "type": "string",
+          "const": "anthropic"
+        }
+      ]
+    },
     "AskChoiceOption": {
       "description": "结构化提问的一个候选项。",
       "type": "object",
@@ -919,6 +934,42 @@
         }
       ]
     },
+    "EndpointSampling": {
+      "description": "采样参数。`None` = 用端点默认。\n\n独立于 `riot-providers` 的 `SamplingParams`(那个不含 `max_output_tokens`,\n因为输出上限在主循环单独走恢复路径)—— 这里是\"宿主配置的完整快照\",\n由内核在建 Provider 和设置输出上限时各取所需。",
+      "type": "object",
+      "properties": {
+        "max_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "temperature": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "top_k": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "top_p": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        }
+      }
+    },
     "Message": {
       "oneOf": [
         {
@@ -1036,6 +1087,46 @@
           "type": "boolean"
         }
       }
+    },
+    "ModelEndpoint": {
+      "description": "一个已解析的模型端点:宿主把 provider 配置和明文 key 都填好,内核直接\n拿它建 Provider。\n\n这是 `config::ResolvedModel` 的\"传输版\" —— 区别在于 `api_key` 是**明文**\n(宿主已从环境变量 / auth.json 解析出来),而不是一个待查的变量名。\n拆进程后内核拿不到 auth.json,key 必须在宿主这一侧解析完再传进来。",
+      "type": "object",
+      "properties": {
+        "api_key": {
+          "description": "明文密钥。见模块文档的约束。",
+          "type": "string"
+        },
+        "api_path": {
+          "description": "接口路径,空 = 按主机猜(见 `riot_providers::endpoint`)。",
+          "type": "string"
+        },
+        "base_url": {
+          "type": "string"
+        },
+        "fallback_model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "protocol": {
+          "$ref": "#/$defs/ApiProtocol"
+        },
+        "sampling": {
+          "$ref": "#/$defs/EndpointSampling",
+          "default": {}
+        }
+      },
+      "required": [
+        "protocol",
+        "base_url",
+        "api_path",
+        "api_key",
+        "model"
+      ]
     },
     "OutputStream": {
       "type": "string",
@@ -1167,6 +1258,32 @@
             "decision"
           ]
         }
+      ]
+    },
+    "PermissionRule": {
+      "type": "object",
+      "properties": {
+        "decision": {
+          "$ref": "#/$defs/RuleDecision"
+        },
+        "pattern": {
+          "description": "None = 整工具规则；Some = 内容级规则，如 `npm run *`。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/RuleSource"
+        },
+        "tool": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool",
+        "decision",
+        "source"
       ]
     },
     "PermissionUpdate": {
@@ -1718,6 +1835,10 @@
             "params": {
               "type": "object",
               "properties": {
+                "config": {
+                  "description": "本轮的完整配置:模型端点、联网/视觉、limits、mode、会话设置。\nBox 是因为它比其它变体大得多,不装箱会把整个 enum 撑大。",
+                  "$ref": "#/$defs/TurnConfig"
+                },
                 "content": {
                   "type": "array",
                   "items": {
@@ -1730,7 +1851,8 @@
               },
               "required": [
                 "session_id",
-                "content"
+                "content",
+                "config"
               ]
             }
           },
@@ -1893,6 +2015,19 @@
           "required": [
             "method"
           ]
+        },
+        {
+          "description": "优雅关闭:内核 flush 会话、杀掉自己 spawn 的子进程,然后退出。\n宿主关闭序列的第一步(见 ARCHITECTURE.md §2.3)。",
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "kernel.shutdown"
+            }
+          },
+          "required": [
+            "method"
+          ]
         }
       ]
     },
@@ -1994,6 +2129,31 @@
             "result": {
               "type": "string",
               "const": "turn_started"
+            }
+          },
+          "required": [
+            "result",
+            "data"
+          ]
+        },
+        {
+          "description": "turn.submit 的应答。`queued_id` = Some 表示上一轮在跑、这条消息进了\n插话队列(条目 id,前端排队面板据此跟踪);None = 直接开轮了。",
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "object",
+              "properties": {
+                "queued_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "result": {
+              "type": "string",
+              "const": "turn_submitted"
             }
           },
           "required": [
@@ -2174,6 +2334,26 @@
           "description": "主动渗透动作打到了**未授权**的目标（不在渗透 scope 内）。\n\n`[约束]` 归到安全检查而不是普通同意，就是为了让它**对 bypass 免疫**:\n「全部放行」的语义是\"信任 agent 做常规开发\"，不是\"允许它对任意目标\n发起攻击\"。scope 外的改包、fuzzing、爬虫必须由用户显式授权目标，\n哪怕开着 bypass。只有无人值守模式（用户明示交出一切）才放行。",
           "type": "string",
           "const": "out_of_scope"
+        }
+      ]
+    },
+    "SandboxKind": {
+      "description": "命令的 OS 级隔离强度。和宿主 `config::SandboxMode` 同构。",
+      "oneOf": [
+        {
+          "description": "读全开、写限于工作区和构建缓存、联网照常。",
+          "type": "string",
+          "const": "workspace_write"
+        },
+        {
+          "description": "同上,另外掐掉网络。",
+          "type": "string",
+          "const": "workspace_write_no_net"
+        },
+        {
+          "description": "不隔离,只剩策略层拦着。",
+          "type": "string",
+          "const": "off"
         }
       ]
     },
@@ -2411,6 +2591,76 @@
         }
       ]
     },
+    "ThinkingEffort": {
+      "description": "思考力度档。取值刻意与 OpenAI 的 `reasoning_effort` 对齐 ——\nlow/medium/high 是各家（OpenAI / DeepSeek / GLM）都接受的交集，\nDeepSeek 和 GLM 会把 medium 兼容映射到 high。",
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "ThinkingPolicy": {
+      "description": "会话级的思考策略。宿主存这个，主循环每次请求时解析成 [`ThinkingConfig`]。\n\n策略和配置分开是因为 `Adaptive` 需要**每请求**决策（首请求 vs 工具续轮），\n而会话设置只在轮子开始前读一次 —— 合成一个类型的话，自适应就只能整轮同档。",
+      "oneOf": [
+        {
+          "description": "不干预，端点默认行为。这是默认值 —— 升级后老会话行为不变。",
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "default"
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        },
+        {
+          "description": "自适应：首请求中档（那一次要理解任务、定计划），工具续轮低档\n（多数续轮只是\"读结果、发起下一步\"，全力思考纯属烧钱烧时间）。",
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "adaptive"
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        },
+        {
+          "description": "每次请求都显式关闭思考。",
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "disabled"
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        },
+        {
+          "description": "每次请求都用固定档位。",
+          "type": "object",
+          "properties": {
+            "level": {
+              "$ref": "#/$defs/ThinkingEffort"
+            },
+            "mode": {
+              "type": "string",
+              "const": "fixed"
+            }
+          },
+          "required": [
+            "mode",
+            "level"
+          ]
+        }
+      ]
+    },
     "ToolInfo": {
       "type": "object",
       "properties": {
@@ -2616,6 +2866,109 @@
         }
       ]
     },
+    "TurnConfig": {
+      "description": "提交一轮所需的完整配置(`turn.submit` 的 RPC 载荷,除用户输入之外的一切)。\n\n宿主从 `AppConfig` + 会话设置解析出它,内核据此现装 provider、联网、视觉、\n子 agent、权限。**不含** MCP / Skill 工具:那些是 trait object,不能跨进程,\n由内核自己从 MCP hub 和技能目录装配(见 M-B4b)。",
+      "type": "object",
+      "properties": {
+        "cheap_model": {
+          "description": "只读侦察子 agent 的便宜档;也用于 Auto 模式的判危分类器。\nNone = 跟主模型。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelEndpoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limits": {
+          "$ref": "#/$defs/TurnLimits"
+        },
+        "mode": {
+          "description": "会话权限模式。",
+          "$ref": "#/$defs/PermissionMode"
+        },
+        "model": {
+          "description": "主模型端点。",
+          "$ref": "#/$defs/ModelEndpoint"
+        },
+        "python_venv": {
+          "description": "会话级 Python 虚拟环境根目录。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rules": {
+          "description": "会话内累积的权限规则(\"总是允许\"等)。",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PermissionRule"
+          }
+        },
+        "system_prompt_extra": {
+          "description": "会话级追加系统提示词。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "thinking": {
+          "description": "会话级思考策略。",
+          "$ref": "#/$defs/ThinkingPolicy",
+          "default": {
+            "mode": "default"
+          }
+        },
+        "vision": {
+          "$ref": "#/$defs/VisionSetup"
+        },
+        "web": {
+          "$ref": "#/$defs/WebSetup"
+        }
+      },
+      "required": [
+        "model",
+        "web",
+        "vision",
+        "limits",
+        "mode"
+      ]
+    },
+    "TurnLimits": {
+      "description": "一轮的数值上限与隔离强度。",
+      "type": "object",
+      "properties": {
+        "ask_timeout_secs": {
+          "description": "权限弹窗等多久算超时(秒)。超时按拒绝处理。",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "compact_threshold_tokens": {
+          "description": "历史超过这个 token 数就在开工前做 LLM 总结压缩。",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_turns": {
+          "description": "单轮最多自主往返多少步。",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "sandbox": {
+          "$ref": "#/$defs/SandboxKind",
+          "default": "workspace_write"
+        }
+      },
+      "required": [
+        "ask_timeout_secs",
+        "max_turns",
+        "compact_threshold_tokens"
+      ]
+    },
     "UpdateScope": {
       "oneOf": [
         {
@@ -2728,6 +3081,62 @@
             "type"
           ]
         }
+      ]
+    },
+    "VisionSetup": {
+      "description": "视觉能力配置。",
+      "type": "object",
+      "properties": {
+        "accepts_images": {
+          "description": "主模型能否直接收图片。",
+          "type": "boolean"
+        },
+        "describe": {
+          "description": "视觉兼容模型端点(主模型收不了图时转述)。None = 无,截图工具报未配置。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelEndpoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "accepts_images"
+      ]
+    },
+    "WebSetup": {
+      "description": "联网能力配置(随 turn 传给内核)。\n\n抓取(fetch)不需要第三方服务;搜索(search)要一个 SearXNG 实例;\n蒸馏(distill)要一个辅助模型端点。三者独立开关,和宿主 `WebConfig` 一致。",
+      "type": "object",
+      "properties": {
+        "distill": {
+          "description": "网页正文蒸馏的辅助模型端点。None = 不蒸馏,抓取返回截断原文。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelEndpoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fetch_enabled": {
+          "type": "boolean"
+        },
+        "search_enabled": {
+          "type": "boolean"
+        },
+        "searxng_url": {
+          "description": "SearXNG 实例地址。空 = 搜索不可用。",
+          "type": "string",
+          "default": ""
+        }
+      },
+      "required": [
+        "fetch_enabled",
+        "search_enabled"
       ]
     }
   }

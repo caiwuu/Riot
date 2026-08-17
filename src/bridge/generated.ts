@@ -583,6 +583,7 @@ export type RpcRequest =
   | {
       method: "turn.submit";
       params: {
+        config: TurnConfig;
         content: UserContent[];
         session_id: string;
       };
@@ -626,7 +627,24 @@ export type RpcRequest =
     }
   | {
       method: "kernel.ping";
+    }
+  | {
+      method: "kernel.shutdown";
     };
+/**
+ * 说话用的协议。决定请求格式与认证头。
+ *
+ * 和宿主 `config` 里的 `Protocol` 同构 —— 那个是配置侧(会序列化进
+ * `config.json`),这个是传输侧(宿主↔内核 RPC)。分开是因为配置类型
+ * 属于宿主、不该进 protocol 这个叶子 crate。
+ */
+export type ApiProtocol = "openai" | "anthropic";
+/**
+ * 思考力度档。取值刻意与 OpenAI 的 `reasoning_effort` 对齐 ——
+ * low/medium/high 是各家（OpenAI / DeepSeek / GLM）都接受的交集，
+ * DeepSeek 和 GLM 会把 medium 兼容映射到 high。
+ */
+export type ThinkingEffort = "low" | "medium" | "high";
 /**
  * 内核 → 宿主，对 [`RpcRequest`] 的应答。
  */
@@ -654,6 +672,12 @@ export type RpcResponse =
         turn_id: string;
       };
       result: "turn_started";
+    }
+  | {
+      data: {
+        queued_id?: string | null;
+      };
+      result: "turn_submitted";
     }
   | {
       data: {
@@ -805,6 +829,174 @@ export interface Usage1 {
   cache_read_tokens: number;
   input_tokens: number;
   output_tokens: number;
+}
+/**
+ * 本轮的完整配置:模型端点、联网/视觉、limits、mode、会话设置。
+ * Box 是因为它比其它变体大得多,不装箱会把整个 enum 撑大。
+ */
+export interface TurnConfig {
+  /**
+   * 只读侦察子 agent 的便宜档;也用于 Auto 模式的判危分类器。
+   * None = 跟主模型。
+   */
+  cheap_model?: ModelEndpoint | null;
+  limits: TurnLimits;
+  /**
+   * 会话权限模式。
+   */
+  mode: "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "unattended" | "dontAsk";
+  model: ModelEndpoint1;
+  /**
+   * 会话级 Python 虚拟环境根目录。
+   */
+  python_venv?: string | null;
+  /**
+   * 会话内累积的权限规则("总是允许"等)。
+   */
+  rules?: PermissionRule[];
+  /**
+   * 会话级追加系统提示词。
+   */
+  system_prompt_extra?: string | null;
+  /**
+   * 会话级思考策略。
+   */
+  thinking?:
+    | {
+        mode: "default";
+      }
+    | {
+        mode: "adaptive";
+      }
+    | {
+        mode: "disabled";
+      }
+    | {
+        level: ThinkingEffort;
+        mode: "fixed";
+      };
+  vision: VisionSetup;
+  web: WebSetup;
+}
+/**
+ * 一个已解析的模型端点:宿主把 provider 配置和明文 key 都填好,内核直接
+ * 拿它建 Provider。
+ *
+ * 这是 `config::ResolvedModel` 的"传输版" —— 区别在于 `api_key` 是**明文**
+ * (宿主已从环境变量 / auth.json 解析出来),而不是一个待查的变量名。
+ * 拆进程后内核拿不到 auth.json,key 必须在宿主这一侧解析完再传进来。
+ */
+export interface ModelEndpoint {
+  /**
+   * 明文密钥。见模块文档的约束。
+   */
+  api_key: string;
+  /**
+   * 接口路径,空 = 按主机猜(见 `riot_providers::endpoint`)。
+   */
+  api_path: string;
+  base_url: string;
+  fallback_model?: string | null;
+  model: string;
+  protocol: ApiProtocol;
+  sampling?: EndpointSampling;
+}
+/**
+ * 采样参数。`None` = 用端点默认。
+ *
+ * 独立于 `riot-providers` 的 `SamplingParams`(那个不含 `max_output_tokens`,
+ * 因为输出上限在主循环单独走恢复路径)—— 这里是"宿主配置的完整快照",
+ * 由内核在建 Provider 和设置输出上限时各取所需。
+ */
+export interface EndpointSampling {
+  max_output_tokens?: number | null;
+  temperature?: number | null;
+  top_k?: number | null;
+  top_p?: number | null;
+}
+/**
+ * 一轮的数值上限与隔离强度。
+ */
+export interface TurnLimits {
+  /**
+   * 权限弹窗等多久算超时(秒)。超时按拒绝处理。
+   */
+  ask_timeout_secs: number;
+  /**
+   * 历史超过这个 token 数就在开工前做 LLM 总结压缩。
+   */
+  compact_threshold_tokens: number;
+  /**
+   * 单轮最多自主往返多少步。
+   */
+  max_turns: number;
+  /**
+   * 命令的 OS 级隔离强度。和宿主 `config::SandboxMode` 同构。
+   */
+  sandbox?: "workspace_write" | "workspace_write_no_net" | "off";
+}
+/**
+ * 一个已解析的模型端点:宿主把 provider 配置和明文 key 都填好,内核直接
+ * 拿它建 Provider。
+ *
+ * 这是 `config::ResolvedModel` 的"传输版" —— 区别在于 `api_key` 是**明文**
+ * (宿主已从环境变量 / auth.json 解析出来),而不是一个待查的变量名。
+ * 拆进程后内核拿不到 auth.json,key 必须在宿主这一侧解析完再传进来。
+ */
+export interface ModelEndpoint1 {
+  /**
+   * 明文密钥。见模块文档的约束。
+   */
+  api_key: string;
+  /**
+   * 接口路径,空 = 按主机猜(见 `riot_providers::endpoint`)。
+   */
+  api_path: string;
+  base_url: string;
+  fallback_model?: string | null;
+  model: string;
+  protocol: ApiProtocol;
+  sampling?: EndpointSampling;
+}
+export interface PermissionRule {
+  decision: RuleDecision;
+  /**
+   * None = 整工具规则；Some = 内容级规则，如 `npm run *`。
+   */
+  pattern?: string | null;
+  source: RuleSource;
+  tool: string;
+}
+/**
+ * 视觉能力配置。
+ */
+export interface VisionSetup {
+  /**
+   * 主模型能否直接收图片。
+   */
+  accepts_images: boolean;
+  /**
+   * 视觉兼容模型端点(主模型收不了图时转述)。None = 无,截图工具报未配置。
+   */
+  describe?: ModelEndpoint | null;
+}
+/**
+ * 联网能力配置(随 turn 传给内核)。
+ *
+ * 抓取(fetch)不需要第三方服务;搜索(search)要一个 SearXNG 实例;
+ * 蒸馏(distill)要一个辅助模型端点。三者独立开关,和宿主 `WebConfig` 一致。
+ */
+export interface WebSetup {
+  /**
+   * 网页正文蒸馏的辅助模型端点。None = 不蒸馏,抓取返回截断原文。
+   */
+  distill?: ModelEndpoint | null;
+  fetch_enabled: boolean;
+  search_enabled: boolean;
+  /**
+   * SearXNG 实例地址。空 = 搜索不可用。
+   */
+  searxng_url?: string;
 }
 export interface SessionSummary {
   cwd: string;
