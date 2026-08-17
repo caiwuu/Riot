@@ -69,7 +69,8 @@ impl Tool for Bash {
              不会影响下一次调用。需要切目录就写成 `cd sub && cmd`，或者直接用相对\
              工作目录的路径。\n\
              - 环境是非交互的：没有 stdin，编辑器和分页器都被禁用。需要输入的命令\
-             会失败而不是挂住，请改用非交互参数（例如 `git commit -m`）。\n\
+             会失败而不是挂住，请改用非交互参数（例如 `git commit -m`）。\
+             `git push` / `ssh` 要凭证时走宿主的 GIT_ASKPASS，不会去开 /dev/tty。\n\
              - 默认 {}s 超时，最长 {}s。\n\
              - **长期服务**（dev server、watch、任何不会自己结束的东西）必须\
              设 `background: true`：它会跑在用户的终端面板里，立刻返回终端 id。\
@@ -261,6 +262,12 @@ fn non_interactive_env() -> Vec<(String, String)> {
         ("PAGER", "cat"),
         // ANSI 转义序列对模型是纯噪音,还占 token
         ("NO_COLOR", "1"),
+        // 没有控制终端。不关的话 git 会去开 /dev/tty，报
+        // "Device not configured"。关了之后走 GIT_ASKPASS（宿主已装），
+        // 助手不在就立刻失败，而不是挂死。
+        ("GIT_TERMINAL_PROMPT", "0"),
+        // OpenSSH 默认"有 tty 才提问"。这里没有 tty，force 让它走 SSH_ASKPASS。
+        ("SSH_ASKPASS_REQUIRE", "force"),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_owned(), v.to_owned()))

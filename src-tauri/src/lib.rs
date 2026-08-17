@@ -12,12 +12,16 @@ pub mod fence;
 // 阶段 B:内核逻辑搬进 riot-kernel crate,这里 re-export 维持 `crate::changes`
 // 等旧路径,宿主其它模块无需改动(见 ARCHITECTURE.md §2.2)。
 // 留在宿主的是需要 OS/tauri 能力的部分:browser、term、term_access、fence、
-// persist、gui_env、kernel(进程监管)。
+// persist、gui_env、askpass、kernel(进程监管)。
 pub use riot_kernel::{
     changes, classifier, config, git, hooks, memory, mentions, session, skills, slash, subagent,
     vision, web,
 };
+mod askpass;
 mod gui_env;
+pub use askpass::run_client as run_askpass;
+pub use gui_env::print_process_env;
+
 pub mod kernel;
 pub mod persist;
 pub mod state;
@@ -777,9 +781,11 @@ pub fn run() {
         )
         .init();
 
-    // Dock / 访达启动的 .app 继承不到终端 PATH。MCP 的 `npx`/`uvx` 会变成
-    // os error 2。必须在 restore 和任何子进程之前补上（set_var 不是线程安全的）。
-    gui_env::inherit_login_path();
+    // Dock / 访达启动的 .app 继承不到终端环境。必须在 restore 和任何子进程
+    // 之前补上（set_var 不是线程安全的）：先吸入登录 shell 的 PATH /
+    // SSH_AUTH_SOCK / gh token，再挂上 GIT_ASKPASS。
+    gui_env::inherit_login_env();
+    askpass::install();
 
     // 全局技能目录启动时就建好。设置页的「打开目录」按钮 reveal 的是它 ——
     // 目录不存在时系统的 reveal 静默失败，按钮看起来就是坏的（用户没写过

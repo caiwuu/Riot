@@ -774,6 +774,10 @@ Edit 工具的 `validate_input` 检查链:
 | `GIT_EDITOR` / `EDITOR` / `VISUAL` | `true` | 编辑器等待保存退出 |
 | `GIT_PAGER` / `PAGER` | `cat` | 分页器等待翻页按键 |
 | `NO_COLOR` | `1` | ANSI 转义序列(对模型是纯噪音,还占 token) |
+| `GIT_TERMINAL_PROMPT` | `0` | git 去开 `/dev/tty` 要用户名（无 TTY 时报 Device not configured） |
+| `SSH_ASKPASS_REQUIRE` | `force` | OpenSSH 在无 TTY 时改走 `SSH_ASKPASS`，而不是挂死 |
+
+`GIT_ASKPASS` / `SSH_ASKPASS` 由宿主在启动时注入（`gui_env` 吸入登录 shell 的 `SSH_AUTH_SOCK` 等变量，`askpass` 再挂上助手）。助手把提问转到宿主弹窗，和 VS Code Git 扩展同一条路。Bash 工具本身不覆盖这两项 —— 没装助手时 git 立刻失败，不假装能提问。
 
 超时能兜底,但那意味着用户白等两分钟换一个没有信息量的失败。
 

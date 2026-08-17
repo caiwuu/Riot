@@ -135,6 +135,8 @@ async fn 禁用编辑器和分页器() {
     assert_eq!(get("VISUAL"), "true");
     assert_eq!(get("GIT_PAGER"), "cat");
     assert_eq!(get("PAGER"), "cat");
+    assert_eq!(get("GIT_TERMINAL_PROMPT"), "0");
+    assert_eq!(get("SSH_ASKPASS_REQUIRE"), "force");
 }
 
 #[tokio::test]

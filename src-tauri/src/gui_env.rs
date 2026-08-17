@@ -1,11 +1,18 @@
 //! GUI 进程的环境补齐。
 //!
-//! macOS 从 Dock / 访达启动的应用，PATH 只有 `/usr/bin:/bin:/usr/sbin:/sbin`。
-//! 用户装的 `npx`、`uvx`、`node`、`brew` 都不在里面。
+//! macOS / Linux 从 Dock / 访达 / `.desktop` 启动的应用，拿不到用户在
+//! `.zprofile` / `.zshrc` 里 export 的东西。PATH 只剩
+//! `/usr/bin:/bin:/usr/sbin:/sbin`，`SSH_AUTH_SOCK` 要么没有、要么指向
+//! 空的系统 agent，`gh` / `nvm` / Homebrew 全不在。
 //!
-//! `pnpm tauri dev` 从已经 export 过的终端起，宿主继承了那份 PATH，所以
-//! 开发时 MCP 看起来一切正常。打成 `.app` 之后同一份配置就会报
-//! `No such file or directory (os error 2)`。
+//! `pnpm tauri dev` 从已经 export 过的终端起，宿主继承了那份环境，所以
+//! 开发时 `git push`、MCP 的 `npx` 看起来一切正常。打成 `.app` 之后同一
+//! 条命令就会变成 `Device not configured` 或 `os error 2`。
+//!
+//! 业内做法（VS Code `resolveShellEnv`、Zed、JetBrains）是启动时跑一次
+//! 用户的登录+交互 shell，把算出来的环境写进当前进程。Bash 工具仍然用
+//! `bash -c`、不加 `-l`/`-i` —— 吸入的是**变量**，不是 alias / 函数，
+//! 模型看到的命令和终端里跑的是同一套凭证。
 //!
 //! 终端面板已经用登录 shell（`zsh -l`，见 `term.rs`）绕过了。MCP / Bash /
 //! hooks 走的是宿主进程环境，必须在任何子进程起来之前补一次。
@@ -19,64 +26,207 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
-use std::process::{Command, Stdio};
-#[cfg(unix)]
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-/// 等登录 shell 吐出 PATH 的上限。`.zprofile` 里要是有网络请求，宁可
-/// 用常见目录兜底，也不能让窗口一直不出来。
+/// 等交互式登录 shell 吐出环境的上限。VS Code 默认 10s；`.zshrc` 里
+/// 要是有 `compinit` 或网络请求，宁可放弃交互式、退回纯登录 shell，
+/// 也不能让窗口一直不出来。
 #[cfg(unix)]
-const LOGIN_PATH_TIMEOUT: Duration = Duration::from_secs(2);
+const INTERACTIVE_ENV_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// 把登录 shell 的 PATH 和常见用户目录写进当前进程。
+/// 纯登录 shell（只读 `.zprofile`）更快，也更不容易挂。
+#[cfg(unix)]
+const LOGIN_ENV_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// 把登录 shell 的环境写进当前进程。
 ///
 /// `[约束]` 必须在任何线程起来之前调用。`env::set_var` 不是线程安全的。
-pub fn inherit_login_path() {
-    let current = env::var_os("PATH").unwrap_or_default();
-    let login = read_login_path().unwrap_or_default();
-    let extras = env::join_paths(well_known_bins()).unwrap_or_default();
-    let merged = merge_paths([&login, &extras, &current]);
-    if merged.is_empty() || merged == current {
-        return;
+pub fn inherit_login_env() {
+    if let Some(vars) = read_shell_env() {
+        apply_shell_env(&vars);
+        tracing::info!(n = vars.len(), "已吸入登录 shell 的环境");
     }
-    // SAFETY: 只在 `run()` 入口、restore / tokio 之前调用一次。
-    unsafe { env::set_var("PATH", &merged) };
-    tracing::info!("已补上登录 shell 的 PATH，MCP 和工具子进程都能找到 npx / uvx");
+    fallback_ssh_auth_sock();
+    // 登录 shell 没写进 PATH 的常见目录再补一层。nvm 默认只在 `.zshrc`，
+    // 交互式吸入成功的话这里是空操作（去重）。
+    let current = env::var_os("PATH").unwrap_or_default();
+    let extras = env::join_paths(well_known_bins()).unwrap_or_default();
+    let merged = merge_paths([&current, &extras]);
+    if !merged.is_empty() && merged != current {
+        unsafe { env::set_var("PATH", &merged) };
+    }
 }
 
-/// 跑一次登录 shell，把它算出来的 PATH 拿回来。
+/// 给 `--print-env` 用：把当前进程环境打成一段 JSON。
 ///
-/// 只用 `-l`、不加 `-i`：`.zshrc` 里常有 `compinit`、提示符、甚至
-/// `read`，交互式启动会挂死。这和 Terminal.app / `term.rs` 同一层。
-fn read_login_path() -> Option<OsString> {
+/// 登录 shell 里再 exec 一次本二进制，避免解析 `export -p`（zshrc 往
+/// stdout 打字会把解析撑破，Zed 为此换过一次实现）。
+pub fn print_process_env() {
+    let map: std::collections::BTreeMap<String, String> = env::vars().collect();
+    match serde_json::to_string(&map) {
+        Ok(s) => print!("{s}"),
+        Err(e) => eprintln!("print-env 序列化失败: {e}"),
+    }
+}
+
+fn apply_shell_env(vars: &[(String, String)]) {
+    for (k, v) in vars {
+        if !keep_imported(k) {
+            continue;
+        }
+        unsafe { env::set_var(k, v) };
+    }
+}
+
+/// 进程自身的状态、我们稍后要覆盖的 askpass 变量，不能从 shell 原样抄进来。
+///
+/// `XDG_RUNTIME_DIR` 是 VS Code 的已知坑（#22593）：抄过来会让 GUI 进程
+/// 的运行时目录指到另一处。`TMPDIR` 留给 launchd 给这个 .app 的那份。
+fn keep_imported(key: &str) -> bool {
+    !matches!(
+        key,
+        "PWD"
+            | "OLDPWD"
+            | "SHLVL"
+            | "_"
+            | "PPID"
+            | "TMPDIR"
+            | "XDG_RUNTIME_DIR"
+            | "TERM"
+            | "TERMINFO"
+            | "TERM_PROGRAM"
+            | "TERM_PROGRAM_VERSION"
+            | "COLORTERM"
+            | "COMMAND_MODE"
+            | "ITERM_SESSION_ID"
+            | "ITERM_PROFILE"
+            | "GIT_ASKPASS"
+            | "SSH_ASKPASS"
+            | "SSH_ASKPASS_REQUIRE"
+            | "GIT_TERMINAL_PROMPT"
+            | "RIOT_ASKPASS_SOCK"
+            | "RIOT_ASKPASS_EXE"
+            | "RIOT_RESOLVING_ENVIRONMENT"
+            | "ELECTRON_RUN_AS_NODE"
+            | "ELECTRON_NO_ATTACH_CONSOLE"
+    )
+}
+
+/// 登录 shell 没给出 `SSH_AUTH_SOCK` 时，问 launchd 要系统 agent 的插座。
+///
+/// Dock 启动的应用经常是这个状态：钥匙在系统 agent 里，但 GUI 进程的
+/// 环境里没有这根变量。`launchctl getenv` 是 macOS 上比猜路径更稳的问法。
+fn fallback_ssh_auth_sock() {
+    if env::var_os("SSH_AUTH_SOCK").is_some() {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = std::process::Command::new("launchctl");
+        cmd.args(["getenv", "SSH_AUTH_SOCK"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        let Some(out) = run_with_timeout(cmd, Duration::from_millis(400)) else {
+            return;
+        };
+        if !out.status.success() {
+            return;
+        }
+        let sock = String::from_utf8_lossy(&out.stdout);
+        let sock = sock.trim();
+        if !sock.is_empty() {
+            unsafe { env::set_var("SSH_AUTH_SOCK", sock) };
+            tracing::info!("已从 launchctl 补上 SSH_AUTH_SOCK");
+        }
+    }
+}
+
+fn read_shell_env() -> Option<Vec<(String, String)>> {
     #[cfg(windows)]
     {
+        // 和 VS Code 一样：Windows 的 GUI 进程从用户会话继承环境，不必再
+        // 跑一遍 shell。乱跑还会把 `ComSpec` 之类搞乱。
         return None;
     }
     #[cfg(unix)]
     {
-        let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_owned());
-        let mut cmd = Command::new(shell);
-        cmd.args(["-l", "-c", "printf %s \"$PATH\""])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .env("TERM", "dumb");
-        let output = run_with_timeout(cmd, LOGIN_PATH_TIMEOUT)?;
-        if !output.status.success() {
-            return None;
-        }
-        let path = String::from_utf8_lossy(&output.stdout);
-        let path = path.trim();
-        (!path.is_empty()).then(|| OsString::from(path))
+        read_unix_shell_env(true).or_else(|| read_unix_shell_env(false))
     }
 }
 
 #[cfg(unix)]
-fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<std::process::Output> {
+fn read_unix_shell_env(interactive: bool) -> Option<Vec<(String, String)>> {
+    let exe = env::current_exe().ok()?;
+    let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_owned());
+    let mark = env_mark();
+    let quoted_exe = posix_single_quote(&exe.to_string_lossy());
+    let command = format!("printf %s '{mark}'; {quoted_exe} --print-env; printf %s '{mark}'");
+
+    let mut cmd = std::process::Command::new(&shell);
+    if interactive {
+        cmd.arg("-i");
+    }
+    cmd.args(["-l", "-c", &command])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .env("TERM", "dumb")
+        .env("RIOT_RESOLVING_ENVIRONMENT", "1");
+
+    let timeout = if interactive {
+        INTERACTIVE_ENV_TIMEOUT
+    } else {
+        LOGIN_ENV_TIMEOUT
+    };
+    let output = run_with_timeout(cmd, timeout)?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let json = extract_marked(&raw, &mark)?;
+    parse_env_json(json)
+}
+
+fn env_mark() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("__RIOT_ENV_{:x}_{:x}__", std::process::id(), nanos)
+}
+
+fn posix_single_quote(s: &str) -> String {
+    let mut out = String::from("'");
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+fn extract_marked<'a>(raw: &'a str, mark: &str) -> Option<&'a str> {
+    let start = raw.find(mark)? + mark.len();
+    let rest = raw.get(start..)?;
+    let end = rest.rfind(mark)?;
+    Some(rest.get(..end)?.trim())
+}
+
+fn parse_env_json(s: &str) -> Option<Vec<(String, String)>> {
+    let map: std::collections::BTreeMap<String, String> = serde_json::from_str(s).ok()?;
+    Some(map.into_iter().collect())
+}
+
+#[cfg(unix)]
+fn run_with_timeout(mut cmd: std::process::Command, timeout: Duration) -> Option<std::process::Output> {
     use std::io::Read;
     // 不另起线程：`set_var` 之前进程里必须只有主线程。超时就杀，
-    // 避免 `.zprofile` 里的网络请求把启动卡住。
+    // 避免 `.zshrc` 里的网络请求把启动卡住。
     let mut child = cmd.spawn().ok()?;
     let ticks = (timeout.as_millis() / 20).max(1);
     for _ in 0..ticks {
@@ -103,7 +253,7 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<std::process:
 
 /// 登录 shell 没写进 PATH、但目录确实在的常见位置。
 ///
-/// nvm 默认只在 `.zshrc` 里，`-l` 拿不到；Homebrew 有人只写在 `.zshrc`。
+/// nvm 默认只在 `.zshrc` 里，纯 `-l` 拿不到；Homebrew 有人只写在 `.zshrc`。
 /// 目录不存在就跳过，不会把 PATH 弄脏。
 fn well_known_bins() -> Vec<PathBuf> {
     let mut dirs = vec![
@@ -229,5 +379,33 @@ mod tests {
         // 字典序会认为 v9 > v22。
         assert!(version_key("v22.17.1") > version_key("v9.9.9"));
         assert!(version_key("not-a-version").is_none());
+    }
+
+    #[test]
+    fn 标记之间抽出_json_即使_zshrc_往_stdout_打过字() {
+        let mark = "__RIOT_ENV_test__";
+        let raw = format!("compinit ok\n{mark}{{\"SSH_AUTH_SOCK\":\"/tmp/s\",\"PATH\":\"/bin\"}}{mark}\n");
+        let json = extract_marked(&raw, mark).expect("有标记");
+        let vars = parse_env_json(json).expect("是 JSON");
+        assert!(vars.iter().any(|(k, v)| k == "SSH_AUTH_SOCK" && v == "/tmp/s"));
+    }
+
+    #[test]
+    fn 吸入时丢掉进程状态_留下凭证相关() {
+        assert!(keep_imported("SSH_AUTH_SOCK"));
+        assert!(keep_imported("PATH"));
+        assert!(keep_imported("GH_TOKEN"));
+        assert!(keep_imported("GITHUB_TOKEN"));
+        assert!(keep_imported("LANG"));
+        assert!(!keep_imported("PWD"));
+        assert!(!keep_imported("GIT_ASKPASS"));
+        assert!(!keep_imported("TMPDIR"));
+        assert!(!keep_imported("XDG_RUNTIME_DIR"));
+    }
+
+    #[test]
+    fn posix_单引号能包住带引号的路径() {
+        assert_eq!(posix_single_quote("/Applications/Riot.app/Contents/MacOS/Riot"), "'/Applications/Riot.app/Contents/MacOS/Riot'");
+        assert_eq!(posix_single_quote("/tmp/it's here"), "'/tmp/it'\\''s here'");
     }
 }
