@@ -84,6 +84,32 @@ impl HostWeb {
             distiller,
         }
     }
+
+    /// 从 RPC 传入的 [`riot_protocol::WebSetup`] 装一套联网能力(拆进程后
+    /// 内核走这条,不碰 AppConfig)。语义和 [`Self::from_config`] 一致。
+    pub fn from_setup(setup: &riot_protocol::WebSetup) -> Self {
+        let fetch = setup.fetch_enabled.then(SystemWebClient::new).and_then(|r| {
+            r.inspect_err(|e| tracing::warn!(error = %e, "抓取客户端没建起来"))
+                .ok()
+        });
+        let search = (setup.search_enabled && !setup.searxng_url.trim().is_empty()).then(|| {
+            Searxng {
+                client: search_client(),
+                base_url: setup.searxng_url.trim().trim_end_matches('/').to_owned(),
+            }
+        });
+        let distiller = setup.distill.as_ref().and_then(|ep| {
+            crate::session::provider_from_endpoint(ep)
+                .inspect_err(|e| tracing::warn!(error = %e, "辅助模型的 provider 建不出来"))
+                .ok()
+                .map(|p| Distiller::new(p, ep.model.clone()))
+        });
+        Self {
+            fetch,
+            search,
+            distiller,
+        }
+    }
 }
 
 /// 专供搜索后端的 HTTP 客户端。

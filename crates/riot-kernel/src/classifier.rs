@@ -63,6 +63,16 @@ pub struct HostClassifier {
 }
 
 impl HostClassifier {
+    /// 从已装好的便宜档借 provider 装判危器 —— 和子 agent 共用同一个端点,
+    /// 避免为同一个模型建两次客户端。`None` = 没配便宜档,Auto 退化成 Default。
+    pub fn from_cheap(cheap: Option<&crate::subagent::CheapModel>) -> Option<Self> {
+        let c = cheap?;
+        Some(Self {
+            provider: Arc::clone(&c.provider),
+            model: c.model.clone(),
+        })
+    }
+
     /// 按配置装。复用子 agent 的便宜档 —— 一个配置管两处省钱的地方，
     /// 用户少配一次，而这两件事要的正好是同一种模型（便宜、够用、可降级）。
     ///

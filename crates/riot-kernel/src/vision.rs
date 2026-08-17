@@ -79,6 +79,21 @@ impl HostVision {
         });
         Self { accepts, aux }
     }
+
+    /// 从 RPC 传入的 [`riot_protocol::VisionSetup`] 装图片能力(拆进程后
+    /// 内核走这条)。语义和 [`Self::from_config`] 一致。
+    pub fn from_setup(setup: &riot_protocol::VisionSetup) -> Self {
+        let aux = setup.describe.as_ref().and_then(|ep| {
+            crate::session::provider_from_endpoint(ep)
+                .inspect_err(|e| tracing::warn!(error = %e, "视觉兼容模型的 provider 建不出来"))
+                .ok()
+                .map(|provider| Aux { provider, model: ep.model.clone() })
+        });
+        Self {
+            accepts: setup.accepts_images,
+            aux,
+        }
+    }
 }
 
 #[async_trait]

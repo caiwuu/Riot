@@ -63,6 +63,22 @@ pub struct CheapModel {
 }
 
 impl CheapModel {
+    /// 从 RPC 传入的端点装便宜档(拆进程后内核走这条,不碰 AppConfig)。
+    /// `None` = 没配便宜档,只读侦察跟主模型。
+    pub fn from_endpoint(endpoint: Option<&riot_protocol::ModelEndpoint>) -> Option<Self> {
+        let endpoint = endpoint?;
+        match crate::session::provider_from_endpoint(endpoint) {
+            Ok(provider) => Some(Self {
+                provider,
+                model: endpoint.model.clone(),
+            }),
+            Err(e) => {
+                tracing::warn!(error = %e, "子 agent 便宜档建不出客户端，只读侦察改走主模型");
+                None
+            }
+        }
+    }
+
     /// 按配置装便宜档。每轮现装 —— 用户中途换掉它，下一轮生效。
     ///
     /// 没配、格式不对、指向主模型自己、provider 找不到、密钥缺失 —— 一律

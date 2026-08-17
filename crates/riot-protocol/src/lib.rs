@@ -54,7 +54,10 @@ pub use tool::{
     ProcessOutput, ProcessRunner, ProcessSpec, ProgressSink, PromptContext, ResultBudget, Tool,
     ToolContext, ToolOutcome, UiPayload, ValidationError,
 };
-pub use turn::{ApiProtocol, EndpointSampling, ModelEndpoint};
+pub use turn::{
+    ApiProtocol, EndpointSampling, ModelEndpoint, SandboxKind, TurnConfig, TurnLimits, VisionSetup,
+    WebSetup,
+};
 pub use vision::{DescribeRequest, NoVision, VisionAccess, VisionError};
 pub use web::{
     DistillRequest, NoWeb, SearchHit, SearchQuery, WebAccess, WebError, WebRequest, WebResponse,
