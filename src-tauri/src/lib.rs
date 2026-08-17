@@ -89,7 +89,7 @@ async fn send_turn(
     session_id: String,
     text: String,
     // 用户附的图。没附就是空数组。
-    images: Vec<session::ImageInput>,
+    images: Vec<riot_protocol::ImageInput>,
     // 输入框里选中的文件引用（界面上的那些块），项目内相对路径。
     // Option 是为了兼容不带这个字段的调用（缺参数会被 Tauri 拒成一条
     // 看不懂的反序列化错误）。
@@ -165,7 +165,7 @@ async fn queue_take(
     state: tauri::State<'_, AppState>,
     session_id: String,
     entry_id: String,
-) -> HostResult<Option<session::QueuedInputOut>> {
+) -> HostResult<Option<riot_protocol::TurnInput>> {
     state.queue_take(&session_id, &entry_id).await
 }
 
@@ -304,7 +304,9 @@ async fn set_config(
 
 /// MCP 服务器的连接状态（设置页轮询它显示状态点和工具数）。
 #[tauri::command]
-async fn mcp_status(state: tauri::State<'_, AppState>) -> HostResult<Vec<riot_mcp::ServerStatus>> {
+async fn mcp_status(
+    state: tauri::State<'_, AppState>,
+) -> HostResult<Vec<riot_protocol::rpc::McpServerStatus>> {
     Ok(state.mcp_statuses().await)
 }
 
@@ -857,6 +859,8 @@ pub fn run() {
         // 启动时把 MCP 连接对齐配置。放 setup 里而不是 restore：
         // spawn 连接任务要求 runtime 已经起来，restore 跑在那之前。
         .setup(|app| {
+            // 接上内核事件里宿主要消费的那几件(busy / mode 回流)。
+            app.state::<AppState>().inner().spawn_host_bridge();
             let state = app.state::<AppState>().inner().clone();
             tauri::async_runtime::spawn(async move {
                 state.reconcile_mcp().await;

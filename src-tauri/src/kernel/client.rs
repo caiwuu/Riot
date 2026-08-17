@@ -25,6 +25,23 @@ use super::supervisor::{Kernel, KernelError, KernelHandle};
 /// 旧 channel 发送失败即自然淘汰。
 type Sinks = Arc<Mutex<HashMap<String, Channel<AgentEvent>>>>;
 
+/// 事件流里宿主自己也要消费的那几件事。
+///
+/// 事件的主要去向是前端 Channel,但 AppState 需要跟着更新自己的登记:
+/// busy 指示点、ExitPlanMode 在内核改掉的权限模式。全量事件都发给宿主
+/// 太重(token 流每秒上百条),只挑这几样。
+#[derive(Debug)]
+pub enum HostNotice {
+    /// 一轮结束(会话空闲了)。
+    Done { session_id: String },
+    /// 内核侧改了权限模式(ExitPlanMode)。宿主是设置权威,要记下来
+    /// 并持久化 —— 否则下一轮 TurnConfig 又把旧模式传回去。
+    ModeChanged {
+        session_id: String,
+        mode: riot_protocol::permission::PermissionMode,
+    },
+}
+
 pub struct KernelClient {
     exe: PathBuf,
     sessions_dir: PathBuf,
@@ -33,17 +50,28 @@ pub struct KernelClient {
     /// 这样并发 RPC 不会被生命周期锁串行化。
     handle: std::sync::RwLock<Option<KernelHandle>>,
     sinks: Sinks,
+    host_tx: mpsc::UnboundedSender<HostNotice>,
+    host_rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<HostNotice>>>,
 }
 
 impl KernelClient {
     pub fn new(exe: PathBuf, sessions_dir: PathBuf) -> Self {
+        let (host_tx, host_rx) = mpsc::unbounded_channel();
         Self {
             exe,
             sessions_dir,
             kernel: Mutex::new(None),
             handle: std::sync::RwLock::new(None),
             sinks: Arc::default(),
+            host_tx,
+            host_rx: std::sync::Mutex::new(Some(host_rx)),
         }
+    }
+
+    /// 取走宿主通知的接收端(只能取一次)。AppState 启动后用它跑一个
+    /// 消费任务,更新 busy / mode 登记。
+    pub fn take_host_notices(&self) -> Option<mpsc::UnboundedReceiver<HostNotice>> {
+        self.host_rx.lock().expect("host_rx 锁").take()
     }
 
     /// 确保内核进程活着;没起过就 spawn 并接上事件分发。幂等。
@@ -62,7 +90,7 @@ impl KernelClient {
             tx,
         )
         .await?;
-        spawn_dispatch(rx, Arc::clone(&self.sinks));
+        spawn_dispatch(rx, Arc::clone(&self.sinks), self.host_tx.clone());
         *self.handle.write().expect("handle 锁") = Some(kernel.handle());
         *guard = Some(kernel);
         tracing::info!(exe = %self.exe.display(), "内核进程已启动");
@@ -124,7 +152,11 @@ impl KernelClient {
 /// 每个会话一个 [`Coalescer`]:token 流每秒上百条,合帧把 IPC 消息数降
 /// 一个数量级;边界事件(工具调用、权限询问、Done)立发,见 coalesce
 /// 模块的三条约束。
-fn spawn_dispatch(mut rx: mpsc::UnboundedReceiver<Value>, sinks: Sinks) {
+fn spawn_dispatch(
+    mut rx: mpsc::UnboundedReceiver<Value>,
+    sinks: Sinks,
+    host_tx: mpsc::UnboundedSender<HostNotice>,
+) {
     tokio::spawn(async move {
         let mut coalescers: HashMap<String, Coalescer> = HashMap::new();
         let mut tick = tokio::time::interval(FRAME);
@@ -140,6 +172,19 @@ fn spawn_dispatch(mut rx: mpsc::UnboundedReceiver<Value>, sinks: Sinks) {
                     match serde_json::from_value::<RpcNotification>(v) {
                         Ok(RpcNotification::Agent { session_id, event }) => {
                             let sid = session_id.as_str().to_owned();
+                            // 宿主关心的那几件先拷贝一份出去(见 HostNotice)。
+                            match &event {
+                                AgentEvent::Done { .. } => {
+                                    let _ = host_tx.send(HostNotice::Done { session_id: sid.clone() });
+                                }
+                                AgentEvent::ModeChanged { mode } => {
+                                    let _ = host_tx.send(HostNotice::ModeChanged {
+                                        session_id: sid.clone(),
+                                        mode: *mode,
+                                    });
+                                }
+                                _ => {}
+                            }
                             let ready = coalescers.entry(sid.clone()).or_default().push(event);
                             if !ready.is_empty() {
                                 let sinks = sinks.lock().await;

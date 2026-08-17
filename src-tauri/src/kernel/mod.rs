@@ -4,5 +4,5 @@ pub mod client;
 pub mod coalesce;
 pub mod supervisor;
 
-pub use client::{KernelClient, locate_kernel};
+pub use client::{HostNotice, KernelClient, locate_kernel};
 pub use supervisor::{Kernel, KernelError, KernelHandle, RestartPolicy};

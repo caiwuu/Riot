@@ -2,6 +2,13 @@
 //!
 //! `Clone` 是浅拷贝（内部全是 `Arc`），因为 Tauri 的退出钩子拿不到
 //! `State<'_, T>` 的所有权，只能克隆一份出来。
+//!
+//! # 拆进程后的职责划分(ARCHITECTURE.md §2.2)
+//!
+//! 宿主是**会话注册表与设置的权威**:id、项目根、标题、权限模式、采样等
+//! 全在这里(内存 + index.json),这些操作纯本地、不依赖内核活着。
+//! 内核那边的活会话只是**运行时投影**——首次要跑轮子/拿历史时按需水合
+//! (session.resume,幂等),会话设置随每轮 TurnConfig 传过去。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -13,26 +20,18 @@ use tauri::ipc::Channel;
 use tokio::sync::Mutex;
 
 use riot_protocol::event::AgentEvent;
-use riot_protocol::id::{IdGenerator, NanoIdGenerator};
+use riot_protocol::id::{IdGenerator, NanoIdGenerator, SessionId};
 use riot_protocol::message::Message;
 use riot_protocol::permission::{PermissionMode, PermissionResponse};
+use riot_protocol::rpc::{RpcRequest, RpcResponse};
 
 use crate::config::AppConfig;
 use crate::fence::Fence;
-use crate::session::Session;
+use crate::kernel::{HostNotice, KernelClient};
 use crate::{HostError, HostResult};
 
-/// 把会话事件送进前端订阅的 tauri `Channel` 的出口实现(宿主侧)。
-///
-/// 内核只认 [`crate::session::EventSink`] trait;这个具体实现是"内嵌"
-/// 那一端。拆进程后它换成"发 RPC 通知给内核 stdout 的读取器",
-/// 内核侧一行不用动(见 ARCHITECTURE.md §2.2 的 KernelClient 换实现)。
-struct ChannelSink(Channel<AgentEvent>);
-
-impl crate::session::EventSink for ChannelSink {
-    fn send(&self, event: AgentEvent) -> Result<(), crate::session::SinkClosed> {
-        self.0.send(event).map_err(|_| crate::session::SinkClosed)
-    }
+fn sid(id: &str) -> SessionId {
+    SessionId::from_raw(id.to_owned())
 }
 
 /// 切回一个会话时前端要的东西。
@@ -90,16 +89,31 @@ struct Sink {
     epoch: u64,
 }
 
-/// 注册表里的一个会话：会话本体 + 只属于登记层的事实。
+/// 注册表里的一个会话:UI 元数据 + 会话设置。**宿主是这些字段的权威。**
 ///
-/// seq 和创建时间不放进 `Session`：它们是列表的排序依据，由登记方分配，
-/// 会话自己既不产生也不消费。
-struct Registered {
-    session: Arc<Session>,
+/// 拆进程后这里没有 `Session` 本体 —— 运行时(历史、轮子、队列)在内核
+/// 进程里,设置随每轮 TurnConfig 传过去,内核不自己存。
+struct Meta {
+    /// 这个会话绑定的项目根。创建后不变。
+    root: PathBuf,
     /// 创建顺序号，前端按它排序。
     seq: u64,
-    /// 创建时刻（Unix 毫秒）。进 transcript 元数据和索引。
+    /// 创建时刻（Unix 毫秒）。进索引。
     created_at_ms: u64,
+    /// 手动改的名字。有它就不再自动起名。
+    custom_title: Option<String>,
+    /// 第一句话起的名字。
+    auto_title: Option<String>,
+    sampling: crate::config::Sampling,
+    mode: PermissionMode,
+    python_venv: Option<String>,
+    system_prompt: Option<String>,
+    thinking: riot_protocol::ThinkingPolicy,
+    /// 有没有轮子在跑(send_turn 置真,Done 事件清掉)。侧栏指示点用。
+    busy: bool,
+    /// 内核那边已经水合过这个会话。resume 是幂等的,这个标记只是省掉
+    /// 每次操作前的一轮 RPC + 全量历史传输。
+    hydrated: bool,
 }
 
 struct Inner {
@@ -116,8 +130,11 @@ struct Inner {
     /// 会话持久化目录（transcript JSONL + index.json）。从 `config_path`
     /// 推导 —— 同一条"测试能指到临时目录"的线。
     sessions_dir: PathBuf,
-    /// transcript 存取。`Arc` 因为每个会话的持久化通道都持有一份。
+    /// transcript 只读入口。transcript 由**内核进程**写;宿主只在启动时
+    /// 用它做索引重建(内核还没起,读安全),以及内核不在时删除兜底。
     transcripts: Arc<riot_store::Transcripts>,
+    /// 内核 RPC 客户端。会话运行时全在它背后的内核进程里。
+    kernel: KernelClient,
     /// session_id → 事件出口。同一会话重复订阅取 epoch 最大的那个 ——
     /// 一个会话在 UI 上只有一个视图。
     sinks: Mutex<HashMap<String, Sink>>,
@@ -126,21 +143,18 @@ struct Inner {
     /// [约束] 每个会话在创建时绑定自己的项目根，之后不变。没有全局
     /// "当前工作区"—— 那个概念上一版有过，后果是换目录后旧会话
     /// 继续往旧目录写文件。多项目并行下它根本没法定义清楚。
-    sessions: Mutex<HashMap<String, Registered>>,
+    sessions: Mutex<HashMap<String, Meta>>,
     config: Mutex<Option<AppConfig>>,
     seq: AtomicU64,
     /// 索引写盘互斥。快照和写文件必须在同一临界区：否则两次并发保存
     /// 可能让旧快照后落盘，一次变更就这么静默丢了。
     index_lock: Mutex<()>,
-    /// MCP 连接枢纽。应用级、会话共享（ARCHITECTURE.md §2.4）——
-    /// 每会话各起一份的话，三个会话配三个服务器就是九个常驻子进程。
-    mcp: Arc<riot_mcp::McpHub>,
-    /// 终端面板。应用级：终端跟着应用走不跟着会话走（见 term.rs），
-    /// 而模型起的服务要出现在用户眼前那一个面板里，不是各自一份。
+    /// 终端面板。应用级：终端跟着应用走不跟着会话走（见 term.rs）。
+    /// M-B3 反向 RPC 后,内核的终端工具经宿主服务端操作同一个面板。
     terminals: crate::term::Terminals,
     /// 会话的面板浏览器(HostBrowser)。会话级、**宿主持有** —— 面板的
-    /// screencast / 输入转发是宿主能力,拆进程后浏览器进程完全归宿主。
-    /// 工具用的是同一个实例(经 `dyn BrowserAccess` 注入进 Session)。
+    /// screencast / 输入转发是宿主能力,浏览器进程完全归宿主。
+    /// M-B3 反向 RPC 后,内核的浏览器工具经宿主服务端用同一个实例。
     browsers: Mutex<HashMap<String, Arc<crate::browser::access::HostBrowser>>>,
 }
 
@@ -150,8 +164,15 @@ impl Inner {
             .parent()
             .unwrap_or(std::path::Path::new("."))
             .join("sessions");
+        let kernel_exe = crate::kernel::locate_kernel().unwrap_or_else(|e| {
+            // 起不来的时候报错在 ensure_running(第一次真正用到内核时),
+            // 这里只留日志 —— 纯本地操作(建会话、看列表)不该被它挡住。
+            tracing::warn!("{e}");
+            PathBuf::new()
+        });
         Self {
             transcripts: Arc::new(riot_store::Transcripts::new(&sessions_dir)),
+            kernel: KernelClient::new(kernel_exe, sessions_dir.clone()),
             sessions_dir,
             config_path,
             sinks: Mutex::default(),
@@ -159,7 +180,6 @@ impl Inner {
             config: Mutex::default(),
             seq: AtomicU64::default(),
             index_lock: Mutex::default(),
-            mcp: Arc::new(riot_mcp::McpHub::new()),
             terminals: crate::term::Terminals::default(),
             browsers: Mutex::default(),
         }
@@ -192,47 +212,24 @@ impl AppState {
         let mut next_seq = 0u64;
         for p in index.sessions {
             next_seq = next_seq.max(p.seq + 1);
-            let id = riot_protocol::id::SessionId::from_raw(p.id.clone());
-            let log = inner.transcripts.open(riot_store::TranscriptMeta {
-                id,
-                root: PathBuf::from(&p.root),
-                created_at_ms: p.created_at_ms,
-            });
-            let settings = crate::session::SessionSettings {
-                id: p.id.clone(),
-                sampling: p.sampling,
-                mode: p.mode,
-                python_venv: p.python_venv.clone(),
-                system_prompt: p.system_prompt.clone(),
-                thinking: p.thinking,
-                custom_title: p.custom_title.clone(),
-                auto_title: p.auto_title.clone(),
-            };
-            let session = Session::restored(
-                &settings,
-                PathBuf::from(&p.root),
-                Some(crate::session::SessionPersist {
-                    store: Arc::clone(&inner.transcripts),
-                    log,
-                }),
-            );
-            session.attach_terminal(Arc::new(crate::term_access::HostTerminal::new(
-                inner.terminals.clone(),
-                PathBuf::from(&p.root),
-            )));
-            let session = Arc::new(session);
             if let Some(b) = make_browser(&inner.config_path, &p.id) {
-                session.attach_browser(
-                    Arc::clone(&b) as Arc<dyn riot_protocol::browser::BrowserAccess>
-                );
                 browsers_map.insert(p.id.clone(), b);
             }
             map.insert(
                 p.id.clone(),
-                Registered {
-                    session,
+                Meta {
+                    root: PathBuf::from(&p.root),
                     seq: p.seq,
                     created_at_ms: p.created_at_ms,
+                    custom_title: p.custom_title,
+                    auto_title: p.auto_title,
+                    sampling: p.sampling,
+                    mode: p.mode,
+                    python_venv: p.python_venv,
+                    system_prompt: p.system_prompt,
+                    thinking: p.thinking,
+                    busy: false,
+                    hydrated: false,
                 },
             );
         }
@@ -246,6 +243,60 @@ impl AppState {
             browsers: Mutex::new(browsers_map),
             ..inner
         }))
+    }
+
+    /// 起一个任务消费内核事件里宿主也关心的那几件(busy / mode)。
+    /// Tauri setup 时调一次 —— `restore` 是同步的,不能在那里 spawn。
+    pub fn spawn_host_bridge(&self) {
+        let Some(mut rx) = self.0.kernel.take_host_notices() else {
+            return;
+        };
+        let state = self.clone();
+        tokio::spawn(async move {
+            while let Some(n) = rx.recv().await {
+                match n {
+                    HostNotice::Done { session_id } => {
+                        if let Some(m) = state.0.sessions.lock().await.get_mut(&session_id) {
+                            m.busy = false;
+                        }
+                    }
+                    HostNotice::ModeChanged { session_id, mode } => {
+                        if let Some(m) = state.0.sessions.lock().await.get_mut(&session_id) {
+                            m.mode = mode;
+                        }
+                        // 持久化:不记的话下一轮 TurnConfig 又把旧模式传回去。
+                        state.persist_index().await;
+                    }
+                }
+            }
+        });
+    }
+
+    /// 发一个内核 RPC,错误统一转 [`HostError`]。
+    async fn kernel_call(&self, req: RpcRequest) -> HostResult<RpcResponse> {
+        self.0.kernel.call(req).await.map_err(HostError::from)
+    }
+
+    /// 确保内核那边有这个会话的活体(没有就从 transcript 水合)。
+    /// 只对"要碰运行时"的操作调用;纯登记操作(改名、改设置)不需要。
+    async fn ensure_hydrated(&self, session_id: &str) -> HostResult<()> {
+        let (root, hydrated) = {
+            let g = self.0.sessions.lock().await;
+            let m = g.get(session_id).ok_or(HostError::NoSession)?;
+            (m.root.clone(), m.hydrated)
+        };
+        if hydrated {
+            return Ok(());
+        }
+        self.kernel_call(RpcRequest::SessionResume {
+            session_id: sid(session_id),
+            cwd: root,
+        })
+        .await?;
+        if let Some(m) = self.0.sessions.lock().await.get_mut(session_id) {
+            m.hydrated = true;
+        }
+        Ok(())
     }
 
     /// 配置和持久化都指向 `p` 所在目录而不是用户真实的配置目录。**只给测试用。**
@@ -283,13 +334,10 @@ impl AppState {
         }
         // `[约束]` 正在跑的轮子也要换到新 channel 上。
         //
-        // 轮子持有的是会话的出口句柄（[`crate::session::SessionSink`]），
-        // 不是某一个 channel —— 用户切走再切回来会换一个新的，不换过去
-        // 的话这一轮剩下的事件（包括结束）全发给了没人听的旧 channel，
-        // 界面就永远停在"它正在做事"。
-        if let Some(r) = self.0.sessions.lock().await.get(&session_id) {
-            r.session.attach_sink(Arc::new(ChannelSink(channel)));
-        }
+        // 分发点在 KernelClient 的 sinks 表(事件从内核 stdout 流进来时
+        // 现查),换表即换出口 —— 不换的话这一轮剩下的事件(包括结束)
+        // 全发给没人听的旧 channel,界面就永远停在"它正在做事"。
+        self.0.kernel.attach_sink(&session_id, channel).await;
         g.insert(session_id, Sink { epoch });
         true
     }
@@ -316,8 +364,11 @@ impl AppState {
     /// 失败都会在创建时报错，而不是等到第一次工具调用才炸。
     pub async fn create_session(&self, root: &str) -> HostResult<SessionInfo> {
         let fence = Fence::new(root)?;
-        let root = fence.root().display().to_string();
+        let root_str = fence.root().display().to_string();
 
+        // 纯宿主操作:分配 id、登记、落索引。内核那边**不建** —— 第一次
+        // send_turn / history 时按需水合(resume 对不存在的会话就是建)。
+        // 这样建会话不依赖内核活着,内核崩溃重启也不丢注册表。
         let id = NanoIdGenerator.session_id();
         let seq = self.0.seq.fetch_add(1, Ordering::Relaxed);
         // 豁免理由：宿主层，持久化记录的是真实时刻，黄金回放不经过这里。
@@ -326,54 +377,44 @@ impl AppState {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let default_mode = self.config().await.default_mode;
-        let log = self.0.transcripts.open(riot_store::TranscriptMeta {
-            id: id.clone(),
-            root: fence.root().to_path_buf(),
-            created_at_ms,
-        });
-        let s = Arc::new(Session::new(
-            id.clone(),
-            fence.root().to_path_buf(),
-            Some(crate::session::SessionPersist {
-                store: Arc::clone(&self.0.transcripts),
-                log,
-            }),
-        ));
-        s.attach_terminal(Arc::new(crate::term_access::HostTerminal::new(
-            self.0.terminals.clone(),
-            fence.root().to_path_buf(),
-        )));
+        let mode = self
+            .config()
+            .await
+            .default_mode
+            .unwrap_or(PermissionMode::Default);
         if let Some(b) = make_browser(&self.0.config_path, id.as_str()) {
-            s.attach_browser(Arc::clone(&b) as Arc<dyn riot_protocol::browser::BrowserAccess>);
             self.0
                 .browsers
                 .lock()
                 .await
                 .insert(id.as_str().to_owned(), b);
         }
-        if let Some(m) = default_mode {
-            s.set_mode(m).await;
-        }
         self.0.sessions.lock().await.insert(
             id.as_str().to_owned(),
-            Registered {
-                session: Arc::clone(&s),
+            Meta {
+                root: fence.root().to_path_buf(),
                 seq,
                 created_at_ms,
+                custom_title: None,
+                auto_title: None,
+                sampling: crate::config::Sampling::default(),
+                mode,
+                python_venv: None,
+                system_prompt: None,
+                thinking: riot_protocol::ThinkingPolicy::default(),
+                busy: false,
+                hydrated: false,
             },
         );
         self.persist_index().await;
 
         Ok(SessionInfo {
             id: id.as_str().to_owned(),
-            root,
+            root: root_str,
             title: None,
             seq,
             sampling: crate::config::Sampling::default(),
-            // 从会话读回而不是直接用 default_mode：上面那个 if 是
-            // Option，两边各写一遍迟早对不上。
-            mode: s.mode().await,
+            mode,
             thinking: riot_protocol::ThinkingPolicy::default(),
             python_venv: None,
             system_prompt: None,
@@ -382,31 +423,27 @@ impl AppState {
     }
 
     /// 所有活着的会话。前端启动或刷新（HMR）后用它对齐状态。
+    /// 纯登记表读取,不打内核。
     pub async fn list_sessions(&self) -> Vec<SessionInfo> {
-        let sessions: Vec<_> = self
+        let mut out: Vec<SessionInfo> = self
             .0
             .sessions
             .lock()
             .await
             .iter()
-            .map(|(id, r)| (id.clone(), Arc::clone(&r.session), r.seq))
+            .map(|(id, m)| SessionInfo {
+                id: id.clone(),
+                root: m.root.display().to_string(),
+                title: m.custom_title.clone().or_else(|| m.auto_title.clone()),
+                seq: m.seq,
+                sampling: m.sampling,
+                mode: m.mode,
+                thinking: m.thinking,
+                python_venv: m.python_venv.clone(),
+                system_prompt: m.system_prompt.clone(),
+                busy: m.busy,
+            })
             .collect();
-
-        let mut out = Vec::with_capacity(sessions.len());
-        for (id, s, seq) in sessions {
-            out.push(SessionInfo {
-                id,
-                root: s.cwd.display().to_string(),
-                title: s.title().await,
-                seq,
-                sampling: s.sampling().await,
-                mode: s.mode().await,
-                thinking: s.thinking().await,
-                python_venv: s.python_venv().await,
-                system_prompt: s.system_prompt_extra().await,
-                busy: s.is_running().await,
-            });
-        }
         out.sort_by_key(|i| i.seq);
         out
     }
@@ -416,12 +453,60 @@ impl AppState {
     /// 两样一起回：前端切回会话时要同时重建对话流和忙碌状态，分两次问
     /// 会在中间留一个窗口 —— 那一瞬间界面显示空闲，而模型正在干活。
     pub async fn history(&self, session_id: &str) -> HostResult<HistoryOut> {
-        let s = self.session(session_id).await?;
+        let root = {
+            let g = self.0.sessions.lock().await;
+            g.get(session_id).ok_or(HostError::NoSession)?.root.clone()
+        };
+        // resume 幂等:在内存直接回快照,不在就从 transcript 水合。
+        let resp = self
+            .kernel_call(RpcRequest::SessionResume {
+                session_id: sid(session_id),
+                cwd: root,
+            })
+            .await?;
+        let RpcResponse::SessionResumed {
+            messages,
+            archived,
+            busy,
+            compacting,
+        } = resp
+        else {
+            return Err(HostError::Kernel(crate::kernel::KernelError::Rpc("session.resume 回了意外的应答".into())));
+        };
+
+        // 顺手做两件登记:标记已水合;索引里没有标题时从历史第一句自愈
+        // (老版本索引、或索引损坏重建后会缺)。
+        {
+            let mut g = self.0.sessions.lock().await;
+            if let Some(m) = g.get_mut(session_id) {
+                m.hydrated = true;
+                m.busy = busy;
+                if m.custom_title.is_none() && m.auto_title.is_none() {
+                    let first = messages.iter().find_map(|msg| match msg {
+                        Message::User { content, .. } => {
+                            content.iter().find_map(|c| match c {
+                                riot_protocol::message::UserContent::Text { text } => {
+                                    crate::session::title_excerpt(text)
+                                }
+                                _ => None,
+                            })
+                        }
+                        _ => None,
+                    });
+                    if first.is_some() {
+                        m.auto_title = first;
+                        drop(g);
+                        self.persist_index().await;
+                    }
+                }
+            }
+        }
+
         Ok(HistoryOut {
-            messages: s.history().await,
-            archived: s.ui_archive().await,
-            busy: s.is_running().await,
-            compacting: s.is_compacting(),
+            messages,
+            archived,
+            busy,
+            compacting,
         })
     }
 
@@ -433,15 +518,21 @@ impl AppState {
     pub async fn delete_session(&self, session_id: &str) {
         let removed = self.0.sessions.lock().await.remove(session_id);
         self.0.sinks.lock().await.remove(session_id);
-        if let Some(r) = removed {
-            // 中断放在移除之后：轮子还持有 Arc<Session> 会把收尾跑完，
-            // 但新的 send_turn 已经找不到它了。
-            r.session.interrupt().await;
-            // 先关句柄再删文件 —— Windows 删不掉还开着的文件。收尾中的
-            // 轮子之后的追加会被静默丢弃：会话都删了，丢弃是正确行为。
-            r.session.close_log().await;
-            if let Err(e) = self.0.transcripts.remove(&r.session.id).await {
-                tracing::warn!(error = %e, "transcript 删除失败，磁盘上可能留下孤儿文件");
+        if removed.is_some() {
+            self.0.kernel.detach_sink(session_id).await;
+            // 内核侧删除:中断轮子、关 transcript 句柄、删文件。内核不在
+            // (没起过/已崩)就自己删文件 —— 不在 = 没有打开的句柄,直接删安全。
+            if self
+                .kernel_call(RpcRequest::SessionDelete {
+                    session_id: sid(session_id),
+                })
+                .await
+                .is_err()
+            {
+                let id = SessionId::from_raw(session_id.to_owned());
+                if let Err(e) = self.0.transcripts.remove(&id).await {
+                    tracing::warn!(error = %e, "transcript 删除失败，磁盘上可能留下孤儿文件");
+                }
             }
             crate::changes::remove_baselines(&crate::changes::baselines_path(
                 &self.0.sessions_dir,
@@ -537,12 +628,25 @@ impl AppState {
 
     /// 重命名会话。空标题表示清除手动名，回退到第一条消息。
     pub async fn rename_session(&self, session_id: &str, title: &str) -> HostResult<()> {
-        let s = self.session(session_id).await?;
         let t = title.trim();
-        // 80 字够侧边栏显示三行了，再长就是粘贴错了东西
-        s.set_title((!t.is_empty()).then(|| t.chars().take(80).collect()))
-            .await;
+        let custom: Option<String> = (!t.is_empty()).then(|| t.chars().take(80).collect());
+        {
+            let mut g = self.0.sessions.lock().await;
+            let m = g.get_mut(session_id).ok_or(HostError::NoSession)?;
+            // 80 字够侧边栏显示三行了，再长就是粘贴错了东西
+            m.custom_title = custom.clone();
+        }
         self.persist_index().await;
+        // 尽力同步给内核(抑制它那边的自动起名)。失败无妨:标题以宿主为准。
+        if let Err(e) = self
+            .kernel_call(RpcRequest::SessionSetTitle {
+                session_id: sid(session_id),
+                title: custom,
+            })
+            .await
+        {
+            tracing::debug!(error = %e, "标题没同步到内核(以宿主为准,无妨)");
+        }
         Ok(())
     }
 
@@ -554,33 +658,26 @@ impl AppState {
     async fn persist_index(&self) {
         let _g = self.0.index_lock.lock().await;
 
-        // 先出锁再逐个读会话字段，和 list_sessions 同一个模式：
-        // 拿着 sessions 表的锁去等各会话的字段锁，是给死锁留门。
-        let snapshot: Vec<_> = self
+        let mut sessions: Vec<_> = self
             .0
             .sessions
             .lock()
             .await
             .iter()
-            .map(|(id, r)| (id.clone(), Arc::clone(&r.session), r.seq, r.created_at_ms))
+            .map(|(id, m)| crate::persist::PersistedSession {
+                id: id.clone(),
+                root: m.root.display().to_string(),
+                seq: m.seq,
+                created_at_ms: m.created_at_ms,
+                custom_title: m.custom_title.clone(),
+                auto_title: m.auto_title.clone(),
+                mode: m.mode,
+                sampling: m.sampling,
+                python_venv: m.python_venv.clone(),
+                system_prompt: m.system_prompt.clone(),
+                thinking: m.thinking,
+            })
             .collect();
-
-        let mut sessions = Vec::with_capacity(snapshot.len());
-        for (id, s, seq, created_at_ms) in snapshot {
-            sessions.push(crate::persist::PersistedSession {
-                id,
-                root: s.cwd.display().to_string(),
-                seq,
-                created_at_ms,
-                custom_title: s.custom_title().await,
-                auto_title: s.auto_title().await,
-                mode: s.mode().await,
-                sampling: s.sampling().await,
-                python_venv: s.python_venv().await,
-                system_prompt: s.system_prompt_extra().await,
-                thinking: s.thinking().await,
-            });
-        }
         sessions.sort_by_key(|p| p.seq);
 
         let index = crate::persist::SessionIndex { sessions };
@@ -607,7 +704,7 @@ impl AppState {
             .lock()
             .await
             .iter()
-            .filter(|(_, r)| r.session.cwd.display().to_string() == root)
+            .filter(|(_, m)| m.root.display().to_string() == root)
             .map(|(id, _)| id.clone())
             .collect();
         for id in &doomed {
@@ -625,7 +722,7 @@ impl AppState {
         id: &str,
     ) -> HostResult<Arc<crate::browser::access::HostBrowser>> {
         // 先确认会话存在(给出一致的 NoSession 错误),再取它的浏览器。
-        self.session(id).await?;
+        self.require_session(id).await?;
         self.0
             .browsers
             .lock()
@@ -639,13 +736,25 @@ impl AppState {
             })
     }
 
-    async fn session(&self, id: &str) -> HostResult<Arc<Session>> {
+    /// 会话在登记表里吗。给出一致的 NoSession 错误。
+    async fn require_session(&self, id: &str) -> HostResult<()> {
+        self.0
+            .sessions
+            .lock()
+            .await
+            .contains_key(id)
+            .then_some(())
+            .ok_or(HostError::NoSession)
+    }
+
+    /// 会话的项目根。
+    async fn session_root(&self, id: &str) -> HostResult<PathBuf> {
         self.0
             .sessions
             .lock()
             .await
             .get(id)
-            .map(|r| Arc::clone(&r.session))
+            .map(|m| m.root.clone())
             .ok_or(HostError::NoSession)
     }
 
@@ -672,18 +781,21 @@ impl AppState {
         &self,
         session_id: &str,
         text: &str,
-        images: Vec<crate::session::ImageInput>,
+        images: Vec<riot_protocol::ImageInput>,
         refs: Vec<String>,
     ) -> HostResult<Option<String>> {
-        let session = self.session(session_id).await?;
         self.require_sink(session_id).await?;
-        let sink = session.sink();
+        self.ensure_hydrated(session_id).await?;
+        let sampling = {
+            let g = self.0.sessions.lock().await;
+            g.get(session_id).ok_or(HostError::NoSession)?.sampling
+        };
 
         // 每轮解析"此刻"的激活配置 —— 对话中途切换模型下一轮就生效。
         // 会话的采样覆盖叠在 provider 默认之上，只盖用户动过的字段。
         let config = self.config().await;
         let mut model = config.resolve()?;
-        model.sampling = session.sampling().await.or(model.sampling);
+        model.sampling = sampling.or(model.sampling);
 
         // `[约束]` 图片处理不了要**在这里**拒绝，而不是让这一轮跑起来。
         //
@@ -698,110 +810,139 @@ impl AppState {
             ));
         }
 
-        // UserPromptSubmit hooks：能把这条消息拦在发送之前（block），
-        // 或给它附加模型可见的上下文。拦截当场报给界面 —— 这正是"提交
-        // 检查"该有的样子，而不是消息发出去之后模型再说做不了。
-        let mut extra_context = Vec::new();
+        // 第一句话定下自动标题，立刻落索引 —— 重启后侧边栏就靠它显示名字。
+        // 放在提交之前：轮子在内核异步跑，等它结束才写的话，中途强杀就
+        // 是一个"有历史但没标题"的会话。
         {
-            let engine = crate::hooks::HookEngine::load(&session.cwd, session_id);
-            if engine.has_user_prompt_submit() {
-                for o in engine.user_prompt_submit(text).await {
-                    match o {
-                        crate::hooks::Outcome::Block { reason } => {
-                            return Err(HostError::Hook(format!(
-                                "消息被 UserPromptSubmit hook 拦下：{reason}"
-                            )));
-                        }
-                        crate::hooks::Outcome::Context { text } => extra_context.push(text),
-                        _ => {}
-                    }
-                }
+            let mut g = self.0.sessions.lock().await;
+            if let Some(m) = g.get_mut(session_id)
+                && m.custom_title.is_none()
+                && m.auto_title.is_none()
+                && let Some(t) = crate::session::title_excerpt(text)
+            {
+                m.auto_title = Some(t);
+                drop(g);
+                self.persist_index().await;
             }
         }
 
-        let input = crate::session::TurnInput {
-            text: text.to_owned(),
-            images,
-            refs,
-            extra_context,
-        };
-
-        // 联网能力同理，每轮按当时的配置现装：用户中途填上 SearXNG 地址，
-        // 下一轮就能搜，不用重启。
-        // 图片能力同理:用户中途给 provider 勾上「支持图片」、或者配了视觉
-        // 兼容模型，下一轮就生效。
-        // 外部工具同理：MCP 服务器中途连上/掉线、SKILL.md 中途改了，
-        // 下一轮的工具清单就是新的。
-        let mut extra_tools = self.0.mcp.tools().await;
-        let skills = crate::skills::discover(&session.cwd);
-        for p in &skills.problems {
-            tracing::warn!(path = %p.path.display(), reason = %p.reason, "有技能没能加载");
-        }
-        // 只把模型能调的那些给 Skill 工具。写了 disable-model-invocation 的
-        // 只出现在 `/` 菜单里 —— 拿全量的话那个开关就是骗人的。
-        let model_cards = skills.model_cards();
-        if !model_cards.is_empty() {
-            // 没有技能就不装 Skill 工具 —— 一个"可用技能：（无）"的工具
-            // 描述是每轮都付的上下文税，还会引诱模型去调它。
-            extra_tools.push(Arc::new(riot_tools::tools::skill::SkillTool::new(
-                model_cards,
-            )));
-        }
-        let caps = crate::session::TurnCapabilities {
-            web: Arc::new(crate::web::HostWeb::from_config(&config)),
-            vision: Arc::new(crate::vision::HostVision::from_config(&config)),
-            subagent_cheap: crate::subagent::CheapModel::from_config(&config),
-            // 判危分类器同理每轮现装。装不出来（没配便宜档）就给占位实现 ——
-            // Auto 模式于是退化成 Default，照常弹窗，不会静默放行。
-            classifier: crate::classifier::HostClassifier::from_config(&config).map_or_else(
-                || {
-                    Arc::new(riot_protocol::permission::NoClassifier)
-                        as Arc<dyn riot_protocol::permission::SafetyClassifier>
+        // 剩下的活全在内核:UserPromptSubmit hook(拦截会变成这条 RPC 的
+        // 错误应答,照样当场报给界面)、图片转述、@ 展开、能力装配。
+        // 宿主只负责把配置快照打包成 TurnConfig。
+        let turn_config = self.build_turn_config(&config, model, session_id).await?;
+        let resp = self
+            .kernel_call(RpcRequest::TurnSubmit {
+                session_id: sid(session_id),
+                input: riot_protocol::TurnInput {
+                    text: text.to_owned(),
+                    images,
+                    refs,
                 },
-                |c| Arc::new(c) as Arc<dyn riot_protocol::permission::SafetyClassifier>,
-            ),
-            extra_tools,
+                config: Box::new(turn_config),
+            })
+            .await?;
+        let RpcResponse::TurnSubmitted { queued_id } = resp else {
+            return Err(HostError::Kernel(crate::kernel::KernelError::Rpc("turn.submit 回了意外的应答".into())));
         };
-        let limits = crate::session::TurnLimits {
-            ask_timeout_secs: config.ask_timeout_secs,
-            max_turns: config.max_turns,
-            compact_threshold_tokens: config.compact_threshold_tokens,
-            sandbox: config.sandbox,
-        };
-
-        // 第一句话定下自动标题，立刻落索引 —— 重启后侧边栏就靠它显示名字。
-        // 放在 spawn 之前：轮子是异步跑的，等它结束才写的话，中途强杀就
-        // 是一个"有历史但没标题"的会话。
-        if session.note_first_prompt(text).await {
-            self.persist_index().await;
+        // 无论直接开轮还是进了插话队列,此刻都有轮子在跑(排队的前提就是
+        // 上一轮还在)。Done 事件会清掉它。
+        if let Some(m) = self.0.sessions.lock().await.get_mut(session_id) {
+            m.busy = true;
         }
+        Ok(queued_id)
+    }
 
-        // submit 而不是 run_turn：上一轮还在跑时插话会排队（内核在安全点
-        // 注入），而不是报错"上一轮还在进行中" —— 模型干活时说话是常态。
-        // 开轮的话轮子已经被 submit 丢进后台，这里立刻返回。
-        Ok(session
-            .submit(input, model.to_endpoint()?, caps, sink, limits)
-            .await)
+    /// 把"此刻"的配置快照打包成随轮传给内核的 [`riot_protocol::TurnConfig`]。
+    ///
+    /// 内核不读 config.json / auth.json —— 模型端点(含明文 key)、联网/视觉
+    /// 目标、limits、会话设置,全部在宿主解析好传过去。每轮现打包,
+    /// 用户中途改设置下一轮就生效(和内嵌时代的"每轮现装"同一条线)。
+    async fn build_turn_config(
+        &self,
+        config: &AppConfig,
+        model: crate::config::ResolvedModel,
+        session_id: &str,
+    ) -> HostResult<riot_protocol::TurnConfig> {
+        let endpoint = model.to_endpoint()?;
+
+        // 可选的辅助端点:解析失败一律降级成 None(它们都是省钱/增强的
+        // 可选项,配坏了不该挡住主流程),内核侧各有兜底。
+        let named = |target: Option<(&str, &str)>| -> Option<riot_protocol::ModelEndpoint> {
+            let (pid, m) = target?;
+            config
+                .resolve_named(pid, m)
+                .inspect_err(|e| tracing::warn!(error = %e, "辅助模型解析失败"))
+                .ok()?
+                .to_endpoint()
+                .inspect_err(|e| tracing::warn!(error = %e, "辅助模型缺密钥"))
+                .ok()
+        };
+        let cheap_model = named(config.subagent_target());
+        let distill = named(config.web.distill_target());
+        let describe = named(config.vision_target());
+
+        let (mode, python_venv, system_prompt, thinking) = {
+            let g = self.0.sessions.lock().await;
+            let m = g.get(session_id).ok_or(HostError::NoSession)?;
+            (
+                m.mode,
+                m.python_venv.clone(),
+                m.system_prompt.clone(),
+                m.thinking,
+            )
+        };
+
+        Ok(riot_protocol::TurnConfig {
+            model: endpoint,
+            cheap_model,
+            web: riot_protocol::WebSetup {
+                fetch_enabled: config.web.fetch_enabled,
+                search_enabled: config.web.search_ready(),
+                searxng_url: config.web.searxng_url.clone(),
+                distill,
+            },
+            vision: riot_protocol::VisionSetup {
+                accepts_images: config.active_takes_images(),
+                describe,
+            },
+            limits: riot_protocol::TurnLimits {
+                ask_timeout_secs: config.ask_timeout_secs,
+                max_turns: config.max_turns,
+                compact_threshold_tokens: config.compact_threshold_tokens,
+                sandbox: sandbox_kind(config.sandbox),
+            },
+            mode,
+            rules: Vec::new(),
+            python_venv,
+            system_prompt_extra: system_prompt,
+            thinking,
+        })
     }
 
     /// 手动压缩会话历史（`/compact`）。完成时发 Compacted 事件。
     pub async fn compact_session(&self, session_id: &str) -> HostResult<()> {
-        let session = self.session(session_id).await?;
         self.require_sink(session_id).await?;
-        let sink = session.sink();
+        self.ensure_hydrated(session_id).await?;
+        let sampling = {
+            let g = self.0.sessions.lock().await;
+            g.get(session_id).ok_or(HostError::NoSession)?.sampling
+        };
         let config = self.config().await;
         let mut model = config.resolve()?;
-        model.sampling = session.sampling().await.or(model.sampling);
-        session
-            .compact_now(model.to_endpoint()?, sink)
-            .await
-            .map_err(HostError::Provider)
+        model.sampling = sampling.or(model.sampling);
+        self.kernel_call(RpcRequest::SessionCompact {
+            session_id: sid(session_id),
+            model: Box::new(model.to_endpoint()?),
+        })
+        .await?;
+        Ok(())
     }
 
     /// `@` 补全菜单的文件搜索。查询为空时给项目里的前几个文件。
+    /// 纯 cwd 函数,库两边都链接 —— 宿主本地调,不走 RPC。
     pub async fn search_files(&self, session_id: &str, query: &str) -> HostResult<Vec<String>> {
-        let session = self.session(session_id).await?;
-        Ok(crate::mentions::search_files(&session.cwd, query).await)
+        let root = self.session_root(session_id).await?;
+        Ok(crate::mentions::search_files(&root, query).await)
     }
 
     /// 展开一条自定义命令。None = 没这条命令或它是内置的。
@@ -811,21 +952,40 @@ impl AppState {
         name: &str,
         args: &str,
     ) -> HostResult<Option<String>> {
-        let session = self.session(session_id).await?;
-        Ok(crate::slash::expand(Some(&session.cwd), name, args))
+        let root = self.session_root(session_id).await?;
+        Ok(crate::slash::expand(Some(&root), name, args))
     }
 
     /// 排队面板：当前排着的插话。
     pub async fn queue_list(
         &self,
         session_id: &str,
-    ) -> HostResult<Vec<crate::session::QueuedSummary>> {
-        Ok(self.session(session_id).await?.queue_snapshot())
+    ) -> HostResult<Vec<riot_protocol::QueuedSummary>> {
+        self.require_session(session_id).await?;
+        match self
+            .kernel_call(RpcRequest::QueueList {
+                session_id: sid(session_id),
+            })
+            .await?
+        {
+            RpcResponse::QueueList { entries } => Ok(entries),
+            _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc("queue.list 回了意外的应答".into()))),
+        }
     }
 
     /// 删掉一条排队插话。false = 条目已经不在（被注入或早被删了）。
     pub async fn queue_remove(&self, session_id: &str, entry_id: &str) -> HostResult<bool> {
-        Ok(self.session(session_id).await?.queue_remove(entry_id))
+        self.require_session(session_id).await?;
+        match self
+            .kernel_call(RpcRequest::QueueRemove {
+                session_id: sid(session_id),
+                entry_id: entry_id.to_owned(),
+            })
+            .await?
+        {
+            RpcResponse::Removed { removed } => Ok(removed),
+            _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc("queue.remove 回了意外的应答".into()))),
+        }
     }
 
     /// 撤回一条排队插话，还给前端原始输入（放回输入框编辑）。
@@ -833,49 +993,98 @@ impl AppState {
         &self,
         session_id: &str,
         entry_id: &str,
-    ) -> HostResult<Option<crate::session::QueuedInputOut>> {
-        Ok(self
-            .session(session_id)
+    ) -> HostResult<Option<riot_protocol::TurnInput>> {
+        self.require_session(session_id).await?;
+        match self
+            .kernel_call(RpcRequest::QueueTake {
+                session_id: sid(session_id),
+                entry_id: entry_id.to_owned(),
+            })
             .await?
-            .queue_take(entry_id)
-            .map(|i| crate::session::QueuedInputOut {
-                text: i.text,
-                images: i.images,
-                refs: i.refs,
-            }))
+        {
+            RpcResponse::QueueTaken { input } => Ok(input),
+            _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc("queue.take 回了意外的应答".into()))),
+        }
     }
 
     pub async fn interrupt(&self, session_id: &str) -> HostResult<bool> {
-        Ok(self.session(session_id).await?.interrupt().await)
+        self.require_session(session_id).await?;
+        self.kernel_call(RpcRequest::TurnInterrupt {
+            session_id: sid(session_id),
+            interjection: false,
+        })
+        .await?;
+        Ok(true)
     }
 
     /// 本会话改了哪些文件、哪些行。给 review 视图。
-    pub async fn changes(&self, session_id: &str) -> HostResult<Vec<crate::changes::FileChange>> {
-        Ok(self.session(session_id).await?.changes().await)
+    pub async fn changes(&self, session_id: &str) -> HostResult<Vec<riot_protocol::FileChange>> {
+        self.ensure_hydrated(session_id).await?;
+        match self
+            .kernel_call(RpcRequest::SessionChanges {
+                session_id: sid(session_id),
+            })
+            .await?
+        {
+            RpcResponse::Changes { changes } => Ok(changes),
+            _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc("session.changes 回了意外的应答".into()))),
+        }
     }
 
     pub async fn set_mode(&self, session_id: &str, mode: PermissionMode) -> HostResult<()> {
-        self.session(session_id).await?.set_mode(mode).await;
+        {
+            let mut g = self.0.sessions.lock().await;
+            g.get_mut(session_id).ok_or(HostError::NoSession)?.mode = mode;
+        }
         self.persist_index().await;
+        // 尽力同步给内核,让**正在跑的轮子**立刻按新模式办。失败无妨:
+        // 下一轮 TurnConfig 会带上新模式。
+        if let Err(e) = self
+            .kernel_call(RpcRequest::ConfigSetMode {
+                session_id: sid(session_id),
+                mode,
+            })
+            .await
+        {
+            tracing::debug!(error = %e, "模式没同步到内核(下一轮 TurnConfig 会带)");
+        }
         Ok(())
     }
 
     pub async fn scope_hosts(&self, session_id: &str) -> HostResult<Vec<String>> {
-        Ok(self.session(session_id).await?.scope_hosts().await)
+        self.require_session(session_id).await?;
+        match self
+            .kernel_call(RpcRequest::ScopeList {
+                session_id: sid(session_id),
+            })
+            .await?
+        {
+            RpcResponse::ScopeHosts { hosts } => Ok(hosts),
+            _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc("scope.list 回了意外的应答".into()))),
+        }
     }
 
     pub async fn revoke_scope(&self, session_id: &str, host: &str) -> HostResult<()> {
-        self.session(session_id).await?.revoke_scope(host).await;
+        self.require_session(session_id).await?;
+        self.kernel_call(RpcRequest::ScopeRevoke {
+            session_id: sid(session_id),
+            host: host.to_owned(),
+        })
+        .await?;
         Ok(())
     }
 
-    /// 设置会话级采样覆盖。空字段继承 provider；下一轮生效。
+    /// 设置会话级采样覆盖。空字段继承 provider；下一轮生效
+    /// (采样随 TurnConfig 的 ModelEndpoint 传,宿主登记即权威)。
     pub async fn set_sampling(
         &self,
         session_id: &str,
         sampling: crate::config::Sampling,
     ) -> HostResult<()> {
-        self.session(session_id).await?.set_sampling(sampling).await;
+        {
+            let mut g = self.0.sessions.lock().await;
+            g.get_mut(session_id).ok_or(HostError::NoSession)?.sampling = sampling;
+        }
         self.persist_index().await;
         Ok(())
     }
@@ -886,7 +1095,10 @@ impl AppState {
         session_id: &str,
         thinking: riot_protocol::ThinkingPolicy,
     ) -> HostResult<()> {
-        self.session(session_id).await?.set_thinking(thinking).await;
+        {
+            let mut g = self.0.sessions.lock().await;
+            g.get_mut(session_id).ok_or(HostError::NoSession)?.thinking = thinking;
+        }
         self.persist_index().await;
         Ok(())
     }
@@ -898,10 +1110,10 @@ impl AppState {
     /// 一键填入，多数情况下连选择框都不用开。校验标准与 [`Self::set_python_venv`]
     /// 一致（有没有 python 可执行文件）。
     pub async fn detect_venvs(&self, session_id: &str) -> HostResult<Vec<String>> {
-        let s = self.session(session_id).await?;
+        let root = self.session_root(session_id).await?;
         Ok([".venv", "venv"]
             .iter()
-            .map(|name| s.cwd.join(name))
+            .map(|name| root.join(name))
             .filter(|dir| venv_python(dir).exists())
             .map(|dir| dir.display().to_string())
             .collect())
@@ -912,24 +1124,26 @@ impl AppState {
     /// 在这里验证目录：venv 路径写错的表现是"pip 装到了系统环境里"，
     /// 那种失败要等模型跑完命令才暴露，而且报错完全不指向路径。
     pub async fn set_python_venv(&self, session_id: &str, path: &str) -> HostResult<()> {
-        let s = self.session(session_id).await?;
+        self.require_session(session_id).await?;
         let trimmed = path.trim();
-        if trimmed.is_empty() {
-            s.set_python_venv(None).await;
-            self.persist_index().await;
-            return Ok(());
+        let value = if trimmed.is_empty() {
+            None
+        } else {
+            let python = venv_python(std::path::Path::new(trimmed));
+            // 宿主层验证用户亲手填的路径，直接查真实文件系统。
+            if !python.exists() {
+                return Err(HostError::Provider(format!(
+                    "{} 不像一个虚拟环境：找不到 {}。\
+                     应该填 venv 的根目录（python -m venv 创建出来的那个）。",
+                    trimmed,
+                    python.display(),
+                )));
+            }
+            Some(trimmed.to_owned())
+        };
+        if let Some(m) = self.0.sessions.lock().await.get_mut(session_id) {
+            m.python_venv = value;
         }
-        let python = venv_python(std::path::Path::new(trimmed));
-        // 宿主层验证用户亲手填的路径，直接查真实文件系统。
-        if !python.exists() {
-            return Err(HostError::Provider(format!(
-                "{} 不像一个虚拟环境：找不到 {}。\
-                 应该填 venv 的根目录（python -m venv 创建出来的那个）。",
-                trimmed,
-                python.display(),
-            )));
-        }
-        s.set_python_venv(Some(trimmed.to_owned())).await;
         self.persist_index().await;
         Ok(())
     }
@@ -937,10 +1151,12 @@ impl AppState {
     /// 设置会话级追加提示词。空字符串清除；下一轮生效。
     pub async fn set_system_prompt(&self, session_id: &str, prompt: &str) -> HostResult<()> {
         let p = prompt.trim();
-        self.session(session_id)
-            .await?
-            .set_system_prompt((!p.is_empty()).then(|| p.to_owned()))
-            .await;
+        {
+            let mut g = self.0.sessions.lock().await;
+            g.get_mut(session_id)
+                .ok_or(HostError::NoSession)?
+                .system_prompt = (!p.is_empty()).then(|| p.to_owned());
+        }
         self.persist_index().await;
         Ok(())
     }
@@ -951,34 +1167,43 @@ impl AppState {
         ask_id: &str,
         response: PermissionResponse,
     ) -> HostResult<()> {
-        let s = self.session(session_id).await?;
-        if !s.pending_asks().resolve(ask_id, response).await {
-            // 不当成错误。用户在超时之后才点按钮是正常的人类行为。
-            tracing::debug!(ask_id, "回应了一个已经不存在的权限请求");
-        }
+        self.require_session(session_id).await?;
+        // 内核按 request_id 在各会话的待答表里找。回应一个已经不存在的
+        // 请求不是错误 —— 用户在超时之后才点按钮是正常的人类行为。
+        self.kernel_call(RpcRequest::PermissionRespond {
+            request_id: riot_protocol::id::RequestId::from_raw(ask_id.to_owned()),
+            response,
+        })
+        .await?;
         Ok(())
     }
 
-    /// 让 MCP 连接对齐当前配置。启动时和每次保存设置后调用。
+    /// 让内核的 MCP 连接对齐当前配置。启动时和每次保存设置后调用。
     ///
-    /// reconcile 本身只是 diff + spawn 连接任务，不等握手完成 ——
+    /// 宿主组清单(读设置是宿主的职责),内核只管照单连接 —— MCP 工具是
+    /// trait object,必须在内核进程里执行。reconcile 不等握手完成,
     /// 连接进度通过 [`Self::mcp_statuses`] 查询。
     pub async fn reconcile_mcp(&self) {
         let config = self.config().await;
-        let specs: Vec<riot_mcp::ServerSpec> = config
+        let servers: Vec<riot_protocol::rpc::McpServerSpec> = config
             .mcp_servers
             .iter()
             // 空命令 = 刚添加还没填完的中间状态，跳过而不是报错 ——
             // 校验放行它正是为了让"添加"按钮能落地（见 config::validate_mcp）。
             .filter(|s| s.enabled && !s.command.trim().is_empty())
-            .map(|s| riot_mcp::ServerSpec {
+            .map(|s| riot_protocol::rpc::McpServerSpec {
                 id: s.id.clone(),
                 command: s.command.clone(),
                 args: s.args.clone(),
                 env: s.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             })
             .collect();
-        self.0.mcp.reconcile(specs).await;
+        if let Err(e) = self
+            .kernel_call(RpcRequest::McpReconcile { servers })
+            .await
+        {
+            tracing::warn!(error = %e, "MCP 清单没送到内核");
+        }
     }
 
     /// 终端面板的句柄。Tauri 那边 `manage` 的和会话用的必须是同一份 ——
@@ -988,41 +1213,39 @@ impl AppState {
     }
 
     /// MCP 服务器的连接状态，给设置页看。
-    pub async fn mcp_statuses(&self) -> Vec<riot_mcp::ServerStatus> {
-        self.0.mcp.statuses().await
+    pub async fn mcp_statuses(&self) -> Vec<riot_protocol::rpc::McpServerStatus> {
+        match self.kernel_call(RpcRequest::McpStatus).await {
+            Ok(RpcResponse::McpStatuses { servers }) => servers,
+            Ok(_) => Vec::new(),
+            Err(e) => {
+                tracing::debug!(error = %e, "拿不到 MCP 状态(内核未运行?)");
+                Vec::new()
+            }
+        }
     }
 
     /// 手动重连一个 MCP 服务器。
     pub async fn mcp_restart(&self, id: &str) -> HostResult<()> {
-        if self.0.mcp.restart(id).await {
-            Ok(())
-        } else {
-            Err(HostError::Provider(format!(
-                "没有叫「{id}」的 MCP 服务器在运行。先在设置里启用它。"
-            )))
-        }
+        self.kernel_call(RpcRequest::McpRestart { id: id.to_owned() })
+            .await?;
+        Ok(())
     }
 
+    /// 关闭:走内核的四步关闭序列(shutdown RPC → EOF → 等退出 → 杀进程组)。
+    /// 会话 flush、MCP 子进程清理都在内核那边做。
     pub async fn shutdown(&self) {
-        let sessions: Vec<Arc<Session>> = self
-            .0
-            .sessions
-            .lock()
-            .await
-            .values()
-            .map(|r| Arc::clone(&r.session))
-            .collect();
-        for s in &sessions {
-            s.interrupt().await;
+        self.0.kernel.shutdown().await;
+    }
+}
+
+/// 宿主配置的沙箱档位 → 传输档位。
+fn sandbox_kind(mode: crate::config::SandboxMode) -> riot_protocol::SandboxKind {
+    match mode {
+        crate::config::SandboxMode::WorkspaceWrite => riot_protocol::SandboxKind::WorkspaceWrite,
+        crate::config::SandboxMode::WorkspaceWriteNoNet => {
+            riot_protocol::SandboxKind::WorkspaceWriteNoNet
         }
-        // 中断只是发信号，正在收尾的轮子可能还有消息在持久化通道里排队。
-        // 等它们真正落盘 —— 这个钩子的意义就是"退出前别丢东西"。
-        for s in &sessions {
-            s.flush_log().await;
-        }
-        // MCP 服务器是常驻子进程，进程组随宿主一起收掉 ——
-        // 留下的孤儿会一直活到关机。
-        self.0.mcp.shutdown().await;
+        crate::config::SandboxMode::Off => riot_protocol::SandboxKind::Off,
     }
 }
 
@@ -1105,8 +1328,11 @@ mod tests {
         // 这是"发完消息永远转圈"的根因。前端一次挂载会连发两次订阅
         // （StrictMode 把 effect 跑两遍），两个命令在宿主侧是并发任务，
         // 落地顺序没有保证。旧的那次要是后落地，事件就全发给一个前端
-        // 已经不听的 channel 了 —— 而且**全程没有任何报错**：send_turn
-        // 查得到出口、整轮照常跑完、历史照常落盘。
+        // 已经不听的 channel 了 —— 而且**全程没有任何报错**。
+        //
+        // 拆进程后分发点在 KernelClient 的 sinks 表(attach 即换表,跑着
+        // 的轮子自动跟过来);这里验证宿主侧的 epoch 语义,"事件真的进
+        // 最新 channel"由内核 stdio smoke + 分发循环覆盖。
         let state = state().await;
         let id = state
             .create_session(&temp_ws("epoch"))
@@ -1114,8 +1340,8 @@ mod tests {
             .expect("会话")
             .id;
 
-        let (new_ch, new_hits) = probe();
-        let (old_ch, old_hits) = probe();
+        let (new_ch, _) = probe();
+        let (old_ch, _) = probe();
 
         // 新的先落地，旧的后落地 —— 正是会出问题的那个顺序
         assert!(state.attach_sink(id.clone(), 2, new_ch).await);
@@ -1124,83 +1350,12 @@ mod tests {
             "epoch 更小的订阅必须被拒绝"
         );
 
-        // 走会话自己的出口句柄 —— 跑着的轮子用的就是它。
-        state
-            .session(&id)
-            .await
-            .expect("会话还在")
-            .sink()
-            .send(AgentEvent::Done {
-                reason: riot_protocol::event::TerminalReason::Completed,
-            })
-            .expect("发送");
-
-        assert_eq!(new_hits.load(Ordering::SeqCst), 1, "事件该进最新那个订阅");
-        assert_eq!(old_hits.load(Ordering::SeqCst), 0, "旧订阅不该收到任何东西");
-    }
-
-    #[tokio::test]
-    async fn 跑轮中途换订阅_事件跟着走() {
-        // 用户切走再切回来时前端会换一个 channel，而轮子是在开轮那一刻
-        // 拿到出口的。抓着旧 channel 不放的话，切回来看到的是一个永远
-        // 停在"它正在做事"的界面 —— 轮子在跑，事件却发给了没人听的那头，
-        // 连结束都收不到。
-        let state = state().await;
-        let id = state
-            .create_session(&temp_ws("resub"))
-            .await
-            .expect("会话")
-            .id;
-
-        let (first, first_hits) = probe();
-        assert!(state.attach_sink(id.clone(), 1, first).await);
-
-        // 轮子在这一刻拿到出口句柄（send_turn 里就是这么拿的）。
-        let session = state.session(&id).await.expect("会话");
-        let sink = session.sink();
-
-        // 前端切走又切回：换上新 channel。
-        let (second, second_hits) = probe();
-        assert!(state.attach_sink(id.clone(), 2, second).await);
-
-        sink.send(AgentEvent::Done {
-            reason: riot_protocol::event::TerminalReason::Completed,
-        })
-        .expect("发送");
-
-        assert_eq!(second_hits.load(Ordering::SeqCst), 1, "该进新订阅");
-        assert_eq!(first_hits.load(Ordering::SeqCst), 0, "旧订阅不该再收到");
-    }
-
-    #[tokio::test]
-    async fn 更新的订阅可以顶掉旧的() {
         // 反方向也要成立，否则切走再切回来就再也收不到事件了。
-        let state = state().await;
-        let id = state
-            .create_session(&temp_ws("epoch2"))
-            .await
-            .expect("会话")
-            .id;
-
-        let (first, first_hits) = probe();
-        let (second, second_hits) = probe();
-
-        assert!(state.attach_sink(id.clone(), 1, first).await);
-        assert!(state.attach_sink(id.clone(), 2, second).await);
-
-        // 走会话自己的出口句柄 —— 跑着的轮子用的就是它。
-        state
-            .session(&id)
-            .await
-            .expect("会话还在")
-            .sink()
-            .send(AgentEvent::Done {
-                reason: riot_protocol::event::TerminalReason::Completed,
-            })
-            .expect("发送");
-
-        assert_eq!(second_hits.load(Ordering::SeqCst), 1);
-        assert_eq!(first_hits.load(Ordering::SeqCst), 0);
+        let (newer, _) = probe();
+        assert!(
+            state.attach_sink(id.clone(), 3, newer).await,
+            "更新的订阅要能顶掉旧的"
+        );
     }
 
     #[tokio::test]
@@ -1214,10 +1369,14 @@ mod tests {
         assert_ne!(a.id, b.id);
         assert_ne!(a.root, b.root);
 
-        let sa = state.session(&a.id).await.expect("取回 a");
-        let sb = state.session(&b.id).await.expect("取回 b");
-        assert_eq!(sa.cwd.display().to_string(), a.root);
-        assert_eq!(sb.cwd.display().to_string(), b.root);
+        let roots: HashMap<String, String> = state
+            .list_sessions()
+            .await
+            .into_iter()
+            .map(|i| (i.id, i.root))
+            .collect();
+        assert_eq!(roots[&a.id], a.root);
+        assert_eq!(roots[&b.id], b.root);
     }
 
     #[tokio::test]
@@ -1499,57 +1658,9 @@ mod tests {
         assert_eq!(ids, vec![kept], "删掉的不能复活");
     }
 
-    #[tokio::test]
-    async fn 重启后历史能水合() {
-        use riot_protocol::id::{MessageId, SessionId};
-        use riot_protocol::message::{MessageMeta, UserContent};
-
-        let cfg = temp_cfg("hydrate");
-        let ws = temp_ws("restart-hydrate");
-        let sessions_dir = cfg.parent().expect("有父目录").join("sessions");
-
-        let id = {
-            let state = AppState::restore_at(cfg.clone());
-            state.set_config(AppConfig::default()).await;
-            state.create_session(&ws).await.expect("会话").id
-        };
-
-        // 模拟跑过一轮：直接往它的 transcript 追加（宿主的 log 从没写过，
-        // 文件没被占用，外部句柄安全）。
-        {
-            let transcripts = riot_store::Transcripts::new(&sessions_dir);
-            let log = transcripts.open(riot_store::TranscriptMeta {
-                id: SessionId::from_raw(id.clone()),
-                root: PathBuf::from(&ws),
-                created_at_ms: 1,
-            });
-            log.append(&Message::User {
-                id: MessageId::from_raw("m1"),
-                content: vec![UserContent::Text {
-                    text: "重启前说的话".into(),
-                }],
-                meta: MessageMeta::default(),
-            });
-            log.flush().await;
-        }
-
-        let state = AppState::restore_at(cfg);
-        let history = state.history(&id).await.expect("拿历史");
-        assert_eq!(history.messages.len(), 1, "重启前的对话必须回来");
-        assert!(matches!(
-            &history.messages[0],
-            Message::User { content, .. }
-                if matches!(&content[0], UserContent::Text { text } if text == "重启前说的话")
-        ));
-
-        // 水合的自愈：索引里没有自动标题时，从历史里找回第一句话。
-        let listed = state.list_sessions().await;
-        assert_eq!(
-            listed[0].title.as_deref(),
-            Some("重启前说的话"),
-            "水合后标题要自愈"
-        );
-    }
+    // 「重启后历史能水合」的行为(resume 从 transcript 捞回历史 + 标题自愈)
+    // 现在跨进程:水合在内核(riot-kernel 的 session 测试覆盖),标题自愈在
+    // history() 收到应答之后 —— 端到端要真内核进程,单测框架里没有。
 
     #[tokio::test]
     async fn 索引损坏时从transcript重建_对话不丢() {
@@ -1596,9 +1707,8 @@ mod tests {
         assert_eq!(listed.len(), 1, "会话要从 transcript 重建回来");
         assert_eq!(listed[0].id, id);
         assert_eq!(listed[0].title.as_deref(), Some("别丢了我"));
-
-        let history = state.history(&id).await.expect("历史");
-        assert_eq!(history.messages.len(), 1, "对话一条都不能丢");
+        // 对话内容本身由内核水合(transcript 是事实来源),此处不验 ——
+        // 那需要真内核进程,riot-kernel 的测试覆盖了水合。
     }
 
     #[tokio::test]

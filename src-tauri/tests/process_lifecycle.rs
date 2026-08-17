@@ -102,7 +102,7 @@ async fn 关闭时内核收到_eof_有机会收尾() {
     let script = write_fake_kernel(dir.path(), "eof", &pid_file, &eof_file);
 
     let (tx, _rx) = mpsc::unbounded_channel();
-    let kernel = Kernel::spawn(script, tx).await.expect("启动假内核");
+    let kernel = Kernel::spawn(script, &[], tx).await.expect("启动假内核");
     read_child_pid(&pid_file).await.expect("假内核该起来了");
 
     kernel.shutdown().await;
@@ -123,7 +123,7 @@ async fn 内核退出后不留孤儿子进程() {
     let script = write_fake_kernel(dir.path(), "orphan", &pid_file, &eof_file);
 
     let (tx, _rx) = mpsc::unbounded_channel();
-    let kernel = Kernel::spawn(script, tx).await.expect("启动假内核");
+    let kernel = Kernel::spawn(script, &[], tx).await.expect("启动假内核");
     let child_pid = read_child_pid(&pid_file).await.expect("拿到孙子进程 PID");
     assert!(is_alive(child_pid), "前置条件：孙子进程该活着");
 
@@ -146,7 +146,7 @@ async fn 强杀内核也不留孤儿() {
     let script = write_fake_kernel(dir.path(), "kill", &pid_file, &eof_file);
 
     let (tx, _rx) = mpsc::unbounded_channel();
-    let kernel = Kernel::spawn(script, tx).await.expect("启动假内核");
+    let kernel = Kernel::spawn(script, &[], tx).await.expect("启动假内核");
     let child_pid = read_child_pid(&pid_file).await.expect("拿到孙子进程 PID");
 
     kernel.kill_now().await;
@@ -174,7 +174,7 @@ async fn 反复启停不累积残留() {
         let script = write_fake_kernel(dir.path(), &i.to_string(), &pid_file, &eof_file);
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        let kernel = Kernel::spawn(script, tx).await.expect("启动假内核");
+        let kernel = Kernel::spawn(script, &[], tx).await.expect("启动假内核");
         let pid = read_child_pid(&pid_file).await.expect("拿到孙子进程 PID");
 
         // 交替走优雅关闭和强杀，两条路径都要干净。
@@ -232,7 +232,7 @@ async fn chaos_soak_启停千次() {
         let script = write_fake_kernel(dir.path(), &i.to_string(), &pid_file, &eof_file);
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        let kernel = Kernel::spawn(script, tx).await.expect("启动假内核");
+        let kernel = Kernel::spawn(script, &[], tx).await.expect("启动假内核");
         let Some(pid) = read_child_pid(&pid_file).await else {
             panic!(
                 "第 {i} 轮假内核没起来。当前进程数 {}（基线 {baseline}，峰值 {peak}）。\
