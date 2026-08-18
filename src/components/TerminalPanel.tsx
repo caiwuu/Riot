@@ -16,6 +16,7 @@ import {
   termWrite,
 } from "../bridge";
 import { type ConfirmRequest, ConfirmDialog } from "./ConfirmDialog";
+import { basename } from "../pathDisplay";
 
 /**
  * 底部终端面板。布局照 Codex：标签栏一行（目录名做标题），下面是终端。
@@ -515,7 +516,7 @@ interface Tab {
 function mkTab(root: string | null, existing: Tab[] = []): Tab {
   // 同目录开出来的标签标题一模一样，撞了就加序号 —— 三个"Riot"
   // 并排时用户只能挨个点开猜哪个是哪个。
-  const base = root?.split("/").pop() || "终端";
+  const base = (root ? basename(root) : "") || "终端";
   let title = base;
   for (let n = 2; existing.some((t) => t.title === title); n++) title = `${base} ${n}`;
   return {

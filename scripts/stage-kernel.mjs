@@ -35,8 +35,18 @@ function hostTriple() {
   }
 }
 
+function cargoTargetDir() {
+  const raw = execSync('cargo metadata --no-deps --format-version 1', {
+    cwd: root,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).toString();
+  const dir = JSON.parse(raw).target_directory;
+  if (!dir) throw new Error('cargo metadata 没有 target_directory');
+  return dir;
+}
+
 const triple = hostTriple();
-const src = path.join(root, 'target', profile, `riot-kernel${ext}`);
+const src = path.join(cargoTargetDir(), profile, `riot-kernel${ext}`);
 const destDir = path.join(root, 'src-tauri', 'binaries');
 fs.mkdirSync(destDir, { recursive: true });
 const dest = path.join(destDir, `riot-kernel-${triple}${ext}`);

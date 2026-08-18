@@ -1912,6 +1912,17 @@ async fn handle_request_paused(
     }
 }
 
+fn is_browser_bundle(path: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    {
+        path.is_dir() && path.join("riot-browser.exe").is_file()
+    }
+    #[cfg(not(windows))]
+    {
+        path.is_dir()
+    }
+}
+
 /// 打包好的浏览器在哪儿。
 ///
 /// 开发时在 crate 的 target 下（`scripts/build-browser.sh` /
@@ -1927,7 +1938,7 @@ pub fn locate_app() -> Option<PathBuf> {
         let bundled = dir.join("riot-browser");
         #[cfg(not(windows))]
         let bundled = dir.join("../Resources/riot-browser.app");
-        if bundled.is_dir() {
+        if is_browser_bundle(&bundled) {
             return bundled.canonicalize().ok();
         }
     }
@@ -1937,7 +1948,7 @@ pub fn locate_app() -> Option<PathBuf> {
     #[cfg(not(windows))]
     const DEV_BUNDLE: &str = "../crates/riot-browser/target/bundle/riot-browser.app";
     let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(DEV_BUNDLE);
-    dev.is_dir().then(|| dev.canonicalize().unwrap_or(dev))
+    is_browser_bundle(&dev).then(|| dev.canonicalize().unwrap_or(dev))
 }
 
 #[cfg(test)]

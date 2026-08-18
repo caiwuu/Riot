@@ -60,6 +60,7 @@ import { TerminalPanel } from "./components/TerminalPanel";
 import { hasActiveTodos, TodoPanel } from "./components/TodoPanel";
 import { ToolCard } from "./components/ToolCard";
 import { type Item, type QueuedItem, useSession } from "./hooks/useSession";
+import { basename, parentOf, tildify } from "./pathDisplay";
 
 /**
  * 布局照着 Codex 桌面端：左侧按项目分组的会话列表（可拖宽、可收起），
@@ -177,7 +178,7 @@ export function App() {
   // 窗口标题跟随项目。多窗口/多桌面时，标题栏是用户分辨"哪个是哪个"
   // 的唯一线索。
   useEffect(() => {
-    const name = activeSession?.root.split("/").pop();
+    const name = activeSession?.root ? basename(activeSession.root) : undefined;
     setWindowTitle(name ? `${name} — Riot` : "Riot").catch(() => {});
   }, [activeSession?.root]);
 
@@ -363,7 +364,7 @@ export function App() {
   const projectMenu = (e: React.MouseEvent, root: string) => {
     e.preventDefault();
     e.stopPropagation();
-    const name = root.split("/").pop() || root;
+    const name = basename(root) || root;
     const count = sessions.filter((s) => s.root === root).length;
     setMenu({
       x: e.clientX,
@@ -1016,7 +1017,7 @@ function ProjectGroup(props: SidebarProps & { root: string }) {
     onRenameSubmit,
     onRenameCancel,
   } = props;
-  const name = root.split("/").pop() || root;
+  const name = basename(root) || root;
   // 最近的在上面
   const ordered = [...sessions].sort((a, b) => b.seq - a.seq);
 
@@ -1160,7 +1161,7 @@ function Welcome({
           {recent.map((root) => (
             <button key={root} className="recent-row" onClick={() => onNewSession(root)}>
               <FolderIcon />
-              <span className="recent-name">{root.split("/").pop()}</span>
+              <span className="recent-name">{basename(root)}</span>
               {/* 只显示父目录。完整路径的最后一段就是左边那个名字，
                   重复一遍既占地方又要截断。 */}
               <span className="recent-path">{tildify(parentOf(root))}</span>
@@ -1170,17 +1171,6 @@ function Welcome({
       ) : null}
     </div>
   );
-}
-
-/** 把家目录换成 `~`。完整的 /Users/xxx 前缀在每一行重复，只是噪音。 */
-function tildify(p: string): string {
-  const m = /^\/Users\/[^/]+/.exec(p);
-  return m ? `~${p.slice(m[0].length)}` || "~" : p;
-}
-
-function parentOf(p: string): string {
-  const i = p.lastIndexOf("/");
-  return i > 0 ? p.slice(0, i) : "/";
 }
 
 /* ── 对话 ───────────────────────────────────── */
@@ -1925,7 +1915,7 @@ function chipEl(path: string): HTMLElement {
   span.className = "ref-chip";
   span.contentEditable = "false";
   span.dataset.path = path;
-  span.dataset.label = path.split("/").pop() ?? path;
+  span.dataset.label = basename(path) || path;
   span.title = path;
   span.innerHTML = CHIP_ICON;
   return bindChip(span);
@@ -2394,7 +2384,7 @@ function FileChip({ path }: { path: string }) {
   return (
     <span className="ref-chip static" title={path}>
       <FileIcon />
-      {path.split("/").pop()}
+      {basename(path)}
     </span>
   );
 }

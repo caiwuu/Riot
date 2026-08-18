@@ -15,6 +15,7 @@ import { FieldNumber } from "./FieldNumber";
 import { FieldSelect, type FieldOption } from "./FieldSelect";
 import { HintTip } from "./HintTip";
 import { Modal } from "./Modal";
+import { basename } from "../pathDisplay";
 
 /**
  * 会话设置弹窗：只管**这个会话**的东西 —— 采样覆盖、Python 虚拟环境、
@@ -285,7 +286,7 @@ export function SessionSettings({
                       void commitVenv(p);
                     }}
                   >
-                    检测到 {p.split("/").pop()}，使用
+                    检测到 {basename(p)}，使用
                   </button>
                 ))}
             </div>
