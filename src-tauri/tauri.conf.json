@@ -38,9 +38,6 @@
     "active": true,
     "targets": ["app", "dmg", "nsis"],
     "externalBin": ["binaries/riot-kernel"],
-    "resources": {
-      "../crates/riot-browser/target/bundle/riot-browser.app": "riot-browser.app"
-    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
