@@ -122,6 +122,30 @@ export interface SessionState {
 
 const MAX_TOOL_LINES = 200;
 
+/**
+ * Channel 沉默超过此时长，视为 IPC 已经死了。
+ *
+ * `[约束]` Tauri `Channel::send` 在 JS 那头已经不听时**不会失败**
+ * （见 `AppState::attach_sink`）。笔记本睡眠、下午再打开、WKWebView
+ * 把后台页掐掉，都是同一件事：内核照常跑完、历史照常落盘，界面却永远
+ * 停在「正在生成」。切走再切回来能看见完整回复，是因为换会话会重新
+ * 订阅并拉历史 —— 不换会话就没人做这两步。
+ */
+const SINK_STALE_MS = 30_000;
+/** 忙碌/压缩中这么久收不到事件，主动换出口并对一下历史。 */
+const BUSY_SILENCE_MS = 12_000;
+/** 刚发送的那几秒不要用快照盖界面：乐观气泡还没进宿主历史。 */
+const SEND_GRACE_MS = 8_000;
+/** 切到别的 app 不到这么久、事件还在流，不要重订阅（避免把正在流的正文闪掉）。 */
+const AWAY_RESYNC_MS = 30_000;
+
+type HistorySnap = {
+  messages: Message[];
+  archived: Message[];
+  busy: boolean;
+  compacting?: boolean;
+};
+
 export function useSession(
   sessionId: string,
   opts?: {
@@ -171,13 +195,20 @@ export function useSession(
   const queuedRef = useRef<QueuedItem[]>([]);
   // 事件回调里要判断"此刻在不在跑"（queueSendNow 分流），同样不能读 state。
   const busyRef = useRef(false);
+  const compactingRef = useRef(false);
   useEffect(() => {
     busyRef.current = state.busy;
-  }, [state.busy]);
+    compactingRef.current = state.compacting;
+  }, [state.busy, state.compacting]);
   // send 在订阅 effect 之后才定义，Done 接力经 ref 调它。
   const sendRef = useRef<
     ((text: string, images?: ImageInput[], refs?: string[]) => Promise<boolean>) | null
   >(null);
+  /** 最近一次从这条会话的 Channel 收到事件（或刚挂上新出口）。 */
+  const lastHeardAt = useRef(Date.now());
+  const lastSendAt = useRef(0);
+  /** 换一条活 Channel，并在宿主已空闲时用历史把界面追上。 */
+  const ensureLiveRef = useRef<(() => Promise<void>) | null>(null);
 
   const mutateQueued = useCallback((fn: (q: QueuedItem[]) => QueuedItem[]) => {
     queuedRef.current = fn(queuedRef.current);
@@ -242,6 +273,7 @@ export function useSession(
     };
 
     const handle = (event: AgentEvent) => {
+      lastHeardAt.current = Date.now();
       switch (event.type) {
         case "delta":
           if (event.kind === "text") {
@@ -445,39 +477,49 @@ export function useSession(
     let historyReady = false;
     const buffered: AgentEvent[] = [];
 
+    const listen = (event: AgentEvent) => {
+      if (!historyReady) {
+        buffered.push(event);
+        return;
+      }
+      handle(event);
+    };
+
+    const restoreQueue = () => {
+      void queueList(sessionId)
+        .then((list) => {
+          if (cancelled || list.length === 0) return;
+          mutateQueued((q) => [
+            ...list
+              .filter((x) => !q.some((y) => y.id === x.id))
+              .map((x) => ({
+                id: x.id,
+                text: x.text,
+                images: [] as ImageInput[],
+                refs: x.refs,
+              })),
+            ...q,
+          ]);
+        })
+        .catch(() => {
+          // 会话可能刚被删。面板空着就空着，不值得报错。
+        });
+    };
+
     // 切回会话时重建排队面板：镜像随组件卸载丢了，宿主队列还在。
     // 图片拿不回全量（快照只带张数），但编辑撤回时会从宿主取回原图。
     mutateQueued(() => []);
-    void queueList(sessionId)
-      .then((list) => {
-        if (cancelled || list.length === 0) return;
-        mutateQueued((q) => [
-          ...list
-            .filter((x) => !q.some((y) => y.id === x.id))
-            .map((x) => ({
-              id: x.id,
-              text: x.text,
-              images: [] as ImageInput[],
-              refs: x.refs,
-            })),
-          ...q,
-        ]);
-      })
-      .catch(() => {
-        // 会话可能刚被删。面板空着就空着，不值得报错。
-      });
+    restoreQueue();
 
-    const sub = subscribeSession(
-      sessionId,
-      (event) => {
-        if (!historyReady) {
-          buffered.push(event);
-          return;
-        }
-        handle(event);
-      },
-      onSubscribeError,
-    );
+    let sub = subscribeSession(sessionId, listen, onSubscribeError);
+
+    const applySnap = (hist: HistorySnap) => {
+      const busy = hist.busy;
+      const compacting = hist.compacting ?? false;
+      busyRef.current = busy;
+      compactingRef.current = compacting;
+      setState((s) => applyHistorySnap(s, hist));
+    };
 
     // 先等出口挂上再拉历史。并行的话，结束事件可能还打在已经没人听的
     // 旧 channel 上，而快照里 busy 仍是 true —— 停止键就摘不掉。
@@ -488,25 +530,7 @@ export function useSession(
       })
       .then((hist) => {
         if (cancelled || !hist) return;
-        const messages = hist.messages ?? [];
-        const archived = hist.archived ?? [];
-        const busy = hist.busy;
-        const compacting = hist.compacting ?? false;
-        // busy / compacting 要跟着历史一起恢复：轮子在后台跑着，而界面
-        // 状态随组件卸载丢了 —— 不恢复的话切回来只剩三个点，或发送键
-        // 停不下来。
-        busyRef.current = busy;
-        if (messages.length === 0 && archived.length === 0) {
-          setState((s) => ({ ...s, busy, compacting }));
-          return;
-        }
-        setState((s) => ({
-          ...s,
-          busy,
-          compacting,
-          items: historyToItems(messages, archived),
-          tokens: sumUsage([...archived, ...messages]),
-        }));
+        applySnap(hist);
       })
       .catch(() => {
         // 新会话没有历史，拿不到不算错。真正的通信故障会在订阅那边报。
@@ -518,12 +542,104 @@ export function useSession(
         buffered.length = 0;
       });
 
+    lastHeardAt.current = Date.now();
+    let ensureInflight: Promise<void> | null = null;
+    /**
+     * `catchUp`：用历史覆盖条目。看门狗在轮子还在跑时只换出口，
+     * 不要每十几秒把正在流的正文和工具输出盖掉。
+     */
+    const ensureLive = (opts?: { catchUp?: boolean }): Promise<void> => {
+      if (cancelled || !historyReady) return Promise.resolve();
+      if (ensureInflight) return ensureInflight;
+      const catchUp = opts?.catchUp !== false;
+      lastHeardAt.current = Date.now();
+      ensureInflight = (async () => {
+        try {
+          sub.unsubscribe();
+          sub = subscribeSession(sessionId, listen, onSubscribeError);
+          await sub.ready;
+          if (cancelled) return;
+          const hist = await getHistory(sessionId);
+          if (cancelled || !hist) return;
+          if (!hist.busy || catchUp) {
+            applySnap(hist);
+          } else {
+            busyRef.current = true;
+            compactingRef.current = hist.compacting ?? false;
+            setState((s) => ({
+              ...s,
+              busy: true,
+              compacting: hist.compacting ?? false,
+            }));
+          }
+          restoreQueue();
+        } catch {
+          // 订阅/历史失败：onSubscribeError 已经报过，这里别再铺一条。
+        } finally {
+          ensureInflight = null;
+        }
+      })();
+      return ensureInflight;
+    };
+    ensureLiveRef.current = () => ensureLive({ catchUp: true });
+
+    let hiddenAt = 0;
+    const onVisibility = () => {
+      if (document.hidden) {
+        hiddenAt = Date.now();
+        return;
+      }
+      const away = hiddenAt ? Date.now() - hiddenAt : 0;
+      hiddenAt = 0;
+      if (away < AWAY_RESYNC_MS && Date.now() - lastHeardAt.current < SINK_STALE_MS) {
+        return;
+      }
+      void ensureLive({ catchUp: true });
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
+    const onWindowFocus = () => {
+      // 睡眠唤醒有时不翻 visibility（窗口一直"可见"），只给一个 focus。
+      if (Date.now() - lastHeardAt.current < SINK_STALE_MS) return;
+      void ensureLive({ catchUp: true });
+    };
+    window.addEventListener("focus", onWindowFocus);
+
+    let unlistenFocus: (() => void) | undefined;
+    void (async () => {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const unlisten = await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+          if (!focused || cancelled) return;
+          if (Date.now() - lastHeardAt.current < SINK_STALE_MS) return;
+          void ensureLive({ catchUp: true });
+        });
+        if (cancelled) unlisten();
+        else unlistenFocus = unlisten;
+      } catch {
+        // 不在 Tauri 里（纯浏览器、组件测试）。
+      }
+    })();
+
+    const watchdog = window.setInterval(() => {
+      if (cancelled) return;
+      if (!busyRef.current && !compactingRef.current) return;
+      if (Date.now() - lastHeardAt.current < BUSY_SILENCE_MS) return;
+      if (Date.now() - lastSendAt.current < SEND_GRACE_MS) return;
+      void ensureLive({ catchUp: false });
+    }, 4_000);
+
     return () => {
       cancelled = true;
+      ensureLiveRef.current = null;
       sub.unsubscribe();
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("focus", onWindowFocus);
+      unlistenFocus?.();
+      window.clearInterval(watchdog);
       if (rafId.current) cancelAnimationFrame(rafId.current);
     };
-  }, [sessionId]);
+  }, [sessionId, mutateQueued]);
 
   /**
    * 发一条消息。返回 false = 宿主没收下（UserPromptSubmit hook 拦了、
@@ -536,6 +652,13 @@ export function useSession(
       images: ImageInput[] = [],
       refs: string[] = [],
     ): Promise<boolean> => {
+      lastSendAt.current = Date.now();
+      // 上午聊完、下午再发：Channel 往往已经死了。先换出口并对历史，
+      // 否则这一轮的事件（包括 Done）继续丢进没人听的旧通道，界面
+      // 永远停在「正在生成」，切走再切回来却能看见完整回复。
+      if (Date.now() - lastHeardAt.current >= SINK_STALE_MS) {
+        await ensureLiveRef.current?.();
+      }
       const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const dataUrls = images.map((i) => `data:${i.mediaType};base64,${i.data}`);
       // 立刻放上去（等宿主回声的话，用户会看到自己输入的内容凭空消失
@@ -750,11 +873,125 @@ export function useSession(
 }
 
 /** 活历史 + 压缩前归档 → 界面条目。归档画在分割线上面。 */
-function historyToItems(live: Message[], archived: Message[]): Item[] {
+function historyToItems(live: Message[], archived: Message[], liveTurn = false): Item[] {
   const past = messagesToItems(archived, true);
   const now = messagesToItems(live, true);
-  if (past.length === 0) return now;
-  return [...past, { kind: "compact", id: "compact-boundary" }, ...now];
+  const items: Item[] =
+    past.length === 0 ? now : [...past, { kind: "compact", id: "compact-boundary" }, ...now];
+  if (liveTurn) return items;
+  // 历史里不该有还在转圈的工具。有就是这一轮被中断了，如实说。
+  // 轮子还在跑时（liveTurn）不能标 —— 切到正在跑的会话会把活工具
+  // 画成「未完成」，下一秒事件又改回来，闪一下像出错了。
+  return finalizeIdleItems(items, "未完成（该轮被中断）");
+}
+
+/**
+ * 用宿主快照对齐界面。
+ *
+ * 空闲：整份替换并清掉忙碌残留（这就是下午回来还在「正在生成」的修复）。
+ * 忙碌：条目追上已落盘的消息，但保留还没进历史的流式正文和工具输出。
+ */
+function applyHistorySnap(s: SessionState, hist: HistorySnap): SessionState {
+  const messages = hist.messages ?? [];
+  const archived = hist.archived ?? [];
+  const busy = hist.busy;
+  const compacting = hist.compacting ?? false;
+
+  if (messages.length === 0 && archived.length === 0) {
+    return {
+      ...s,
+      busy,
+      compacting,
+      ...(!busy
+        ? {
+            streaming: "",
+            thinking: "",
+            streamingPlan: null,
+            asks: [],
+            items: finalizeIdleItems(s.items, "未完成"),
+          }
+        : {}),
+    };
+  }
+
+  const fromHist = historyToItems(messages, archived, busy);
+  const items = mergeLiveTools(mergeOptimisticUser(fromHist, s.items), s.items);
+  const tokens = sumUsage([...archived, ...messages]);
+  if (busy) {
+    return {
+      ...s,
+      busy: true,
+      compacting,
+      items,
+      tokens,
+      streaming: keepIfNotSettled(s.streaming, items, "assistant"),
+      thinking: keepIfNotSettled(s.thinking, items, "thinking"),
+    };
+  }
+  return {
+    ...s,
+    busy: false,
+    compacting,
+    items,
+    tokens,
+    streaming: "",
+    thinking: "",
+    streamingPlan: null,
+    asks: [],
+  };
+}
+
+/** 还没进历史的乐观气泡留下，已经在快照里的丢掉。 */
+function mergeOptimisticUser(fromHist: Item[], current: Item[]): Item[] {
+  const extras = current.filter((it) => {
+    if (it.kind !== "user" || !it.id.startsWith("local-")) return false;
+    return !fromHist.some((h) => h.kind === "user" && h.text === it.text);
+  });
+  return extras.length === 0 ? fromHist : [...fromHist, ...extras];
+}
+
+/** 历史没有进度行，把界面上还在跑的那张卡的输出接回去。 */
+function mergeLiveTools(fromHist: Item[], current: Item[]): Item[] {
+  return fromHist.map((it) => {
+    if (it.kind !== "tool" || it.status !== "running") return it;
+    const prev = current.find((c) => c.kind === "tool" && c.id === it.id);
+    if (!prev || prev.kind !== "tool") return it;
+    return {
+      ...it,
+      output: prev.output.length > 0 ? prev.output : it.output,
+      input: hasToolInput(it.input) ? it.input : prev.input,
+      ...(prev.resultImage ? { resultImage: prev.resultImage } : {}),
+      ...(prev.resultImagePath ? { resultImagePath: prev.resultImagePath } : {}),
+    };
+  });
+}
+
+function hasToolInput(input: unknown): boolean {
+  return !!input && typeof input === "object" && Object.keys(input as object).length > 0;
+}
+
+function keepIfNotSettled(
+  live: string,
+  items: Item[],
+  kind: "assistant" | "thinking",
+): string {
+  if (!live.trim()) return "";
+  if (items.some((it) => it.kind === kind && textsOverlap(it.text, live))) return "";
+  return live;
+}
+
+function textsOverlap(a: string, b: string): boolean {
+  return a === b || a.startsWith(b) || b.startsWith(a);
+}
+
+function finalizeIdleItems(items: Item[], result: string): Item[] {
+  let hit = false;
+  const out = items.map((it) => {
+    if (it.kind !== "tool" || it.status !== "running") return it;
+    hit = true;
+    return { ...it, status: "error" as const, result: it.result ?? result };
+  });
+  return hit ? out : items;
 }
 
 function messagesToItems(msgs: Message[], skipSynthetic = false): Item[] {
@@ -830,14 +1067,6 @@ function messagesToItems(msgs: Message[], skipSynthetic = false): Item[] {
       }
     } else {
       items.push({ kind: "error", id: msg.id, text: msg.text });
-    }
-  }
-
-  // 历史里不该有还在转圈的工具。有就是这一轮被中断了，如实说。
-  for (let i = 0; i < items.length; i++) {
-    const it = items[i];
-    if (it && it.kind === "tool" && it.status === "running") {
-      items[i] = { ...it, status: "error", result: "未完成（该轮被中断）" };
     }
   }
 
