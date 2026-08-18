@@ -219,7 +219,9 @@ impl AppState {
             map.insert(
                 p.id.clone(),
                 Meta {
-                    root: PathBuf::from(&p.root),
+                    // 索引可能是修掉 verbatim 前缀之前写的，恢复时归一化，
+                    // 让老会话回到真实项目的分组下。
+                    root: crate::fence::strip_verbatim(PathBuf::from(&p.root)),
                     seq: p.seq,
                     created_at_ms: p.created_at_ms,
                     custom_title: p.custom_title,
@@ -363,10 +365,13 @@ impl AppState {
     pub async fn config(&self) -> AppConfig {
         let mut g = self.0.config.lock().await;
         g.get_or_insert_with(|| {
-            let (c, backup) = crate::config::load_at(&self.0.config_path);
+            let (mut c, backup) = crate::config::load_at(&self.0.config_path);
             if let Some(b) = backup {
                 crate::config::note_recovered(b);
             }
+            // 治历史脏数据：verbatim 前缀修掉之前，`\\?\D:\x` 被当成新项目
+            // 写进过列表。归一化再去重，不然幽灵项目会一直躺在侧边栏。
+            normalize_projects(&mut c.projects);
             c
         })
         .clone()
@@ -1477,6 +1482,25 @@ fn venv_python(dir: &std::path::Path) -> std::path::PathBuf {
         } else {
             "python"
         })
+}
+
+/// 项目列表的路径归一化 + 去重（保序，先出现的赢）。
+///
+/// 专治一类历史脏数据:Windows 上 `Fence::new` 曾把 canonicalize 的
+/// verbatim 结果（`\\?\D:\x`）原样写进项目列表，和用户手选的 `D:\x`
+/// 变成两个项目。归一化后两串相同，去重收敛成一个。
+fn normalize_projects(projects: &mut Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    let normalized: Vec<String> = projects
+        .drain(..)
+        .map(|p| {
+            crate::fence::strip_verbatim(PathBuf::from(&p))
+                .display()
+                .to_string()
+        })
+        .filter(|p| seen.insert(p.clone()))
+        .collect();
+    *projects = normalized;
 }
 
 /// 给一个会话装配面板浏览器。没打包浏览器时返回 None(工具装 NoBrowser、

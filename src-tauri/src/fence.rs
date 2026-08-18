@@ -49,7 +49,9 @@ impl Fence {
             path: root.to_path_buf(),
             msg: e.to_string(),
         })?;
-        Ok(Self { root: canonical })
+        Ok(Self {
+            root: strip_verbatim(canonical),
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -93,7 +95,9 @@ fn canonicalize_lexically_existing(path: &Path) -> Result<PathBuf, FenceError> {
     loop {
         match std::fs::canonicalize(&existing) {
             Ok(base) => {
-                let mut out = base;
+                // 和 Fence::new 用同一套归一形式。root 剥了前缀而这里不剥的话，
+                // starts_with 按组件比较（VerbatimDisk ≠ Disk），一切都成越界。
+                let mut out = strip_verbatim(base);
                 for part in tail.iter().rev() {
                     out.push(part);
                 }
@@ -131,6 +135,46 @@ fn canonicalize_lexically_existing(path: &Path) -> Result<PathBuf, FenceError> {
             }
         }
     }
+}
+
+/// 把 Windows `canonicalize` 返回的 verbatim 前缀（`\\?\C:\` / `\\?\UNC\`）
+/// 剥回常规写法。非 Windows 路径没有 Prefix 组件，原样返回。
+///
+/// 不剥的话有两笔账：
+/// 1. 这个 root 会以字符串进配置、进前端、当项目分组的 key。用户手选的是
+///    `D:\x`，canonicalize 回来是 `\\?\D:\x`，两串对不上 —— 新建会话就凭空
+///    多出一个 `\\?\` 开头的"新项目"。
+/// 2. `Path::starts_with` 按组件比较，`VerbatimDisk(D)` 和 `Disk(D)` 不相等，
+///    围栏两侧只要一边带前缀，所有路径都会被判越界。
+///
+/// 超长路径不受影响：std 的 fs 调用在需要时会自己把路径转回 verbatim 形式，
+/// 剥掉只影响字符串形态，不影响能力。
+pub(crate) fn strip_verbatim(p: PathBuf) -> PathBuf {
+    use std::path::Prefix;
+
+    let mut comps = p.components();
+    let Some(Component::Prefix(pre)) = comps.next() else {
+        return p;
+    };
+    let base = match pre.kind() {
+        Prefix::VerbatimDisk(d) => PathBuf::from(format!(r"{}:\", d as char)),
+        Prefix::VerbatimUNC(server, share) => {
+            let mut s = std::ffi::OsString::from(r"\\");
+            s.push(server);
+            s.push(r"\");
+            s.push(share);
+            PathBuf::from(s)
+        }
+        // \\?\pipe\… 这类没有常规等价形式，保持原样。
+        _ => return p,
+    };
+    let mut out = base;
+    for c in comps {
+        if !matches!(c, Component::RootDir) {
+            out.push(c.as_os_str());
+        }
+    }
+    out
 }
 
 /// 纯词法地消解 `.` 和 `..`，不碰文件系统。
@@ -244,5 +288,40 @@ mod tests {
 
         let got = fence.resolve("sub/../a.rs").expect("这在围栏内，应放行");
         assert!(got.starts_with(fence.root()));
+    }
+
+    /// Windows 的 canonicalize 给的是 `\\?\D:\…`。它一旦漏出去，前端按
+    /// 字符串分组项目就会多出一个 `\\?\` 开头的幽灵项目。
+    #[cfg(windows)]
+    #[test]
+    fn 根和解析结果都不带_verbatim_前缀() {
+        let (dir, fence) = tmp_fence();
+        let root = fence.root().to_string_lossy().into_owned();
+        assert!(
+            !root.starts_with(r"\\?\"),
+            "root 漏出了 verbatim 形式：{root}"
+        );
+
+        std::fs::write(dir.path().join("a.rs"), "").unwrap();
+        let existing = fence.resolve("a.rs").expect("放行");
+        let missing = fence.resolve("sub/new.rs").expect("放行");
+        for p in [existing, missing] {
+            let s = p.to_string_lossy().into_owned();
+            assert!(!s.starts_with(r"\\?\"), "resolve 漏出了 verbatim 形式：{s}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn strip_verbatim_的两种前缀() {
+        let disk = strip_verbatim(PathBuf::from(r"\\?\D:\work\Riot"));
+        assert_eq!(disk, PathBuf::from(r"D:\work\Riot"));
+
+        let unc = strip_verbatim(PathBuf::from(r"\\?\UNC\srv\share\dir"));
+        assert_eq!(unc, PathBuf::from(r"\\srv\share\dir"));
+
+        // 没有常规等价形式的保持原样。
+        let pipe = strip_verbatim(PathBuf::from(r"\\?\pipe\x"));
+        assert_eq!(pipe, PathBuf::from(r"\\?\pipe\x"));
     }
 }
