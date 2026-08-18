@@ -8,6 +8,18 @@
 //! 拆出来之后顺带拿到三件事:CEF 和 tao 不再抢主线程的 run loop;
 //! 浏览器崩了带不倒聊天;开发和生产下浏览器都是 bundle 形态，不会出现
 //! "dev 好好的、打包就 panic"那类只在发版时才暴露的问题。
+//!
+//! # 平台差异都在启动这一段
+//!
+//! macOS 要从 `.app` 里动态加载框架、先把 NSApp 换成 CEF 认的子类;
+//! Windows 的 libcef.dll 是链接期挂上的，资源按 dll 所在目录找，什么都
+//! 不用做。进了消息循环之后（osr / dispatch / cdp / wire）没有任何平台分支。
+
+// `[约束]` Windows 上必须是 windows 子系统。这个进程由主应用带管道 spawn，
+// stdio 走管道句柄，不需要控制台；而 console 子系统的可执行文件被 GUI
+// 程序启动时会弹出一个黑色控制台窗 —— 主进程一个、CEF 的每个 helper
+// 再各一个，屏幕上全是闪烁的黑框。
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod cdp;
 mod dispatch;
@@ -20,9 +32,9 @@ mod wire;
 use cef::*;
 
 fn main() {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
-        eprintln!("riot-browser: 目前只实现了 macOS");
+        eprintln!("riot-browser: 目前只实现了 macOS 和 Windows");
         std::process::exit(1);
     }
 
@@ -43,15 +55,24 @@ fn main() {
         }
         run(&frameworks);
     }
+
+    // Windows 不加载任何东西:libcef.dll 由加载器按"和 exe 同目录"的
+    // 规则找到（打包脚本 scripts/build-browser.ps1 保证了这个布局），
+    // 找不到时进程根本起不来，主应用看到的是 spawn 失败而不是半死状态。
+    #[cfg(windows)]
+    run();
 }
 
-#[cfg(target_os = "macos")]
-fn run(frameworks: &std::path::Path) {
+/// macOS 需要知道 Frameworks 目录在哪（框架和 helper 都在里面）;
+/// Windows 上一切和 exe 平级，没有要传的东西。
+#[cfg(any(target_os = "macos", windows))]
+fn run(#[cfg(target_os = "macos")] frameworks: &std::path::Path) {
     let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
 
     // `[约束]` 必须在 execute_process / initialize 之前。见 mac 模块的说明 ——
     // 少了这一步，报出来的是 `icudtl.dat not found in bundle`，和真正的
     // 原因（NSApp 没就位）看起来毫无关系。
+    #[cfg(target_os = "macos")]
     mac::setup_application();
 
     let args = args::Args::new();
@@ -77,24 +98,35 @@ fn run(frameworks: &std::path::Path) {
         eprintln!("riot-browser: 建缓存目录失败 {}: {e}", cache.display());
     }
 
-    let settings = Settings {
-        // helper 是独立可执行文件，必须显式指路 —— 默认值假设的是
-        // Chromium 官方那套命名。
-        browser_subprocess_path: CefString::from(
-            paths::helper_exe(frameworks).to_string_lossy().as_ref(),
-        ),
-        framework_dir_path: CefString::from(
-            paths::framework_dir(frameworks).to_string_lossy().as_ref(),
-        ),
+    let mut settings = Settings {
         // 离屏渲染。不开的话 on_paint 永远不会被调。
         windowless_rendering_enabled: 1,
         // `[约束]` 独立 profile。见 paths::cache_dir 的注释。
         root_cache_path: CefString::from(cache.to_string_lossy().as_ref()),
-        // 沙箱要求 helper 有额外的签名和 entitlement，先关掉。
+        // 沙箱要平台侧额外配合（macOS 是 helper 的签名和 entitlement，
+        // Windows 要静态链接 cef_sandbox），先关掉。
         // TODO: 发版前打开，agent 驱动的浏览器更需要这层。
         no_sandbox: 1,
         ..Default::default()
     };
+
+    // helper 是独立可执行文件，必须显式指路 —— 默认值假设的是
+    // Chromium 官方那套命名。框架路径只有 macOS 需要:Windows 上
+    // 这个字段没有意义，CEF 按 libcef.dll 的位置找资源。
+    #[cfg(target_os = "macos")]
+    {
+        settings.browser_subprocess_path = CefString::from(
+            paths::helper_exe(frameworks).to_string_lossy().as_ref(),
+        );
+        settings.framework_dir_path = CefString::from(
+            paths::framework_dir(frameworks).to_string_lossy().as_ref(),
+        );
+    }
+    #[cfg(windows)]
+    {
+        settings.browser_subprocess_path =
+            CefString::from(paths::helper_exe().to_string_lossy().as_ref());
+    }
 
     let mut app = HostApp::new();
     assert_eq!(

@@ -48,7 +48,7 @@ pnpm dev
 
 ## 配置与扩展
 
-配置目录在设置 → 关于里能看到。macOS 默认是 `~/Library/Application Support/riot`。
+配置目录在设置 → 关于里能看到。macOS 默认是 `~/Library/Application Support/riot`，Windows 是 `%APPDATA%\riot`。
 
 | 能力 | 全局 | 项目级 |
 | --- | --- | --- |
@@ -131,6 +131,13 @@ cargo run -p export-cef-dir -- --force "$HOME/.local/share/cef"
 ```bash
 ./scripts/build-browser.sh                 # 编 + 打成 .app
 # 产物：crates/riot-browser/target/bundle/riot-browser.app
+```
+
+Windows 上产物是平铺目录（exe、dll、资源同层，CEF 没有 bundle 概念）。CEF 由 build.rs 自动下载到 `CEF_PATH`（默认 `%USERPROFILE%\.local\share\cef`）；编译它的 C++ wrapper 需要 VS 的「使用 C++ 的桌面开发」工作负载，CMake / Ninja 会自动从 VS 里借：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build-browser.ps1
+# 产物：crates/riot-browser/target/bundle/riot-browser/
 ```
 
 `pnpm tauri dev` 已经在跑的话，打完要重启一次 —— 宿主只在启动时定位浏览器。

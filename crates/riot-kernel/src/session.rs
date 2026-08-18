@@ -3166,9 +3166,16 @@ mod tests {
             .find(|(k, _)| k == "PATH")
             .map(|(_, v)| v.clone())
             .expect("有 PATH");
+        // venv 的可执行目录两个平台叫法不同：unix 是 bin，Windows 是 Scripts。
+        #[cfg(not(windows))]
         assert!(
             path.starts_with("/tmp/venv/bin"),
             "venv 的 bin 要排最前：{path}"
+        );
+        #[cfg(windows)]
+        assert!(
+            path.starts_with(r"/tmp/venv\Scripts"),
+            "venv 的 Scripts 要排最前：{path}"
         );
         assert!(
             r.env

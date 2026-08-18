@@ -3,8 +3,9 @@
 //! 这条链路跨进程、跨 crate、跨 workspace，中间任何一环对不上都不会有
 //! 编译错误 —— 只会表现为"发了命令没反应"。所以必须真的起一个进程。
 //!
-//! `[前提]` 需要先跑 `scripts/build-browser.sh` 打包。没打包时用例跳过而
-//! 不是失败:CEF 的二进制有 355MB，不该成为跑一次 `cargo test` 的前置条件。
+//! `[前提]` 需要先跑 `scripts/build-browser.sh`（Windows 上是
+//! `scripts/build-browser.ps1`）打包。没打包时用例跳过而不是失败:
+//! CEF 的二进制有 355MB，不该成为跑一次 `cargo test` 的前置条件。
 
 // 这里等的是**真实进程**的真实往返。确定性时钟那条约束（见 clippy.toml）
 // 针对的是内核逻辑 —— 那里的时间必须可控才能做黄金回放；而这个用例的
@@ -32,8 +33,13 @@ fn profile(tag: &str) -> PathBuf {
 }
 
 fn bundle() -> Option<PathBuf> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../crates/riot-browser/target/bundle/riot-browser.app");
+    // 打包布局按平台走:macOS 是 .app，Windows 是平铺目录。
+    // 见 riot_host_lib::browser::executable_in。
+    #[cfg(windows)]
+    const BUNDLE: &str = "../crates/riot-browser/target/bundle/riot-browser";
+    #[cfg(not(windows))]
+    const BUNDLE: &str = "../crates/riot-browser/target/bundle/riot-browser.app";
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(BUNDLE);
     p.is_dir().then_some(p)
 }
 

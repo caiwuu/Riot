@@ -1,7 +1,8 @@
 //! 浏览器子进程的生命周期与通信。
 //!
-//! CEF 跑在 `riot-browser.app` 这个独立进程里。拆出去的理由见那个 crate 的
-//! 文档 —— 简单说是 macOS 上 CEF 必须从 `.app` 启动，而主应用在 `tauri dev`
+//! CEF 跑在 riot-browser 这个独立进程里（macOS 上是 `riot-browser.app`，
+//! Windows 上是一个平铺目录）。拆出去的理由见那个 crate 的文档 ——
+//! 简单说是 macOS 上 CEF 必须从 `.app` 启动，而主应用在 `tauri dev`
 //! 下是裸二进制。
 //!
 //! 这里的职责和 [`crate::kernel::supervisor`] 是同一类:spawn、包进程组、
@@ -44,13 +45,22 @@ const CDP_TIMEOUT: Duration = Duration::from_secs(30);
 /// 等响应的 CDP 请求表。key 是 CDP 的 `id`。
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>;
 
+/// 提示用户跑哪个打包脚本。按平台指路 —— 指错平台的脚本比不指还糟，
+/// 用户会在 Windows 上想办法装 bash。
+#[cfg(windows)]
+const BUILD_SCRIPT: &str = "scripts/build-browser.ps1";
+#[cfg(not(windows))]
+const BUILD_SCRIPT: &str = "scripts/build-browser.sh";
+
 #[derive(Debug, thiserror::Error)]
 pub enum BrowserError {
     #[error("浏览器进程未运行")]
     NotRunning,
     #[error(
-        "找不到浏览器程序 {0}。\
-         开发时先跑 scripts/build-browser.sh 打包 —— CEF 在 macOS 上必须从 .app 启动。"
+        "找不到浏览器程序 {path}。\
+         开发时先跑 {script} 打包 —— CEF 的运行时不随主应用一起构建。",
+        path = .0.display(),
+        script = BUILD_SCRIPT
     )]
     NotBundled(PathBuf),
     #[error("CDP `{method}` 超过 {}s 没有响应", CDP_TIMEOUT.as_secs())]
@@ -79,6 +89,9 @@ pub struct Browser {
 
 impl Browser {
     /// 启动浏览器进程。
+    ///
+    /// `app` 是打包产物的路径:macOS 上是 `riot-browser.app`，Windows 上是
+    /// 装着 exe 和 CEF 运行时的目录。见 [`executable_in`]。
     ///
     /// `events` 收到的是子进程吐出的每一条 [`Event`]。调用方必须一直排空它:
     /// 通道是无界的，不读的话内存会跟着帧事件一起涨。
@@ -399,7 +412,12 @@ async fn route_cdp_response(pending: &Pending, ev: &Event) -> bool {
     true
 }
 
-/// `.app` 里那个可执行文件的位置。
+/// 打包产物里那个可执行文件的位置。
+///
+/// macOS 上产物是 `.app`（可执行文件埋在 `Contents/MacOS/` 里），
+/// Windows 上是平铺目录 —— exe、libcef.dll、资源全在一层（CEF 在
+/// Windows 没有 bundle 概念，dll 按"和 exe 同目录"加载）。
+#[cfg(not(windows))]
 fn executable_in(app: &std::path::Path) -> PathBuf {
     let name = app
         .file_stem()
@@ -407,10 +425,16 @@ fn executable_in(app: &std::path::Path) -> PathBuf {
     app.join("Contents/MacOS").join(name)
 }
 
+#[cfg(windows)]
+fn executable_in(app: &std::path::Path) -> PathBuf {
+    app.join("riot-browser.exe")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(not(windows))]
     #[test]
     fn 从_app_路径推出可执行文件() {
         let exe = executable_in(std::path::Path::new("/x/riot-browser.app"));
@@ -420,9 +444,16 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn 从打包目录推出可执行文件() {
+        let exe = executable_in(std::path::Path::new(r"C:\x\riot-browser"));
+        assert_eq!(exe, PathBuf::from(r"C:\x\riot-browser\riot-browser.exe"));
+    }
+
     #[tokio::test]
     async fn 没打包时报错要指出怎么修() {
-        // 开发时最容易撞上的一条:忘了跑 build-browser.sh。
+        // 开发时最容易撞上的一条:忘了跑打包脚本。
         // 报"文件不存在"没有用，得说清下一步做什么。
         let r = Browser::spawn(
             PathBuf::from("/nonexistent/riot-browser.app"),
@@ -434,6 +465,6 @@ mod tests {
             panic!("路径不存在时不该起得来");
         };
         let msg = err.to_string();
-        assert!(msg.contains("build-browser.sh"), "报错要指路：{msg}");
+        assert!(msg.contains(BUILD_SCRIPT), "报错要指路：{msg}");
     }
 }

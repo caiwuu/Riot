@@ -6,11 +6,19 @@
 //! `[约束]` 这里不能有任何耗时初始化。每开一个标签页就会起一个 renderer，
 //! 在这里多做一件事就是每个标签页都多付一次。
 
+// 理由同主进程（见 src/main.rs）:console 子系统的 helper 每被 CEF
+// spawn 一次就弹一个黑窗，而 renderer 是每个标签页一个。
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
 
 fn main() {
     // 布局是 `Frameworks/riot-browser Helper.app/Contents/MacOS/<exe>`，
     // 框架在 `Frameworks/` 下，所以往上三层。
+    //
+    // Windows 没有对应的步骤:libcef.dll 是链接期挂上的，helper 和它
+    // 同目录，加载器自己就能找到。
     #[cfg(target_os = "macos")]
     {
         let Some(frameworks) = helper_frameworks_dir() else {
