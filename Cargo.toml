@@ -54,6 +54,12 @@ pin-project-lite = "0.2"
 # [约束] 不要加 default-features = false —— job-object(Windows) 和
 # process-group(Unix) 都在 default 里，关掉它们等于把这个依赖的意义关掉了。
 process-wrap = { version = "9", features = ["tokio1"] }
+# 只为进程创建标志的常量（CREATE_NO_WINDOW / CREATE_SUSPENDED）。
+# 各 spawn 点自定义的 NoWindow 包装器用它 —— 为什么不能直接
+# cmd.creation_flags、也不能用 process-wrap 自带的 CreationFlags，
+# 见 riot-runtime 的命令执行器。版本跟 process-wrap 依赖的 windows
+# 保持同一 minor，免得解析出两份。
+windows = { version = "0.62", features = ["Win32_System_Threading"] }
 # 真实 HTTP。用 rustls 而不是 native-tls：后者在 Linux 上要系统装 openssl，
 # 在 CI 和用户机器上都是一类反复出现的构建失败。
 #

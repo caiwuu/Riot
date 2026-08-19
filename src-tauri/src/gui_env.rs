@@ -27,6 +27,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::time::Duration;
+#[cfg(unix)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 等交互式登录 shell 吐出环境的上限。VS Code 默认 10s；`.zshrc` 里
@@ -47,6 +48,7 @@ pub fn inherit_login_env() {
         apply_shell_env(&vars);
         tracing::info!(n = vars.len(), "已吸入登录 shell 的环境");
     }
+    #[cfg(unix)]
     fallback_ssh_auth_sock();
     // 登录 shell 没写进 PATH 的常见目录再补一层。nvm 默认只在 `.zshrc`，
     // 交互式吸入成功的话这里是空操作（去重）。
@@ -117,6 +119,7 @@ fn keep_imported(key: &str) -> bool {
 ///
 /// Dock 启动的应用经常是这个状态：钥匙在系统 agent 里，但 GUI 进程的
 /// 环境里没有这根变量。`launchctl getenv` 是 macOS 上比猜路径更稳的问法。
+#[cfg(unix)]
 fn fallback_ssh_auth_sock() {
     if env::var_os("SSH_AUTH_SOCK").is_some() {
         return;
@@ -143,17 +146,16 @@ fn fallback_ssh_auth_sock() {
     }
 }
 
+// 和 VS Code 一样：Windows 的 GUI 进程从用户会话继承环境，不必再
+// 跑一遍 shell。乱跑还会把 `ComSpec` 之类搞乱。
+#[cfg(windows)]
 fn read_shell_env() -> Option<Vec<(String, String)>> {
-    #[cfg(windows)]
-    {
-        // 和 VS Code 一样：Windows 的 GUI 进程从用户会话继承环境，不必再
-        // 跑一遍 shell。乱跑还会把 `ComSpec` 之类搞乱。
-        return None;
-    }
-    #[cfg(unix)]
-    {
-        read_unix_shell_env(true).or_else(|| read_unix_shell_env(false))
-    }
+    None
+}
+
+#[cfg(unix)]
+fn read_shell_env() -> Option<Vec<(String, String)>> {
+    read_unix_shell_env(true).or_else(|| read_unix_shell_env(false))
 }
 
 #[cfg(unix)]
@@ -189,6 +191,7 @@ fn read_unix_shell_env(interactive: bool) -> Option<Vec<(String, String)>> {
     parse_env_json(json)
 }
 
+#[cfg(unix)]
 fn env_mark() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -197,6 +200,7 @@ fn env_mark() -> String {
     format!("__RIOT_ENV_{:x}_{:x}__", std::process::id(), nanos)
 }
 
+#[cfg(unix)]
 fn posix_single_quote(s: &str) -> String {
     let mut out = String::from("'");
     for c in s.chars() {
@@ -210,6 +214,7 @@ fn posix_single_quote(s: &str) -> String {
     out
 }
 
+#[cfg(unix)]
 fn extract_marked<'a>(raw: &'a str, mark: &str) -> Option<&'a str> {
     let start = raw.find(mark)? + mark.len();
     let rest = raw.get(start..)?;
@@ -217,6 +222,7 @@ fn extract_marked<'a>(raw: &'a str, mark: &str) -> Option<&'a str> {
     Some(rest.get(..end)?.trim())
 }
 
+#[cfg(unix)]
 fn parse_env_json(s: &str) -> Option<Vec<(String, String)>> {
     let map: std::collections::BTreeMap<String, String> = serde_json::from_str(s).ok()?;
     Some(map.into_iter().collect())
@@ -329,9 +335,19 @@ where
 mod tests {
     use super::*;
 
+    /// 用平台自己的分隔符拼一段 PATH。测试数据写死 `:` 的话，
+    /// Windows 上按 `;` 切分根本切不开，整段被当成一个路径。
+    fn chunk(parts: &[&str]) -> OsString {
+        env::join_paths(parts.iter().map(PathBuf::from)).expect("拼 PATH")
+    }
+
     #[test]
     fn 合并去重且前面的优先() {
-        let merged = merge_paths(["/opt/homebrew/bin:/usr/bin", "/usr/bin:/bin", "/bin:/sbin"]);
+        let merged = merge_paths([
+            chunk(&["/opt/homebrew/bin", "/usr/bin"]),
+            chunk(&["/usr/bin", "/bin"]),
+            chunk(&["/bin", "/sbin"]),
+        ]);
         let parts: Vec<_> = env::split_paths(&merged).collect();
         assert_eq!(
             parts,
@@ -381,6 +397,7 @@ mod tests {
         assert!(version_key("not-a-version").is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn 标记之间抽出_json_即使_zshrc_往_stdout_打过字() {
         let mark = "__RIOT_ENV_test__";
@@ -403,6 +420,7 @@ mod tests {
         assert!(!keep_imported("XDG_RUNTIME_DIR"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn posix_单引号能包住带引号的路径() {
         assert_eq!(posix_single_quote("/Applications/Riot.app/Contents/MacOS/Riot"), "'/Applications/Riot.app/Contents/MacOS/Riot'");

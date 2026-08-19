@@ -122,6 +122,31 @@ impl KernelHandle {
     }
 }
 
+/// 把 `CREATE_SUSPENDED | CREATE_NO_WINDOW` 焊在 spawn 前的最后一笔。
+/// 内核是控制台程序，少了它，打包后的 GUI 主程序一起内核就**常驻**一个
+/// 黑色控制台窗（dev 下继承终端的控制台，看不出来）。
+///
+/// `[约束]` 必须注册在 JobObject **之后**、不能用直接 creation_flags 或
+/// 库自带的 CreationFlags 包装器 —— 前者被 JobObject 整个改写，后者在
+/// process-wrap 9.1.0 里因为 spawn 时包装器表被 mem::take 拿空而永远
+/// 读不到。完整分析见 riot-runtime 的命令执行器。
+#[cfg(windows)]
+#[derive(Debug)]
+struct NoWindow;
+
+#[cfg(windows)]
+impl process_wrap::tokio::CommandWrapper for NoWindow {
+    fn pre_spawn(
+        &mut self,
+        command: &mut tokio::process::Command,
+        _core: &CommandWrap,
+    ) -> std::io::Result<()> {
+        use windows::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
+        command.creation_flags((CREATE_NO_WINDOW | CREATE_SUSPENDED).0);
+        Ok(())
+    }
+}
+
 pub struct Kernel {
     child: Box<dyn ChildWrapper>,
     /// stdin 的关闭开关。drop 掉它会让写线程结束并 drop 真正的 ChildStdin，
@@ -151,7 +176,10 @@ impl Kernel {
 
         let mut wrap = CommandWrap::from(cmd);
         #[cfg(windows)]
-        wrap.wrap(process_wrap::tokio::JobObject);
+        {
+            wrap.wrap(process_wrap::tokio::JobObject);
+            wrap.wrap(NoWindow);
+        }
         #[cfg(unix)]
         wrap.wrap(process_wrap::tokio::ProcessGroup::leader());
 

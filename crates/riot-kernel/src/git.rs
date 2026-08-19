@@ -144,6 +144,10 @@ async fn git(root: &Path, args: &[&str]) -> Option<String> {
         // 超时后这个 future 被 drop，进程得跟着走，否则大仓库上会攒下
         // 一堆还在扫描的 git。
         .kill_on_drop(true);
+    // Windows:不带 CREATE_NO_WINDOW 的话，打包后的 GUI 主程序每问一次
+    // git 就闪一个黑色控制台窗。理由的完整版见 riot-runtime 的命令执行器。
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
 
     let out = tokio::time::timeout(GIT_TIMEOUT, cmd.output()).await.ok()?.ok()?;
     out.status

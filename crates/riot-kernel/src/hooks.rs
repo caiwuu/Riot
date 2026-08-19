@@ -426,6 +426,10 @@ impl HookEngine {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+        // Windows:不带 CREATE_NO_WINDOW 的话，打包后的 GUI 主程序每跑一个
+        // hook 就闪一个黑色控制台窗。理由的完整版见 riot-runtime 的命令执行器。
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,

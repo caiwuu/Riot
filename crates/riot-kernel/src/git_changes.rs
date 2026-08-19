@@ -304,6 +304,10 @@ async fn git_raw(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
         .stderr(Stdio::null())
         // 超时后 future 被 drop,进程必须跟着走,不然大仓库上会攒一堆。
         .kill_on_drop(true);
+    // Windows:不带 CREATE_NO_WINDOW 的话,打包后的 GUI 主程序每刷一次
+    // 变更面板就闪一串黑色控制台窗。理由的完整版见 riot-runtime 的命令执行器。
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     let out = tokio::time::timeout(GIT_TIMEOUT, cmd.output()).await.ok()?.ok()?;
     out.status.success().then_some(out.stdout)
 }

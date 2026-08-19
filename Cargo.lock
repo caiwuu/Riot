@@ -3500,6 +3500,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -3551,6 +3552,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -3621,6 +3623,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
+ "windows 0.62.2",
 ]
 
 [[package]]

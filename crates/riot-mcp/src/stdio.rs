@@ -24,6 +24,31 @@ pub(crate) struct SpawnedServer {
     pub stdin: tokio::process::ChildStdin,
 }
 
+/// 把 `CREATE_SUSPENDED | CREATE_NO_WINDOW` 焊在 spawn 前的最后一笔，
+/// 否则打包后的 GUI 主程序每连一个 MCP 服务器就弹一个黑色控制台窗
+/// （dev 下继承终端的控制台，看不出来）。
+///
+/// `[约束]` 必须注册在 JobObject **之后**、不能用直接 creation_flags 或
+/// 库自带的 CreationFlags 包装器 —— 前者被 JobObject 整个改写，后者
+/// 在 process-wrap 9.1.0 里因为 spawn 时包装器表被 mem::take 拿空而
+/// 永远读不到。完整分析见 riot-runtime 的命令执行器。
+#[cfg(windows)]
+#[derive(Debug)]
+struct NoWindow;
+
+#[cfg(windows)]
+impl process_wrap::tokio::CommandWrapper for NoWindow {
+    fn pre_spawn(
+        &mut self,
+        command: &mut tokio::process::Command,
+        _core: &CommandWrap,
+    ) -> std::io::Result<()> {
+        use windows::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
+        command.creation_flags((CREATE_NO_WINDOW | CREATE_SUSPENDED).0);
+        Ok(())
+    }
+}
+
 /// 拉起服务器进程。stderr 由后台任务转进日志 —— MCP 规范允许服务器往
 /// stderr 打日志，不接的话管道写满 64KB 后服务器会整个卡住。
 pub(crate) fn spawn_server(spec: &ServerSpec) -> std::io::Result<SpawnedServer> {
@@ -45,7 +70,10 @@ pub(crate) fn spawn_server(spec: &ServerSpec) -> std::io::Result<SpawnedServer> 
     #[cfg(unix)]
     wrap.wrap(process_wrap::tokio::ProcessGroup::leader());
     #[cfg(windows)]
-    wrap.wrap(process_wrap::tokio::JobObject);
+    {
+        wrap.wrap(process_wrap::tokio::JobObject);
+        wrap.wrap(NoWindow);
+    }
 
     let mut child = wrap.spawn()?;
     let stdout = child.stdout().take().expect("stdout 已设为 piped");

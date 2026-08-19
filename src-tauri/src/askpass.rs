@@ -210,6 +210,9 @@ fn native_prompt(prompt: &str) -> Option<String> {
     }
 }
 
+// Windows 的 InputBox 没有密码模式，这个判断只有 mac / Linux 的
+// 对话框用得上。
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn looks_secret(prompt: &str) -> bool {
     let p = prompt.to_ascii_lowercase();
     p.contains("password")
@@ -245,6 +248,7 @@ fn macos_dialog(prompt: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim_end().to_owned())
 }
 
+#[cfg(target_os = "macos")]
 fn applescript_string(s: &str) -> String {
     let mut out = String::from("\"");
     for c in s.chars() {
@@ -299,8 +303,13 @@ fn windows_dialog(prompt: &str) -> Option<String> {
     let script = format!(
         "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.Interaction]::InputBox('{escaped}','Riot')"
     );
+    // CREATE_NO_WINDOW:藏的是 PowerShell 自己的黑色控制台窗，InputBox
+    // 弹窗是它进程里另开的 GUI 窗口，照常显示。不藏的话每次凭据询问都是
+    // "黑窗 + 弹窗"一起出现。
+    use std::os::windows::process::CommandExt as _;
     let out = std::process::Command::new("powershell")
         .args(["-NoProfile", "-Command", &script])
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
         .output()
         .ok()?;
     if !out.status.success() {
@@ -314,6 +323,7 @@ fn windows_dialog(prompt: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn 密码类提示走隐藏输入() {
         assert!(looks_secret("Password for 'https://github.com':"));
@@ -323,6 +333,7 @@ mod tests {
         assert!(!looks_secret("Are you sure you want to continue connecting (yes/no)?"));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn applescript_转义引号和反斜杠() {
         assert_eq!(applescript_string("a\"b\\c"), "\"a\\\"b\\\\c\"");

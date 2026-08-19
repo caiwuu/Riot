@@ -67,6 +67,41 @@ enum Ended {
     Cancelled,
 }
 
+/// 把 `CREATE_SUSPENDED | CREATE_NO_WINDOW` 焊在 spawn 前的最后一笔。
+///
+/// 少了 CREATE_NO_WINDOW 的表现:`pnpm tauri dev` 一切正常（主程序挂在
+/// 开发者的终端上，控制台子进程继承那个控制台），打包后的 exe 是 GUI
+/// 子系统、没有控制台 —— 每起一个子进程就弹一个黑色控制台窗。
+///
+/// `[约束]` 只能用这个自定义包装器给标志，两条捷径都是死路（实测）:
+/// - 直接 `cmd.creation_flags(...)`:JobObject 的 pre_spawn 会**整个改写**
+///   创建标志，直接设在 Command 上的值必被覆盖;
+/// - 库自带的 `CreationFlags` 包装器（文档推荐的配合方式）:process-wrap
+///   9.1.0 的 spawn 先把包装器表 `mem::take` 拿空、再把自己当上下文传给
+///   回调，JobObject 去读 CreationFlags 时永远拿到空表 —— 承诺的合并
+///   根本不会发生。
+///
+/// 注册在 JobObject **之后**:pre_spawn 按注册序执行，这里最后写入
+/// `SUSPENDED | NO_WINDOW` —— 窗口标志活到 CreateProcess，挂起语义也
+/// 保住（JobObject 的恢复因为同一个空表 bug 而无条件执行，进程不会
+/// 留在冻结态；就算上游修好了，它也读不到**这个**类型，照样恢复）。
+#[cfg(windows)]
+#[derive(Debug)]
+struct NoWindow;
+
+#[cfg(windows)]
+impl process_wrap::tokio::CommandWrapper for NoWindow {
+    fn pre_spawn(
+        &mut self,
+        command: &mut tokio::process::Command,
+        _core: &CommandWrap,
+    ) -> std::io::Result<()> {
+        use windows::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
+        command.creation_flags((CREATE_NO_WINDOW | CREATE_SUSPENDED).0);
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl ProcessRunner for SystemProcessRunner {
     async fn run(
@@ -103,7 +138,10 @@ impl ProcessRunner for SystemProcessRunner {
         #[cfg(unix)]
         wrap.wrap(process_wrap::tokio::ProcessGroup::leader());
         #[cfg(windows)]
-        wrap.wrap(process_wrap::tokio::JobObject);
+        {
+            wrap.wrap(process_wrap::tokio::JobObject);
+            wrap.wrap(NoWindow);
+        }
 
         let mut child = wrap.spawn()?;
 
