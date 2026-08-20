@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-regenerate-turn"
+description = "Enables the regenerate_turn command without any pre-configured scope."
+commands.allow = ["regenerate_turn"]
+
+[[permission]]
+identifier = "deny-regenerate-turn"
+description = "Denies the regenerate_turn command without any pre-configured scope."
+commands.deny = ["regenerate_turn"]

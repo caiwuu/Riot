@@ -5,6 +5,7 @@ import {
   type AgentEvent,
   type ImageInput,
   type Message,
+  type PendingAsk,
   type PermissionAsk,
   type PermissionMode,
   type PermissionResponse,
@@ -13,6 +14,7 @@ import {
   queueList,
   queueRemove,
   queueTake,
+  regenerateTurn,
   respondPermission,
   sendTurn,
   subscribeSession,
@@ -144,7 +146,28 @@ type HistorySnap = {
   archived: Message[];
   busy: boolean;
   compacting?: boolean;
+  /** 还在等用户回答的权限询问。见 reconcileAsks。 */
+  pendingAsks?: PendingAsk[];
+  /** 正在流式生成的正文。流式增量不进历史，切回来靠它接着显示。 */
+  liveText?: string;
+  /** 正在流式生成的思考。缺了它思考块的字数会清零重数。 */
+  liveThinking?: string;
 };
+
+/**
+ * 每个会话当前这轮等待的起点（epoch ms）。
+ *
+ * 挂在模块级：Chat 按会话 id 重挂载，组件内的计时起点活不过切换 ——
+ * 切走再切回，状态行的秒数从 0 重数，明明已经等了两分钟却显示 3s。
+ * 协议消息不带时间戳，历史水合恢复不出真实起点，只能在"等待开始"的
+ * 时刻由前端记下来。应用重启后拿不回起点，从水合时刻起数（诚实的下界）。
+ */
+const waitStartAt = new Map<string, number>();
+
+/** 状态行计时的起点。null = 此刻没有在等的东西。 */
+export function waitStartedAt(sessionId: string): number | null {
+  return waitStartAt.get(sessionId) ?? null;
+}
 
 export function useSession(
   sessionId: string,
@@ -256,6 +279,7 @@ export function useSession(
     };
 
     const onSubscribeError = (message: string) => {
+      waitStartAt.delete(sessionId);
       setState((s) => ({
         ...s,
         busy: false,
@@ -339,6 +363,9 @@ export function useSession(
           // 上一轮的残留会让这一轮的同样一句话被误删。
           settled.current = { text: [], thinking: [] };
           busyRef.current = true;
+          // 只补缺不重置：一轮里每次模型调用都发 request_start，
+          // 中途重置会让状态行的秒数在轮内清零。
+          if (!waitStartAt.has(sessionId)) waitStartAt.set(sessionId, Date.now());
           // 请求开始意味着压缩这一段结束了 —— 成功如此，失败也如此
           // （失败没有事件，只有日志，但轮次照常用完整历史往下走）。
           setState((s) => ({
@@ -425,10 +452,14 @@ export function useSession(
         case "compacting":
           // 这段时间界面上只有那三个点在动。不说的话用户以为是模型变慢了，
           // 而实际上系统在做一件必要的事。
+          // 手动 /compact 不开轮次、没有 request_start，等待起点在这里补。
+          if (!waitStartAt.has(sessionId)) waitStartAt.set(sessionId, Date.now());
           setState((s) => ({ ...s, compacting: true }));
           break;
 
         case "compacted":
+          // 手动压缩（不在轮内）到此等待结束；轮内自动压缩则轮子还在跑。
+          if (!busyRef.current) waitStartAt.delete(sessionId);
           // 旧消息还在界面上，划一条线就够了。再出一块提示等于把记录盖住。
           flush();
           setState((s) => ({
@@ -441,6 +472,7 @@ export function useSession(
         case "done": {
           flush();
           toolJsonById.current.clear();
+          waitStartAt.delete(sessionId);
           // 立刻同步 ref —— 下面的接力在 React 提交之前就要按"已空闲"
           // 决定开新轮还是排队。
           busyRef.current = false;
@@ -516,6 +548,13 @@ export function useSession(
     const applySnap = (hist: HistorySnap) => {
       const busy = hist.busy;
       const compacting = hist.compacting ?? false;
+      // 等待起点跟着快照对齐：还在等而起点丢了（应用重启）就从现在
+      // 起数；已经空闲就清掉，免得下一轮从陈旧起点开始。
+      if (busy || compacting) {
+        if (!waitStartAt.has(sessionId)) waitStartAt.set(sessionId, Date.now());
+      } else {
+        waitStartAt.delete(sessionId);
+      }
       busyRef.current = busy;
       compactingRef.current = compacting;
       setState((s) => applyHistorySnap(s, hist));
@@ -530,7 +569,16 @@ export function useSession(
       })
       .then((hist) => {
         if (cancelled || !hist) return;
-        applySnap(hist);
+        // 订阅之后、快照落地之前的 text/thinking delta 已经在内核缓冲里
+        // 一份，也在这里的 buffer 里一份。两头都用会把前缀拼两遍，字数
+        // 翻倍；丢掉 buffer 又会丢快照之后才到的那几个 token。按重叠
+        // 拼接（见 mergeLive）。
+        const extra = liveDeltasOf(buffered);
+        applySnap({
+          ...hist,
+          liveText: mergeLive(hist.liveText, extra.text),
+          liveThinking: mergeLive(hist.liveThinking, extra.thinking),
+        });
       })
       .catch(() => {
         // 新会话没有历史，拿不到不算错。真正的通信故障会在订阅那边报。
@@ -538,7 +586,11 @@ export function useSession(
       .finally(() => {
         if (cancelled) return;
         historyReady = true;
-        for (const e of buffered) handle(e);
+        for (const e of buffered) {
+          // text/thinking 已经折进 liveText/liveThinking，再 handle 会重拼。
+          if (isLiveDelta(e)) continue;
+          handle(e);
+        }
         buffered.length = 0;
       });
 
@@ -570,6 +622,13 @@ export function useSession(
               ...s,
               busy: true,
               compacting: hist.compacting ?? false,
+              // 弹窗也要对账：睡眠期间到的询问，事件早发进死通道了，
+              // 只有快照里有它。
+              asks: reconcileAsks(s.asks, hist.pendingAsks ?? []),
+              // 通道死掉的那段思考/正文只在内核缓冲里。不 catchUp 条目
+              // 以免盖掉正在流的工具输出，但半截流要接上，否则字数停住。
+              streaming: mergeLive(hist.liveText, s.streaming),
+              thinking: mergeLive(hist.liveThinking, s.thinking),
             }));
           }
           restoreQueue();
@@ -673,6 +732,7 @@ export function useSession(
         mutateQueued((q) => [...q, { id: localId, text, images, refs }]);
       } else {
         busyRef.current = true;
+        waitStartAt.set(sessionId, Date.now());
         setState((s) => ({
           ...s,
           busy: true,
@@ -712,6 +772,7 @@ export function useSession(
           // 乐观放进了面板，宿主却直接开轮了：转成对话气泡。
           mutateQueued((q) => q.filter((x) => x.id !== localId));
           busyRef.current = true;
+          waitStartAt.set(sessionId, Date.now());
           setState((s) => ({
             ...s,
             busy: true,
@@ -730,6 +791,8 @@ export function useSession(
         return true;
       } catch (e) {
         mutateQueued((q) => q.filter((x) => x.id !== localId));
+        // 乐观记下的等待起点一并回滚（轮子没开起来）。
+        if (!wasBusy) waitStartAt.delete(sessionId);
         setState((s) => ({
           ...s,
           // 排队发送失败时上一轮还在跑，不能把它标成空闲 ——
@@ -826,11 +889,66 @@ export function useSession(
     [sessionId, mutateQueued, send],
   );
 
+  /**
+   * 重新生成一条助手回复：丢掉它及之后的条目，从前面那条用户消息再跑。
+   * 忙着的时候不做事 —— 按钮那时是禁用的。
+   */
+  const regenerate = useCallback(
+    async (itemId: string) => {
+      if (busyRef.current) return;
+      const messageId = assistantMessageId(itemId);
+      busyRef.current = true;
+      waitStartAt.set(sessionId, Date.now());
+      mutateQueued(() => []);
+      setState((s) => ({
+        ...s,
+        items: trimAfterUserPrompt(s.items, itemId),
+        streaming: "",
+        thinking: "",
+        streamingPlan: null,
+        busy: true,
+        asks: [],
+        queued: [],
+      }));
+      try {
+        await regenerateTurn(sessionId, messageId);
+      } catch (e) {
+        waitStartAt.delete(sessionId);
+        busyRef.current = false;
+        try {
+          const hist = await getHistory(sessionId);
+          setState((s) => {
+            const restored = applyHistorySnap(s, hist);
+            return {
+              ...restored,
+              busy: false,
+              items: [
+                ...restored.items,
+                { kind: "error", id: `err-${Date.now()}`, text: humanizeError(e) },
+              ],
+            };
+          });
+        } catch {
+          setState((s) => ({
+            ...s,
+            busy: false,
+            items: [
+              ...s.items,
+              { kind: "error", id: `err-${Date.now()}`, text: humanizeError(e) },
+            ],
+          }));
+        }
+      }
+    },
+    [sessionId, mutateQueued],
+  );
+
   const stop = useCallback(() => {
     void interruptSession(sessionId).then((cancelled) => {
       if (cancelled) return;
       // 宿主已经闲着。结束事件在换订阅时丢过，界面还转圈 ——
       // 再点停止必须把残留忙碌清掉，否则停止键永远摘不下来。
+      waitStartAt.delete(sessionId);
       busyRef.current = false;
       setState((s) => ({
         ...s,
@@ -869,7 +987,7 @@ export function useSession(
     [sessionId, state.asks],
   );
 
-  return { ...state, send, stop, answer, queueDelete, queueEdit, queueSendNow };
+  return { ...state, send, stop, answer, regenerate, queueDelete, queueEdit, queueSendNow };
 }
 
 /** 活历史 + 压缩前归档 → 界面条目。归档画在分割线上面。 */
@@ -910,7 +1028,17 @@ function applyHistorySnap(s: SessionState, hist: HistorySnap): SessionState {
             asks: [],
             items: finalizeIdleItems(s.items, "未完成"),
           }
-        : {}),
+        : {
+            asks: reconcileAsks(s.asks, hist.pendingAsks ?? []),
+            streaming: mergeLive(
+              hist.liveText,
+              keepIfNotSettled(s.streaming, s.items, "assistant"),
+            ),
+            thinking: mergeLive(
+              hist.liveThinking,
+              keepIfNotSettled(s.thinking, s.items, "thinking"),
+            ),
+          }),
     };
   }
 
@@ -924,8 +1052,17 @@ function applyHistorySnap(s: SessionState, hist: HistorySnap): SessionState {
       compacting,
       items,
       tokens,
-      streaming: keepIfNotSettled(s.streaming, items, "assistant"),
-      thinking: keepIfNotSettled(s.thinking, items, "thinking"),
+      // 半截流以快照为准：内核收齐了每一条增量，本地这份在切走/通道
+      // 断开期间是缺头的。快照为空（老内核或刚好没在流）才退回本地。
+      streaming: mergeLive(
+        hist.liveText,
+        keepIfNotSettled(s.streaming, items, "assistant"),
+      ),
+      thinking: mergeLive(
+        hist.liveThinking,
+        keepIfNotSettled(s.thinking, items, "thinking"),
+      ),
+      asks: reconcileAsks(s.asks, hist.pendingAsks ?? []),
     };
   }
   return {
@@ -948,6 +1085,64 @@ function mergeOptimisticUser(fromHist: Item[], current: Item[]): Item[] {
     return !fromHist.some((h) => h.kind === "user" && h.text === it.text);
   });
   return extras.length === 0 ? fromHist : [...fromHist, ...extras];
+}
+
+/**
+ * 用快照里的挂起询问重建弹窗队列。
+ *
+ * `permission_request` 事件只发一次：切走再切回（组件重挂载）、睡眠唤醒
+ * 后换通道，事件都已经发进没人听的旧出口，弹窗全靠快照重建。快照为准 ——
+ * 不在快照里的已经被解决（超时/分类器），留着就是一个点了没反应的僵尸
+ * 弹窗；已在队列里的保住原对象，正在看的弹窗不因为一次对账重建。快照
+ * 之后新到的询问由事件流补上（permission_request 的处理按 request_id
+ * 去重，晚到的重复无害）。
+ */
+function reconcileAsks(
+  current: { requestId: string; detail: PermissionAsk }[],
+  snap: PendingAsk[],
+): { requestId: string; detail: PermissionAsk }[] {
+  return snap.map(
+    (p) =>
+      current.find((a) => a.requestId === p.request_id) ?? {
+        requestId: p.request_id,
+        detail: p.detail,
+      },
+  );
+}
+
+/**
+ * 把内核快照里的半截流和本地/缓冲里的增量拼起来。
+ *
+ * 订阅之后到快照落地之间，同一段 delta 会同时出现在两边。哪边是前缀
+ * 就取长的；有重叠就按后缀对齐再接上快照之后才到的那截。对不上就
+ * 以快照为准再追加 —— 总比从 0 重数、缺一截头好。
+ */
+function mergeLive(snap: string | undefined, extra: string): string {
+  const a = snap ?? "";
+  if (!extra) return a;
+  if (!a) return extra;
+  if (extra.startsWith(a)) return extra;
+  if (a.startsWith(extra)) return a;
+  const max = Math.min(a.length, extra.length);
+  for (let k = max; k >= 0; k--) {
+    if (a.endsWith(extra.slice(0, k))) return a + extra.slice(k);
+  }
+  return a + extra;
+}
+
+function isLiveDelta(event: AgentEvent): boolean {
+  return event.type === "delta" && (event.kind === "text" || event.kind === "thinking");
+}
+
+function liveDeltasOf(events: AgentEvent[]): { text: string; thinking: string } {
+  let text = "";
+  let thinking = "";
+  for (const e of events) {
+    if (e.type !== "delta") continue;
+    if (e.kind === "text") text += e.text;
+    else if (e.kind === "thinking") thinking += e.text;
+  }
+  return { text, thinking };
 }
 
 /** 历史没有进度行，把界面上还在跑的那张卡的输出接回去。 */
@@ -982,6 +1177,21 @@ function keepIfNotSettled(
 
 function textsOverlap(a: string, b: string): boolean {
   return a === b || a.startsWith(b) || b.startsWith(a);
+}
+
+/** 界面条目 id（`msg_xxx-t` / `msg_xxx-t3`）→ 内核消息 id。 */
+function assistantMessageId(itemId: string): string {
+  return itemId.replace(/-t\d*$/, "");
+}
+
+/** 丢掉这条助手回复及之后的一切，保留到它前面那条用户气泡。 */
+function trimAfterUserPrompt(items: Item[], assistantItemId: string): Item[] {
+  const ast = items.findIndex((it) => it.id === assistantItemId);
+  if (ast < 0) return items;
+  for (let i = ast - 1; i >= 0; i--) {
+    if (items[i]?.kind === "user") return items.slice(0, i + 1);
+  }
+  return items.slice(0, ast);
 }
 
 function finalizeIdleItems(items: Item[], result: string): Item[] {
@@ -1309,7 +1519,8 @@ function describeError(e: AgentError): string {
  *
  * 图片类结果（截图、读图）显示图片本身。described_image 的 text 是写给
  * 模型的转述（带着"当作亲眼所见"之类的内部指示），**不能**摆到界面上 ——
- * 用户该看到的是那张图。
+ * 用户该看到的是那张图。marked_image 的 text 则是和图同属一个结果的
+ * 正文（编号清单、MCP 结果的文本部分），图文都给用户看。
  *
  * `image` 是消息里的压缩图（data URL），`imagePath` 是落盘原图的路径。
  * 两个都给：压缩图立刻能显示，原图由组件按路径异步加载后替换。
@@ -1322,9 +1533,14 @@ function resultView(c: ToolResultContent): { text?: string; image?: string; imag
       return { text: `结果过大（${c.total_bytes} 字节），已写入 ${c.path}\n\n${c.preview}` };
     case "cleared":
       return { text: "（历史结果已清理）" };
+    case "marked_image":
+      return {
+        text: c.text,
+        image: `data:${c.media_type};base64,${c.data}`,
+        ...(c.path ? { imagePath: c.path } : {}),
+      };
     case "image":
     case "described_image":
-    case "marked_image":
       return {
         image: `data:${c.media_type};base64,${c.data}`,
         ...(c.path ? { imagePath: c.path } : {}),

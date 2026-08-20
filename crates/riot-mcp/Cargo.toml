@@ -8,7 +8,12 @@ description = "MCP 客户端：stdio 服务器连接、工具适配、连接枢�
 
 [dependencies]
 riot-protocol = { workspace = true }
+# 只用 tools::shrink：MCP 返回的图片和截图走同一条"给模型前压小"的路。
+# 依赖方向无环（tools 不依赖 mcp），kernel 同时依赖两者。
+riot-tools = { workspace = true }
 async-trait = { workspace = true }
+# MCP 的图片内容块是 base64，落盘原图前要解码。
+base64 = "0.22"
 process-wrap = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
@@ -20,3 +25,7 @@ tracing = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
+
+[dev-dependencies]
+# FakeVision / MemFs / Null 系列替身，测 McpTool 的图片交付分支。
+riot-tools = { workspace = true, features = ["testing"] }

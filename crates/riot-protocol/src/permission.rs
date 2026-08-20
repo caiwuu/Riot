@@ -4,7 +4,7 @@
 //! hook 的 allow 不能越过配置文件里的 deny/ask。**
 //! 见 ARCHITECTURE.md §9.2
 
-use crate::id::ToolUseId;
+use crate::id::{RequestId, ToolUseId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -294,6 +294,17 @@ pub struct PermissionAsk {
     pub preview: AskPreview,
     pub suggestions: Vec<PermissionUpdate>,
     pub reason: DecisionReason,
+}
+
+/// 一条还在等用户回答的权限询问（会话快照用）。
+///
+/// `permission_request` 事件只在询问产生那一刻发一次；界面切走的话它发进
+/// 没人听的旧通道。快照不带的话，切回来弹窗再也不出现 —— 那次询问只能
+/// 等到超时被拒，模型收到"授权请求没有得到回应"。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PendingAsk {
+    pub request_id: RequestId,
+    pub detail: PermissionAsk,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

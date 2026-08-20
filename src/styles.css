@@ -4443,28 +4443,52 @@ pre {
   font-size: inherit;
 }
 
-/* 整条消息的复制。占位始终存在，hover 才可见 —— 布局不跳动 */
-.msg-copy {
-  display: block;
+/* 消息操作（复制 / 重新生成）。占位始终在，hover 才可见 —— 布局不跳动 */
+.msg-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
   margin-top: 4px;
-  border: none;
-  background: none;
-  color: var(--text-faint);
-  font-size: 11px;
-  padding: 2px 8px;
-  margin-left: -8px;
-  border-radius: 5px;
+  margin-left: -4px;
   opacity: 0;
   transition: opacity 0.12s;
 }
 
-.msg.assistant:hover .msg-copy,
-.msg-copy:focus-visible {
+.msg.assistant:hover .msg-actions,
+.msg-actions:focus-within {
   opacity: 1;
 }
 
-.msg-copy:hover {
+.msg-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: none;
+  color: var(--text-faint);
+  border-radius: 5px;
+  padding: 0;
+  cursor: pointer;
+}
+
+.msg-action:hover {
   background: var(--bg-hover);
+  color: var(--text);
+}
+
+.msg-action:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
+.msg-action:disabled:hover {
+  background: none;
+  color: var(--text-faint);
+}
+
+.msg-action.done {
   color: var(--text);
 }
 
@@ -4544,6 +4568,70 @@ pre {
 .think-block.live .think-body {
   max-height: min(28vh, 320px);
   overflow-y: auto;
+}
+
+/* ── 过程折叠组 ─────────────────────────────── */
+
+/*
+ * 一段已完成的探索（思考 / 读文件 / 搜索…）折成一行摘要。
+ * 视觉上和 think-head 同一族：小字、淡色、hover 才亮 —— 这是过程
+ * 不是内容，不该比正文显眼。
+ */
+.fold-block {
+  align-self: stretch;
+  min-width: 0;
+}
+
+.fold-head {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: none;
+  color: var(--text-faint);
+  font-size: 12px;
+  padding: 2px 8px 2px 4px;
+  border-radius: 6px;
+  text-align: left;
+}
+
+.fold-head:hover {
+  color: var(--text-dim);
+  background: var(--bg-hover);
+}
+
+/* 摘要超长截尾 —— 全文在 title 里悬停可见。 */
+.fold-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fold-count {
+  font-size: 11px;
+  opacity: 0.75;
+  flex: none;
+}
+
+/* 折叠不能把"中间有一步炸了"也藏掉，失败数常驻头部。 */
+.fold-fail {
+  font-size: 11px;
+  color: var(--danger);
+  font-weight: 600;
+  flex: none;
+}
+
+/* 展开体：左侧一道竖线把这段过程括起来，和周围的正式内容分层。 */
+.fold-body {
+  margin: 6px 0 0 16px;
+  border-left: 2px solid var(--border);
+  padding-left: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
 }
 
 /* ── 输入框附属 ─────────────────────────────── */

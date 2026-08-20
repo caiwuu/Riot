@@ -56,7 +56,7 @@ use serde::Serialize;
 /// 技能目录里让模型按需 Read，不该整个贴进 SKILL.md）。
 const MAX_BODY_CHARS: usize = 64 * 1024;
 
-/// 随应用分发的技能。源文件在 `src-tauri/builtin/skills/<名字>/SKILL.md`。
+/// 随应用分发的技能。源文件在 `crates/riot-kernel/builtin/skills/<名字>/SKILL.md`。
 ///
 /// 加一个：放好文件，然后在这里加一行。见模块文档「为什么编进二进制」。
 ///
@@ -81,6 +81,7 @@ const BUILTIN_SKILLS: &[(&str, &str)] = &[
         "skillify",
         include_str!("../builtin/skills/skillify/SKILL.md"),
     ),
+    ("retro", include_str!("../builtin/skills/retro/SKILL.md")),
     (
         "split-to-prs",
         include_str!("../builtin/skills/split-to-prs/SKILL.md"),

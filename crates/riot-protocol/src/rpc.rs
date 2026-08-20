@@ -8,7 +8,7 @@ use crate::changes::{FileChange, GitChanges};
 use crate::event::AgentEvent;
 use crate::id::{RequestId, SessionId, TurnId};
 use crate::message::Message;
-use crate::permission::{PermissionMode, PermissionResponse};
+use crate::permission::{PendingAsk, PermissionMode, PermissionResponse};
 use crate::turn::{ModelEndpoint, QueuedSummary, TurnConfig, TurnInput};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -36,6 +36,15 @@ pub enum RpcRequest {
         input: crate::turn::TurnInput,
         /// 本轮的完整配置:模型端点、联网/视觉、limits、mode、会话设置。
         /// Box 是因为它比其它变体大得多,不装箱会把整个 enum 撑大。
+        config: Box<TurnConfig>,
+    },
+    /// 丢掉指定助手消息及其后的一切，从它前面那条用户消息再跑一轮。
+    /// 不重复插入用户消息 —— 历史已经以那条提示结尾。
+    #[serde(rename = "turn.regenerate")]
+    TurnRegenerate {
+        session_id: SessionId,
+        /// 要点重新生成的助手消息 id（不是界面条目 id）。
+        message_id: String,
         config: Box<TurnConfig>,
     },
     /// 中断当前轮。
@@ -145,6 +154,17 @@ pub enum RpcResponse {
         /// 有没有轮子在跑。决定界面显示停止键还是发送键。
         busy: bool,
         compacting: bool,
+        /// 还在等用户回答的权限询问。事件只发一次，弹窗跨"切走再切回"
+        /// 活下来靠这份快照。`default` 兼容旧 transcript 回放。
+        #[serde(default)]
+        pending_asks: Vec<PendingAsk>,
+        /// 正在流式生成的正文。流式增量不进历史 —— 不带这段的话，
+        /// 切回来的界面只能从 0 重新攒，正文缺头直到消息完成。
+        #[serde(default)]
+        live_text: String,
+        /// 正在流式生成的思考。症状同 `live_text`：思考块的字数清零重数。
+        #[serde(default)]
+        live_thinking: String,
     },
     SessionList {
         sessions: Vec<SessionSummary>,
@@ -296,5 +316,38 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(&env).unwrap();
         assert_eq!(v["id"], 7);
         assert_eq!(v["method"], "kernel.ping");
+    }
+
+    #[test]
+    fn regenerate_uses_dotted_method_name() {
+        let req: RpcRequest = serde_json::from_value(serde_json::json!({
+            "method": "turn.regenerate",
+            "params": {
+                "session_id": "s1",
+                "message_id": "msg_1",
+                "config": {
+                    "model": {
+                        "protocol": "openai",
+                        "base_url": "https://example.com",
+                        "api_path": "",
+                        "api_key": "",
+                        "model": "t"
+                    },
+                    "web": { "fetch_enabled": false, "search_enabled": false },
+                    "vision": { "accepts_images": false },
+                    "limits": {
+                        "ask_timeout_secs": 60,
+                        "max_turns": 32,
+                        "compact_threshold_tokens": 100000
+                    },
+                    "mode": "default"
+                }
+            }
+        }))
+        .expect("turn.regenerate 要能从 JSON 读出来");
+        let RpcRequest::TurnRegenerate { message_id, .. } = req else {
+            panic!("该解成 TurnRegenerate");
+        };
+        assert_eq!(message_id, "msg_1");
     }
 }

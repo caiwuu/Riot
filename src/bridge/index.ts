@@ -15,6 +15,7 @@ import type {
   FileChange,
   GitChanges,
   Message,
+  PendingAsk,
   PermissionAsk,
   PermissionMode,
   PermissionResponse,
@@ -25,6 +26,7 @@ export type {
   FileChange,
   GitChanges,
   Message,
+  PendingAsk,
   PermissionAsk,
   PermissionMode,
   PermissionResponse,
@@ -289,6 +291,11 @@ export function sendTurn(
   refs: string[] = [],
 ): Promise<string | null> {
   return invoke<string | null>("send_turn", { sessionId, text, images, refs });
+}
+
+/** 丢掉这条助手回复及其后的一切，从它前面那条用户消息再跑一轮。 */
+export function regenerateTurn(sessionId: string, messageId: string): Promise<void> {
+  return invoke("regenerate_turn", { sessionId, messageId });
 }
 
 /** 一条斜杠命令。模板正文留在宿主，展开走 slashExpand。 */
@@ -597,6 +604,12 @@ export function getHistory(sessionId: string): Promise<{
   archived: Message[];
   busy: boolean;
   compacting: boolean;
+  /** 还在等用户回答的权限询问。切回会话时靠它重建弹窗。 */
+  pendingAsks: PendingAsk[];
+  /** 正在流式生成的正文。流式增量不进历史，切回来靠它接着显示。 */
+  liveText: string;
+  /** 正在流式生成的思考。缺了它思考块的字数会清零重数。 */
+  liveThinking: string;
 }> {
   return invoke("get_history", { sessionId });
 }

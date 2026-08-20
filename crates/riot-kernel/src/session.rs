@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::sync::{Mutex, oneshot};
@@ -26,13 +26,13 @@ use tokio_util::sync::CancellationToken;
 
 use riot_core::{AgentDeps, AgentState, run_agent};
 use riot_permissions::RuleSet;
-use riot_protocol::event::AgentEvent;
+use riot_protocol::event::{AgentEvent, StreamDelta};
 use riot_protocol::id::{IdGenerator, MessageId, NanoIdGenerator, RequestId, SessionId};
 use riot_protocol::message::{Attachment, Message, MessageMeta, UserContent};
 use riot_protocol::permission::{
-    AskPreview, DecisionReason, GateOutcome, PermissionAsk, PermissionContext, PermissionGate,
-    PermissionMode, PermissionModeState, PermissionResponse, PermissionResult, PermissionRule,
-    SafetyVerdict,
+    AskPreview, DecisionReason, GateOutcome, PendingAsk, PermissionAsk, PermissionContext,
+    PermissionGate, PermissionMode, PermissionModeState, PermissionResponse, PermissionResult,
+    PermissionRule, SafetyVerdict,
 };
 use riot_protocol::provider::Provider;
 use riot_protocol::tool::{FileStateCache, PromptContext, Tool};
@@ -393,6 +393,8 @@ pub struct Session {
     /// 事件出口。前端每次订阅都会换掉里面的 channel，跑着的轮子跟着换。
     sink: SessionSink,
     pending_asks: Arc<PendingAsks>,
+    /// 进行中的半截流（见 [`LiveStream`]）。随 session.resume 快照回给界面。
+    live_stream: Mutex<LiveStream>,
     /// 会话级采样覆盖。字段为 None 表示继承 provider 的设置。
     /// 模型本身不存这里 —— 每轮由宿主按当前激活配置解析传入，
     /// 用户在对话中途切换模型，下一轮立即生效。
@@ -465,21 +467,67 @@ pub fn title_excerpt(text: &str) -> Option<String> {
     (!t.is_empty()).then(|| t.chars().take(40).collect())
 }
 
+/// 进行中的半截流：正在流式生成、还没落成完整消息的正文和思考。
+///
+/// 历史只收完整消息（见模块文档），流式增量不进 transcript —— 于是
+/// 「切走再切回」的界面从历史里恢复不出正在生成的这一段：思考块的字数
+/// 从 0 重数、正文缺头，直到消息完成才自愈。这份缓冲随 session.resume
+/// 快照整体带回，界面拿它接着显示。
+#[derive(Default)]
+pub struct LiveStream {
+    pub text: String,
+    pub thinking: String,
+}
+
+/// 把一条事件折进半截流缓冲。
+///
+/// 清空点和前端 applyMessage 一致：助手消息完成（整段内容已经在消息里，
+/// 缓冲的使命结束）和轮子结束。工具增量刻意不进这里 —— 完整参数在
+/// Message 里，卡片摘要缺一小会儿会在消息到达时自愈，为它再攒一份
+/// 每个 tool_use_id 的 JSON 不值。
+fn fold_live(live: &mut LiveStream, ev: &AgentEvent) {
+    match ev {
+        AgentEvent::Delta(StreamDelta::Text { text, .. }) => live.text.push_str(text),
+        AgentEvent::Delta(StreamDelta::Thinking { text, .. }) => live.thinking.push_str(text),
+        AgentEvent::Message(Message::Assistant { .. }) | AgentEvent::Done { .. } => {
+            live.text.clear();
+            live.thinking.clear();
+        }
+        _ => {}
+    }
+}
+
+/// 一条挂着的询问：应答通道，加上给界面重建弹窗用的详情。
+struct PendingEntry {
+    tx: oneshot::Sender<PermissionResponse>,
+    detail: PermissionAsk,
+    /// 到达序号。HashMap 不保序，快照按它排 —— 乱序重建会让弹窗
+    /// 顺序和产生顺序对不上。
+    seq: u64,
+}
+
 #[derive(Default)]
 pub struct PendingAsks {
-    map: Mutex<HashMap<String, oneshot::Sender<PermissionResponse>>>,
+    map: Mutex<HashMap<String, PendingEntry>>,
+    seq: AtomicU64,
 }
 
 impl PendingAsks {
-    async fn insert(&self, id: String, tx: oneshot::Sender<PermissionResponse>) {
-        self.map.lock().await.insert(id, tx);
+    async fn insert(
+        &self,
+        id: String,
+        tx: oneshot::Sender<PermissionResponse>,
+        detail: PermissionAsk,
+    ) {
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        self.map.lock().await.insert(id, PendingEntry { tx, detail, seq });
     }
 
     pub async fn resolve(&self, id: &str, response: PermissionResponse) -> bool {
         match self.map.lock().await.remove(id) {
             // 接收端已经走了（超时或取消）。不是错误 —— 用户在超时之后
             // 才点了按钮，这时候什么都不该发生。
-            Some(tx) => tx.send(response).is_ok(),
+            Some(e) => e.tx.send(response).is_ok(),
             None => false,
         }
     }
@@ -487,6 +535,51 @@ impl PendingAsks {
     async fn forget(&self, id: &str) {
         self.map.lock().await.remove(id);
     }
+
+    /// 还在等回答的询问，按到达顺序。进会话快照（session.resume）——
+    /// `permission_request` 事件只发一次，切走的界面靠这份快照把弹窗
+    /// 重建出来，否则那次询问只能等到超时被拒。
+    pub async fn snapshot(&self) -> Vec<PendingAsk> {
+        let g = self.map.lock().await;
+        let mut v: Vec<(u64, PendingAsk)> = g
+            .iter()
+            .map(|(id, e)| {
+                (
+                    e.seq,
+                    PendingAsk {
+                        request_id: RequestId::from_raw(id.clone()),
+                        detail: e.detail.clone(),
+                    },
+                )
+            })
+            .collect();
+        v.sort_by_key(|(seq, _)| *seq);
+        v.into_iter().map(|(_, a)| a).collect()
+    }
+
+    async fn clear(&self) {
+        self.map.lock().await.clear();
+    }
+}
+
+/// 真正的用户提示：有正文、附图或 `@` 文件。工具结果不算。
+fn is_user_prompt(m: &Message) -> bool {
+    match m {
+        Message::User { content, .. } => content.iter().any(|c| match c {
+            UserContent::Text { text } => !text.trim().is_empty(),
+            UserContent::Attachment(Attachment::Image { .. } | Attachment::UserFile { .. }) => true,
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
+/// 重新生成的截断点：指定助手消息前面最近一条用户提示的下标。
+fn cut_at_user_prompt(history: &[Message], assistant_id: &str) -> Option<usize> {
+    let ast = history.iter().position(|m| {
+        matches!(m, Message::Assistant { .. }) && m.id().as_str() == assistant_id
+    })?;
+    history[..ast].iter().rposition(is_user_prompt)
 }
 
 /// 把用户这一轮的输入拼成消息内容。
@@ -620,6 +713,7 @@ impl Session {
             queue: Arc::new(HostInputQueue::default()),
             sink: SessionSink::default(),
             pending_asks: Arc::new(PendingAsks::default()),
+            live_stream: Mutex::new(LiveStream::default()),
             sampling_override: Mutex::new(Sampling::default()),
             python_venv: Mutex::new(None),
             system_prompt_extra: Mutex::new(None),
@@ -660,6 +754,7 @@ impl Session {
             queue: Arc::new(HostInputQueue::default()),
             sink: SessionSink::default(),
             pending_asks: Arc::new(PendingAsks::default()),
+            live_stream: Mutex::new(LiveStream::default()),
             sampling_override: Mutex::new(settings.sampling),
             python_venv: Mutex::new(settings.python_venv.clone()),
             system_prompt_extra: Mutex::new(settings.system_prompt.clone()),
@@ -759,6 +854,12 @@ impl Session {
 
     pub fn pending_asks(&self) -> Arc<PendingAsks> {
         Arc::clone(&self.pending_asks)
+    }
+
+    /// 进行中的半截流快照：（正文, 思考）。空闲时两段都是空串。
+    pub async fn live_stream(&self) -> (String, String) {
+        let g = self.live_stream.lock().await;
+        (g.text.clone(), g.thinking.clone())
     }
 
     pub async fn set_mode(&self, m: PermissionMode) {
@@ -912,7 +1013,7 @@ impl Session {
         let this = Arc::clone(self);
         tokio::spawn(async move {
             if let Err(e) = this
-                .run_locked(input, model, caps, sink.clone(), cancel, limits)
+                .run_locked(Some(input), model, caps, sink.clone(), cancel, limits)
                 .await
             {
                 tracing::error!(error = %e, "本轮失败");
@@ -1084,15 +1185,97 @@ impl Session {
             }
             *g = Some(cancel.clone());
         }
-        self.run_locked(input, model, caps, sink, cancel, limits)
+        self.run_locked(Some(input), model, caps, sink, cancel, limits)
             .await
+    }
+
+    /// 丢掉指定助手消息及其后的一切，从它前面那条用户提示再跑一轮。
+    ///
+    /// 不重复插入用户消息：历史已经以那条提示结尾。忙着的时候拒绝 ——
+    /// 截断和正在写的 transcript 打架，界面也会同时出现新旧两段。
+    pub async fn regenerate(
+        self: &Arc<Self>,
+        assistant_id: &str,
+        model: riot_protocol::ModelEndpoint,
+        caps: TurnCapabilities,
+        sink: SessionSink,
+        limits: TurnLimits,
+    ) -> Result<(), String> {
+        let cancel = CancellationToken::new();
+        {
+            let mut g = self.running.lock().await;
+            if g.is_some() {
+                return Err("正在跑一轮，等它结束再重新生成。".into());
+            }
+            *g = Some(cancel.clone());
+        }
+        if let Err(e) = self.rewind_to_prompt(assistant_id).await {
+            *self.running.lock().await = None;
+            return Err(e);
+        }
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            if let Err(e) = this
+                .run_locked(None, model, caps, sink.clone(), cancel, limits)
+                .await
+            {
+                tracing::error!(error = %e, "重新生成失败");
+                let _ = sink.send(AgentEvent::Done {
+                    reason: riot_protocol::event::TerminalReason::Error {
+                        error: riot_protocol::event::AgentError::Internal { message: e },
+                    },
+                });
+            }
+        });
+        Ok(())
+    }
+
+    /// 截断内存历史（以及 transcript）到指定助手消息前面那条用户提示。
+    ///
+    /// 归档里的旧回复也能点：截回那条就把压缩后的活历史一并丢掉。
+    pub async fn rewind_to_prompt(&self, assistant_id: &str) -> Result<String, String> {
+        self.hydrate().await;
+        let mut live = self.history.lock().await;
+        let mut archived = self.ui_archive.lock().await;
+
+        let mut all = Vec::with_capacity(archived.len() + live.len());
+        all.extend_from_slice(&archived);
+        all.extend_from_slice(&live);
+
+        let keep = cut_at_user_prompt(&all, assistant_id).ok_or_else(|| {
+            if all.iter().any(|m| m.id().as_str() == assistant_id) {
+                "找不到这条回复前面的用户消息，没法重新生成。".to_owned()
+            } else {
+                "这条消息已经不在当前上下文里。".to_owned()
+            }
+        })?;
+        let keep_id = all[keep].id().as_str().to_owned();
+        let archive_len = archived.len();
+        if keep < archive_len {
+            archived.truncate(keep + 1);
+            live.clear();
+        } else {
+            live.truncate(keep - archive_len + 1);
+        }
+        drop(live);
+        drop(archived);
+
+        if let Some(p) = &self.persist {
+            p.log.append_rewind(&keep_id);
+        }
+        *self.live_stream.lock().await = LiveStream::default();
+        let _ = self.queue.take_all();
+        self.pending_asks.clear().await;
+        Ok(keep_id)
     }
 
     /// 跑一轮的主体。调用方必须已经把 `running` 置成本轮的令牌 ——
     /// 这里负责跑完、清 `running`、清残留插话。
+    ///
+    /// `input` 为 `None` 表示重新生成：历史已经以用户提示结尾，不再追加。
     async fn run_locked(
         &self,
-        input: TurnInput,
+        input: Option<TurnInput>,
         model: riot_protocol::ModelEndpoint,
         caps: TurnCapabilities,
         sink: SessionSink,
@@ -1337,7 +1520,7 @@ impl Session {
 
     async fn run_inner(
         &self,
-        input: TurnInput,
+        input: Option<TurnInput>,
         model: riot_protocol::ModelEndpoint,
         mut caps: TurnCapabilities,
         sink: SessionSink,
@@ -1538,52 +1721,56 @@ impl Session {
 
         let mut history = self.history.lock().await.clone();
 
-        // ── 主动压缩：历史超阈值就先总结再开工 ────────────────────
-        // 反应式（413 重试）是保命；这条是"到线就处理"—— 不主动的话，
-        // 会话会一直顶着窗口上限跑，每轮都在 413 的边缘反复横跳。
-        // 放在追加本轮用户消息**之前**：压的是旧账，新话骑在压缩后的历史上。
-        let history_tokens = provider.count_tokens(&history);
-        if !history.is_empty() && history_tokens >= limits.compact_threshold_tokens {
-            match self
-                .compact_history(
-                    &provider,
-                    &model.model,
-                    &history,
-                    &sink,
-                    cancel.child_token(),
-                )
-                .await
-            {
-                Some(compacted) => {
-                    history = compacted;
-                    *self.history.lock().await = history.clone();
+        if let Some(input) = input {
+            // ── 主动压缩：历史超阈值就先总结再开工 ────────────────────
+            // 反应式（413 重试）是保命；这条是"到线就处理"—— 不主动的话，
+            // 会话会一直顶着窗口上限跑，每轮都在 413 的边缘反复横跳。
+            // 放在追加本轮用户消息**之前**：压的是旧账，新话骑在压缩后的历史上。
+            let history_tokens = provider.count_tokens(&history);
+            if !history.is_empty() && history_tokens >= limits.compact_threshold_tokens {
+                match self
+                    .compact_history(
+                        &provider,
+                        &model.model,
+                        &history,
+                        &sink,
+                        cancel.child_token(),
+                    )
+                    .await
+                {
+                    Some(compacted) => {
+                        history = compacted;
+                        *self.history.lock().await = history.clone();
+                    }
+                    // 失败不拦路：继续用完整历史，真溢出时反应式路径兜底。
+                    None => tracing::warn!("主动压缩失败，本轮用完整历史"),
                 }
-                // 失败不拦路：继续用完整历史，真溢出时反应式路径兜底。
-                None => tracing::warn!("主动压缩失败，本轮用完整历史"),
             }
-        }
-        let mut content = user_content(input, vision.as_ref(), self.mention_ctx()).await;
-        // 记忆注入：会话的**第一条**用户消息前置 AGENTS.md（全局 + 项目）。
-        // 只注入一次 —— 它随消息进历史和 transcript，往后每轮自然带着；
-        // 每轮都注的话，同一份内容会在上下文里堆出 N 份。
-        if history.is_empty() {
-            let mut prelude = self.first_message_prelude().await;
-            if !prelude.is_empty() {
-                prelude.append(&mut content);
-                content = prelude;
+            let mut content = user_content(input, vision.as_ref(), self.mention_ctx()).await;
+            // 记忆注入：会话的**第一条**用户消息前置 AGENTS.md（全局 + 项目）。
+            // 只注入一次 —— 它随消息进历史和 transcript，往后每轮自然带着；
+            // 每轮都注的话，同一份内容会在上下文里堆出 N 份。
+            if history.is_empty() {
+                let mut prelude = self.first_message_prelude().await;
+                if !prelude.is_empty() {
+                    prelude.append(&mut content);
+                    content = prelude;
+                }
             }
+            let user_msg = Message::User {
+                id: MessageId::from_raw(self.ids.next_id("msg")),
+                content,
+                meta: MessageMeta::default(),
+            };
+            // 边产生边追加（两家共识）：轮次结束才写盘的话，中途崩溃丢的是
+            // 整轮对话；这里丢的最多是后台通道里还没落盘的几条。
+            if let Some(p) = &self.persist {
+                p.log.append(&user_msg);
+            }
+            history.push(user_msg);
+        } else if history.is_empty() {
+            return Err("没有可重新生成的用户消息".into());
         }
-        let user_msg = Message::User {
-            id: MessageId::from_raw(self.ids.next_id("msg")),
-            content,
-            meta: MessageMeta::default(),
-        };
-        // 边产生边追加（两家共识）：轮次结束才写盘的话，中途崩溃丢的是
-        // 整轮对话；这里丢的最多是后台通道里还没落盘的几条。
-        if let Some(p) = &self.persist {
-            p.log.append(&user_msg);
-        }
-        history.push(user_msg);
 
         let state = AgentState::new(self.id.clone(), model.model.clone())
             .with_messages(history)
@@ -1619,6 +1806,9 @@ impl Session {
         // 就是一片空白，用户以为聊天记录没了）。落盘那边本来就是逐条追加
         // 的，内存这边没有理由不一致。
         *self.history.lock().await = state.messages.clone();
+        // 半截流从零开始。正常情况下上一轮的 Done 已经清过，这里兜住
+        // 通道断开提前 break 的那条路 —— 不清的话残留会拼进这一轮。
+        *self.live_stream.lock().await = LiveStream::default();
 
         let stream = run_agent(state, deps, cancel.clone());
         futures::pin_mut!(stream);
@@ -1645,6 +1835,9 @@ impl Session {
                     p.log.append(m);
                 }
             }
+            // 半截流缓冲：切回会话的快照要能带上正在生成的正文/思考，
+            // 否则界面只能从 0 重新攒（历史只收完整消息）。
+            fold_live(&mut *self.live_stream.lock().await, &ev);
             // 发送失败说明前端窗口没了。继续跑完只会白烧 API 额度。
             if sink.send(ev).is_err() {
                 tracing::warn!("事件通道已断开，中止本轮");
@@ -2241,7 +2434,6 @@ impl HostGate {
         // PermissionAsk —— 先留一份。
         let reason = spec.reason.clone();
         let (tx, rx) = oneshot::channel();
-        self.pending.insert(request_id.clone(), tx).await;
 
         let ask = PermissionAsk {
             tool_use_id: tool_use_id.clone(),
@@ -2255,6 +2447,9 @@ impl HostGate {
             suggestions: spec.suggestions,
             reason: spec.reason,
         };
+        // 详情和应答通道一起挂着：事件只发一次，界面切走再切回时靠
+        // session.resume 的快照重建弹窗（见 PendingAsks::snapshot）。
+        self.pending.insert(request_id.clone(), tx, ask.clone()).await;
 
         let sent = self.sink.send(AgentEvent::PermissionRequest {
             request_id: RequestId::from_raw(request_id.clone()),
@@ -2978,6 +3173,88 @@ mod tests {
         assert!(inject_choice(&serde_json::json!("字符串"), vec!["x".into()]).is_none());
     }
 
+    /// 测试用的最小询问详情。
+    fn ask_detail(tool: &str) -> PermissionAsk {
+        PermissionAsk {
+            tool_use_id: riot_protocol::id::ToolUseId::from_raw("t1"),
+            tool_name: tool.to_owned(),
+            summary: format!("运行 {tool}"),
+            preview: AskPreview::Plain {
+                text: String::new(),
+            },
+            suggestions: vec![],
+            reason: DecisionReason::UserChoice { remembered: false },
+        }
+    }
+
+    /// 半截流缓冲：增量累加，助手消息完成或轮子结束即清空。
+    ///
+    /// 历史只收完整消息 —— 这份缓冲是「切走再切回」时恢复正在生成内容的
+    /// 唯一来源，思考块字数从 0 重数就是它缺位的症状。清空点必须和前端
+    /// applyMessage 一致：消息完成时整段内容已在消息里，缓冲再留着就会
+    /// 在下一段流里拼出重复。
+    #[test]
+    fn 半截流_增量累加_消息完成即清空() {
+        use riot_protocol::event::TerminalReason;
+
+        let mut live = LiveStream::default();
+        let mid = MessageId::from_raw("m1");
+        let delta = |text: &str| StreamDelta::Thinking {
+            message_id: mid.clone(),
+            text: text.into(),
+        };
+        fold_live(&mut live, &AgentEvent::Delta(delta("先看")));
+        fold_live(&mut live, &AgentEvent::Delta(delta("内核")));
+        fold_live(
+            &mut live,
+            &AgentEvent::Delta(StreamDelta::Text {
+                message_id: mid.clone(),
+                text: "好的".into(),
+            }),
+        );
+        assert_eq!(live.thinking, "先看内核");
+        assert_eq!(live.text, "好的");
+
+        // 工具增量不进缓冲 —— 完整参数在 Message 里。
+        fold_live(
+            &mut live,
+            &AgentEvent::Delta(StreamDelta::ToolInput {
+                tool_use_id: riot_protocol::id::ToolUseId::from_raw("t1"),
+                partial_json: "{\"a\":".into(),
+            }),
+        );
+        assert_eq!(live.text, "好的", "工具参数不该混进正文");
+
+        fold_live(
+            &mut live,
+            &AgentEvent::Message(Message::Assistant {
+                id: mid,
+                content: vec![],
+                usage: Default::default(),
+                meta: MessageMeta::default(),
+            }),
+        );
+        assert!(
+            live.text.is_empty() && live.thinking.is_empty(),
+            "完整消息已带全部内容，缓冲留着会在下一段流里拼出重复"
+        );
+
+        fold_live(
+            &mut live,
+            &AgentEvent::Delta(StreamDelta::Text {
+                message_id: MessageId::from_raw("m2"),
+                text: "下一段".into(),
+            }),
+        );
+        fold_live(
+            &mut live,
+            &AgentEvent::Done {
+                reason: TerminalReason::Completed,
+            },
+        );
+        assert!(live.text.is_empty(), "轮子结束也要清空");
+    }
+
     #[tokio::test]
     async fn 回应不存在的请求不会崩() {
         // 用户在超时之后才点按钮，这时候什么都不该发生
@@ -2994,11 +3271,50 @@ mod tests {
         );
     }
 
+    /// 挂着的询问要能进会话快照：按到达顺序，解决后消失。
+    ///
+    /// `permission_request` 事件只发一次。界面切走再切回、或睡眠唤醒后
+    /// 换通道，弹窗全靠 session.resume 里的这份快照重建 —— 快照缺了它，
+    /// 那次询问只能等到超时被拒，而用户从头到尾看不见任何东西。
+    #[tokio::test]
+    async fn 挂着的询问进快照_按到达顺序_解决后消失() {
+        let p = PendingAsks::default();
+        let (tx1, _rx1) = oneshot::channel();
+        let (tx2, _rx2) = oneshot::channel();
+        // id 故意让字典序和到达顺序相反 —— 快照排序靠到达序号，不是名字。
+        p.insert("ask-10".into(), tx1, ask_detail("Bash")).await;
+        p.insert("ask-2".into(), tx2, ask_detail("Write")).await;
+
+        let snap = p.snapshot().await;
+        assert_eq!(snap.len(), 2);
+        assert_eq!(
+            snap[0].request_id,
+            RequestId::from_raw("ask-10".to_owned()),
+            "按到达顺序"
+        );
+        assert_eq!(snap[0].detail.tool_name, "Bash");
+        assert_eq!(snap[1].request_id, RequestId::from_raw("ask-2".to_owned()));
+
+        assert!(
+            p.resolve(
+                "ask-10",
+                PermissionResponse::Allow {
+                    remember: vec![],
+                    choice: vec![]
+                }
+            )
+            .await
+        );
+        let snap = p.snapshot().await;
+        assert_eq!(snap.len(), 1, "解决掉的不该再出现在快照里");
+        assert_eq!(snap[0].detail.tool_name, "Write");
+    }
+
     #[tokio::test]
     async fn 回应之后请求就被摘掉了() {
         let p = PendingAsks::default();
         let (tx, rx) = oneshot::channel();
-        p.insert("a1".into(), tx).await;
+        p.insert("a1".into(), tx, ask_detail("Bash")).await;
 
         assert!(
             p.resolve(
@@ -3880,6 +4196,130 @@ mod tests {
         assert_eq!(s.title().await.as_deref(), Some("手动名"));
         s.set_title(None).await;
         assert_eq!(s.title().await.as_deref(), Some("你好，世界"));
+    }
+
+    fn hist_user(id: &str, text: &str) -> Message {
+        Message::User {
+            id: MessageId::from_raw(id),
+            content: vec![UserContent::Text { text: text.into() }],
+            meta: MessageMeta::default(),
+        }
+    }
+
+    fn hist_assistant(id: &str, text: &str) -> Message {
+        Message::Assistant {
+            id: MessageId::from_raw(id),
+            content: vec![riot_protocol::message::AssistantContent::Text {
+                text: text.into(),
+            }],
+            usage: None,
+            meta: MessageMeta::default(),
+        }
+    }
+
+    fn hist_tool_result(id: &str, tool: &str) -> Message {
+        Message::User {
+            id: MessageId::from_raw(id),
+            content: vec![UserContent::ToolResult {
+                tool_use_id: riot_protocol::id::ToolUseId::from_raw(tool),
+                content: riot_protocol::message::ToolResultContent::text("ok"),
+                is_error: false,
+            }],
+            meta: MessageMeta::default(),
+        }
+    }
+
+    #[test]
+    fn 重新生成截在最近一条用户提示() {
+        let hist = [
+            hist_user("m1", "第一句"),
+            hist_assistant("a1", "旧答"),
+            hist_user("m2", "第二句"),
+            hist_assistant("a2", "工具"),
+            hist_tool_result("t1", "tu1"),
+            hist_assistant("a3", "要重来的"),
+        ];
+        assert_eq!(cut_at_user_prompt(&hist, "a3"), Some(2));
+        assert_eq!(cut_at_user_prompt(&hist, "a1"), Some(0));
+        assert_eq!(cut_at_user_prompt(&hist, "missing"), None);
+    }
+
+    #[test]
+    fn 工具结果不算用户提示() {
+        let hist = [
+            hist_user("m1", "做这个"),
+            hist_assistant("a1", "先读"),
+            hist_tool_result("t1", "tu1"),
+            hist_assistant("a2", "答"),
+        ];
+        assert_eq!(
+            cut_at_user_prompt(&hist, "a2"),
+            Some(0),
+            "中间的 tool_result 不能当成重新生成的起点"
+        );
+    }
+
+    #[tokio::test]
+    async fn 重新生成丢掉助手消息之后的历史() {
+        let s = Session::new(
+            SessionId::from_raw("s1"),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        );
+        {
+            let mut h = s.history.lock().await;
+            h.push(hist_user("m1", "第一句"));
+            h.push(hist_assistant("a1", "旧答"));
+            h.push(hist_user("m2", "第二句"));
+            h.push(hist_assistant("a2", "要丢掉"));
+        }
+        let keep = s.rewind_to_prompt("a2").await.expect("能截断");
+        assert_eq!(keep, "m2");
+        let hist = s.history().await;
+        assert_eq!(hist.len(), 3);
+        assert_eq!(hist[2].id().as_str(), "m2");
+        assert!(s.queue_snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn 重新生成可以截回压缩前的归档() {
+        let s = Session::new(
+            SessionId::from_raw("s1"),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        );
+        s.ui_archive.lock().await.extend([
+            hist_user("m1", "压缩前"),
+            hist_assistant("a1", "旧答"),
+        ]);
+        s.history.lock().await.extend([
+            hist_user("m2", "压缩后"),
+            hist_assistant("a2", "新答"),
+        ]);
+        s.rewind_to_prompt("a1").await.expect("能截回归档");
+        assert_eq!(s.ui_archive().await.len(), 1);
+        assert!(s.history().await.is_empty(), "截回归档后活历史应清空");
+    }
+
+    #[tokio::test]
+    async fn 忙时拒绝重新生成() {
+        let s = Arc::new(Session::new(
+            SessionId::from_raw("s1"),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        ));
+        *s.running.lock().await = Some(CancellationToken::new());
+        let err = s
+            .regenerate(
+                "a1",
+                test_model(),
+                test_caps(),
+                test_sink(),
+                test_limits(),
+            )
+            .await
+            .expect_err("忙着不该开重新生成");
+        assert!(err.contains("正在跑"), "{err}");
     }
 
     #[test]

@@ -104,6 +104,16 @@ async fn send_turn(
         .await
 }
 
+/// 丢掉指定助手消息及其后的一切，从它前面那条用户提示再跑一轮。
+#[tauri::command]
+async fn regenerate_turn(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    message_id: String,
+) -> HostResult<()> {
+    state.regenerate_turn(&session_id, &message_id).await
+}
+
 /// 手动压缩会话历史（`/compact`）。空闲时才能做；完成发 Compacted 事件。
 #[tauri::command]
 async fn session_compact(state: tauri::State<'_, AppState>, session_id: String) -> HostResult<()> {
@@ -815,6 +825,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             subscribe_session,
             send_turn,
+            regenerate_turn,
             queue_list,
             queue_remove,
             queue_take,

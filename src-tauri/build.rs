@@ -9,6 +9,7 @@
 const COMMANDS: &[&str] = &[
     "subscribe_session",
     "send_turn",
+    "regenerate_turn",
     "interrupt",
     "respond_permission",
     "set_permission_mode",

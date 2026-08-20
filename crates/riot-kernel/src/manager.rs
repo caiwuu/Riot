@@ -55,6 +55,25 @@ impl EventSink for RpcEventSink {
     }
 }
 
+/// session.resume 的快照：切回会话时界面重建所需的一切。
+///
+/// 字段一一对应 `RpcResponse::SessionResumed`。做成结构体而不是元组 ——
+/// 七个位置参数里有两个 bool 和两个 String，调用点弄错顺序编译器看不出来。
+pub struct ResumeSnapshot {
+    pub messages: Vec<Message>,
+    /// 压缩边界之前的消息。模型看不见，界面画在分割线上面。
+    pub archived: Vec<Message>,
+    pub busy: bool,
+    pub compacting: bool,
+    /// 还在等用户回答的权限询问（事件只发一次，弹窗靠快照重建）。
+    pub pending_asks: Vec<riot_protocol::permission::PendingAsk>,
+    /// 正在流式生成的正文。历史只收完整消息，不带这段的话切回来的
+    /// 界面只能从 0 重新攒。
+    pub live_text: String,
+    /// 正在流式生成的思考。症状同上（思考块的字数清零重数）。
+    pub live_thinking: String,
+}
+
 /// 活会话注册表。内核 bin 持有一个。
 pub struct SessionManager {
     sessions: Mutex<HashMap<String, Arc<Session>>>,
@@ -139,18 +158,20 @@ impl SessionManager {
     ///
     /// 会话设置(mode/venv/system prompt 等)不在这里恢复 —— 它们由宿主持有,
     /// 随每轮 TurnConfig 传入;自定义标题走 session.set_title。
-    pub async fn resume(
-        &self,
-        session_id: &str,
-        cwd: PathBuf,
-    ) -> (Vec<Message>, Vec<Message>, bool, bool) {
+    pub async fn resume(&self, session_id: &str, cwd: PathBuf) -> ResumeSnapshot {
         if let Some(s) = self.get(session_id).await {
-            return (
-                s.history().await,
-                s.ui_archive().await,
-                s.is_running().await,
-                s.is_compacting(),
-            );
+            let (live_text, live_thinking) = s.live_stream().await;
+            return ResumeSnapshot {
+                messages: s.history().await,
+                archived: s.ui_archive().await,
+                busy: s.is_running().await,
+                compacting: s.is_compacting(),
+                // 还挂着的权限询问。事件只发一次，切回来的界面靠快照
+                // 把弹窗重建出来。
+                pending_asks: s.pending_asks().snapshot().await,
+                live_text,
+                live_thinking,
+            };
         }
         let id = SessionId::from_raw(session_id.to_owned());
         let log = self.transcripts.open(riot_store::TranscriptMeta {
@@ -177,7 +198,16 @@ impl SessionManager {
             .lock()
             .await
             .insert(session_id.to_owned(), session);
-        (history, archived, false, false)
+        // 刚水合的会话没有轮子在跑：没有挂着的询问，也没有半截流。
+        ResumeSnapshot {
+            messages: history,
+            archived,
+            busy: false,
+            compacting: false,
+            pending_asks: Vec::new(),
+            live_text: String::new(),
+            live_thinking: String::new(),
+        }
     }
 
     pub async fn delete(&self, session_id: &str) {
@@ -219,16 +249,12 @@ impl SessionManager {
         }
     }
 
-    /// 提交一轮:从 [`TurnConfig`] 现装能力,跑主循环,事件经出口回流。
-    /// 返回 `Some(条目 id)` = 上一轮在跑、进了插话队列;`None` = 直接开轮。
-    pub async fn submit(
+    /// 会话设置 + 本轮能力。submit / regenerate 共用。
+    async fn setup_turn(
         &self,
-        session_id: &str,
-        input: RpcTurnInput,
-        config: TurnConfig,
-    ) -> Result<Option<String>, String> {
-        let session = self.get(session_id).await.ok_or("会话不存在")?;
-
+        session: &Session,
+        config: &TurnConfig,
+    ) -> (TurnCapabilities, TurnLimits) {
         // 会话设置:宿主是权威,每轮现设。ExitPlanMode 在内核改的 mode 会经
         // ModeChanged 事件回流宿主,下一轮再传回来。
         session.set_mode(config.mode).await;
@@ -269,6 +295,19 @@ impl SessionManager {
             compact_threshold_tokens: config.limits.compact_threshold_tokens,
             sandbox: sandbox_mode(config.limits.sandbox),
         };
+        (caps, limits)
+    }
+
+    /// 提交一轮:从 [`TurnConfig`] 现装能力,跑主循环,事件经出口回流。
+    /// 返回 `Some(条目 id)` = 上一轮在跑、进了插话队列;`None` = 直接开轮。
+    pub async fn submit(
+        &self,
+        session_id: &str,
+        input: RpcTurnInput,
+        config: TurnConfig,
+    ) -> Result<Option<String>, String> {
+        let session = self.get(session_id).await.ok_or("会话不存在")?;
+        let (caps, limits) = self.setup_turn(&session, &config).await;
 
         // UserPromptSubmit hooks:能拦下这条消息或给它附加上下文。
         let mut extra_context = Vec::new();
@@ -302,6 +341,21 @@ impl SessionManager {
         Ok(session
             .submit(session_input, config.model, caps, sink, limits)
             .await)
+    }
+
+    /// 丢掉指定助手消息及其后的一切，从它前面那条用户提示再跑一轮。
+    pub async fn regenerate(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        config: TurnConfig,
+    ) -> Result<(), String> {
+        let session = self.get(session_id).await.ok_or("会话不存在")?;
+        let (caps, limits) = self.setup_turn(&session, &config).await;
+        let sink = session.sink();
+        session
+            .regenerate(message_id, config.model, caps, sink, limits)
+            .await
     }
 
     /// 手动压缩(/compact)。空闲时才能做,session 内部会拒绝并发。

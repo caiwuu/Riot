@@ -57,6 +57,14 @@ pub enum Record {
         before_tokens: u32,
         after_tokens: u32,
     },
+    /// 重新生成：丢掉 `keep_until` 之后的历史。
+    ///
+    /// 加载时截断到这条消息（含）。之后继续追加的是新生成的回复。
+    /// 旧加载器不认识这个类型会当坏行跳过 —— 那会把本该丢掉的回复
+    /// 读回来，所以新版本必须处理它，不能靠"坏行跳过"凑合。
+    Rewind {
+        keep_until: String,
+    },
 }
 
 /// 会话的不变事实，写在 transcript 首行。
@@ -171,6 +179,9 @@ impl Transcripts {
                     // 活历史从边界重新开始。归档留下给界面画分割线上面的记录。
                     archived.append(&mut live);
                 }
+                Ok(Record::Rewind { keep_until }) => {
+                    apply_rewind(&mut live, &mut archived, &keep_until);
+                }
                 Err(e) => {
                     skipped += 1;
                     tracing::debug!(line = i + 1, error = %e, "transcript 有读不懂的行");
@@ -225,6 +236,19 @@ impl Transcripts {
     }
 }
 
+/// 加载时应用一条 rewind：先在活历史里找，找不到再看归档。
+/// 找不到就不动（文件坏了也不该把整份历史扔掉）。
+fn apply_rewind(live: &mut Vec<Message>, archived: &mut Vec<Message>, keep_until: &str) {
+    if let Some(i) = live.iter().position(|m| m.id().as_str() == keep_until) {
+        live.truncate(i + 1);
+        return;
+    }
+    if let Some(i) = archived.iter().position(|m| m.id().as_str() == keep_until) {
+        archived.truncate(i + 1);
+        live.clear();
+    }
+}
+
 fn scan_one(path: &Path) -> Option<ScannedTranscript> {
     let f = std::fs::File::open(path).ok()?;
     let mut lines = std::io::BufReader::new(f).lines();
@@ -259,6 +283,8 @@ enum Cmd {
     Append(Box<Message>),
     /// 压缩边界。
     Boundary { before_tokens: u32, after_tokens: u32 },
+    /// 重新生成：截断到这条消息。
+    Rewind { keep_until: String },
     /// 等所有已提交的追加真正写进文件。
     Flush(oneshot::Sender<()>),
     /// 写完手上的、关掉文件句柄、此后 append 静默丢弃。
@@ -307,6 +333,19 @@ impl SessionLog {
         }
     }
 
+    /// 记下一次重新生成的截断点。必须在内存历史已经截完之后调用。
+    pub fn append_rewind(&self, keep_until: &str) {
+        if self
+            .sender()
+            .send(Cmd::Rewind {
+                keep_until: keep_until.to_owned(),
+            })
+            .is_err()
+        {
+            tracing::debug!(path = %self.path.display(), "写入任务已关闭，丢弃截断记录");
+        }
+    }
+
     /// 等所有已提交的追加落盘。退出钩子用；从没写过东西时是空操作。
     pub async fn flush(&self) {
         self.ack(Cmd::Flush).await;
@@ -348,6 +387,7 @@ async fn write_loop(path: PathBuf, meta: TranscriptMeta, mut rx: mpsc::Unbounded
                 Cmd::Boundary { before_tokens, after_tokens } => {
                     Some(Record::CompactBoundary { before_tokens, after_tokens })
                 }
+                Cmd::Rewind { keep_until } => Some(Record::Rewind { keep_until }),
                 Cmd::Flush(ack) => {
                     acks.push(ack);
                     None
@@ -490,6 +530,17 @@ mod tests {
         Message::User {
             id: MessageId::from_raw(id),
             content: vec![UserContent::Text { text: text.into() }],
+            meta: MessageMeta::default(),
+        }
+    }
+
+    fn assistant(id: &str, text: &str) -> Message {
+        Message::Assistant {
+            id: MessageId::from_raw(id),
+            content: vec![riot_protocol::message::AssistantContent::Text {
+                text: text.into(),
+            }],
+            usage: None,
             meta: MessageMeta::default(),
         }
     }
@@ -716,6 +767,51 @@ mod tests {
         let raw = std::fs::read_to_string(d.path().join("s1.jsonl")).expect("读原文");
         assert!(raw.contains("压缩前的旧话"), "旧消息留在文件里可审计");
         assert!(raw.contains("compact_boundary"), "边界记录本身要落盘");
+    }
+
+    #[tokio::test]
+    async fn 重新生成截断点之后的消息不再进活历史() {
+        let d = dir();
+        let store = Transcripts::new(d.path());
+        let log = store.open(meta("s1"));
+        log.append(&user("m1", "第一句"));
+        log.append(&assistant("a1", "旧答"));
+        log.append(&user("m2", "第二句"));
+        log.append(&assistant("a2", "要丢掉的"));
+        log.append_rewind("m2");
+        log.append(&assistant("a3", "新答"));
+        log.flush().await;
+
+        let parts = store.load_parts(&SessionId::from_raw("s1")).await;
+        assert_eq!(
+            parts.live,
+            vec![
+                user("m1", "第一句"),
+                assistant("a1", "旧答"),
+                user("m2", "第二句"),
+                assistant("a3", "新答"),
+            ],
+            "截断点之后、新追加之前的那条助手消息不该再出现"
+        );
+        assert!(parts.archived.is_empty());
+    }
+
+    #[tokio::test]
+    async fn 重新生成可以截回压缩边界之前() {
+        let d = dir();
+        let store = Transcripts::new(d.path());
+        let log = store.open(meta("s1"));
+        log.append(&user("m1", "压缩前"));
+        log.append(&assistant("a1", "旧答"));
+        log.append_boundary(1000, 100);
+        log.append(&user("m2", "压缩后"));
+        log.append(&assistant("a2", "新答"));
+        log.append_rewind("m1");
+        log.flush().await;
+
+        let parts = store.load_parts(&SessionId::from_raw("s1")).await;
+        assert_eq!(parts.archived, vec![user("m1", "压缩前")]);
+        assert!(parts.live.is_empty(), "截回归档之后活历史应清空");
     }
 
     #[tokio::test]
