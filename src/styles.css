@@ -1103,8 +1103,11 @@ pre {
 /* 视口模式切换。两个模式一粒胶囊，亮着的是当前模式。 */
 .browser-mode {
   flex: none;
+  /* 高度跟着这一行最高的元素（地址栏）伸展，两个外框永远一样高 ——
+     写死像素的话，地址栏的内边距一改就又对不齐。 */
+  align-self: stretch;
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: 1px;
   padding: 2px;
   border: 1px solid var(--border);
@@ -1112,11 +1115,10 @@ pre {
   background: var(--bg);
 }
 
-/* 比导航键小一号 —— 加上胶囊自己的边框和内边距，整体高度才跟
-   28px 的导航键对得齐。 */
+/* 按钮填满胶囊的内高，选中态的底色才能撑满整粒胶囊。 */
 .browser-bar .browser-mode .icon {
-  width: 24px;
-  height: 20px;
+  width: 26px;
+  height: auto;
   border-radius: 6px;
 }
 
