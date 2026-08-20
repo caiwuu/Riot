@@ -12,6 +12,10 @@
 //!
 //! 形状检查留着:NUL 字节、NTFS 数据流、DOS 设备名这些和边界无关,
 //! 它们本身就不该出现在一个正常路径里。
+//!
+//! `[约束]` Windows 上 `canonicalize` 返回的是 verbatim 形式(`\\?\D:\…`),
+//! 每个结果都要过 [`fence::strip_verbatim`] 再往下走。漏掉的话形状检查会
+//! 拿盘符的冒号当 NTFS 数据流,把每一个存在的文件都拒掉。
 
 use std::path::{Path, PathBuf};
 
@@ -87,18 +91,27 @@ pub async fn resolve(
         // NotFound 要和别的 IO 错误分开。合并的话，模型看到的是
         // "无法访问上级目录"，于是跑去检查目录 —— 而真正的问题是
         // 它把文件名拼错了。
-        Some(ctx.fs.canonicalize(&absolute).await.map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                PathError::NotFound {
-                    path: absolute.clone(),
-                }
-            } else {
-                PathError::Io {
-                    path: absolute.clone(),
-                    source: e,
-                }
-            }
-        })?)
+        // strip_verbatim 不能省：Windows 的 canonicalize 返回 `\\?\D:\…`，
+        // 那个前缀会让下面第二道形状检查把每一个存在的文件都判成"设备路径
+        // 前缀 + NTFS 数据流"（盘符的冒号），Read/Write 于是全线失败。
+        Some(
+            ctx.fs
+                .canonicalize(&absolute)
+                .await
+                .map(fence::strip_verbatim)
+                .map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        PathError::NotFound {
+                            path: absolute.clone(),
+                        }
+                    } else {
+                        PathError::Io {
+                            path: absolute.clone(),
+                            source: e,
+                        }
+                    }
+                })?,
+        )
     } else {
         // 目标可能还不存在。解析父目录 —— 这是 symlink 能藏身的地方:
         // `work/link/new.txt` 里 `link` 指向 /etc，而 new.txt 不存在，
@@ -128,7 +141,7 @@ async fn resolve_parent(
     };
 
     match ctx.fs.canonicalize(parent).await {
-        Ok(p) => Ok(Some(p.join(name))),
+        Ok(p) => Ok(Some(fence::strip_verbatim(p).join(name))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(PathError::Io {
             path: parent.to_path_buf(),

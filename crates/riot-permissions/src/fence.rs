@@ -95,13 +95,70 @@ pub fn normalize(path: &Path) -> PathBuf {
 }
 
 fn has_ads(s: &str) -> bool {
-    // Windows 盘符（`C:\`）不算。只看第一个分量之后的冒号。
-    let tail = if s.len() > 2 && s.as_bytes()[1] == b':' {
-        &s[2..]
+    // 冒号有两处是合法的前缀语法，不是数据流分隔符：盘符（`C:\`），以及
+    // verbatim 前缀里的盘符（`\\?\C:\`）。后者是 `canonicalize` 在 Windows
+    // 上的正常输出形态，漏掉它会把每一个解析过的路径都判成数据流。
+    //
+    // 用字符串而不是 `Path::components`：`C:\x` 在非 Windows 上不被识别成
+    // Prefix，整段会当成一个分量，盘符的冒号就成了误判 —— 而这些检查一律
+    // 不分平台执行。
+    strip_prefix_colon(s).contains(':')
+}
+
+/// 剥掉开头那段"冒号属于前缀语法"的部分，返回真正该检查数据流的尾巴。
+fn strip_prefix_colon(s: &str) -> &str {
+    let rest = s
+        .strip_prefix(r"\\?\")
+        .or_else(|| s.strip_prefix(r"\\.\"))
+        .unwrap_or(s);
+
+    if rest.len() > 2 && rest.as_bytes()[1] == b':' {
+        &rest[2..]
     } else {
-        s
+        rest
+    }
+}
+
+/// 把 Windows `canonicalize` 返回的 verbatim 前缀（`\\?\C:\` / `\\?\UNC\`）
+/// 剥回常规写法。非 Windows 路径没有 Prefix 组件，原样返回。
+///
+/// `[约束]` `canonicalize` 的结果在参与形状检查、字符串比较或显示之前都要
+/// 过这一道。不剥的话有三笔账：
+/// 1. [`check_shape`] 会把 `\\?\` 当成设备路径前缀、把盘符的冒号当成数据流，
+///    于是每一个解析过的路径都被拒；
+/// 2. `Path::starts_with` 按组件比较，`VerbatimDisk(D)` 和 `Disk(D)` 不相等，
+///    两侧只要一边带前缀，前缀判定就全不成立；
+/// 3. 前缀漏进配置或界面时，用户手选的 `D:\x` 和回来的 `\\?\D:\x` 对不上。
+///
+/// 超长路径不受影响：std 的 fs 调用在需要时会自己把路径转回 verbatim 形式，
+/// 剥掉只影响字符串形态，不影响能力。
+pub fn strip_verbatim(p: PathBuf) -> PathBuf {
+    use std::path::Prefix;
+
+    let mut comps = p.components();
+    let Some(Component::Prefix(pre)) = comps.next() else {
+        return p;
     };
-    tail.contains(':')
+    let base = match pre.kind() {
+        Prefix::VerbatimDisk(d) => PathBuf::from(format!(r"{}:\", d as char)),
+        Prefix::VerbatimUNC(server, share) => {
+            let mut s = std::ffi::OsString::from(r"\\");
+            s.push(server);
+            s.push(r"\");
+            s.push(share);
+            PathBuf::from(s)
+        }
+        // `\\?\pipe\…` 这类没有常规等价形式，保持原样。
+        _ => return p,
+    };
+
+    let mut out = base;
+    for c in comps {
+        if !matches!(c, Component::RootDir) {
+            out.push(c.as_os_str());
+        }
+    }
+    out
 }
 
 fn has_short_name(s: &str) -> bool {
@@ -197,6 +254,55 @@ mod tests {
     #[test]
     fn windows_盘符不算数据流() {
         assert_eq!(check_shape(&p("C:\\work\\a.txt")), Ok(()));
+    }
+
+    #[test]
+    fn verbatim_前缀里的盘符不算数据流() {
+        // 回归：`canonicalize` 在 Windows 上返回 `\\?\D:\…`，盘符的冒号一度
+        // 被当成数据流分隔符。这条路径确实该拒（字面输入不该带 `\\?\`），
+        // 但理由必须是前缀，不能是数据流 —— 否则给模型的纠错指令是错的，
+        // 它会去改一个根本不存在的"数据流"写法。
+        let err = check_shape(&p(r"\\?\D:\work\a.txt")).expect_err("字面 verbatim 该拒");
+        let FenceViolation::Suspicious { reason, .. } = err;
+        assert_eq!(reason, "Win32 设备路径前缀");
+    }
+
+    #[test]
+    fn 盘符路径里的数据流照样被抓() {
+        // 剥前缀不能把 ADS 检查一起剥没了。这是 `resolve` 剥完前缀之后的形态。
+        assert!(check_shape(&p(r"D:\work\a.txt:hidden")).is_err());
+    }
+
+    /// `strip_verbatim` 靠 `Component::Prefix` 识别前缀，而非 Windows 平台不
+    /// 解析 `\\?\` —— 这几条只有在 Windows 上才验证得到真实行为。
+    #[cfg(windows)]
+    #[test]
+    fn 解析结果剥掉前缀后完全通过() {
+        // 这是 `resolve` 的真实路径：canonicalize 给回 verbatim，剥掉之后再做
+        // 形状检查。忘了剥，Windows 上每一次 Read/Write 都会栽在第二道检查上。
+        for raw in [r"\\?\D:\work\pkg.json", r"\\?\UNC\srv\share\pkg.json"] {
+            let stripped = strip_verbatim(p(raw));
+            assert_eq!(check_shape(&stripped), Ok(()), "{raw} 剥完该放行");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn strip_verbatim_的三种前缀() {
+        assert_eq!(strip_verbatim(p(r"\\?\D:\work\Riot")), p(r"D:\work\Riot"));
+        assert_eq!(
+            strip_verbatim(p(r"\\?\UNC\srv\share\dir")),
+            p(r"\\srv\share\dir")
+        );
+        // 没有常规等价形式的，保持原样
+        assert_eq!(strip_verbatim(p(r"\\?\pipe\x")), p(r"\\?\pipe\x"));
+    }
+
+    #[test]
+    fn strip_verbatim_不碰普通路径() {
+        for ok in ["/work/a.txt", r"C:\work\a.txt", "relative/a.txt"] {
+            assert_eq!(strip_verbatim(p(ok)), p(ok), "{ok}");
+        }
     }
 
     #[test]

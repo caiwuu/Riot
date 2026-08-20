@@ -27,6 +27,10 @@
 
 use std::path::{Component, Path, PathBuf};
 
+/// 和工具侧的形状检查共用一份实现 —— 两边都要拿 `canonicalize` 的结果去做
+/// 字符串比较，各留一份迟早只修一边。见 [`riot_permissions::fence`]。
+pub(crate) use riot_permissions::fence::strip_verbatim;
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum FenceError {
     #[error("路径越界: {} 不在工作区 {} 内", path.display(), root.display())]
@@ -135,46 +139,6 @@ fn canonicalize_lexically_existing(path: &Path) -> Result<PathBuf, FenceError> {
             }
         }
     }
-}
-
-/// 把 Windows `canonicalize` 返回的 verbatim 前缀（`\\?\C:\` / `\\?\UNC\`）
-/// 剥回常规写法。非 Windows 路径没有 Prefix 组件，原样返回。
-///
-/// 不剥的话有两笔账：
-/// 1. 这个 root 会以字符串进配置、进前端、当项目分组的 key。用户手选的是
-///    `D:\x`，canonicalize 回来是 `\\?\D:\x`，两串对不上 —— 新建会话就凭空
-///    多出一个 `\\?\` 开头的"新项目"。
-/// 2. `Path::starts_with` 按组件比较，`VerbatimDisk(D)` 和 `Disk(D)` 不相等，
-///    围栏两侧只要一边带前缀，所有路径都会被判越界。
-///
-/// 超长路径不受影响：std 的 fs 调用在需要时会自己把路径转回 verbatim 形式，
-/// 剥掉只影响字符串形态，不影响能力。
-pub(crate) fn strip_verbatim(p: PathBuf) -> PathBuf {
-    use std::path::Prefix;
-
-    let mut comps = p.components();
-    let Some(Component::Prefix(pre)) = comps.next() else {
-        return p;
-    };
-    let base = match pre.kind() {
-        Prefix::VerbatimDisk(d) => PathBuf::from(format!(r"{}:\", d as char)),
-        Prefix::VerbatimUNC(server, share) => {
-            let mut s = std::ffi::OsString::from(r"\\");
-            s.push(server);
-            s.push(r"\");
-            s.push(share);
-            PathBuf::from(s)
-        }
-        // \\?\pipe\… 这类没有常规等价形式，保持原样。
-        _ => return p,
-    };
-    let mut out = base;
-    for c in comps {
-        if !matches!(c, Component::RootDir) {
-            out.push(c.as_os_str());
-        }
-    }
-    out
 }
 
 /// 纯词法地消解 `.` 和 `..`，不碰文件系统。
@@ -311,17 +275,6 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn strip_verbatim_的两种前缀() {
-        let disk = strip_verbatim(PathBuf::from(r"\\?\D:\work\Riot"));
-        assert_eq!(disk, PathBuf::from(r"D:\work\Riot"));
-
-        let unc = strip_verbatim(PathBuf::from(r"\\?\UNC\srv\share\dir"));
-        assert_eq!(unc, PathBuf::from(r"\\srv\share\dir"));
-
-        // 没有常规等价形式的保持原样。
-        let pipe = strip_verbatim(PathBuf::from(r"\\?\pipe\x"));
-        assert_eq!(pipe, PathBuf::from(r"\\?\pipe\x"));
-    }
+    // strip_verbatim 自身的单元测试在 riot-permissions::fence —— 实现搬过去
+    // 和工具侧共用了。上面这条留着，它测的是围栏这一层的集成行为。
 }

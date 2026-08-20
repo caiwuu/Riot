@@ -120,6 +120,29 @@ mod tests {
         Url::parse(s).expect("测试 URL")
     }
 
+    /// 本地文件用例的平台差异。判定逻辑两个平台一样，只有字面量得换：
+    /// Windows 的 file URL 必须带盘符，否则 `Url::to_file_path` 不认，
+    /// 这个 URL 会在 [`weburl::normalize_for_browser`] 那层就被判畸形。
+    ///
+    /// `DISPLAY` 是弹窗上给人看的形态 —— [`permission_label`] 走的是
+    /// `PathBuf::display`，Windows 上是反斜杠。
+    #[cfg(windows)]
+    mod local {
+        pub const FILE_URL: &str = "file:///C:/Users/me/proj/wechat.html";
+        pub const SAME_DIR_URL: &str = "file:///C:/Users/me/proj/other.html";
+        pub const DISPLAY: &str = r"C:\Users\me\proj\wechat.html";
+        /// 内容键拼的也是 `Path::display`，不是 URL 形式。
+        pub const DIR_KEY: &str = r"file:C:\Users\me\proj";
+    }
+
+    #[cfg(not(windows))]
+    mod local {
+        pub const FILE_URL: &str = "file:///Users/me/proj/wechat.html";
+        pub const SAME_DIR_URL: &str = "file:///Users/me/proj/other.html";
+        pub const DISPLAY: &str = "/Users/me/proj/wechat.html";
+        pub const DIR_KEY: &str = "file:/Users/me/proj";
+    }
+
     #[test]
     fn 陌生域名要问_且理由是_consent() {
         // `[约束]` 理由不能写成 Rule。写错的话「全部放行」对这个工具
@@ -172,7 +195,7 @@ mod tests {
 
     #[test]
     fn 本地文件要问且键是目录粒度() {
-        let u = url("file:///Users/me/proj/wechat.html");
+        let u = url(local::FILE_URL);
         let r = decide_for_domain("BrowserNavigate", &u, &ctx(vec![]));
         let PermissionResult::Ask {
             message,
@@ -183,7 +206,7 @@ mod tests {
             panic!("本地文件必须确认，实际：{r:?}");
         };
         assert!(
-            message.contains("/Users/me/proj/wechat.html"),
+            message.contains(local::DISPLAY),
             "要让人看见完整路径：{message}"
         );
         assert!(
@@ -194,20 +217,20 @@ mod tests {
         else {
             panic!("建议应当是 AddRule：{suggestions:?}");
         };
-        assert_eq!(pattern.as_deref(), Some("file:/Users/me/proj"));
+        assert_eq!(pattern.as_deref(), Some(local::DIR_KEY));
     }
 
     #[test]
     fn 同一目录的本地文件共享允许规则() {
         let allow = PermissionRule {
             tool: "BrowserNavigate".into(),
-            pattern: Some("file:/Users/me/proj".into()),
+            pattern: Some(local::DIR_KEY.into()),
             decision: RuleDecision::Allow,
             source: RuleSource::Session,
         };
         let r = decide_for_domain(
             "BrowserNavigate",
-            &url("file:///Users/me/proj/other.html"),
+            &url(local::SAME_DIR_URL),
             &ctx(vec![allow]),
         );
         assert!(matches!(r, PermissionResult::Allow { .. }), "{r:?}");

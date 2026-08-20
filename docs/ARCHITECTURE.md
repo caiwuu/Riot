@@ -767,6 +767,10 @@ Edit 工具的 `validate_input` 检查链:
 
 `[约束]` 用 `bash -c`,**不要加 `-l` 或 `-i`**。登录/交互 shell 会读用户的 rc 文件,那里的 alias 和 shell 函数会让同一条命令在不同机器上做不同的事,而模型看不到那些配置。"让 alias 生效"听起来是便利,实际是把不可观测的状态引进了执行环境。
 
+`[约束]` Windows 上**不能把 `bash` 交给 PATH 解析**。只要启用过 WSL 功能,`C:\Windows\System32\bash.exe` 就在 PATH 里而且排得很前——那是 WSL 的启动器,不是 bash。它会进到 Linux 那侧的文件系统里执行,工作目录 `D:\…` 在那边并不存在,报出来的是 `execvpe(/bin/bash) failed: No such file or directory`:看着像"没装 bash",实际是"找错了 bash",于是 Bash 工具在 Windows 上整个不可用。
+
+查找顺序:`RIOT_BASH`(逃生舱)→ 顺着 PATH 里的 `git.exe` 反推 Git for Windows 的 `<root>\bin\bash.exe` → 常见安装位置 → PATH 里其它 bash(**跳过 System32**)。反推 git 比猜安装目录准——用户可能装在别的盘;而装了 git 就有 bash,这个应用本来就依赖 git。
+
 `[约束]` 必须注入非交互环境变量。agent 执行 shell 最常见的挂死原因是交互式命令:`git commit`(无 `-m`)开编辑器,`git log` 开分页器,两者都在等一个永远不会来的按键。
 
 | 变量 | 值 | 挡住什么 |
@@ -1209,6 +1213,10 @@ Rust 这里有生态优势:`tree-sitter` 和 `tree-sitter-bash` 都是原生 cra
 - 各跑一次:symlink 可以指向 `/work/notes.txt:hidden` 或 `/work/NUL`,字面路径干干净净。
 
 形状检查要在归一化**之前**做——那些别名构造的目的就是让解析结果和字面看起来不一样,先归一化再检查等于自己把证据抹了。
+
+`[约束]` 但"解析后"那一次必须先剥掉 verbatim 前缀。Windows 上 `canonicalize` 返回的是 `\\?\D:\…`,原样送进形状检查会同时踩中两条规则:`\\?\` 前缀本身,以及盘符 `D:` 的冒号被当成 ADS。这不是理论风险——漏掉这一步,Windows 上**每一次** Read/Write 都会栽在第二道检查上,而且报给模型的理由是"含有 NTFS 备用数据流",于是它跑去修一个根本不存在的数据流写法。
+
+剥前缀用 `riot_permissions::fence::strip_verbatim`,工具侧的 `resolve` 和宿主侧的工作区围栏(§9.5.1)共用这一份实现。两边各写一份的话只会修好一边:围栏那侧因为 `Path::starts_with` 按组件比较(`VerbatimDisk(D)` ≠ `Disk(D)`)早就踩过一次,工具侧后来又踩了同一个坑。
 
 ### 9.6 OS 沙箱与策略层正交
 

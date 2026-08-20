@@ -2887,9 +2887,21 @@ mod tests {
     /// 本地 HTML 必须能进到宿主。模型预览静态页几乎总是走 `file://`。
     #[tokio::test]
     async fn 本地_file_地址可以导航() {
+        // Windows 的 file URL 必须带盘符：`Url::to_file_path` 不接受没有盘符
+        // 的路径，这个地址会在 URL 归一化那层就被判畸形。`LOCAL_PATH` 是它
+        // 对应的本机路径 —— 弹窗和安全检查用的是这个形态。
+        #[cfg(windows)]
+        const FILE_URL: &str = "file:///C:/Users/me/proj/wechat.html";
+        #[cfg(windows)]
+        const LOCAL_PATH: &str = r"C:\Users\me\proj\wechat.html";
+        #[cfg(not(windows))]
+        const FILE_URL: &str = "file:///Users/me/proj/wechat.html";
+        #[cfg(not(windows))]
+        const LOCAL_PATH: &str = "/Users/me/proj/wechat.html";
+
         let b = Arc::new(FakeBrowser::default());
         let ctx = ctx_browser(Arc::clone(&b), FakeVision::Direct, Arc::new(NullFs));
-        let input = serde_json::json!({ "url": "file:///Users/me/proj/wechat.html" });
+        let input = serde_json::json!({ "url": FILE_URL });
 
         BrowserNavigate
             .validate_input(&input, &ctx)
@@ -2906,7 +2918,7 @@ mod tests {
         );
         assert_eq!(
             b.calls.lock().expect("calls")[0],
-            "navigate file:///Users/me/proj/wechat.html"
+            format!("navigate {FILE_URL}")
         );
 
         let ask = BrowserNavigate.check_permissions(&input, &PermissionContext::default());
@@ -2914,13 +2926,13 @@ mod tests {
             panic!("本地文件仍要问一次：{ask:?}");
         };
         assert!(
-            message.contains("/Users/me/proj/wechat.html"),
+            message.contains(LOCAL_PATH),
             "弹窗要显示完整路径：{message}"
         );
 
         assert_eq!(
             BrowserNavigate.target_path(&input),
-            Some(std::path::PathBuf::from("/Users/me/proj/wechat.html")),
+            Some(std::path::PathBuf::from(LOCAL_PATH)),
             "凭证文件的安全检查靠这条路径"
         );
     }

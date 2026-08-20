@@ -90,10 +90,18 @@ fn is_ok(o: &ToolOutcome) -> bool {
 }
 
 /// 输出里出现的文件名（去掉目录前缀，断言好读）。
+///
+/// 分隔符一律归一成 `/`：Windows 上 rg 给的是 `\`，不归一的话下面每条断言
+/// 都要写两份。
 fn names(text: &str, root: &Path) -> Vec<String> {
+    let prefix = root.to_string_lossy().into_owned();
     text.lines()
-        .filter(|l| l.starts_with(root.to_string_lossy().as_ref()))
-        .map(|l| l.trim_start_matches(root.to_string_lossy().as_ref()).trim_start_matches('/').to_owned())
+        .filter(|l| l.starts_with(&prefix))
+        .map(|l| {
+            l[prefix.len()..]
+                .trim_start_matches(['/', '\\'])
+                .replace('\\', "/")
+        })
         .collect()
 }
 

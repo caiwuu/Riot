@@ -93,7 +93,23 @@ async fn 用非登录非交互的_shell() {
     run(&h, "echo hi").await;
 
     let spec = h.proc.last_spec().expect("起过进程");
+
+    // Windows 上必须是一条显式路径。回归点：交给 PATH 解析会命中
+    // `System32\bash.exe`，那是 WSL 启动器 —— 它进的是 Linux 那侧的文件
+    // 系统，工作目录 `D:\…` 在那边不存在，Bash 工具于是整个不可用。
+    #[cfg(windows)]
+    {
+        let p = spec.program.to_ascii_lowercase();
+        assert!(p.ends_with("bash.exe"), "该是个 bash：{}", spec.program);
+        assert!(
+            !p.contains(r"\windows\system32\") && !p.contains(r"\windows\syswow64\"),
+            "解析到了 WSL 启动器：{}",
+            spec.program
+        );
+    }
+    #[cfg(not(windows))]
     assert_eq!(spec.program, "bash");
+
     assert_eq!(spec.args, vec!["-c".to_owned(), "echo hi".to_owned()]);
 
     // `[约束]` 不能加 -l 或 -i。登录/交互 shell 会读用户的 rc 文件，

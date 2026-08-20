@@ -269,13 +269,21 @@ mod tests {
 
     #[test]
     fn profile_把写收紧到给定目录() {
+        // 用真实存在的临时目录，不写死 `/tmp`：`policy_for` 要 canonicalize，
+        // 而 `/tmp` 在 Windows 上不存在，写死会让这条测试在那边直接 panic。
+        let dir = tempfile::tempdir().expect("临时目录");
+        let real = dir.path().canonicalize().expect("规范化");
+
         let p = ActiveSandbox {
-            policy: policy_for(Path::new("/tmp")),
+            policy: policy_for(dir.path()),
         }
         .profile();
 
         assert!(p.starts_with("(version 1)\n(allow default)\n(deny file-write*)\n"));
-        assert!(p.contains("(subpath \"/private/tmp\")") || p.contains("(subpath \"/tmp\")"));
+        assert!(
+            p.contains(&format!("(subpath {})", sbpl_str(&real.to_string_lossy()))),
+            "给定目录要进 profile：{p}"
+        );
         assert!(p.contains("(subpath \"/dev/null\")"));
         assert!(!p.contains("deny network"), "默认不断网");
     }

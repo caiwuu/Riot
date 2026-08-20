@@ -174,6 +174,34 @@ async fn 二进制文件被拒绝() {
     assert!(text_of(&out).contains("二进制"));
 }
 
+/// 回归：Windows 的 `canonicalize` 返回 verbatim 形式（`\\?\D:\…`）。
+/// `path::resolve` 必须先剥掉那个前缀再做第二道形状检查，否则 `\\?\` 和盘符
+/// 的冒号会分别撞上"设备路径前缀"和"NTFS 数据流"两条规则 —— 表现是 Windows
+/// 上**每一个存在的文件**都读不了，而且给模型的理由是"含有 NTFS 备用数据流"，
+/// 于是它去改一个根本不存在的写法，怎么试都不对。
+///
+/// `with_link` 用来模拟那个返回值：memfs 的 canonicalize 默认原样返回传入的
+/// 路径，不带前缀，所以这条链在替身上是测不到的。
+#[cfg(windows)]
+#[tokio::test]
+async fn canonicalize_给回_verbatim_前缀时仍能读() {
+    let h = harness(
+        MemFs::new()
+            .with_dir(r"D:\work")
+            .with_file(r"D:\work\pkg.json", "{\"name\":\"riot\"}")
+            .with_link(r"D:\work\pkg.json", r"\\?\D:\work\pkg.json"),
+    );
+
+    let out = read(&h, serde_json::json!({ "path": r"D:\work\pkg.json" })).await;
+
+    assert!(
+        is_ok(&out),
+        "verbatim 前缀该被剥掉，而不是判成数据流：{}",
+        text_of(&out)
+    );
+    assert!(text_of(&out).contains("riot"));
+}
+
 // ── Read:图片 ─────────────────────────────────────
 
 /// 换掉替身的图片能力。默认的 NoVision 只够测"没配"那条路。

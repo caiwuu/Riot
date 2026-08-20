@@ -273,6 +273,28 @@ mod tests {
         Url::parse(s).expect("测试 URL 应当合法")
     }
 
+    /// 本地文件用例的平台差异。被检查的逻辑两个平台一样，只有字面量得换：
+    /// Windows 上 `/Users/…` 既不是绝对路径，`Url::to_file_path` 也不接受
+    /// 没有盘符的 file URL（[`check_file_url`] 正是靠它把畸形地址挡掉的）。
+    #[cfg(windows)]
+    mod local {
+        pub const FILE_URL: &str = "file:///C:/Users/me/proj/wechat.html";
+        pub const ABS_PATH: &str = r"C:\Users\me\proj\wechat.html";
+        /// [`permission_content`] 拼的是 `Path::display`，不是 URL 形式。
+        pub const DIR_KEY: &str = r"file:C:\Users\me\proj";
+        pub const VIA_LOCALHOST: &str = "file://localhost/C:/Users/me/proj/a.html";
+        pub const VIA_LOCALHOST_PATH: &str = r"C:\Users\me\proj\a.html";
+    }
+
+    #[cfg(not(windows))]
+    mod local {
+        pub const FILE_URL: &str = "file:///Users/me/proj/wechat.html";
+        pub const ABS_PATH: &str = "/Users/me/proj/wechat.html";
+        pub const DIR_KEY: &str = "file:/Users/me/proj";
+        pub const VIA_LOCALHOST: &str = "file://localhost/Users/me/proj/a.html";
+        pub const VIA_LOCALHOST_PATH: &str = "/Users/me/proj/a.html";
+    }
+
     #[test]
     fn http_升级成_https() {
         // 模型从网页里抄来的链接经常是 http，拒绝会让它反复重试同一个地址
@@ -476,26 +498,26 @@ mod tests {
 
     #[test]
     fn 浏览器允许本地文件() {
-        let n = normalize_for_browser("file:///Users/me/proj/wechat.html").expect("应当通过");
+        let n = normalize_for_browser(local::FILE_URL).expect("应当通过");
         assert_eq!(n.scheme(), "file");
         assert_eq!(
             n.to_file_path().expect("能转成本地路径"),
-            PathBuf::from("/Users/me/proj/wechat.html")
+            PathBuf::from(local::ABS_PATH)
         );
 
         // 模型经常直接塞绝对路径，不带 file://
-        let n = normalize_for_browser("/Users/me/proj/wechat.html").expect("应当通过");
+        let n = normalize_for_browser(local::ABS_PATH).expect("应当通过");
         assert_eq!(n.scheme(), "file");
         assert_eq!(
             n.to_file_path().expect("能转成本地路径"),
-            PathBuf::from("/Users/me/proj/wechat.html")
+            PathBuf::from(local::ABS_PATH)
         );
 
         // Chromium 也认 file://localhost/...
-        let n = normalize_for_browser("file://localhost/Users/me/proj/a.html").expect("应当通过");
+        let n = normalize_for_browser(local::VIA_LOCALHOST).expect("应当通过");
         assert_eq!(
             n.to_file_path().expect("能转成本地路径"),
-            PathBuf::from("/Users/me/proj/a.html")
+            PathBuf::from(local::VIA_LOCALHOST_PATH)
         );
     }
 
@@ -524,18 +546,15 @@ mod tests {
     #[test]
     fn 抓取仍然拒绝_file_浏览器放行() {
         assert!(matches!(
-            normalize("file:///Users/me/proj/wechat.html"),
+            normalize(local::FILE_URL),
             Err(UrlReject::BadScheme { .. })
         ));
-        assert!(normalize_for_browser("file:///Users/me/proj/wechat.html").is_ok());
+        assert!(normalize_for_browser(local::FILE_URL).is_ok());
     }
 
     #[test]
     fn 本地文件的权限键是目录粒度() {
-        assert_eq!(
-            permission_content(&u("file:///Users/me/proj/wechat.html")),
-            "file:/Users/me/proj"
-        );
+        assert_eq!(permission_content(&u(local::FILE_URL)), local::DIR_KEY);
         assert_eq!(
             permission_content(&u("https://docs.rs/tokio/1.0/x")),
             "domain:docs.rs"

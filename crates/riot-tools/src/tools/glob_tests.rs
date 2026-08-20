@@ -97,11 +97,18 @@ fn is_ok(o: &ToolOutcome) -> bool {
 }
 
 /// 结果里的相对路径（去掉临时目录前缀，断言好读）。
+///
+/// 分隔符一律归一成 `/`：Windows 上工具输出的是 `\`，不归一的话下面每条
+/// 断言都要写两份。
 fn names(text: &str, root: &Path) -> Vec<String> {
     let prefix = root.to_string_lossy().into_owned();
     text.lines()
         .filter(|l| l.starts_with(&prefix))
-        .map(|l| l[prefix.len()..].trim_start_matches('/').to_owned())
+        .map(|l| {
+            l[prefix.len()..]
+                .trim_start_matches(['/', '\\'])
+                .replace('\\', "/")
+        })
         .collect()
 }
 

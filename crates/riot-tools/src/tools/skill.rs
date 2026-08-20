@@ -151,9 +151,29 @@ mod tests {
         SkillCard {
             name: name.into(),
             description: desc.into(),
-            dir: PathBuf::from("/tmp/skills").join(name),
+            dir: skill_dir(name),
             body: body.into(),
         }
+    }
+
+    /// 断言里不能自己拼分隔符 —— `join` 在 Windows 上给的是 `\`，而工具
+    /// 输出走的是 `Path::display`。要比的两边都从这里来。
+    fn skill_dir(name: &str) -> PathBuf {
+        PathBuf::from("/tmp/skills").join(name)
+    }
+
+    /// 取出模型看到的正文。
+    ///
+    /// 不能用 `format!("{model_content:?}")`：Debug 会把 Windows 路径里的
+    /// `\` 转义成 `\\`，含路径的断言就永远对不上。
+    fn model_text(out: &ToolOutcome) -> &str {
+        let ToolOutcome::Ok { model_content, .. } = out else {
+            panic!("该成功：{out:?}")
+        };
+        let riot_protocol::message::ToolResultContent::Text { text } = model_content else {
+            panic!("该是文本：{model_content:?}")
+        };
+        text
     }
 
     fn ctx() -> ToolContext {
@@ -203,14 +223,12 @@ mod tests {
         let out = t
             .call(serde_json::json!({ "name": "发布" }), ctx())
             .await;
-        match out {
-            ToolOutcome::Ok { model_content, .. } => {
-                let text = format!("{model_content:?}");
-                assert!(text.contains("按 checklist 走"));
-                assert!(text.contains("/tmp/skills/发布"), "要告诉模型基准目录");
-            }
-            other => panic!("该成功：{other:?}"),
-        }
+        let text = model_text(&out);
+        assert!(text.contains("按 checklist 走"));
+        assert!(
+            text.contains(&skill_dir("发布").display().to_string()),
+            "要告诉模型基准目录：{text}"
+        );
     }
 
     #[tokio::test]
@@ -219,12 +237,13 @@ mod tests {
         let out = t
             .call(serde_json::json!({ "name": "查", "args": "example.com" }), ctx())
             .await;
-        let ToolOutcome::Ok { model_content, .. } = out else {
-            panic!("该成功")
-        };
-        let text = format!("{model_content:?}");
+        let text = model_text(&out);
         assert!(text.contains("查询目标：example.com"));
-        assert!(text.contains("/tmp/skills/查/conf.json"), "${{SKILL_DIR}} 要替换成真实目录");
+        let want = format!("{}/conf.json", skill_dir("查").display());
+        assert!(
+            text.contains(&want),
+            "${{SKILL_DIR}} 要替换成真实目录：{text}"
+        );
     }
 
     /// 内置技能（编进二进制的那些）没有目录，这时不该做替换。

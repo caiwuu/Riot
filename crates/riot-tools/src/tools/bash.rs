@@ -199,7 +199,7 @@ impl Tool for Bash {
             .min(MAX_TIMEOUT_MS);
 
         let spec = ProcessSpec {
-            program: "bash".to_owned(),
+            program: shell_program(),
             // -c 之后不加 -l / -i。登录 shell 会读用户的 rc 文件,
             // 那里可能有 alias 和交互式设置,让同一条命令在不同机器上
             // 表现不同 —— 而模型看不到那些配置。
@@ -243,6 +243,108 @@ impl Tool for Bash {
             side_messages: Vec::new(),
         }
     }
+}
+
+/// Bash 的可执行文件。
+#[cfg(not(windows))]
+fn shell_program() -> String {
+    "bash".to_owned()
+}
+
+/// Bash 的可执行文件。
+///
+/// # 为什么不能把 `"bash"` 直接交给 PATH
+///
+/// 只要启用过 WSL 功能，`C:\Windows\System32\bash.exe` 就在 PATH 里而且排
+/// 得很前 —— 那是 WSL 的启动器，不是 bash。它会跳到 Linux 那侧的文件系统
+/// 里执行，工作目录 `D:\…` 在那边并不存在，于是报 `execvpe(/bin/bash)
+/// failed: No such file or directory`：看着像"没装 bash"，其实是"找错了
+/// bash"。
+///
+/// 所以显式去找 Git for Windows 自带的那个。装了 git 就有，而这个应用本来
+/// 就依赖 git。
+#[cfg(windows)]
+fn shell_program() -> String {
+    static RESOLVED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    RESOLVED.get_or_init(resolve_windows_bash).clone()
+}
+
+#[cfg(windows)]
+fn resolve_windows_bash() -> String {
+    use std::path::{Path, PathBuf};
+
+    // 逃生舱：装在非常规位置，或者用户就是想指定某一个。
+    if let Some(p) = std::env::var_os("RIOT_BASH") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return p.to_string_lossy().into_owned();
+        }
+    }
+
+    // Git for Windows：git.exe 在 `<root>\cmd\`，bash 在 `<root>\bin\`。
+    // 顺着 PATH 里的 git 反推比猜安装目录准 —— 用户可能装在别的盘。
+    for git in path_lookup("git.exe") {
+        if let Some(found) = git.parent().and_then(Path::parent).and_then(git_bash_under) {
+            return found;
+        }
+    }
+
+    // 常见安装位置。git 不在 PATH 上时（只装了 GUI 客户端）还能捞回来。
+    for var in [
+        "ProgramFiles",
+        "ProgramW6432",
+        "ProgramFiles(x86)",
+        "LOCALAPPDATA",
+    ] {
+        let Some(base) = std::env::var_os(var) else {
+            continue;
+        };
+        for sub in ["Git", r"Programs\Git"] {
+            if let Some(found) = git_bash_under(&Path::new(&base).join(sub)) {
+                return found;
+            }
+        }
+    }
+
+    // PATH 里别的 bash（MSYS2、Cygwin）。跳过 WSL 启动器。
+    for cand in path_lookup("bash.exe") {
+        if !is_wsl_launcher(&cand) {
+            return cand.to_string_lossy().into_owned();
+        }
+    }
+
+    // 都没找到。保持裸名字 —— spawn 失败时的系统报错比这里编一个更准确。
+    "bash".to_owned()
+}
+
+/// `<root>\bin\bash.exe` 排在 `usr\bin` 前面：前者是 Git for Windows 的
+/// 包装器，会把 MSYS 环境准备好。
+#[cfg(windows)]
+fn git_bash_under(root: &std::path::Path) -> Option<String> {
+    [r"bin\bash.exe", r"usr\bin\bash.exe"]
+        .iter()
+        .map(|rel| root.join(rel))
+        .find(|p| p.is_file())
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+#[cfg(windows)]
+fn path_lookup(exe: &str) -> Vec<std::path::PathBuf> {
+    std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path)
+                .map(|dir| dir.join(exe))
+                .filter(|p| p.is_file())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `System32\bash.exe`（32 位视图下是 `SysWOW64`）是 WSL 启动器。
+#[cfg(windows)]
+fn is_wsl_launcher(p: &std::path::Path) -> bool {
+    let s = p.to_string_lossy().to_ascii_lowercase();
+    s.contains(r"\windows\system32\") || s.contains(r"\windows\syswow64\")
 }
 
 /// 让子进程跑在非交互模式下。

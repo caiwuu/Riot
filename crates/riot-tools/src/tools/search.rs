@@ -307,6 +307,7 @@ mod tests {
         Deadline::new(Arc::new(crate::testing::FixedClock::default()), TIME_BUDGET_SECS)
     }
 
+    /// 分隔符归一成 `/`：Windows 上是 `\`，不归一的话下面每条断言都要写两份。
     fn names(files: &[PathBuf], root: &Path) -> Vec<String> {
         files
             .iter()
@@ -314,7 +315,7 @@ mod tests {
                 f.strip_prefix(root)
                     .unwrap_or(f)
                     .to_string_lossy()
-                    .into_owned()
+                    .replace('\\', "/")
             })
             .collect()
     }
