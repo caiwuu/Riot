@@ -52,6 +52,23 @@ export function BrowserPanel({
   /** 上一次点击的位置。输入法的候选窗口贴着它弹。 */
   const [caret, setCaret] = useState({ x: 0, y: 0 });
   const addressRef = useRef<HTMLInputElement>(null);
+  /**
+   * 视口模式。自适应＝页面按面板的实际尺寸渲染（所见即面板）；Web＝按
+   * 桌面宽度渲染，再整体缩小塞进面板。
+   *
+   * 面板窄的时候页面会切进移动端布局，模型的整页截图也跟着变窄 ——
+   * 而用户常常正想确认"桌面版长什么样"。Web 模式把渲染宽度和面板宽度
+   * 解耦，用户和模型看到的都是桌面版。
+   */
+  const [viewMode, setViewMode] = useState<ViewMode>(() =>
+    localStorage.getItem(VIEW_MODE_KEY) === "web" ? "web" : "fit",
+  );
+
+  /** 换模式并记住。这是"怎么看页面"的个人偏好，跨会话、跨重启生效。 */
+  const switchMode = (mode: ViewMode) => {
+    setViewMode(mode);
+    localStorage.setItem(VIEW_MODE_KEY, mode);
+  };
 
   /**
    * 把新的导航状态铺到界面上。
@@ -137,6 +154,11 @@ export function BrowserPanel({
    * `[约束]` 像素密度也要一起给。Retina 上面板占的是两倍物理像素，帧却是
    * 按一倍出的 —— 浏览器把它放大一倍铺上去，文字边缘全是虚的。这种糊
    * 尤其难归因：内容、比例、点击位置全对，看起来只像是画质差。
+   *
+   * Web 模式下宽度不跟面板，钉在 WEB_WIDTH 上；高度按面板比例折算，
+   * 帧和画面区同比例，contain 缩放后正好铺满、不留边。高度有上下限
+   * （见 WEB_MAX_HEIGHT 的说明），顶到限之后比例对不上的部分由
+   * contain 留边，坐标换算在 toPage 里按内容矩形做，不受影响。
    */
   useEffect(() => {
     const view = viewRef.current;
@@ -145,12 +167,20 @@ export function BrowserPanel({
     let timer: number | undefined;
     let last = "";
     const push = () => {
-      const width = view.clientWidth;
-      const height = view.clientHeight;
+      const vw = view.clientWidth;
+      const vh = view.clientHeight;
       // 刚挂上还没布局时量到的是 0。0 尺寸的视口在 CEF 那边等同于"看不见"，
       // 从此不再出帧 —— 画面会停在最后一帧，而且不报错。
-      if (width < MIN_VIEWPORT || height < MIN_VIEWPORT) return;
+      if (vw < MIN_VIEWPORT || vh < MIN_VIEWPORT) return;
       const scale = window.devicePixelRatio || 1;
+      const web = viewMode === "web";
+      const width = web ? WEB_WIDTH : vw;
+      const height = web
+        ? Math.min(
+            WEB_MAX_HEIGHT,
+            Math.max(WEB_MIN_HEIGHT, Math.round((vh / vw) * WEB_WIDTH)),
+          )
+        : vh;
       const key = `${width}x${height}@${scale}`;
       if (key === last) return;
       last = key;
@@ -192,7 +222,7 @@ export function BrowserPanel({
       media?.removeEventListener("change", onDensity);
       window.clearTimeout(timer);
     };
-  }, [sessionId]);
+  }, [sessionId, viewMode]);
 
   /**
    * DOM 坐标 → 页面坐标。
@@ -200,17 +230,27 @@ export function BrowserPanel({
    * `[约束]` 必须按帧的真实尺寸换算，不能直接用鼠标事件的 offsetX/Y。
    * 画面是等比缩放后铺在面板里的，两者的比例通常不是 1 —— 不换算的话
    * 点击会系统性地偏，而且窗口越窄偏得越多。
+   *
+   * `[约束]` 换算的参照系是 contain 之后的**内容矩形**，不是 img 的元素框。
+   * 两者在帧和面板同比例时重合（自适应模式的常态），但 Web 模式下帧是
+   * 桌面比例、面板是竖条，contain 会居中留边 —— 按元素框算的话，留边
+   * 越宽点击偏得越多。
    */
   const toPage = useCallback(
     (e: React.MouseEvent): { x: number; y: number } | null => {
       const img = viewRef.current?.querySelector("img");
-      if (!img || !frame) return null;
+      if (!img || !frame || !frame.width || !frame.height) return null;
       const r = img.getBoundingClientRect();
       if (r.width === 0 || r.height === 0) return null;
-      return {
-        x: ((e.clientX - r.left) / r.width) * frame.width,
-        y: ((e.clientY - r.top) / r.height) * frame.height,
-      };
+      const s = Math.min(r.width / frame.width, r.height / frame.height);
+      const left = r.left + (r.width - frame.width * s) / 2;
+      const top = r.top + (r.height - frame.height * s) / 2;
+      const x = (e.clientX - left) / s;
+      const y = (e.clientY - top) / s;
+      // 点在留边上不算点在页面里。硬夹回页面范围的话，点黑边会命中
+      // 页面边缘的元素 —— 用户明明什么都没点到，页面却有反应。
+      if (x < 0 || y < 0 || x > frame.width || y > frame.height) return null;
+      return { x, y };
     },
     [frame],
   );
@@ -387,6 +427,28 @@ export function BrowserPanel({
             <OpenIcon />
           </button>
         </div>
+        {/*
+         * 视口模式。挨着地址栏 —— 它决定"页面以多宽渲染"，和导航一族。
+         * 用图标不用文字:面板可以窄到 320px，见上面三个导航键的说明。
+         */}
+        <div className="browser-mode" role="group" aria-label="视口模式">
+          <button
+            className={viewMode === "fit" ? "icon active" : "icon"}
+            aria-pressed={viewMode === "fit"}
+            onClick={() => switchMode("fit")}
+            title="自适应：页面按面板宽度渲染"
+          >
+            <FitIcon />
+          </button>
+          <button
+            className={viewMode === "web" ? "icon active" : "icon"}
+            aria-pressed={viewMode === "web"}
+            onClick={() => switchMode("web")}
+            title={`Web：按 ${WEB_WIDTH}px 桌面宽度渲染，整体缩放进面板`}
+          >
+            <WebIcon />
+          </button>
+        </div>
       </div>
       {navError ? <div className="browser-nav-error">{navError}</div> : null}
 
@@ -394,6 +456,13 @@ export function BrowserPanel({
         className={imeFocused ? "browser-view focused" : "browser-view"}
         ref={viewRef}
         onMouseDown={(e) => {
+          // `[约束]` 必须拦掉 mousedown 的默认行为。默认行为是"把焦点移给
+          // 被点的元素"，而画面区不可聚焦 —— WebKit（Tauri 在 macOS 上的
+          // 引擎）会在处理器返回之后把焦点清到 body，正好把下面那句 focus()
+          // 的结果抹掉。表现是"页面里点了输入框却一个字都打不进去"，而且
+          // 只在 WKWebView 里发生，Chromium 系（含 dev 里常用来对照的
+          // Chrome）会尊重处理器里刚设的焦点，怎么测都测不出来。
+          e.preventDefault();
           // 转发原生 down（带 button 和 clickCount）而不是等 onClick 合成 ——
           // 页面里选字、拖滑块、双击选词、三击选段全靠这条真实的按下序列。
           const p = toPage(e);
@@ -549,6 +618,34 @@ const MIN_VIEWPORT = 80;
 /** 尺寸稳定多久之后才同步。拖动过程中每一帧都发的话，页面会一直在重排。 */
 const RESIZE_QUIET_MS = 120;
 
+/** 视口模式:自适应＝跟着面板尺寸走，Web＝按桌面宽度渲染再缩放显示。 */
+type ViewMode = "fit" | "web";
+
+/** 视口模式存这里。跨会话共享 —— 这是人的偏好，不是某个会话的状态。 */
+const VIEW_MODE_KEY = "riot.browser.viewMode";
+
+/**
+ * Web 模式的渲染宽度（CSS 像素）。
+ *
+ * 1280 是桌面站点最普遍的设计宽度:比它窄的视口常被响应式断点切进
+ * 平板/移动布局 —— 那正是这个模式要避开的。模型整页截图的宽度就是
+ * 当前视口宽（见宿主 ops::screenshot），所以这个数同时决定了模型
+ * 眼里"桌面版"的宽度。
+ */
+const WEB_WIDTH = 1280;
+
+/**
+ * Web 模式视口高度的上下限（CSS 像素）。
+ *
+ * 高度跟着面板比例折算，好让帧与画面区同比例、缩放后正好铺满。但渲染
+ * 表面是 宽×高×密度 的位图:竖条面板能折算出几千像素的高度，内存和
+ * 每一帧的 JPEG 编码都跟着翻倍，还会顶穿 screencast 的物理像素上限
+ * （见宿主 start_screencast，Retina 下 1500×2 正好贴着 3000）。顶到
+ * 限之后比例对不上的部分由 contain 留边，点击换算见 toPage。
+ */
+const WEB_MIN_HEIGHT = 600;
+const WEB_MAX_HEIGHT = 1500;
+
 /** DOM 的 MouseEvent.button（0/1/2）→ CDP 认的名字。 */
 function mouseButton(b: number): string {
   return b === 2 ? "right" : b === 1 ? "middle" : "left";
@@ -630,6 +727,50 @@ function PanelIcon() {
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
       <rect x="2" y="3" width="12" height="10" rx="2" stroke="currentColor" strokeWidth="1.3" />
       <path d="M10 3v10" stroke="currentColor" strokeWidth="1.3" />
+    </svg>
+  );
+}
+
+/** 自适应模式:两边的箭头把页面撑到面板边上。 */
+function FitIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M2.5 3.5v9M13.5 3.5v9"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
+      <path
+        d="M5 8h6M6.8 6.2 5 8l1.8 1.8M9.2 6.2 11 8l-1.8 1.8"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+/** Web 模式:一台桌面显示器。 */
+function WebIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <rect
+        x="1.5"
+        y="3"
+        width="13"
+        height="8.5"
+        rx="1.5"
+        stroke="currentColor"
+        strokeWidth="1.3"
+      />
+      <path
+        d="M5.5 13.5h5M8 11.5v2"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
     </svg>
   );
 }
