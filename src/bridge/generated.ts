@@ -212,6 +212,18 @@ export type Attachment = {
       kind: "image";
       media_type: string;
     }
+  | {
+      data: string;
+      kind: "described_image";
+      /**
+       * `data` 的类型（客户端压缩产物通常是 image/jpeg）。
+       */
+      media_type: string;
+      /**
+       * 给模型的转述，自带"当作亲眼所见"的使用指示。
+       */
+      text: string;
+    }
 );
 export type AssistantContent =
   | {

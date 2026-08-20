@@ -1219,11 +1219,15 @@ function messagesToItems(msgs: Message[], skipSynthetic = false): Item[] {
         }
         continue;
       }
-      // 历史里用户附的图（模型能直接看图时存的是原图）。不回显的话，
-      // 切回会话后"自己发过哪张图"就再也看不到了。挂在同一条消息的
-      // 第一个文本气泡上 —— user_content 保证每条用户消息都有文本。
+      // 历史里用户附的图。不回显的话，切回会话后"自己发过哪张图"就再也
+      // 看不到了。挂在同一条消息的第一个文本气泡上 —— user_content 保证
+      // 每条用户消息都有文本。
+      //
+      // 两种附件都是图：`image` 是模型自己能看图时存的原图，
+      // `described_image` 是走视觉兼容时存的（模型读里面的转述，图给界面）。
+      // 只认前者的话，纯文本模型下的图片全都不显示。
       const images = msg.content.flatMap((c) =>
-        c.type === "attachment" && c.kind === "image"
+        c.type === "attachment" && (c.kind === "image" || c.kind === "described_image")
           ? [`data:${c.media_type};base64,${c.data}`]
           : [],
       );

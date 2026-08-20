@@ -473,6 +473,10 @@ fn convert_attachment(a: &riot_protocol::message::Attachment) -> serde_json::Val
         Attachment::SystemReminder { text } => {
             format!("<system-reminder>\n{text}\n</system-reminder>")
         }
+        // 视觉兼容：模型读转述，图片本体（`data`）只给界面，不发出去。
+        Attachment::DescribedImage { text, .. } => {
+            format!("<system-reminder>\n{text}\n</system-reminder>")
+        }
         Attachment::Image { media_type, data } => {
             return serde_json::json!({
                 "type": "image",
@@ -614,6 +618,38 @@ mod tests {
             }
         }
         out
+    }
+
+    /// 视觉兼容那张图只发转述，base64 一个字节都不能出去。
+    ///
+    /// `[约束]` 附件里带着图片本体是给界面留的（切回会话要能重画用户发过
+    /// 的图）。当成 image 块发出去的话，收不了图的模型这边会被服务方拒。
+    #[test]
+    fn 视觉兼容的图只发转述() {
+        use riot_protocol::message::Attachment;
+
+        let msg = Message::User {
+            id: MessageId::from_raw("m"),
+            content: vec![
+                UserContent::Attachment(Attachment::DescribedImage {
+                    media_type: "image/jpeg".into(),
+                    data: "BASE64PAYLOAD".into(),
+                    text: "用户附的第 1 张图：\n图里是一个两栏布局".into(),
+                }),
+                UserContent::Text {
+                    text: "这里为什么错位".into(),
+                },
+            ],
+            meta: MessageMeta::default(),
+        };
+
+        let r = build_request(&req(vec![msg]), &sections(), &RetryContext::initial());
+        let wire = serde_json::to_string(&r.messages).expect("序列化");
+        assert!(wire.contains("两栏布局"), "转述要发给模型：{wire}");
+        assert!(
+            !wire.contains("BASE64PAYLOAD"),
+            "图片本体不能发出去：{wire}"
+        );
     }
 
     #[test]

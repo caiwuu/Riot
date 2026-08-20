@@ -177,6 +177,13 @@ fn strip_for_summary(messages: &[Message]) -> Vec<Message> {
                                 text: "[此处原本是一张图片，总结时已省略]".into(),
                             })
                         }
+                        // 视觉兼容那张图：转述留着（模型本来读的就是它，
+                        // 丢掉等于让总结忘掉用户附过什么），base64 去掉。
+                        UserContent::Attachment(Attachment::DescribedImage { text, .. }) => {
+                            UserContent::Attachment(Attachment::SystemReminder {
+                                text: text.clone(),
+                            })
+                        }
                         UserContent::ToolResult { tool_use_id, content, is_error } => {
                             UserContent::ToolResult {
                                 tool_use_id: tool_use_id.clone(),

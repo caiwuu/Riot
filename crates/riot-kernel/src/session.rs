@@ -449,6 +449,15 @@ pub struct Session {
     compacting: AtomicBool,
     /// 压缩边界之前的消息，只给界面画。模型看的是 `history`（活的那截）。
     ui_archive: Mutex<Vec<Message>>,
+    /// 这一轮还没成形的用户消息，只给界面看：不进 `history`、不落盘。
+    ///
+    /// 用户消息要等主动压缩、图片转述、`@` 展开全跑完才定稿，前两样都是
+    /// 模型调用，慢的时候十几秒起步。而 `running` 在这之前就置位了 ——
+    /// 这段时间里切走再切回来，前端靠 [`Self::history`] 重建界面，看到的
+    /// 是一个转圈的"正在生成"和一片空白，自己刚发出去的话不见了（真实
+    /// 反馈）。和 `live_stream` 同一个路子：还没进历史但界面得看得见的
+    /// 东西，挂在会话上随快照一起回去。
+    pending_user: Mutex<Option<Message>>,
     /// 模型这一侧的终端面板。宿主创建会话后挂上（见 [`Self::attach_terminals`]）。
     ///
     /// 会话级而不是每轮现建：`owned` 集合记着模型起过哪些服务，每轮重建
@@ -567,7 +576,11 @@ fn is_user_prompt(m: &Message) -> bool {
     match m {
         Message::User { content, .. } => content.iter().any(|c| match c {
             UserContent::Text { text } => !text.trim().is_empty(),
-            UserContent::Attachment(Attachment::Image { .. } | Attachment::UserFile { .. }) => true,
+            UserContent::Attachment(
+                Attachment::Image { .. }
+                | Attachment::DescribedImage { .. }
+                | Attachment::UserFile { .. },
+            ) => true,
             _ => false,
         }),
         _ => false,
@@ -626,16 +639,22 @@ async fn user_content(
 
         // 走视觉兼容。失败也要留一句话 —— 静默丢掉的话，用户明明附了图，
         // 模型却完全不知道有这回事，然后答得像用户什么都没给。
+        //
+        // 转述进 DescribedImage 而不是 SystemReminder：模型那边两者一样（都
+        // 只读文字，provider 不发图），但前者把图片本体留在了消息里，界面
+        // 切回会话时还能把用户发过的图画出来。
         let described = vision
             .describe(riot_protocol::vision::DescribeRequest {
-                media_type: img.media_type,
-                data: img.data,
+                media_type: img.media_type.clone(),
+                data: img.data.clone(),
                 focus: "用户附上这张图是想让你看懂它的内容:上面的文字、界面元素、\
                         数据、以及任何看起来是报错的地方"
                     .to_owned(),
             })
             .await;
-        content.push(UserContent::Attachment(Attachment::SystemReminder {
+        content.push(UserContent::Attachment(Attachment::DescribedImage {
+            media_type: img.media_type,
+            data: img.data,
             text: match described {
                 Ok(desc) => format!("用户附的第 {} 张图：\n{desc}", i + 1),
                 Err(e) => format!("用户附了第 {} 张图，但没能转成文字：{e}", i + 1),
@@ -643,15 +662,9 @@ async fn user_content(
         }));
     }
 
-    // 空文本也要留个位置:用户可能只丢了一张图什么都没说，而空的 user 消息
-    // 会被一部分服务方拒。
     let text_for_mentions = input.text.clone();
     content.push(UserContent::Text {
-        text: if input.text.trim().is_empty() {
-            "看这张图。".to_owned()
-        } else {
-            input.text
-        },
+        text: prompt_text(&input.text),
     });
     // `@路径` 引用：用户点名的文件连内容一起带上，排在正文之后
     //（先读问题再看材料 —— 和图片相反，图片是"看着图听问题"）。
@@ -676,6 +689,49 @@ async fn user_content(
             text: format!("UserPromptSubmit hook 的补充上下文：\n{ctx}"),
         }));
     }
+    content
+}
+
+/// 用户这条消息的正文。
+///
+/// 空文本也要留个位置:用户可能只丢了一张图什么都没说，而空的 user 消息
+/// 会被一部分服务方拒。
+fn prompt_text(text: &str) -> String {
+    if text.trim().is_empty() {
+        "看这张图。".to_owned()
+    } else {
+        text.to_owned()
+    }
+}
+
+/// 用户这一轮输入的**占位形态**：只有他真正打的字和附的图。
+///
+/// [`user_content`] 要调模型（图片转述）、读磁盘（`@` 展开）才能定稿，
+/// 期间界面得先有东西可画（见 `Session::pending_user`）。缺的是那些
+/// 本来就是补给模型的上下文 —— 用户自己在气泡里看到的就是这些。
+///
+/// `[约束]` 图片一律进 `DescribedImage`。这份内容按设计不会发给模型
+/// （定稿版会整条顶掉它），但万一漏出去，这个变体只会渲染成一段文字 ——
+/// 而 `Image` 会让收不了图的模型 400，正是 [`user_content`] 要避免的那个。
+fn pending_user_content(input: &TurnInput) -> Vec<UserContent> {
+    let mut content: Vec<UserContent> = input
+        .images
+        .iter()
+        .enumerate()
+        // 超限的图定稿时也不会带上，占位这里同样跳过 —— 它进不了历史，
+        // 却要跟着每次拉历史在 RPC 上来回搬几 MB。
+        .filter(|(_, img)| img.data.len() <= MAX_IMAGE_B64)
+        .map(|(i, img)| {
+            UserContent::Attachment(Attachment::DescribedImage {
+                media_type: img.media_type.clone(),
+                data: img.data.clone(),
+                text: format!("用户附的第 {} 张图，还在读。", i + 1),
+            })
+        })
+        .collect();
+    content.push(UserContent::Text {
+        text: prompt_text(&input.text),
+    });
     content
 }
 
@@ -729,6 +785,7 @@ impl Session {
             ids: Arc::new(NanoIdGenerator),
             compacting: AtomicBool::new(false),
             ui_archive: Mutex::new(Vec::new()),
+            pending_user: Mutex::new(None),
             terminal: std::sync::OnceLock::new(),
         }
     }
@@ -770,6 +827,7 @@ impl Session {
             ids: Arc::new(NanoIdGenerator),
             compacting: AtomicBool::new(false),
             ui_archive: Mutex::new(Vec::new()),
+            pending_user: Mutex::new(None),
             terminal: std::sync::OnceLock::new(),
         }
     }
@@ -1055,9 +1113,16 @@ impl Session {
     }
 
     /// 历史快照。切回一个会话时前端用它重建对话流。
+    ///
+    /// 末尾可能多出一条还没定稿的用户消息（见 `pending_user`）——
+    /// 界面要的是"用户发了什么"，不是"模型收到了什么"。
     pub async fn history(&self) -> Vec<Message> {
         self.hydrate().await;
-        self.history.lock().await.clone()
+        let mut out = self.history.lock().await.clone();
+        if let Some(m) = self.pending_user.lock().await.clone() {
+            out.push(m);
+        }
+        out
     }
 
     /// 挂上前端最新的事件出口。跑着的轮子会立刻改用它。
@@ -1299,6 +1364,10 @@ impl Session {
             *g = None;
             self.queue.take_all()
         };
+        // 占位在正常路径上定稿时就撤了；这里兜住半路失败的那条（比如缺
+        // key，消息根本没进历史也没落盘）。留着的话，界面上会挂着一条
+        // 永远等不到回复、重启之后又消失的用户消息。
+        *self.pending_user.lock().await = None;
         if !leftover.is_empty() {
             tracing::debug!(
                 count = leftover.len(),
@@ -1722,6 +1791,16 @@ impl Session {
         let mut history = self.history.lock().await.clone();
 
         if let Some(input) = input {
+            // 这条消息的 id 先定下来：占位版和定稿版用同一个，前端认 id。
+            let user_id = MessageId::from_raw(self.ids.next_id("msg"));
+            // 占位先立起来 —— 底下压缩和转述都是模型调用，这段时间里切走
+            // 再切回来必须还看得见自己刚发的话（见 `pending_user`）。
+            *self.pending_user.lock().await = Some(Message::User {
+                id: user_id.clone(),
+                content: pending_user_content(&input),
+                meta: MessageMeta::default(),
+            });
+
             // ── 主动压缩：历史超阈值就先总结再开工 ────────────────────
             // 反应式（413 重试）是保命；这条是"到线就处理"—— 不主动的话，
             // 会话会一直顶着窗口上限跑，每轮都在 413 的边缘反复横跳。
@@ -1758,7 +1837,7 @@ impl Session {
                 }
             }
             let user_msg = Message::User {
-                id: MessageId::from_raw(self.ids.next_id("msg")),
+                id: user_id,
                 content,
                 meta: MessageMeta::default(),
             };
@@ -1806,6 +1885,9 @@ impl Session {
         // 就是一片空白，用户以为聊天记录没了）。落盘那边本来就是逐条追加
         // 的，内存这边没有理由不一致。
         *self.history.lock().await = state.messages.clone();
+        // 定稿版已经进历史，占位撤掉 —— 留着的话历史末尾会多出一条重复的
+        // 用户消息。撤在写历史**之后**：反过来的话中间那一瞬两边都没有。
+        *self.pending_user.lock().await = None;
         // 半截流从零开始。正常情况下上一轮的 Done 已经清过，这里兜住
         // 通道断开提前 break 的那条路 —— 不清的话残留会拼进这一轮。
         *self.live_stream.lock().await = LiveStream::default();
@@ -2336,10 +2418,16 @@ impl PermissionGate for HostGate {
 /// 不能：安全检查（写 SSH 配置、凭证文件、命令注入……对 bypass 都免疫，
 /// 更不该被一个脚本压过）和用户自己写的 ask 规则（那是用户明确要求
 /// "这个必须问我"，脚本无权替他改主意）。
+///
+/// 也不能：提问（`UserChoice`，即 `AskUserQuestion` 的选项卡）。这不是
+/// 信任问题 —— hook 的 allow 回答不了一道选择题。跳过卡片的话工具拿着
+/// 空选择跑，必然以"没有收到用户的选择"失败。
 fn hook_may_skip_ask(reason: &DecisionReason) -> bool {
     !matches!(
         reason,
-        DecisionReason::SafetyCheck { .. } | DecisionReason::Rule { .. }
+        DecisionReason::SafetyCheck { .. }
+            | DecisionReason::Rule { .. }
+            | DecisionReason::UserChoice { .. }
     )
 }
 
@@ -2522,12 +2610,23 @@ impl HostGate {
                 // 用户点"允许"也不会有任何反应 —— 操作早就被拒绝了。
                 self.resolved(&request_id, DecisionReason::Timeout);
                 // `[约束]` 超时按拒绝处理。见 ASK_TIMEOUT_RANGE 的注释。
-                GateOutcome::Deny {
-                    message: format!(
+                //
+                // 提问的超时不能劝模型"重新提出"：没人在场时重新提问的结局
+                // 还是超时，一来一回就成了每分钟一轮的提问循环。和工具自己
+                // 的空选择失败同一个口径 —— 讲清取舍，停下来等人。
+                let message = if tool.name() == "AskUserQuestion" {
+                    format!(
+                        "等了 {} 秒没有人回答。不要立刻重新提问，也不要自己替用户挑一个 —— \
+                         用普通回复把这个决定和各选项的取舍讲清楚，然后停下来等他说。",
+                        timeout.as_secs()
+                    )
+                } else {
+                    format!(
                         "等待授权超过 {} 秒，本次操作未执行。如果仍然需要，请重新提出。",
                         timeout.as_secs()
-                    ),
-                }
+                    )
+                };
+                GateOutcome::Deny { message }
             }
         }
     }
@@ -2838,10 +2937,13 @@ mod tests {
         ));
     }
 
-    /// 看不了图的模型:图片转成文字，**不能**把图片留在消息里。
+    /// 看不了图的模型:图片转成文字，**不能**把图片当 `Image` 留在消息里。
     ///
     /// `[约束]` 留在里面的话，OpenAI 那条路会发出一条模型看不懂的 image_url，
     /// Anthropic 那条会被服务方拒 —— 而两种失败都发生在用户已经点了发送之后。
+    ///
+    /// `[约束]` 但图片本体要留在 `DescribedImage` 里给界面。丢掉的话，用户
+    /// 切走再切回来自己发过的图就没了（实时路径靠乐观回显看不出这个问题）。
     #[tokio::test]
     async fn 看不了图时转成文字() {
         struct Compat;
@@ -2876,17 +2978,18 @@ mod tests {
             !content
                 .iter()
                 .any(|c| matches!(c, UserContent::Attachment(Attachment::Image { .. }))),
-            "不能把图片留在消息里：{content:?}"
+            "不能把图片当 Image 留在消息里：{content:?}"
         );
-        // 转述进 SystemReminder 而不是 Text:它是宿主补的上下文，不是用户
-        // 说的话。混进 Text 的话，前端重建历史时会把整段转述当成用户气泡。
+        // 转述进附件而不是 Text:它是宿主补的上下文，不是用户说的话。混进
+        // Text 的话，前端重建历史时会把整段转述当成用户气泡显示出来。
+        // 用 DescribedImage 而不是 SystemReminder:图片本体得跟着留下来。
         assert!(
             content.iter().any(|c| matches!(
                 c,
-                UserContent::Attachment(Attachment::SystemReminder { text })
-                    if text.contains("两栏")
+                UserContent::Attachment(Attachment::DescribedImage { text, data, .. })
+                    if text.contains("两栏") && data == "AAAA"
             )),
-            "转述要以 SystemReminder 附件带上：{content:?}"
+            "转述和图片本体要一起以 DescribedImage 附件带上：{content:?}"
         );
         // 只丢了图什么都没说时，也得有一句话 —— 空 user 消息会被一部分
         // 服务方拒。
@@ -3888,6 +3991,11 @@ mod tests {
             source: riot_protocol::permission::RuleSource::Session,
             pattern: "Bash(rm *)".into(),
         }));
+        // 提问不是信任问题：hook 的 allow 回答不了选择题，跳过卡片
+        // 只会让 AskUserQuestion 拿着空选择必然失败。
+        assert!(!hook_may_skip_ask(&DecisionReason::UserChoice {
+            remembered: false
+        }));
     }
 
     #[tokio::test]
@@ -4030,6 +4138,100 @@ mod tests {
         };
         let _ = s.run_turn(input, model, caps, ch, limits).await;
         assert!(s.running.lock().await.is_none(), "失败路径没有清理 running");
+        // 这一轮连历史都没写进去（缺 key，provider 都没建起来）。占位留着
+        // 的话，界面上会挂一条永远等不到回复、重启之后又消失的用户消息。
+        assert!(
+            s.pending_user.lock().await.is_none(),
+            "失败路径没有清理准备中的用户消息"
+        );
+    }
+
+    /// 还没定稿的用户消息也要出现在历史快照里。
+    ///
+    /// `[约束]` 用户消息要等主动压缩和图片转述（都是模型调用）跑完才进
+    /// `history`，而 `running` 早就置位了。这段时间里切走再切回来，前端
+    /// 拿到的快照必须已经带着它 —— 否则界面上只剩一个转圈的"正在生成"，
+    /// 用户刚发出去的话不见了，等模型答完再切一次才又冒出来（真实反馈）。
+    #[tokio::test]
+    async fn 准备中的用户消息也进历史快照() {
+        let s = Session::new(
+            SessionId::from_raw("s1"),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        );
+        *s.pending_user.lock().await = Some(hist_user("m1", "在准备"));
+
+        let snap = s.history().await;
+        assert_eq!(snap.len(), 1, "快照要带上准备中的那条：{snap:?}");
+        assert!(
+            s.history.lock().await.is_empty(),
+            "它只给界面看，不能混进模型读的历史"
+        );
+    }
+
+    /// 占位内容 = 用户真正打的字 + 他附的图，仅此而已。
+    #[tokio::test]
+    async fn 占位带上正文和图片但跳过超限的图() {
+        let content = pending_user_content(&TurnInput {
+            text: "这里为什么错位".into(),
+            images: vec![
+                ImageInput {
+                    media_type: "image/png".into(),
+                    data: "AAAA".into(),
+                },
+                ImageInput {
+                    media_type: "image/png".into(),
+                    data: "x".repeat(MAX_IMAGE_B64 + 1),
+                },
+            ],
+            ..Default::default()
+        });
+
+        // `[约束]` 图片进 DescribedImage 而不是 Image：占位按设计不发给
+        // 模型，但万一漏出去，Image 会让收不了图的模型 400。
+        let imgs: Vec<&str> = content
+            .iter()
+            .filter_map(|c| match c {
+                UserContent::Attachment(Attachment::DescribedImage { data, .. }) => {
+                    Some(data.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(imgs, ["AAAA"], "超限的图不该跟着占位来回搬：{content:?}");
+        assert!(
+            content.iter().any(|c| matches!(
+                c, UserContent::Text { text } if text == "这里为什么错位"
+            )),
+            "正文要原样带上：{content:?}"
+        );
+    }
+
+    /// 只丢了一张图什么都没说时，占位的正文和定稿版保持一致。
+    /// 两边对不上的话，前端按正文去重的那步会把气泡显示成两条。
+    #[tokio::test]
+    async fn 空文本的占位和定稿用同一句话() {
+        let input = TurnInput {
+            text: "  ".into(),
+            images: vec![ImageInput {
+                media_type: "image/png".into(),
+                data: "AAAA".into(),
+            }],
+            ..Default::default()
+        };
+        let pending = pending_user_content(&input);
+        let final_content =
+            user_content(input, &riot_protocol::vision::NoVision, no_mentions()).await;
+
+        let text_of = |c: &[UserContent]| {
+            c.iter()
+                .find_map(|x| match x {
+                    UserContent::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .expect("总要有一句正文")
+        };
+        assert_eq!(text_of(&pending), text_of(&final_content));
     }
 
     fn test_model() -> riot_protocol::ModelEndpoint {

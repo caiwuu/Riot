@@ -210,6 +210,20 @@ pub enum Attachment {
         media_type: String,
         data: String,
     },
+    /// 用户附的图 + 它的文字转述。主模型收不了图时（视觉兼容）的产物，
+    /// 语义同 [`ToolResultContent::DescribedImage`]：**模型只读 `text`**，
+    /// 图片本体只给界面。
+    ///
+    /// 和 `SystemReminder` 分开是因为图得留下来。转述本身塞进 SystemReminder
+    /// 就够模型用了，但那样图片本体在这一步就没了 —— 实时路径靠乐观回显
+    /// 还看得见，切回会话之后用户自己发过的图就再也找不回来（真实发生过）。
+    DescribedImage {
+        /// `data` 的类型（客户端压缩产物通常是 image/jpeg）。
+        media_type: String,
+        data: String,
+        /// 给模型的转述，自带"当作亲眼所见"的使用指示。
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

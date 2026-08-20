@@ -281,6 +281,38 @@ fn 系统提醒附件渲染成文本不是_json() {
     assert!(!content.contains("\"kind\""), "不该是字面 JSON：{content}");
 }
 
+/// 视觉兼容那张图只发转述，base64 一个字节都不能出去。
+///
+/// `[约束]` 附件里带着图片本体是给界面留的（切回会话要能重画用户发过的
+/// 图）。发出去的话，收不了图的模型会拿到一条它看不懂的 image_url —— 而
+/// 这正是当初把图片转成文字要避免的那个 400。
+#[test]
+fn 视觉兼容的图只发转述() {
+    use riot_protocol::message::Attachment;
+
+    let msgs = vec![Message::User {
+        id: MessageId::from_raw("u1"),
+        content: vec![
+            UserContent::Attachment(Attachment::DescribedImage {
+                media_type: "image/jpeg".into(),
+                data: "BASE64PAYLOAD".into(),
+                text: "用户附的第 1 张图：\n图里是一个两栏布局".into(),
+            }),
+            UserContent::Text {
+                text: "这里为什么错位".into(),
+            },
+        ],
+        meta: MessageMeta::default(),
+    }];
+
+    let out = convert_messages(&msgs);
+    let WireMessage::User { content } = &out[0] else {
+        panic!("不发图片时应该是纯文本 user：{:?}", out[0]);
+    };
+    assert!(content.contains("两栏布局"), "转述要发给模型：{content}");
+    assert!(!content.contains("BASE64PAYLOAD"), "图片本体不能发出去：{content}");
+}
+
 #[test]
 fn 工具结果排在同批用户文本之前() {
     // OpenAI 要求 tool 消息紧跟带 tool_calls 的 assistant，中间不能插 user。

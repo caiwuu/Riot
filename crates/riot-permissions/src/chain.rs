@@ -263,6 +263,14 @@ fn mode_default(
 /// [`PermissionMode::Unattended`] 是另一回事：用户在场、看着警告、
 /// 亲手选的"别问了，都放行"。那是"**不必**回答"，可以是 allow。
 /// 这两者读起来很像，混为一谈就等于开后门。
+///
+/// `[约束]` 无人值守的放行**不适用于提问**（[`DecisionReason::UserChoice`]，
+/// 即 `AskUserQuestion` 的选项卡）。权限询问要的是**许可**，allow 就是
+/// 完整的回答；提问要的是**信息**，allow 什么都没答 —— 工具拿着空选择
+/// 跑 `call`，唯一可能的结局是"没有收到用户的选择"的失败：卡片没弹出来，
+/// 用户看到一张红色的失败卡，模型白跑一轮。无人值守的语义是"权限问题
+/// 别拦着任务"，不是"把模型主动要的决定静默扔掉"。用户真不在场时，
+/// 由宿主的 ask 超时按拒绝兜底（那条路本来就是为没人回应设计的）。
 fn finish_ask(
     message: String,
     suggestions: Vec<PermissionUpdate>,
@@ -278,7 +286,9 @@ fn finish_ask(
         };
     }
 
-    if mode == PermissionMode::Unattended {
+    if mode == PermissionMode::Unattended
+        && !matches!(reason, DecisionReason::UserChoice { .. })
+    {
         return PermissionResult::Allow {
             updated_input: None,
             reason: DecisionReason::Mode { mode },
@@ -793,6 +803,96 @@ mod tests {
                 &RuleSet::default()
             )),
             "ask"
+        );
+    }
+
+    /// 复刻 AskUserQuestion 的形状：提问用的 ask，理由是 UserChoice。
+    fn question_tool() -> PermTool {
+        PermTool::read_only("AskUserQuestion").says(PermissionResult::Ask {
+            message: "模型想让你做一个决定".into(),
+            suggestions: Vec::new(),
+            reason: DecisionReason::UserChoice { remembered: false },
+        })
+    }
+
+    #[test]
+    fn 无人值守不吞掉提问() {
+        // 权限询问要的是许可，allow 就是完整回答；提问要的是**信息**，
+        // allow 什么都没答。曾经的真实 bug：无人值守把这个 ask 收敛成
+        // allow，卡片不弹，AskUserQuestion 的 call 拿着空选择跑，唯一的
+        // 结局是"没有收到用户的选择"失败 —— 用户看到一张红色失败卡，
+        // 问题却从没出现过。
+        for mode in [
+            PermissionMode::Unattended,
+            PermissionMode::BypassPermissions,
+            PermissionMode::Auto,
+            PermissionMode::Default,
+        ] {
+            assert_eq!(
+                behavior(&decide(
+                    &question_tool(),
+                    &serde_json::json!({}),
+                    &ctx_with(mode),
+                    &RuleSet::default()
+                )),
+                "ask",
+                "{mode:?} 下提问被吞掉了"
+            );
+        }
+    }
+
+    #[test]
+    fn 无人值守的放行只豁免提问() {
+        // 上一条的反面：UserChoice 的豁免不能顺手把无人值守的"全部放行"
+        // 弄没了 —— 连安全检查它都压过（用户看着警告亲手选的档位）。
+        let ctx = ctx_with(PermissionMode::Unattended);
+        assert_eq!(
+            behavior(&decide(
+                &PermTool::writer("Write"),
+                &input("/work/a.rs"),
+                &ctx,
+                &RuleSet::default()
+            )),
+            "allow"
+        );
+        assert_eq!(
+            behavior(&decide(
+                &PermTool::writer("Write"),
+                &input("/work/.zshrc"),
+                &ctx,
+                &RuleSet::default()
+            )),
+            "allow",
+            "无人值守连安全检查一起放行，这是它和 bypass 的区别"
+        );
+    }
+
+    #[test]
+    fn 提问在没人能答时是拒绝不是空答案() {
+        // DontAsk 和子 agent（can_prompt_user=false）下没人能点卡片。
+        // 收敛成 deny 模型立刻知道该换路；收敛成 allow 的话工具拿空选择
+        // 跑，失败得更晚、报错更绕。
+        assert_eq!(
+            behavior(&decide(
+                &question_tool(),
+                &serde_json::json!({}),
+                &ctx_with(PermissionMode::DontAsk),
+                &RuleSet::default()
+            )),
+            "deny"
+        );
+
+        let mut ctx = ctx_with(PermissionMode::Unattended);
+        ctx.can_prompt_user = false;
+        assert_eq!(
+            behavior(&decide(
+                &question_tool(),
+                &serde_json::json!({}),
+                &ctx,
+                &RuleSet::default()
+            )),
+            "deny",
+            "无人值守的豁免只让提问活到弹窗，问不出去时仍然要拒"
         );
     }
 

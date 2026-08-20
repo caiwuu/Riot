@@ -337,6 +337,10 @@ fn render_attachment(a: &riot_protocol::message::Attachment) -> Option<String> {
         Attachment::Environment { text } | Attachment::SystemReminder { text } => {
             format!("<system-reminder>\n{text}\n</system-reminder>")
         }
+        // 视觉兼容：模型读转述，图片本体（`data`）只给界面，不发出去。
+        Attachment::DescribedImage { text, .. } => {
+            format!("<system-reminder>\n{text}\n</system-reminder>")
+        }
         // 图片由调用方单独走内容块，不在这里变成文字。
         Attachment::Image { .. } => return None,
     })

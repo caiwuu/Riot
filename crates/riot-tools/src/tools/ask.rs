@@ -165,6 +165,11 @@ impl Tool for AskUserQuestion {
     /// 注意这里返回 Ask 而不是 Passthrough：Passthrough 会被决策链按模式
     /// 收敛，在 `bypassPermissions` / `Unattended` 下变成自动放行，那时
     /// 用户根本看不到问题，而模型收到一个空答案。
+    ///
+    /// `[约束]` 理由必须是 [`DecisionReason::UserChoice`]，这是和决策链
+    /// 约好的暗号：`finish_ask` 靠它豁免无人值守的"全部放行"收敛（放行
+    /// 一次提问什么都没答），Auto 模式的判危也靠它（`yields_to_bypass`
+    /// 为 false）不去替用户答题。换成别的理由，卡片会在那些模式下消失。
     fn check_permissions(
         &self,
         _input: &serde_json::Value,
@@ -344,6 +349,41 @@ mod tests {
             assert!(
                 matches!(t.check_permissions(&input(2), &ctx), PermissionResult::Ask { .. }),
                 "{mode:?} 下没有问用户"
+            );
+        }
+    }
+
+    /// 上一条只盯工具层，这条走**完整决策链** —— bug 曾经就藏在两层之间：
+    /// `check_permissions` 永远返回 Ask，但链的 `finish_ask` 把无人值守下
+    /// 的 Ask 收敛成 Allow。卡片没弹，call 拿着空选择，必然以"没有收到
+    /// 用户的选择"失败 —— 用户看到的是一张莫名其妙的红色失败卡。
+    #[test]
+    fn 决策链在无人值守下也把提问问出去() {
+        use riot_protocol::permission::{PermissionMode, PermissionModeState};
+        let t = AskUserQuestion;
+        for mode in [
+            PermissionMode::Default,
+            PermissionMode::AcceptEdits,
+            PermissionMode::Plan,
+            PermissionMode::Auto,
+            PermissionMode::BypassPermissions,
+            PermissionMode::Unattended,
+        ] {
+            let ctx = PermissionContext {
+                mode: PermissionModeState(Some(mode)),
+                rules: Vec::new(),
+                sandboxed: false,
+                can_prompt_user: true,
+            };
+            let r = riot_permissions::decide(
+                &t,
+                &input(2),
+                &ctx,
+                &riot_permissions::RuleSet::default(),
+            );
+            assert!(
+                matches!(r, PermissionResult::Ask { .. }),
+                "{mode:?} 下走完整条链必须仍是询问，实际：{r:?}"
             );
         }
     }
