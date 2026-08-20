@@ -1378,6 +1378,22 @@
         "stderr"
       ]
     },
+    "PendingAsk": {
+      "description": "一条还在等用户回答的权限询问（会话快照用）。\n\n`permission_request` 事件只在询问产生那一刻发一次；界面切走的话它发进\n没人听的旧通道。快照不带的话，切回来弹窗再也不出现 —— 那次询问只能\n等到超时被拒，模型收到\"授权请求没有得到回应\"。",
+      "type": "object",
+      "properties": {
+        "detail": {
+          "$ref": "#/$defs/PermissionAsk"
+        },
+        "request_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id",
+        "detail"
+      ]
+    },
     "PermissionAsk": {
       "description": "发给 UI 的权限请求详情。",
       "type": "object",
@@ -2139,6 +2155,40 @@
           ]
         },
         {
+          "description": "丢掉指定助手消息及其后的一切，从它前面那条用户消息再跑一轮。\n不重复插入用户消息 —— 历史已经以那条提示结尾。",
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "const": "turn.regenerate"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "config": {
+                  "$ref": "#/$defs/TurnConfig"
+                },
+                "message_id": {
+                  "description": "要点重新生成的助手消息 id（不是界面条目 id）。",
+                  "type": "string"
+                },
+                "session_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session_id",
+                "message_id",
+                "config"
+              ]
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ]
+        },
+        {
           "description": "中断当前轮。",
           "type": "object",
           "properties": {
@@ -2644,10 +2694,28 @@
                 "compacting": {
                   "type": "boolean"
                 },
+                "live_text": {
+                  "description": "正在流式生成的正文。流式增量不进历史 —— 不带这段的话，\n切回来的界面只能从 0 重新攒，正文缺头直到消息完成。",
+                  "type": "string",
+                  "default": ""
+                },
+                "live_thinking": {
+                  "description": "正在流式生成的思考。症状同 `live_text`：思考块的字数清零重数。",
+                  "type": "string",
+                  "default": ""
+                },
                 "messages": {
                   "type": "array",
                   "items": {
                     "$ref": "#/$defs/Message"
+                  }
+                },
+                "pending_asks": {
+                  "description": "还在等用户回答的权限询问。事件只发一次，弹窗跨\"切走再切回\"\n活下来靠这份快照。`default` 兼容旧 transcript 回放。",
+                  "type": "array",
+                  "default": [],
+                  "items": {
+                    "$ref": "#/$defs/PendingAsk"
                   }
                 }
               },
@@ -3572,7 +3640,7 @@
           ]
         },
         {
-          "description": "图 + 编号清单（Set-of-Marks）。和 [`Image`](Self::Image) 一样，图是\n给**能看图**的模型的（压缩图放 `data`，原图落盘走 `path`）；但多带一段\n`text`（编号清单），两路一起发:模型看图上第 [n] 个框、照清单查 [n] 是\n什么。给纯文本模型时产出方不该用这个变体（图对它没用），退回\n[`Text`](Self::Text)。",
+          "description": "图 + 配套文字，两路一起发。和 [`Image`](Self::Image) 一样，图是给\n**能看图**的模型的（压缩图放 `data`，原图落盘走 `path`）；`text` 是\n和图同属一个结果的文字：Set-of-Marks 截图的编号清单（模型看图上\n第 [n] 个框、照清单查 [n] 是什么）、MCP 工具图文混合结果的文本部分。\n给纯文本模型时产出方不该用这个变体（图对它没用）：Set-of-Marks 退回\n[`Text`](Self::Text)，MCP 走视觉兼容（[`DescribedImage`](Self::DescribedImage)）。",
           "type": "object",
           "properties": {
             "data": {
@@ -3588,7 +3656,7 @@
               ]
             },
             "text": {
-              "description": "编号清单，和图上的框一一对应；编号同 [`crate::browser::MarkedView`]。",
+              "description": "配套文字。Set-of-Marks 场景是编号清单（编号同\n[`crate::browser::MarkedView`]），MCP 场景是结果的文本内容块。",
               "type": "string"
             },
             "type": {

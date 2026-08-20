@@ -293,9 +293,10 @@ fn render_result(content: &ToolResultContent, is_error: bool) -> String {
         // 产生于"模型看不了图"的会话（见协议注释）。
         ToolResultContent::DescribedImage { text, .. } => text.clone(),
         // 图跟在下一条 user 消息里（见 convert_messages 的 tool_images）；
-        // 这里给编号清单 + 一句指路，tool 消息不能为空。
+        // 这里给配套文字 + 一句指路，tool 消息不能为空。措辞保持中性 ——
+        // 这个变体不只装 Set-of-Marks 截图，也装 MCP 的图文混合结果。
         ToolResultContent::MarkedImage { media_type, text, .. } => {
-            format!("{text}\n（带编号框的截图见下一条消息，{media_type}）")
+            format!("{text}\n（结果配套的图片见下一条消息，{media_type}）")
         }
     };
 

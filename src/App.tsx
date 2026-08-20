@@ -55,11 +55,12 @@ import {
   PlanDraft,
 } from "./components/PermissionDialog";
 import { Settings } from "./components/Settings";
+import { groupBlocks, ProcessGroup, ThinkingBlock } from "./components/ProcessFold";
 import { useEscLayer } from "./components/Modal";
 import { TerminalPanel } from "./components/TerminalPanel";
 import { hasActiveTodos, TodoPanel } from "./components/TodoPanel";
 import { ToolCard } from "./components/ToolCard";
-import { type Item, type QueuedItem, useSession } from "./hooks/useSession";
+import { type Item, type QueuedItem, useSession, waitStartedAt } from "./hooks/useSession";
 import { basename, parentOf, tildify } from "./pathDisplay";
 
 /**
@@ -1327,6 +1328,8 @@ function Chat({
             streamingPlan={session.streamingPlan}
             busy={session.busy}
             compacting={session.compacting}
+            waitSince={waitStartedAt(sessionId)}
+            onRegenerate={session.regenerate}
             {...(planAsk ? { planAsk } : {})}
             {...(choiceAsk ? { choiceAsk } : {})}
             onAnswerPlan={(r) => planAsk && void session.answer(r, planAsk.requestId)}
@@ -1518,10 +1521,12 @@ function Transcript({
   streamingPlan,
   busy,
   compacting,
+  waitSince,
   planAsk,
   choiceAsk,
   onAnswerPlan,
   onAnswerChoice,
+  onRegenerate,
 }: {
   items: Item[];
   streaming: string;
@@ -1530,12 +1535,18 @@ function Transcript({
   busy: boolean;
   /** 宿主正在压缩上下文。见 useSession 里同名字段。 */
   compacting: boolean;
+  /**
+   * 当前这轮等待的起点（epoch ms）。挂在组件外（见 waitStartedAt），
+   * 活得过切会话导致的重挂载 —— 状态行的秒数靠它接着数而不是清零。
+   */
+  waitSince: number | null;
   /** 待批准的计划（ExitPlanMode 的询问）。内联在对话流末尾。 */
   planAsk?: { requestId: string; detail: PermissionAsk };
   /** 模型主动提的选择题。同样内联，不弹窗。 */
   choiceAsk?: { requestId: string; detail: PermissionAsk };
   onAnswerPlan?: (r: PermissionResponse) => void;
   onAnswerChoice?: (r: PermissionResponse) => void;
+  onRegenerate?: (itemId: string) => void;
 }) {
   const boxRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -1626,13 +1637,29 @@ function Transcript({
 
   const waitLabel = runningTool ? `正在执行 ${runningTool}` : "正在生成…";
 
+  // 连续的思考 / 工具折成组（学 Cursor）。长探索几十行连排会把回答
+  // 挤出屏幕，折完对话流里剩下的才是内容。生成过程中同样折：已落定
+  // 的步骤随做随折，正在跑的工具被 groupBlocks 排除在组外、单独成行
+  // 直播。useMemo 挂在 items 上：流式期间 Transcript 每帧重渲染，
+  // 分组不该跟着每帧重算。
+  const blocks = useMemo(() => groupBlocks(items), [items]);
+
   return (
     <main className="transcript" ref={boxRef}>
       {findOpen ? <FindBar box={boxRef} onClose={() => setFindOpen(false)} /> : null}
       <div className="thread-col">
-        {items.map((it) => (
-          <Row key={it.id} item={it} />
-        ))}
+        {blocks.map((b) =>
+          b.kind === "row" ? (
+            <Row
+              key={b.item.id}
+              item={b.item}
+              regenEnabled={!busy}
+              {...(onRegenerate ? { onRegenerate } : {})}
+            />
+          ) : (
+            <ProcessGroup key={b.id} items={b.items} />
+          ),
+        )}
 
         {thinking ? <ThinkingBlock text={thinking} live /> : null}
         {streaming ? (
@@ -1669,9 +1696,9 @@ function Transcript({
          * 压缩优先且不看 busy：手动 `/compact` 不开轮次，不占 busy。
          */}
         {compacting ? (
-          <Dots label="正在压缩上下文…" timed />
+          <Dots label="正在压缩上下文…" timed since={waitSince} />
         ) : busy && !planAsk && !choiceAsk ? (
-          <Dots label={waitLabel} timed />
+          <Dots label={waitLabel} timed since={waitSince} />
         ) : null}
       </div>
       {/* 往上翻了超过一屏才出现 —— 贴底时这按钮只是噪音。点了重新贴底，
@@ -1707,7 +1734,15 @@ function Transcript({
  * items 数组里未变化的元素引用是稳定的（更新走的是替换单个元素），
  * 所以浅比较有效。
  */
-const Row = memo(function Row({ item }: { item: Item }) {
+const Row = memo(function Row({
+  item,
+  onRegenerate,
+  regenEnabled,
+}: {
+  item: Item;
+  onRegenerate?: (itemId: string) => void;
+  regenEnabled?: boolean;
+}) {
   switch (item.kind) {
     case "user":
       // 用户输入按原文显示，不走 markdown —— 渲染会篡改他说的话
@@ -1729,7 +1764,11 @@ const Row = memo(function Row({ item }: { item: Item }) {
       return (
         <div className="msg assistant">
           <Markdown text={item.text} />
-          <CopyMsg text={item.text} />
+          <MsgActions
+            text={item.text}
+            regenEnabled={!!regenEnabled && !!onRegenerate}
+            {...(onRegenerate ? { onRegenerate: () => onRegenerate(item.id) } : {})}
+          />
         </div>
       );
     case "thinking":
@@ -1749,70 +1788,107 @@ const Row = memo(function Row({ item }: { item: Item }) {
   }
 });
 
-/**
- * 思考过程：始终默认折叠（过程不是结论，铺开会把回答挤走）。
- *
- * 正在流的那条不展开正文，而是在标题右侧滚过最新的思考文字 ——
- * 既能看出"没卡住"，收尾落定时高度又几乎不变。早先直播时整块展开，
- * 收尾一折叠底部内容瞬间矮掉几百像素，贴底跟随会被这次跳变打断。
- */
-function ThinkingBlock({ text, live }: { text: string; live?: boolean }) {
-  const [open, setOpen] = useState(false);
-  const bodyRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!live || !open) return;
-    const el = bodyRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [text, live, open]);
-
-  // 最近一段文字压成一行当预览。换行换成空格 —— 预览框只有一行高。
-  const peek = live && !open ? text.slice(-160).replace(/\s+/g, " ").trim() : "";
-
+/** 悬停出现的消息操作：复制 + 重新生成。占位始终在，hover 才可见。 */
+function MsgActions({
+  text,
+  onRegenerate,
+  regenEnabled,
+}: {
+  text: string;
+  onRegenerate?: () => void;
+  regenEnabled: boolean;
+}) {
+  const [copied, setCopied] = useState(false);
   return (
-    <div className={live ? "think-block live" : "think-block"}>
+    <div className="msg-actions">
       <button
         type="button"
-        className="think-head"
-        // 点标题只为开合，不要把焦点吃过去 —— WKWebView 对 focused
-        // button 会默认滚进视野，正好滚到这条思考、离开底部。
-        onMouseDown={(e) => e.preventDefault()}
-        onClick={() => setOpen(!open)}
+        className={copied ? "msg-action done" : "msg-action"}
+        title={copied ? "已复制" : "复制原文"}
+        aria-label={copied ? "已复制" : "复制原文"}
+        onClick={() => {
+          void navigator.clipboard.writeText(text);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        }}
       >
-        <Chevron open={open} />
-        <span className="think-label">{live ? "思考中…" : "思考过程"}</span>
-        <span className="think-chars">{text.length} 字</span>
-        {peek ? (
-          <span className="think-peek" aria-hidden>
-            <span className="think-peek-text">{peek}</span>
-          </span>
-        ) : null}
+        {copied ? <CheckIcon /> : <CopyIcon />}
       </button>
-      {open ? (
-        <div className="think-body" ref={bodyRef}>
-          {text}
-        </div>
+      {onRegenerate ? (
+        <button
+          type="button"
+          className="msg-action"
+          title={regenEnabled ? "重新生成" : "生成中，结束后才能重新生成"}
+          aria-label="重新生成"
+          disabled={!regenEnabled}
+          onClick={() => onRegenerate()}
+        >
+          <RegenIcon />
+        </button>
       ) : null}
     </div>
   );
 }
 
-/** 悬停出现的整条复制。答案经常要贴回代码或文档，别让用户拖选。 */
-function CopyMsg({ text }: { text: string }) {
-  const [done, setDone] = useState(false);
+function CopyIcon() {
   return (
-    <button
-      type="button"
-      className="msg-copy"
-      title="复制原文"
-      onClick={() => {
-        void navigator.clipboard.writeText(text);
-        setDone(true);
-        setTimeout(() => setDone(false), 1500);
-      }}
-    >
-      {done ? "已复制" : "复制"}
-    </button>
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <rect x="5.5" y="5.5" width="8" height="8" rx="1.4" stroke="currentColor" strokeWidth="1.3" />
+      <path
+        d="M10.5 5.5V4.2A1.7 1.7 0 0 0 8.8 2.5H4.2A1.7 1.7 0 0 0 2.5 4.2v4.6A1.7 1.7 0 0 0 4.2 10.5H5.5"
+        stroke="currentColor"
+        strokeWidth="1.3"
+      />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M3.5 8.2L6.6 11.2 12.5 4.8"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function RegenIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M3.2 8.2A4.8 4.8 0 0 1 12 5.4l.2-2.1"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M12.8 7.8A4.8 4.8 0 0 1 4 10.6l-.2 2.1"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M12.2 2.8v2.6H9.6"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M3.8 13.2V10.6H6.4"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 
@@ -1826,15 +1902,34 @@ function CopyMsg({ text }: { text: string }) {
  * 静止的三个点和"卡死了"看起来一模一样；走动的秒数是那段时间里唯一
  * 能证明系统还活着的东西。
  */
-function Dots({ label, timed }: { label?: string; timed?: boolean }) {
-  const [elapsed, setElapsed] = useState(0);
-  const start = useRef(Date.now());
+function Dots({
+  label,
+  timed,
+  since,
+}: {
+  label?: string;
+  timed?: boolean;
+  /**
+   * 计时起点（epoch ms）。不给就从挂载时刻起数。
+   * 切会话会把整棵 Chat 重挂载，挂载时刻起数的话，切走再切回秒数从 0
+   * 重来 —— 等待的起点必须由活得过重挂载的地方（useSession 的模块级
+   * 表）给进来。
+   */
+  since?: number | null;
+}) {
+  const mountedAt = useRef(Date.now());
+  const start = since ?? mountedAt.current;
+  const [elapsed, setElapsed] = useState(() => Math.round((Date.now() - start) / 1000));
 
   useEffect(() => {
     if (!timed) return;
-    const id = setInterval(() => setElapsed(Math.round((Date.now() - start.current) / 1000)), 1000);
+    const tick = () => setElapsed(Math.round((Date.now() - start) / 1000));
+    // 立即算一次：切回会话时等待往往已经进行了很久，先显示旧值再等
+    // 一秒才跳到真实值，看起来像计时器坏了。
+    tick();
+    const id = setInterval(tick, 1000);
     return () => clearInterval(id);
-  }, [timed]);
+  }, [timed, start]);
 
   const dots = (
     <div className="dots">
@@ -2254,6 +2349,13 @@ interface Shot {
 }
 
 /**
+ * 每个会话待发的截图。和 drafts 同一个问题：Chat 按会话 id 重挂载，
+ * 粘贴的图是组件 state，切走再切回就没了 —— 文字有 drafts 兜着，
+ * 图同样是用户放进输入框的内容，不该丢。发送或删除后由同步 effect 清掉。
+ */
+const shotsCache = new Map<string, Shot[]>();
+
+/**
  * 一条消息最多附几张图。
  *
  * 不是技术上限，是成本上限:每张图都要过一遍模型的视觉编码，五张已经能吃掉
@@ -2554,8 +2656,16 @@ function Composer({
   const [mentionQuery, setMentionQuery] = useState<string | undefined>(undefined);
   /** 斜杠命令的执行反馈（压缩中、展开失败）。 */
   const [slashNote, setSlashNote] = useState("");
-  /** 待发的图。发出去就清空。 */
-  const [shots, setShots] = useState<Shot[]>([]);
+  /** 待发的图。发出去就清空。挂载时从模块级缓存恢复（见 shotsCache）。 */
+  const [shots, setShots] = useState<Shot[]>(() => shotsCache.get(sessionId) ?? []);
+
+  // 写通到模块级缓存。挂在 effect 而不是每个 setShots 调用点：
+  // 调用点有五六处（粘贴、拖放、删除、发送、失败回滚），漏一处
+  // 就是一个静默丢图的洞。
+  useEffect(() => {
+    if (shots.length) shotsCache.set(sessionId, shots);
+    else shotsCache.delete(sessionId);
+  }, [sessionId, shots]);
   /**
    * 编辑区里的文件引用块（按出现顺序）。发出去就清空。
    *

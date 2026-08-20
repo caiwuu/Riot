@@ -172,7 +172,8 @@ export type ToolResultContent =
       media_type: string;
       path?: string | null;
       /**
-       * 编号清单，和图上的框一一对应；编号同 [`crate::browser::MarkedView`]。
+       * 配套文字。Set-of-Marks 场景是编号清单（编号同
+       * [`crate::browser::MarkedView`]），MCP 场景是结果的文本内容块。
        */
       text: string;
       type: "marked_image";
@@ -590,6 +591,17 @@ export type RpcRequest =
       };
     }
   | {
+      method: "turn.regenerate";
+      params: {
+        config: TurnConfig1;
+        /**
+         * 要点重新生成的助手消息 id（不是界面条目 id）。
+         */
+        message_id: string;
+        session_id: string;
+      };
+    }
+  | {
       method: "turn.interrupt";
       params: {
         /**
@@ -738,7 +750,21 @@ export type RpcResponse =
          */
         busy: boolean;
         compacting: boolean;
+        /**
+         * 正在流式生成的正文。流式增量不进历史 —— 不带这段的话，
+         * 切回来的界面只能从 0 重新攒，正文缺头直到消息完成。
+         */
+        live_text?: string;
+        /**
+         * 正在流式生成的思考。症状同 `live_text`：思考块的字数清零重数。
+         */
+        live_thinking?: string;
         messages: Message1[];
+        /**
+         * 还在等用户回答的权限询问。事件只发一次，弹窗跨"切走再切回"
+         * 活下来靠这份快照。`default` 兼容旧 transcript 回放。
+         */
+        pending_asks?: PendingAsk[];
       };
       result: "session_resumed";
     }
@@ -1139,6 +1165,57 @@ export interface ImageInput {
   mediaType: string;
 }
 /**
+ * 提交一轮所需的完整配置(`turn.submit` 的 RPC 载荷,除用户输入之外的一切)。
+ *
+ * 宿主从 `AppConfig` + 会话设置解析出它,内核据此现装 provider、联网、视觉、
+ * 子 agent、权限。**不含** MCP / Skill 工具:那些是 trait object,不能跨进程,
+ * 由内核自己从 MCP hub 和技能目录装配(见 M-B4b)。
+ */
+export interface TurnConfig1 {
+  /**
+   * 只读侦察子 agent 的便宜档;也用于 Auto 模式的判危分类器。
+   * None = 跟主模型。
+   */
+  cheap_model?: ModelEndpoint | null;
+  limits: TurnLimits;
+  /**
+   * 会话权限模式。
+   */
+  mode: "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "unattended" | "dontAsk";
+  model: ModelEndpoint1;
+  /**
+   * 会话级 Python 虚拟环境根目录。
+   */
+  python_venv?: string | null;
+  /**
+   * 会话内累积的权限规则("总是允许"等)。
+   */
+  rules?: PermissionRule[];
+  /**
+   * 会话级追加系统提示词。
+   */
+  system_prompt_extra?: string | null;
+  /**
+   * 会话级思考策略。
+   */
+  thinking?:
+    | {
+        mode: "default";
+      }
+    | {
+        mode: "adaptive";
+      }
+    | {
+        mode: "disabled";
+      }
+    | {
+        level: ThinkingEffort;
+        mode: "fixed";
+      };
+  vision: VisionSetup;
+  web: WebSetup;
+}
+/**
  * MCP 服务器的启动描述。宿主从设置里组好(过滤掉未启用/没填完的),
  * 内核只管照单连接 —— 内核不读配置文件。
  */
@@ -1150,6 +1227,17 @@ export interface McpServerSpec {
    * 稳定标识,进工具名(`mcp__<id>__…`),也是权限规则的一部分。
    */
   id: string;
+}
+/**
+ * 一条还在等用户回答的权限询问（会话快照用）。
+ *
+ * `permission_request` 事件只在询问产生那一刻发一次；界面切走的话它发进
+ * 没人听的旧通道。快照不带的话，切回来弹窗再也不出现 —— 那次询问只能
+ * 等到超时被拒，模型收到"授权请求没有得到回应"。
+ */
+export interface PendingAsk {
+  detail: PermissionAsk;
+  request_id: string;
 }
 export interface SessionSummary {
   cwd: string;

@@ -16,6 +16,7 @@
     "opener:allow-open-path",
     "allow-subscribe-session",
     "allow-send-turn",
+    "allow-regenerate-turn",
     "allow-interrupt",
     "allow-respond-permission",
     "allow-set-permission-mode",

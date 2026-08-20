@@ -22,7 +22,7 @@ use tokio::sync::Mutex;
 use riot_protocol::event::AgentEvent;
 use riot_protocol::id::{IdGenerator, NanoIdGenerator, SessionId};
 use riot_protocol::message::Message;
-use riot_protocol::permission::{PermissionMode, PermissionResponse};
+use riot_protocol::permission::{PendingAsk, PermissionMode, PermissionResponse};
 use riot_protocol::rpc::{RpcRequest, RpcResponse};
 
 use crate::config::AppConfig;
@@ -45,6 +45,14 @@ pub struct HistoryOut {
     pub busy: bool,
     /// 此刻是否在压缩。不回的话切回来只剩三个点，"正在压缩上下文"丢了。
     pub compacting: bool,
+    /// 还在等用户回答的权限询问。`permission_request` 事件只发一次，
+    /// 切走再切回时弹窗靠这份快照重建 —— 否则只能等超时被拒。
+    pub pending_asks: Vec<PendingAsk>,
+    /// 正在流式生成的正文。流式增量不进历史，切回来的界面靠它接着显示，
+    /// 否则从 0 重新攒、缺头直到消息完成。
+    pub live_text: String,
+    /// 正在流式生成的思考。症状同上：思考块的字数清零重数。
+    pub live_thinking: String,
 }
 
 /// 侧边栏需要知道的会话信息。**不含历史内容** —— 列表要快，内容按需拉。
@@ -492,6 +500,9 @@ impl AppState {
             archived,
             busy,
             compacting,
+            pending_asks,
+            live_text,
+            live_thinking,
         } = resp
         else {
             return Err(HostError::Kernel(crate::kernel::KernelError::Rpc("session.resume 回了意外的应答".into())));
@@ -530,6 +541,9 @@ impl AppState {
             archived,
             busy,
             compacting,
+            pending_asks,
+            live_text,
+            live_thinking,
         })
     }
 
@@ -873,6 +887,30 @@ impl AppState {
             m.busy = true;
         }
         Ok(queued_id)
+    }
+
+    /// 丢掉指定助手消息及其后的一切，从它前面那条用户提示再跑一轮。
+    pub async fn regenerate_turn(&self, session_id: &str, message_id: &str) -> HostResult<()> {
+        self.require_sink(session_id).await?;
+        self.ensure_hydrated(session_id).await?;
+        let sampling = {
+            let g = self.0.sessions.lock().await;
+            g.get(session_id).ok_or(HostError::NoSession)?.sampling
+        };
+        let config = self.config().await;
+        let mut model = config.resolve()?;
+        model.sampling = sampling.or(model.sampling);
+        let turn_config = self.build_turn_config(&config, model, session_id).await?;
+        self.kernel_call(RpcRequest::TurnRegenerate {
+            session_id: sid(session_id),
+            message_id: message_id.to_owned(),
+            config: Box::new(turn_config),
+        })
+        .await?;
+        if let Some(m) = self.0.sessions.lock().await.get_mut(session_id) {
+            m.busy = true;
+        }
+        Ok(())
     }
 
     /// 把"此刻"的配置快照打包成随轮传给内核的 [`riot_protocol::TurnConfig`]。

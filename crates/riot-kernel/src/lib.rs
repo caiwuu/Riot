@@ -250,13 +250,15 @@ async fn dispatch(request: RpcRequest, manager: &manager::SessionManager) -> Rpc
             session_id: manager.create(cwd).await,
         },
         Req::SessionResume { session_id, cwd } => {
-            let (messages, archived, busy, compacting) =
-                manager.resume(session_id.as_str(), cwd).await;
+            let snap = manager.resume(session_id.as_str(), cwd).await;
             RpcResponse::SessionResumed {
-                messages,
-                archived,
-                busy,
-                compacting,
+                messages: snap.messages,
+                archived: snap.archived,
+                busy: snap.busy,
+                compacting: snap.compacting,
+                pending_asks: snap.pending_asks,
+                live_text: snap.live_text,
+                live_thinking: snap.live_thinking,
             }
         }
         Req::SessionDelete { session_id } => {
@@ -272,6 +274,26 @@ async fn dispatch(request: RpcRequest, manager: &manager::SessionManager) -> Rpc
             Err(e) => RpcResponse::Error {
                 error: RpcError {
                     code: RpcErrorCode::Internal,
+                    message: e,
+                },
+            },
+        },
+        Req::TurnRegenerate {
+            session_id,
+            message_id,
+            config,
+        } => match manager
+            .regenerate(session_id.as_str(), &message_id, *config)
+            .await
+        {
+            Ok(()) => RpcResponse::Ok,
+            Err(e) => RpcResponse::Error {
+                error: RpcError {
+                    code: if e.contains("正在跑") {
+                        RpcErrorCode::TurnInProgress
+                    } else {
+                        RpcErrorCode::Internal
+                    },
                     message: e,
                 },
             },
