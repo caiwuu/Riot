@@ -75,12 +75,10 @@ impl PageCache {
     /// 取一条。过期的当作没有，并顺手删掉。
     pub fn get(&self, key: &str, now_ms: u64) -> Option<CachedPage> {
         let mut inner = self.lock();
-        let expired = match inner.map.get(key) {
-            None => return None,
-            // saturating_sub：时钟回拨时当作"刚存进去"，而不是算出一个
-            // 巨大的年龄把整个缓存判死。
-            Some(e) => now_ms.saturating_sub(e.stored_at_ms) >= self.ttl_ms,
-        };
+        let entry = inner.map.get(key)?;
+        // saturating_sub：时钟回拨时当作"刚存进去"，而不是算出一个
+        // 巨大的年龄把整个缓存判死。
+        let expired = now_ms.saturating_sub(entry.stored_at_ms) >= self.ttl_ms;
 
         if expired {
             if let Some(e) = inner.map.remove(key) {

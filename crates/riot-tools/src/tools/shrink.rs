@@ -66,8 +66,6 @@ pub fn for_model(bytes: &[u8]) -> Option<Shrunk> {
 
 #[cfg(test)]
 mod tests {
-    use base64::Engine as _;
-
     use super::*;
 
     /// 造一张纯色 PNG。

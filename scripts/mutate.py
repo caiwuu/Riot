@@ -24,10 +24,10 @@ LAYERS = {
     "permissions": ("riot-permissions", ROOT / "crates/riot-permissions/src", []),
     "tools": ("riot-tools", ROOT / "crates/riot-tools/src", []),
     "runtime": ("riot-runtime", ROOT / "crates/riot-runtime/src", []),
-    # 宿主层只跑 --lib。浏览器 e2e 要起 CEF 子进程，几十秒起步，而且几十个
-    # 用例抢一个子进程时本身就会偶发超时 —— 一次偶发失败会被记成"变异被
-    # 抓住"，那正是这个脚本最该避免的假绿。
-    "gate": ("riot-host", ROOT / "src-tauri/src", ["--lib"]),
+    # 权限闸随阶段 B 搬进了内核（session.rs / classifier.rs 及其测试都在
+    # riot-kernel）。只跑 --lib：把 kernel_e2e 一类要起真进程的集成测试
+    # 排除在外 —— 偶发超时会被记成"变异被抓住"，那是这个脚本最该避免的假绿。
+    "gate": ("riot-kernel", ROOT / "crates/riot-kernel/src", ["--lib"]),
 }
 
 # (名字, 层, 文件, 原文, 替换, 这个 bug 会导致什么)
