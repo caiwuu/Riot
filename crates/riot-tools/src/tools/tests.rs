@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
+use pretty_assertions::assert_eq;
 use riot_protocol::id::{SessionId, ToolUseId};
 use riot_protocol::tool::{FileStateCache, FileView, Tool, ToolContext, ToolOutcome};
-use pretty_assertions::assert_eq;
 use tokio_util::sync::CancellationToken;
 
 use super::memfs::{MemFileState, MemFs};
@@ -51,7 +51,9 @@ fn text_of(o: &ToolOutcome) -> String {
             riot_protocol::message::ToolResultContent::Text { text } => text.clone(),
             other => panic!("非文本结果：{other:?}"),
         },
-        ToolOutcome::Failed { error_for_model, .. } => error_for_model.clone(),
+        ToolOutcome::Failed {
+            error_for_model, ..
+        } => error_for_model.clone(),
         ToolOutcome::Cancelled => "<cancelled>".into(),
     }
 }
@@ -94,7 +96,9 @@ async fn 读取文件带行号() {
 #[tokio::test]
 async fn 相对路径基于_cwd() {
     let h = harness(base_fs().with_file("/work/src/main.rs", "fn main() {}"));
-    assert!(is_ok(&read(&h, serde_json::json!({ "path": "src/main.rs" })).await));
+    assert!(is_ok(
+        &read(&h, serde_json::json!({ "path": "src/main.rs" })).await
+    ));
 }
 
 #[tokio::test]
@@ -102,7 +106,10 @@ async fn 读取后写入状态缓存() {
     let h = harness(base_fs().with_file("/work/a.txt", "x"));
     read(&h, serde_json::json!({ "path": "a.txt" })).await;
 
-    let s = h.state.get(std::path::Path::new("/work/a.txt")).expect("有缓存");
+    let s = h
+        .state
+        .get(std::path::Path::new("/work/a.txt"))
+        .expect("有缓存");
     assert_eq!(s.content, "x");
     assert_eq!(s.view, FileView::Full);
 }
@@ -110,7 +117,11 @@ async fn 读取后写入状态缓存() {
 #[tokio::test]
 async fn offset_从_1_开始() {
     let h = harness(base_fs().with_file("/work/a.txt", "a\nb\nc\nd"));
-    let out = read(&h, serde_json::json!({ "path": "a.txt", "offset": 2, "limit": 2 })).await;
+    let out = read(
+        &h,
+        serde_json::json!({ "path": "a.txt", "offset": 2, "limit": 2 }),
+    )
+    .await;
 
     let t = text_of(&out);
     assert!(t.contains("     2\tb"), "{t}");
@@ -131,9 +142,16 @@ async fn offset_为_0_被拒并说明从_1_开始() {
 async fn 部分读取标记为_partial_视图() {
     // 这是"模型没看到全文就动手改"的唯一防线
     let h = harness(base_fs().with_file("/work/a.txt", "a\nb\nc\nd"));
-    read(&h, serde_json::json!({ "path": "a.txt", "offset": 2, "limit": 2 })).await;
+    read(
+        &h,
+        serde_json::json!({ "path": "a.txt", "offset": 2, "limit": 2 }),
+    )
+    .await;
 
-    let s = h.state.get(std::path::Path::new("/work/a.txt")).expect("有缓存");
+    let s = h
+        .state
+        .get(std::path::Path::new("/work/a.txt"))
+        .expect("有缓存");
     assert!(
         matches!(s.view, FileView::Partial { .. }),
         "部分读取必须标 Partial，否则 Edit 会放行"
@@ -142,15 +160,25 @@ async fn 部分读取标记为_partial_视图() {
 
 #[tokio::test]
 async fn 超过行数上限时截断并提示() {
-    let big = (1..=3000).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
+    let big = (1..=3000)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
     let h = harness(base_fs().with_file("/work/big.txt", big));
     let out = read(&h, serde_json::json!({ "path": "big.txt" })).await;
 
     let t = text_of(&out);
-    assert!(t.contains("共 3000 行"), "要告诉模型总行数：{}", &t[t.len() - 200..]);
+    assert!(
+        t.contains("共 3000 行"),
+        "要告诉模型总行数：{}",
+        &t[t.len() - 200..]
+    );
     assert!(t.contains("offset=2001"), "要给出继续读的方法");
 
-    let s = h.state.get(std::path::Path::new("/work/big.txt")).expect("有缓存");
+    let s = h
+        .state
+        .get(std::path::Path::new("/work/big.txt"))
+        .expect("有缓存");
     assert!(matches!(s.view, FileView::Partial { .. }));
 }
 
@@ -223,15 +251,20 @@ async fn 能看图的模型读图片拿到图片块() {
     let ToolOutcome::Ok { model_content, .. } = &out else {
         panic!("应当成功：{}", text_of(&out));
     };
-    let riot_protocol::message::ToolResultContent::Image { media_type, data, path } =
-        model_content
+    let riot_protocol::message::ToolResultContent::Image {
+        media_type,
+        data,
+        path,
+    } = model_content
     else {
         panic!("应当是图片内容块：{model_content:?}");
     };
     assert_eq!(media_type, "image/png");
     use base64::Engine as _;
     assert_eq!(
-        base64::engine::general_purpose::STANDARD.decode(data).expect("合法 base64"),
+        base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .expect("合法 base64"),
         png,
         "假 PNG 解不开，压缩要原样放行 —— 字节不能有任何加工"
     );
@@ -243,7 +276,9 @@ async fn 能看图的模型读图片拿到图片块() {
     // `[约束]` 图片不进文件状态缓存。记了的话 Edit 会以为"读过全文"，
     // 给二进制开了一条被改写的路。
     assert!(
-        h.state.get(std::path::Path::new("/work/shot.png")).is_none(),
+        h.state
+            .get(std::path::Path::new("/work/shot.png"))
+            .is_none(),
         "图片不该写 file_state"
     );
 }
@@ -292,7 +327,9 @@ async fn 看不了图时读图片返回转述文字() {
     assert!(text.contains("两栏布局"), "要带上转述内容：{text}");
     use base64::Engine as _;
     assert_eq!(
-        base64::engine::general_purpose::STANDARD.decode(data).expect("合法 base64"),
+        base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .expect("合法 base64"),
         b"\x89PNG-fake",
         "图片本体要留给界面显示"
     );
@@ -431,7 +468,11 @@ async fn read_的结果预算是无限的() {
 #[tokio::test]
 async fn 创建新文件不需要先读() {
     let h = harness(base_fs());
-    let out = write(&h, serde_json::json!({ "path": "new.txt", "content": "hi" })).await;
+    let out = write(
+        &h,
+        serde_json::json!({ "path": "new.txt", "content": "hi" }),
+    )
+    .await;
 
     assert!(is_ok(&out), "{}", text_of(&out));
     assert_eq!(h.fs.text("/work/new.txt").as_deref(), Some("hi"));
@@ -441,7 +482,11 @@ async fn 创建新文件不需要先读() {
 async fn 覆盖已存在的文件要先读() {
     // 要防的是模型基于半小时前的印象重写整个文件
     let h = harness(base_fs().with_file("/work/a.txt", "原有内容"));
-    let out = write(&h, serde_json::json!({ "path": "a.txt", "content": "新内容" })).await;
+    let out = write(
+        &h,
+        serde_json::json!({ "path": "a.txt", "content": "新内容" }),
+    )
+    .await;
 
     assert!(!is_ok(&out));
     assert!(text_of(&out).contains("Read"), "{}", text_of(&out));
@@ -484,9 +529,16 @@ async fn 覆盖保持_crlf() {
     // 不保持的话，全量覆盖会让整个文件进 diff
     let h = harness(base_fs().with_file("/work/a.txt", b"a\r\nb\r\n"));
     read(&h, serde_json::json!({ "path": "a.txt" })).await;
-    write(&h, serde_json::json!({ "path": "a.txt", "content": "x\ny\n" })).await;
+    write(
+        &h,
+        serde_json::json!({ "path": "a.txt", "content": "x\ny\n" }),
+    )
+    .await;
 
-    assert_eq!(h.fs.content("/work/a.txt").as_deref(), Some(&b"x\r\ny\r\n"[..]));
+    assert_eq!(
+        h.fs.content("/work/a.txt").as_deref(),
+        Some(&b"x\r\ny\r\n"[..])
+    );
 }
 
 #[tokio::test]
@@ -504,9 +556,16 @@ async fn 覆盖保持_bom() {
 #[tokio::test]
 async fn 写入后进缓存不用再读一次() {
     let h = harness(base_fs());
-    write(&h, serde_json::json!({ "path": "new.txt", "content": "a\nb" })).await;
+    write(
+        &h,
+        serde_json::json!({ "path": "new.txt", "content": "a\nb" }),
+    )
+    .await;
 
-    let s = h.state.get(std::path::Path::new("/work/new.txt")).expect("有缓存");
+    let s = h
+        .state
+        .get(std::path::Path::new("/work/new.txt"))
+        .expect("有缓存");
     assert_eq!(s.content, "a\nb");
     assert_eq!(s.view, FileView::Full);
 
@@ -524,7 +583,11 @@ async fn 项目目录之外也能写() {
     // `[前提]` 工具层放行不等于没人管。写操作照样过权限闸：默认模式
     // 逐次询问，弹窗里显示解析后的绝对路径；敏感目标另有 safety 层。
     let h = harness(base_fs().with_dir("/other"));
-    let out = write(&h, serde_json::json!({ "path": "/other/note.md", "content": "x" })).await;
+    let out = write(
+        &h,
+        serde_json::json!({ "path": "/other/note.md", "content": "x" }),
+    )
+    .await;
 
     assert!(is_ok(&out), "{}", text_of(&out));
     assert_eq!(h.fs.content("/other/note.md").as_deref(), Some(&b"x"[..]));
@@ -533,7 +596,11 @@ async fn 项目目录之外也能写() {
 #[tokio::test]
 async fn 父目录不存在时给出可操作提示() {
     let h = harness(base_fs());
-    let out = write(&h, serde_json::json!({ "path": "a/b/c.txt", "content": "x" })).await;
+    let out = write(
+        &h,
+        serde_json::json!({ "path": "a/b/c.txt", "content": "x" }),
+    )
+    .await;
 
     assert!(!is_ok(&out));
     assert!(text_of(&out).contains("目录"), "{}", text_of(&out));
@@ -581,7 +648,11 @@ async fn 没读过就改被拒() {
 async fn 只读过一部分就改被拒() {
     // 模型以为看到了全文，把"这个函数只出现一次"当成事实
     let h = harness(base_fs().with_file("/work/a.rs", "a\nb\nc\nd"));
-    read(&h, serde_json::json!({ "path": "a.rs", "offset": 1, "limit": 2 })).await;
+    read(
+        &h,
+        serde_json::json!({ "path": "a.rs", "offset": 1, "limit": 2 }),
+    )
+    .await;
 
     let out = edit(
         &h,
@@ -608,7 +679,10 @@ async fn 多处匹配时拒绝而不是改第一处() {
     assert!(!is_ok(&out));
     let t = text_of(&out);
     assert!(t.contains("2 次"), "要说清出现了几次：{t}");
-    assert!(t.contains("上下文") || t.contains("replace_all"), "要给出两条出路：{t}");
+    assert!(
+        t.contains("上下文") || t.contains("replace_all"),
+        "要给出两条出路：{t}"
+    );
     assert_eq!(
         h.fs.text("/work/a.rs").as_deref(),
         Some("let x = 1;\nlet x = 2;\n"),
@@ -794,8 +868,14 @@ async fn 编辑后缓存更新() {
     )
     .await;
 
-    let s = h.state.get(std::path::Path::new("/work/a.rs")).expect("有缓存");
-    assert!(s.content.contains("fn z()"), "缓存要跟上，否则连续两次 Edit 会失败");
+    let s = h
+        .state
+        .get(std::path::Path::new("/work/a.rs"))
+        .expect("有缓存");
+    assert!(
+        s.content.contains("fn z()"),
+        "缓存要跟上，否则连续两次 Edit 会失败"
+    );
 
     // 连续第二次 Edit
     let out = edit(
@@ -808,7 +888,11 @@ async fn 编辑后缓存更新() {
 
 #[tokio::test]
 async fn 编辑围栏外的文件被拒() {
-    let h = harness(base_fs().with_dir("/etc").with_file("/etc/hosts", "127.0.0.1"));
+    let h = harness(
+        base_fs()
+            .with_dir("/etc")
+            .with_file("/etc/hosts", "127.0.0.1"),
+    );
     let out = edit(
         &h,
         serde_json::json!({ "path": "/etc/hosts", "old_string": "127", "new_string": "0" }),

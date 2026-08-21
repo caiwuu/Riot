@@ -37,7 +37,10 @@ fn assemble(events: &[Value]) -> Vec<(String, Req)> {
     let mut order: Vec<String> = Vec::new();
 
     for e in events {
-        let id = e["params"]["requestId"].as_str().unwrap_or_default().to_owned();
+        let id = e["params"]["requestId"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
         if id.is_empty() {
             continue;
         }
@@ -71,7 +74,10 @@ fn assemble(events: &[Value]) -> Vec<(String, Req)> {
         }
     }
 
-    order.into_iter().filter_map(|id| map.remove(&id).map(|r| (id, r))).collect()
+    order
+        .into_iter()
+        .filter_map(|id| map.remove(&id).map(|r| (id, r)))
+        .collect()
 }
 
 /// 列出抓到的请求。`filter` 是 URL 子串（大小写不敏感）。
@@ -94,9 +100,18 @@ pub fn list(events: &[Value], filter: Option<&str>) -> String {
             break;
         }
         let status = r.status.map_or_else(|| "…".to_owned(), |s| s.to_string());
-        let size = r.size.map_or_else(String::new, |b| format!(" {}B", b as i64));
-        let mime = if r.mime.is_empty() { String::new() } else { format!(" {}", r.mime) };
-        out.push_str(&format!("#{id} {} {} {status}{mime}{size}\n", r.method, r.url));
+        let size = r
+            .size
+            .map_or_else(String::new, |b| format!(" {}B", b as i64));
+        let mime = if r.mime.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", r.mime)
+        };
+        out.push_str(&format!(
+            "#{id} {} {} {status}{mime}{size}\n",
+            r.method, r.url
+        ));
         shown += 1;
     }
     if out.is_empty() {
@@ -182,7 +197,12 @@ pub fn audit(events: &[Value], page_url: &str) -> String {
         .as_object()
         .map(|o| {
             o.iter()
-                .map(|(k, v)| (k.to_ascii_lowercase(), v.as_str().unwrap_or_default().to_owned()))
+                .map(|(k, v)| {
+                    (
+                        k.to_ascii_lowercase(),
+                        v.as_str().unwrap_or_default().to_owned(),
+                    )
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -198,7 +218,8 @@ pub fn audit(events: &[Value], page_url: &str) -> String {
         findings.push("缺少 Strict-Transport-Security (HSTS):可能被降级到 HTTP 中间人。".into());
     }
     if !has("x-frame-options") && !get("content-security-policy").contains("frame-ancestors") {
-        findings.push("缺少 X-Frame-Options / frame-ancestors:可能被点击劫持（iframe 套壳）。".into());
+        findings
+            .push("缺少 X-Frame-Options / frame-ancestors:可能被点击劫持（iframe 套壳）。".into());
     }
     if !has("x-content-type-options") {
         findings.push("缺少 X-Content-Type-Options: nosniff:浏览器可能按内容猜类型。".into());
@@ -255,11 +276,20 @@ mod tests {
             sent("1", "GET", "https://x.test/"),
             recv("1", 200, "text/html", "https://x.test/", json!({})),
             sent("2", "POST", "https://x.test/api/login"),
-            recv("2", 401, "application/json", "https://x.test/api/login", json!({})),
+            recv(
+                "2",
+                401,
+                "application/json",
+                "https://x.test/api/login",
+                json!({}),
+            ),
         ];
         let out = list(&events, None);
         assert!(out.contains("#1 GET https://x.test/ 200"), "{out}");
-        assert!(out.contains("#2 POST https://x.test/api/login 401"), "{out}");
+        assert!(
+            out.contains("#2 POST https://x.test/api/login 401"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -277,12 +307,21 @@ mod tests {
     fn detail_给出请求和响应头() {
         let events = vec![
             sent("7", "GET", "https://x.test/"),
-            recv("7", 200, "text/html", "https://x.test/", json!({ "Server": "nginx" })),
+            recv(
+                "7",
+                200,
+                "text/html",
+                "https://x.test/",
+                json!({ "Server": "nginx" }),
+            ),
         ];
         let d = detail_headers(&events, "7").expect("有这条");
         assert!(d.contains("GET https://x.test/"), "{d}");
         assert!(d.contains("Server: nginx"), "{d}");
-        assert!(detail_headers(&events, "999").is_none(), "没有的 id 返回 None");
+        assert!(
+            detail_headers(&events, "999").is_none(),
+            "没有的 id 返回 None"
+        );
     }
 
     #[test]
@@ -303,7 +342,10 @@ mod tests {
         });
         let events = vec![recv("1", 200, "text/html", "https://x.test/", headers)];
         let out = audit(&events, "https://x.test/");
-        assert!(out.contains("CORS 高危"), "带凭证的通配 CORS 要标高危：{out}");
+        assert!(
+            out.contains("CORS 高危"),
+            "带凭证的通配 CORS 要标高危：{out}"
+        );
     }
 
     #[test]

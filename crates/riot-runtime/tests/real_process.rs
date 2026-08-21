@@ -10,7 +10,6 @@
 // 这些测试的全部意义就是真跑 OS：真起进程、真等时间。禁用列表
 // 针对的是内核逻辑，不是它的验证。
 #![allow(clippy::disallowed_methods)]
-
 #![cfg(unix)]
 
 use std::path::PathBuf;
@@ -78,7 +77,9 @@ async fn 工作目录生效() {
         .expect("能起来");
 
     // macOS 的 /var 是 /private/var 的 symlink，比较 canonical 形式
-    let got = PathBuf::from(out.stdout.trim()).canonicalize().expect("解析");
+    let got = PathBuf::from(out.stdout.trim())
+        .canonicalize()
+        .expect("解析");
     let want = dir.path().canonicalize().expect("解析");
     assert_eq!(got, want);
 }
@@ -95,7 +96,11 @@ async fn 环境变量生效且不清空继承的() {
 
     assert!(out.stdout.contains("注入的值"));
     // 只覆盖指定的变量，其余继承 —— 命令需要 PATH 才能找到程序
-    assert!(out.stdout.contains("有PATH"), "不能把环境清空：{}", out.stdout);
+    assert!(
+        out.stdout.contains("有PATH"),
+        "不能把环境清空：{}",
+        out.stdout
+    );
 }
 
 #[tokio::test]

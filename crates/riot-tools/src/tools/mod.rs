@@ -7,29 +7,29 @@
 //! - [`precondition`] —— 先读后写协议。
 
 pub mod ask;
+pub mod bash;
 pub mod browser;
 pub mod diagnostics;
-pub mod bash;
 pub mod edit;
+#[cfg(any(test, feature = "testing"))]
+pub mod fakeproc;
 pub mod glob;
 pub mod grep;
 #[cfg(any(test, feature = "testing"))]
-pub mod fakeproc;
-#[cfg(any(test, feature = "testing"))]
 pub mod memfs;
 pub mod path;
-pub mod search;
 pub mod pentest;
 pub mod plan;
 pub mod precondition;
 pub mod read;
+pub mod search;
 pub mod shrink;
 pub mod skill;
+pub mod terminal;
+pub mod text;
 pub mod todo;
 pub mod tool_search;
-pub mod text;
 pub mod web;
-pub mod terminal;
 pub mod write;
 
 pub use bash::Bash;

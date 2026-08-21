@@ -100,11 +100,7 @@ fn explain(r: ComplexReason) -> &'static str {
     }
 }
 
-fn decide_subs(
-    subs: &[SubCommand],
-    ctx: &PermissionContext,
-    rules: &RuleSet,
-) -> PermissionResult {
+fn decide_subs(subs: &[SubCommand], ctx: &PermissionContext, rules: &RuleSet) -> PermissionResult {
     if subs.is_empty() {
         // 空命令或纯注释。没有副作用,但也没有意义。
         return PermissionResult::Allow {
@@ -202,7 +198,10 @@ fn sub_decision(sub: &SubCommand, rules: &RuleSet) -> SubVerdict {
     for (want, make) in [
         (
             RuleDecision::Deny,
-            (|p, s| SubVerdict::Deny { pattern: p, source: s }) as fn(_, _) -> _,
+            (|p, s| SubVerdict::Deny {
+                pattern: p,
+                source: s,
+            }) as fn(_, _) -> _,
         ),
         (RuleDecision::Ask, |p, s| SubVerdict::Ask {
             pattern: p,
@@ -242,8 +241,8 @@ fn allow_suggestion(matchable: &str) -> PermissionUpdate {
 mod tests {
     use super::*;
     use crate::testing::ctx_with;
-    use riot_protocol::permission::{PermissionMode, PermissionRule, RuleSource};
     use pretty_assertions::assert_eq;
+    use riot_protocol::permission::{PermissionMode, PermissionRule, RuleSource};
 
     fn rules(pairs: Vec<(&str, RuleDecision)>) -> RuleSet {
         RuleSet::new(

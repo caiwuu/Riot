@@ -184,7 +184,7 @@ static DANGEROUS_VARS: &[&str] = &[
     "ENV",
     "SHELLOPTS",
     "BASHOPTS",
-    "PS4",           // 配合 set -x 可执行任意代码
+    "PS4", // 配合 set -x 可执行任意代码
     "GLOBIGNORE",
     "PERL5LIB",
     "PERL5OPT",
@@ -470,17 +470,27 @@ fn classify(kind: &str) -> ComplexReason {
     match kind {
         "command_substitution" => ComplexReason::CommandSubstitution,
         "process_substitution" => ComplexReason::ProcessSubstitution,
-        "expansion" | "simple_expansion" | "arithmetic_expansion" | "$" => {
-            ComplexReason::Expansion
-        }
+        "expansion" | "simple_expansion" | "arithmetic_expansion" | "$" => ComplexReason::Expansion,
         "&" => ComplexReason::Background,
-        "file_redirect" | "heredoc_redirect" | "redirected_statement" | "herestring_redirect"
-        | ">" | ">>" | "<" | "&>" => ComplexReason::Redirect,
-        "subshell" | "compound_statement" | "for_statement" | "while_statement"
-        | "if_statement" | "case_statement" | "function_definition" | "do_group"
-        | "negated_command" | "c_style_for_statement" | "ternary_expression" => {
-            ComplexReason::ControlFlow
-        }
+        "file_redirect"
+        | "heredoc_redirect"
+        | "redirected_statement"
+        | "herestring_redirect"
+        | ">"
+        | ">>"
+        | "<"
+        | "&>" => ComplexReason::Redirect,
+        "subshell"
+        | "compound_statement"
+        | "for_statement"
+        | "while_statement"
+        | "if_statement"
+        | "case_statement"
+        | "function_definition"
+        | "do_group"
+        | "negated_command"
+        | "c_style_for_statement"
+        | "ternary_expression" => ComplexReason::ControlFlow,
         _ => ComplexReason::UnknownNode,
     }
 }

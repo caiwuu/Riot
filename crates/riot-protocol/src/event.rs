@@ -89,7 +89,9 @@ pub enum AgentEvent {
     /// 宿主直接落到会话上。界面必须跟着更新 —— 否则 composer 还显示
     /// 「规划模式」，而宿主已经在按「自动接受编辑」放行了。显示得比
     /// 实际更严是最坏的一种错（和 SessionInfo.mode 的注释同一条教训）。
-    ModeChanged { mode: crate::permission::PermissionMode },
+    ModeChanged {
+        mode: crate::permission::PermissionMode,
+    },
 
     /// 终止。
     ///

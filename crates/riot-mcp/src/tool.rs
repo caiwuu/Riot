@@ -32,7 +32,13 @@ const MAX_IMAGE_B64: usize = 2_000_000;
 pub fn tool_name(server_id: &str, remote_name: &str) -> String {
     let sanitize = |s: &str| -> String {
         s.chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect()
     };
     let mut name = format!("mcp__{}__{}", sanitize(server_id), sanitize(remote_name));
@@ -65,7 +71,8 @@ impl McpTool {
             // 提示撒谎的后果是"多问了一次"，反向撒谎的后果是静默写盘。
             read_only: hints.read_only_hint.unwrap_or(false),
             // 规范默认 destructiveHint = true（对会写的工具）。
-            destructive: hints.destructive_hint.unwrap_or(true) && !hints.read_only_hint.unwrap_or(false),
+            destructive: hints.destructive_hint.unwrap_or(true)
+                && !hints.read_only_hint.unwrap_or(false),
             client,
         }
     }
@@ -167,7 +174,11 @@ impl Tool for McpTool {
 
         let prepared = match rendered.image {
             Some((media_type, data)) => match prepare_image(media_type, data, &ctx).await {
-                ImagePrep::Ready { media_type, data, path } => Some((media_type, data, path)),
+                ImagePrep::Ready {
+                    media_type,
+                    data,
+                    path,
+                } => Some((media_type, data, path)),
                 // 有具体说明的进 notes，没有的归入通用 skipped 计数 ——
                 // 二选一，别把同一张图说两遍。
                 ImagePrep::Skipped(Some(note)) => {
@@ -187,7 +198,11 @@ impl Tool for McpTool {
                 let extra = trailer(skipped, &notes);
                 if rendered.text.is_empty() && extra.is_empty() {
                     return ToolOutcome::Ok {
-                        model_content: ToolResultContent::Image { media_type, data, path },
+                        model_content: ToolResultContent::Image {
+                            media_type,
+                            data,
+                            path,
+                        },
                         ui_payload: None,
                         side_messages: Vec::new(),
                     };
@@ -197,7 +212,12 @@ impl Tool for McpTool {
                 // "这段文字说的就是这张图"的关联。
                 let text = join_text(&rendered.text, &extra);
                 return ToolOutcome::Ok {
-                    model_content: ToolResultContent::MarkedImage { media_type, data, path, text },
+                    model_content: ToolResultContent::MarkedImage {
+                        media_type,
+                        data,
+                        path,
+                        text,
+                    },
                     ui_payload: None,
                     side_messages: Vec::new(),
                 };
@@ -285,9 +305,10 @@ fn render_content(blocks: &[Value]) -> Rendered {
                 }
             }
             Some("image") => {
-                let pair = block.get("mimeType").and_then(Value::as_str).zip(
-                    block.get("data").and_then(Value::as_str),
-                );
+                let pair = block
+                    .get("mimeType")
+                    .and_then(Value::as_str)
+                    .zip(block.get("data").and_then(Value::as_str));
                 match pair {
                     Some((m, d)) if image.is_none() => {
                         image = Some((m.to_owned(), d.to_owned()));
@@ -296,15 +317,10 @@ fn render_content(blocks: &[Value]) -> Rendered {
                 }
             }
             // 内嵌资源里带文本的话捞出来 —— 常见于"读文件"类工具。
-            Some("resource") => {
-                match block
-                    .pointer("/resource/text")
-                    .and_then(Value::as_str)
-                {
-                    Some(t) => texts.push(t),
-                    None => skipped += 1,
-                }
-            }
+            Some("resource") => match block.pointer("/resource/text").and_then(Value::as_str) {
+                Some(t) => texts.push(t),
+                None => skipped += 1,
+            },
             _ => skipped += 1,
         }
     }
@@ -354,7 +370,11 @@ async fn prepare_image(media_type: String, data: String, ctx: &ToolContext) -> I
             data.len() / 1024,
         )));
     }
-    ImagePrep::Ready { media_type, data, path }
+    ImagePrep::Ready {
+        media_type,
+        data,
+        path,
+    }
 }
 
 /// 原图落盘（会话工件目录），界面按路径显示。写不进就不带路径 ——
@@ -444,7 +464,9 @@ mod tests {
                     Ok(m) => m,
                     Err(_) => continue,
                 };
-                let Some(id) = msg.get("id").cloned() else { continue };
+                let Some(id) = msg.get("id").cloned() else {
+                    continue;
+                };
                 let reply = match msg.get("method").and_then(Value::as_str) {
                     Some("initialize") => serde_json::json!({
                         "jsonrpc": "2.0", "id": id,
@@ -512,7 +534,9 @@ mod tests {
         fs: Arc<dyn riot_protocol::tool::FileSystem>,
     ) -> ToolOutcome {
         let client = client_with_result(result).await;
-        mcp_tool(client).call(serde_json::json!({}), ctx(vision, fs)).await
+        mcp_tool(client)
+            .call(serde_json::json!({}), ctx(vision, fs))
+            .await
     }
 
     /// "AAAA" 解码成 3 字节垃圾：base64 合法、图片解不开 —— shrink 原样
@@ -536,7 +560,12 @@ mod tests {
         let ToolOutcome::Ok { model_content, .. } = out else {
             panic!("应当成功：{out:?}");
         };
-        let ToolResultContent::Image { media_type, data, path } = model_content else {
+        let ToolResultContent::Image {
+            media_type,
+            data,
+            path,
+        } = model_content
+        else {
             panic!("应当是图片内容块：{model_content:?}");
         };
         assert_eq!(media_type, "image/png");
@@ -548,7 +577,9 @@ mod tests {
         let on_disk = fs.read(&path).await.expect("落盘的原图");
         assert_eq!(
             on_disk,
-            base64::engine::general_purpose::STANDARD.decode(TINY_B64).expect("合法 base64"),
+            base64::engine::general_purpose::STANDARD
+                .decode(TINY_B64)
+                .expect("合法 base64"),
             "落盘的必须是解码后的原图字节"
         );
     }
@@ -587,7 +618,13 @@ mod tests {
         let ToolOutcome::Ok { model_content, .. } = out else {
             panic!("应当成功：{out:?}");
         };
-        let ToolResultContent::MarkedImage { media_type, data, text, .. } = model_content else {
+        let ToolResultContent::MarkedImage {
+            media_type,
+            data,
+            text,
+            ..
+        } = model_content
+        else {
             panic!("图文混合该走 MarkedImage（早先图被静默丢弃）：{model_content:?}");
         };
         assert_eq!(media_type, "image/png");

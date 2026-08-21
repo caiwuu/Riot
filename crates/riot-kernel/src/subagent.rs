@@ -48,7 +48,9 @@ use riot_core::{AgentDeps, AgentState, run_agent};
 use riot_protocol::event::{AgentEvent, OutputStream, ProgressPayload, TerminalReason};
 use riot_protocol::id::{IdGenerator, SessionId};
 use riot_protocol::message::{AssistantContent, Message, Usage};
-use riot_protocol::permission::{DecisionReason, PermissionContext, PermissionGate, PermissionResult};
+use riot_protocol::permission::{
+    DecisionReason, PermissionContext, PermissionGate, PermissionResult,
+};
 use riot_protocol::tool::{PromptContext, Tool, ToolContext, ToolOutcome, UiPayload};
 use riot_runtime::{MemoryFileState, SystemFs, SystemProcessRunner};
 use riot_tools::registry::Registry;
@@ -97,7 +99,10 @@ impl CheapModel {
             }
         };
         match crate::session::provider_for(&resolved) {
-            Ok(provider) => Some(Self { provider, model: resolved.model }),
+            Ok(provider) => Some(Self {
+                provider,
+                model: resolved.model,
+            }),
             Err(e) => {
                 tracing::warn!(error = %e, "子 agent 便宜档建不出客户端，只读侦察改走主模型");
                 None
@@ -308,7 +313,10 @@ impl Tool for TaskTool {
     }
 
     fn describe(&self, input: &serde_json::Value) -> String {
-        let desc = input.get("description").and_then(|v| v.as_str()).unwrap_or("子任务");
+        let desc = input
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("子任务");
         format!("子 agent（{}）：{desc}", kind_of(input).as_str())
     }
 
@@ -462,7 +470,10 @@ impl Tool for TaskTool {
                     if let Some(l) = &log {
                         l.append(&m);
                     }
-                    if let Message::Assistant { content, usage: u, .. } = &m {
+                    if let Message::Assistant {
+                        content, usage: u, ..
+                    } = &m
+                    {
                         if let Some(u) = u {
                             usage.merge(u);
                         }
@@ -516,7 +527,9 @@ impl Tool for TaskTool {
                 match text {
                     Some(t) => {
                         let capped = if matches!(terminal, Some(TerminalReason::MaxTurns { .. })) {
-                            format!("{t}\n\n[注意：子任务达到步数上限被停止，以上可能是未完成的结果]")
+                            format!(
+                                "{t}\n\n[注意：子任务达到步数上限被停止，以上可能是未完成的结果]"
+                            )
                         } else {
                             t
                         };
@@ -594,7 +607,9 @@ mod tests {
             _id: &ToolUseId,
             _cancel: &tokio_util::sync::CancellationToken,
         ) -> riot_protocol::permission::GateOutcome {
-            riot_protocol::permission::GateOutcome::Allow { updated_input: None }
+            riot_protocol::permission::GateOutcome::Allow {
+                updated_input: None,
+            }
         }
     }
 
@@ -628,7 +643,10 @@ mod tests {
         }
     }
 
-    fn ctx() -> (ToolContext, tokio::sync::mpsc::UnboundedReceiver<(ToolUseId, ProgressPayload)>) {
+    fn ctx() -> (
+        ToolContext,
+        tokio::sync::mpsc::UnboundedReceiver<(ToolUseId, ProgressPayload)>,
+    ) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let id = ToolUseId::from_raw("t1");
         (
@@ -689,7 +707,10 @@ mod tests {
             "explore 有只读工具"
         );
         assert!(
-            reqs[0].tools.iter().all(|t| t.name != "Write" && t.name != "Bash"),
+            reqs[0]
+                .tools
+                .iter()
+                .all(|t| t.name != "Write" && t.name != "Bash"),
             "explore 不能有写工具"
         );
         assert!(
@@ -709,10 +730,16 @@ mod tests {
                 c,
             )
             .await;
-        let ToolOutcome::Failed { error_for_model, .. } = out else {
+        let ToolOutcome::Failed {
+            error_for_model, ..
+        } = out
+        else {
             panic!("该失败")
         };
-        assert!(error_for_model.contains("general-purpose"), "{error_for_model}");
+        assert!(
+            error_for_model.contains("general-purpose"),
+            "{error_for_model}"
+        );
     }
 
     #[test]
@@ -721,7 +748,10 @@ mod tests {
         let tool = TaskTool::new(deps(provider));
         assert!(tool.is_read_only(&serde_json::json!({ "subagent_type": "explore" })));
         assert!(!tool.is_read_only(&serde_json::json!({ "subagent_type": "general-purpose" })));
-        assert!(!tool.is_read_only(&serde_json::json!({})), "缺省是 general-purpose，会写");
+        assert!(
+            !tool.is_read_only(&serde_json::json!({})),
+            "缺省是 general-purpose，会写"
+        );
         assert!(
             !tool.is_read_only(&serde_json::json!({ "subagent_type": "ninja" })),
             "认不出的类型要落在 fail-closed 那侧（会写），不能因为不认识就当只读并行掉"
@@ -760,14 +790,25 @@ mod tests {
                     c,
                 )
                 .await;
-            assert!(matches!(out, ToolOutcome::Ok { .. }), "{kind} 该成功：{out:?}");
+            assert!(
+                matches!(out, ToolOutcome::Ok { .. }),
+                "{kind} 该成功：{out:?}"
+            );
 
-            let (hit, miss) = if cheap_used { (&cheap, &main) } else { (&main, &cheap) };
+            let (hit, miss) = if cheap_used {
+                (&cheap, &main)
+            } else {
+                (&main, &cheap)
+            };
             assert_eq!(hit.requests().len(), 1, "{kind} 该打中这一档");
             assert!(miss.requests().is_empty(), "{kind} 不该打另一档");
             assert_eq!(
                 hit.requests()[0].model,
-                if cheap_used { "cheap-model" } else { "test-model" },
+                if cheap_used {
+                    "cheap-model"
+                } else {
+                    "test-model"
+                },
                 "{kind} 的请求里带的模型名不对"
             );
         }
@@ -794,7 +835,11 @@ mod tests {
     /// 父会话的上限是天花板：用户把主对话调低，子 agent 不能反而跑更多轮。
     #[test]
     fn 轮数上限只能收窄不能放宽() {
-        assert_eq!(Kind::Explore.max_turns(48), EXPLORE_MAX_TURNS, "侦察档要被压到上限");
+        assert_eq!(
+            Kind::Explore.max_turns(48),
+            EXPLORE_MAX_TURNS,
+            "侦察档要被压到上限"
+        );
         assert_eq!(Kind::Explore.max_turns(4), 4, "父比上限还小时跟父");
         assert_eq!(Kind::GeneralPurpose.max_turns(48), 48, "执行档跟父");
         for parent in [1u32, 8, 16, 48, 1000] {

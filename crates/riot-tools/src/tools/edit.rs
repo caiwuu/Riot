@@ -157,7 +157,9 @@ impl Tool for Edit {
         }
 
         let updated = if parsed.replace_all {
-            state.content.replace(&parsed.old_string, &parsed.new_string)
+            state
+                .content
+                .replace(&parsed.old_string, &parsed.new_string)
         } else {
             state
                 .content
@@ -313,11 +315,7 @@ fn hunks(before: &str, after: &str) -> Vec<DiffHunk> {
     let a: Vec<&str> = before.lines().collect();
     let b: Vec<&str> = after.lines().collect();
 
-    let prefix = a
-        .iter()
-        .zip(&b)
-        .take_while(|(x, y)| x == y)
-        .count();
+    let prefix = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
 
     let max_suffix = (a.len() - prefix).min(b.len() - prefix);
     let suffix = (0..max_suffix)

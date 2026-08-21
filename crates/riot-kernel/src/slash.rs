@@ -157,7 +157,9 @@ fn add_skills(root: Option<&Path>, out: &mut Vec<SlashCommand>) {
 /// `None` = 没这条命令，或它是内置命令（内置由前端按 name 执行，
 /// 没有模板可展开）。
 pub fn expand(project_root: Option<&Path>, name: &str, args: &str) -> Option<String> {
-    let cmd = discover(project_root).into_iter().find(|c| c.name == name)?;
+    let cmd = discover(project_root)
+        .into_iter()
+        .find(|c| c.name == name)?;
     if cmd.body.is_empty() {
         return None;
     }
@@ -303,7 +305,9 @@ fn scan(dir: &Path, source: &str, out: &mut Vec<SlashCommand>) {
 }
 
 fn collect_md(base: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in rd.flatten() {
         let p = entry.path();
         if p.is_dir() {
@@ -330,7 +334,9 @@ fn parse(raw: &str) -> Result<(String, Option<String>, String), String> {
     let mut argument_hint = None;
     if let Some(front) = front {
         for line in front.lines() {
-            let Some((key, value)) = line.split_once(':') else { continue };
+            let Some((key, value)) = line.split_once(':') else {
+                continue;
+            };
             let value = value.trim().trim_matches('"').trim_matches('\'').to_owned();
             match key.trim() {
                 "description" => description = Some(value),
@@ -350,14 +356,9 @@ fn parse(raw: &str) -> Result<(String, Option<String>, String), String> {
     }
 
     // 没写 description 就拿正文第一行凑 —— 补全菜单里一行说明必须有。
-    let description = description.filter(|d| !d.is_empty()).unwrap_or_else(|| {
-        body.lines()
-            .next()
-            .unwrap_or("")
-            .chars()
-            .take(60)
-            .collect()
-    });
+    let description = description
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| body.lines().next().unwrap_or("").chars().take(60).collect());
     Ok((description, argument_hint.filter(|h| !h.is_empty()), body))
 }
 
@@ -367,7 +368,8 @@ mod tests {
 
     #[test]
     fn 解析带_frontmatter_的命令() {
-        let (d, h, b) = parse("---\ndescription: 写 PR\nargument-hint: [分支]\n---\n给 $1 写 PR").expect("解析");
+        let (d, h, b) = parse("---\ndescription: 写 PR\nargument-hint: [分支]\n---\n给 $1 写 PR")
+            .expect("解析");
         assert_eq!(d, "写 PR");
         assert_eq!(h.as_deref(), Some("[分支]"));
         assert_eq!(b, "给 $1 写 PR");
@@ -404,12 +406,18 @@ mod tests {
         .expect("写技能");
 
         let list = discover(Some(root));
-        let found = list.iter().find(|c| c.name == "verify").expect("技能该在 / 菜单里");
+        let found = list
+            .iter()
+            .find(|c| c.name == "verify")
+            .expect("技能该在 / 菜单里");
         assert_eq!(found.source, "skill", "来源要标出来，用户得知道这是技能");
 
         let text = expand(Some(root), "verify", "只跑 clippy").expect("该展开");
         assert!(text.contains("只跑 clippy"), "$ARGUMENTS 要替换：{text}");
-        assert!(!text.contains("${SKILL_DIR}"), "占位符不能漏到提示词里：{text}");
+        assert!(
+            !text.contains("${SKILL_DIR}"),
+            "占位符不能漏到提示词里：{text}"
+        );
         assert!(text.contains("verify"), "SKILL_DIR 该指向技能目录：{text}");
     }
 
@@ -458,13 +466,19 @@ mod tests {
 
         let sk = root.join(".riot/skills/dup");
         std::fs::create_dir_all(&sk).expect("建目录");
-        std::fs::write(sk.join("SKILL.md"), "---\nname: dup\ndescription: 技能版\n---\n技能正文\n")
-            .expect("写技能");
+        std::fs::write(
+            sk.join("SKILL.md"),
+            "---\nname: dup\ndescription: 技能版\n---\n技能正文\n",
+        )
+        .expect("写技能");
 
         let cmd = root.join(".riot/commands");
         std::fs::create_dir_all(&cmd).expect("建目录");
-        std::fs::write(cmd.join("dup.md"), "---\ndescription: 命令版\n---\n命令正文\n")
-            .expect("写命令");
+        std::fs::write(
+            cmd.join("dup.md"),
+            "---\ndescription: 命令版\n---\n命令正文\n",
+        )
+        .expect("写命令");
 
         let list = discover(Some(root));
         let hits: Vec<&SlashCommand> = list.iter().filter(|c| c.name == "dup").collect();
@@ -482,7 +496,9 @@ mod tests {
         assert!(
             list.iter().any(|c| c.source == "skill"),
             "没有活跃项目时也该列出内置技能，实际：{:?}",
-            list.iter().map(|c| (&c.name, &c.source)).collect::<Vec<_>>()
+            list.iter()
+                .map(|c| (&c.name, &c.source))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -497,12 +513,18 @@ mod tests {
         let root = t.path();
         let dir = root.join(".riot/skills/mine");
         std::fs::create_dir_all(&dir).expect("建目录");
-        std::fs::write(dir.join("SKILL.md"), "---\nname: mine\ndescription: d\n---\n正文\n")
-            .expect("写技能");
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: mine\ndescription: d\n---\n正文\n",
+        )
+        .expect("写技能");
 
         let list = discover(Some(root));
 
-        let mine = list.iter().find(|c| c.name == "mine").expect("项目技能该在");
+        let mine = list
+            .iter()
+            .find(|c| c.name == "mine")
+            .expect("项目技能该在");
         assert_eq!(mine.source, "skill");
         assert_eq!(mine.skill_source.as_deref(), Some("project"));
 
@@ -514,7 +536,10 @@ mod tests {
         assert!(!builtin_skill.name.is_empty());
 
         // 命令文件和内置命令没有这个字段 —— 它们不是技能。
-        let compact = list.iter().find(|c| c.name == "compact").expect("内置命令该在");
+        let compact = list
+            .iter()
+            .find(|c| c.name == "compact")
+            .expect("内置命令该在");
         assert_eq!(compact.source, "builtin");
         assert!(compact.skill_source.is_none());
     }
@@ -526,8 +551,11 @@ mod tests {
         let root = t.path();
         let sk = root.join(".riot/skills/compact");
         std::fs::create_dir_all(&sk).expect("建目录");
-        std::fs::write(sk.join("SKILL.md"), "---\nname: compact\ndescription: 冒名\n---\n正文\n")
-            .expect("写技能");
+        std::fs::write(
+            sk.join("SKILL.md"),
+            "---\nname: compact\ndescription: 冒名\n---\n正文\n",
+        )
+        .expect("写技能");
 
         let list = discover(Some(root));
         let hits: Vec<&SlashCommand> = list.iter().filter(|c| c.name == "compact").collect();
@@ -537,9 +565,16 @@ mod tests {
 
     #[test]
     fn 参数展开_arguments_与位置参数() {
-        assert_eq!(substitute("给 $1 写 PR：$ARGUMENTS", "main 加了缓存"), "给 main 写 PR：main 加了缓存");
+        assert_eq!(
+            substitute("给 $1 写 PR：$ARGUMENTS", "main 加了缓存"),
+            "给 main 写 PR：main 加了缓存"
+        );
         assert_eq!(substitute("第二个是 $2", "a b c"), "第二个是 b");
-        assert_eq!(substitute("缺参数：[$3]", "a"), "缺参数：[]", "没给的位置参数留空");
+        assert_eq!(
+            substitute("缺参数：[$3]", "a"),
+            "缺参数：[]",
+            "没给的位置参数留空"
+        );
     }
 
     #[test]
@@ -549,20 +584,30 @@ mod tests {
             "[hello world] [second]"
         );
         assert_eq!(split_args(""), Vec::<String>::new());
-        assert_eq!(split_args(r#"a "" b"#), vec!["a", "", "b"], "空引号是一个空参数");
+        assert_eq!(
+            split_args(r#"a "" b"#),
+            vec!["a", "", "b"],
+            "空引号是一个空参数"
+        );
     }
 
     #[test]
     fn 无占位符时把参数追加到末尾() {
         // 否则用户敲的参数被静默扔掉，看起来像"这个命令不认参数"。
-        assert_eq!(substitute("跑测试", "只跑单测"), "跑测试\n\nARGUMENTS: 只跑单测");
+        assert_eq!(
+            substitute("跑测试", "只跑单测"),
+            "跑测试\n\nARGUMENTS: 只跑单测"
+        );
         assert_eq!(substitute("跑测试", ""), "跑测试", "没参数就不加尾巴");
         assert_eq!(substitute("用 $ARGUMENTS", ""), "用 ", "有占位符就不追加");
     }
 
     #[test]
     fn 非占位符的美元号原样保留() {
-        assert_eq!(substitute("echo $HOME 和 $(date)", ""), "echo $HOME 和 $(date)");
+        assert_eq!(
+            substitute("echo $HOME 和 $(date)", ""),
+            "echo $HOME 和 $(date)"
+        );
     }
 
     #[test]
@@ -581,7 +626,10 @@ mod tests {
         let names: Vec<&str> = out.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"git:pr"), "子目录变命名空间：{names:?}");
         assert!(names.contains(&"deploy"));
-        let compact = out.iter().find(|c| c.name == "compact").expect("有 compact");
+        let compact = out
+            .iter()
+            .find(|c| c.name == "compact")
+            .expect("有 compact");
         assert_eq!(compact.source, "builtin", "内置命令不能被自定义盖掉");
     }
 }

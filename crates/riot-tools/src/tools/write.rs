@@ -13,8 +13,7 @@ use async_trait::async_trait;
 use riot_protocol::message::ToolResultContent;
 use riot_protocol::permission::{PermissionContext, PermissionResult};
 use riot_protocol::tool::{
-    FileState, FileView, PromptContext, Tool, ToolContext, ToolOutcome, UiPayload,
-    ValidationError,
+    FileState, FileView, PromptContext, Tool, ToolContext, ToolOutcome, UiPayload, ValidationError,
 };
 use serde::Deserialize;
 

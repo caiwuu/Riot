@@ -12,8 +12,8 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use futures_core::Stream;
-use riot_protocol::event::AgentEvent;
 use pin_project_lite::pin_project;
+use riot_protocol::event::AgentEvent;
 
 use crate::invariants::StreamGuard;
 

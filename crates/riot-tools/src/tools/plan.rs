@@ -92,7 +92,9 @@ impl Tool for ExitPlanMode {
                     scope: UpdateScope::Session,
                 },
             ],
-            reason: DecisionReason::Consent { what: "按计划开始执行".into() },
+            reason: DecisionReason::Consent {
+                what: "按计划开始执行".into(),
+            },
         }
     }
 
@@ -109,7 +111,9 @@ impl Tool for ExitPlanMode {
                 "用户已批准计划，规划模式已退出。开始执行：如果任务有多步，\
                  先用 TodoWrite 把计划落成待办清单，然后按顺序动手。",
             ),
-            ui_payload: Some(UiPayload::Plain { text: "计划已批准，开始执行".into() }),
+            ui_payload: Some(UiPayload::Plain {
+                text: "计划已批准，开始执行".into(),
+            }),
             side_messages: Vec::new(),
         }
     }
@@ -125,7 +129,12 @@ mod tests {
             &serde_json::json!({ "plan": "……" }),
             &PermissionContext::default(),
         );
-        let PermissionResult::Ask { suggestions, reason, .. } = r else {
+        let PermissionResult::Ask {
+            suggestions,
+            reason,
+            ..
+        } = r
+        else {
             panic!("必须走询问，批准是用户的事：{r:?}");
         };
         assert_eq!(

@@ -64,14 +64,7 @@ static READ_ONLY: &[(&str, Flags)] = &[
     (
         "find",
         Flags::Deny(&[
-            "-exec",
-            "-execdir",
-            "-ok",
-            "-okdir",
-            "-delete",
-            "-fprintf",
-            "-fprint",
-            "-fls",
+            "-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprintf", "-fprint", "-fls",
         ]),
     ),
     ("fd", Flags::Deny(&["-x", "--exec", "-X", "--exec-batch"])),
@@ -88,17 +81,52 @@ static READ_ONLY: &[(&str, Flags)] = &[
 /// `[约束]` 白名单而不是黑名单。git 有一百多个子命令,还能通过
 /// `git-foo` 可执行文件扩展 —— 黑名单挡不住 `git my-custom-deploy`。
 static GIT_READ_ONLY: &[&str] = &[
-    "status", "log", "diff", "show", "branch", "tag", "remote", "config", "blame", "describe",
-    "rev-parse", "rev-list", "ls-files", "ls-tree", "ls-remote", "cat-file", "shortlog",
-    "reflog", "whatchanged", "grep", "count-objects", "check-ignore", "var", "help",
+    "status",
+    "log",
+    "diff",
+    "show",
+    "branch",
+    "tag",
+    "remote",
+    "config",
+    "blame",
+    "describe",
+    "rev-parse",
+    "rev-list",
+    "ls-files",
+    "ls-tree",
+    "ls-remote",
+    "cat-file",
+    "shortlog",
+    "reflog",
+    "whatchanged",
+    "grep",
+    "count-objects",
+    "check-ignore",
+    "var",
+    "help",
 ];
 
 /// git 子命令里能写东西的 flag。
 ///
 /// `git config --global x y` 写用户配置,`git branch -d` 删分支。
 static GIT_WRITE_FLAGS: &[&str] = &[
-    "-d", "-D", "--delete", "--unset", "--unset-all", "--add", "--replace-all", "--edit", "-e",
-    "--set-upstream-to", "-m", "-M", "--move", "--prune", "--force", "-f",
+    "-d",
+    "-D",
+    "--delete",
+    "--unset",
+    "--unset-all",
+    "--add",
+    "--replace-all",
+    "--edit",
+    "-e",
+    "--set-upstream-to",
+    "-m",
+    "-M",
+    "--move",
+    "--prune",
+    "--force",
+    "-f",
 ];
 
 enum Flags {

@@ -88,7 +88,11 @@ pub(crate) fn spawn_server(spec: &ServerSpec) -> std::io::Result<SpawnedServer> 
         }
     });
 
-    Ok(SpawnedServer { child, stdout, stdin })
+    Ok(SpawnedServer {
+        child,
+        stdout,
+        stdin,
+    })
 }
 
 /// 停掉整个进程组：先 SIGTERM 给它收尾的机会，再无条件 SIGKILL。

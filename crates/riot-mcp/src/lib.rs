@@ -54,7 +54,11 @@ mod tests {
                     Ok(m) => m,
                     Err(_) => continue,
                 };
-                let method = msg.get("method").and_then(Value::as_str).unwrap_or("").to_owned();
+                let method = msg
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
                 let id = msg.get("id").cloned();
                 let params = msg.get("params").cloned().unwrap_or(Value::Null);
                 // handler 返回零或多条要写回的完整帧（可以是响应，也可以是
@@ -136,7 +140,10 @@ mod tests {
             "initialize" => vec![init_reply()],
             "tools/call" => {
                 assert_eq!(p.pointer("/name").and_then(Value::as_str), Some("echo"));
-                let text = p.pointer("/arguments/text").and_then(Value::as_str).unwrap_or("");
+                let text = p
+                    .pointer("/arguments/text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
                 vec![json!({
                     "$reply": true, "jsonrpc": "2.0",
                     "result": { "content": [{ "type": "text", "text": format!("回声：{text}") }] }
@@ -258,7 +265,9 @@ mod tests {
         });
 
         let (r, w) = tokio::io::split(client_io);
-        let (c, _) = Client::connect(r, w, Timeouts::default()).await.expect("握手");
+        let (c, _) = Client::connect(r, w, Timeouts::default())
+            .await
+            .expect("握手");
         assert!(c.is_alive());
 
         // Timeouts::default 的 request 是 30 秒；5 秒内失败才算"立刻"。
@@ -367,7 +376,10 @@ rl.on('line', (l) => {
                 break;
             }
         }
-        assert_eq!(state, "failed", "起不来的服务器必须报 failed 而不是永远 connecting");
+        assert_eq!(
+            state, "failed",
+            "起不来的服务器必须报 failed 而不是永远 connecting"
+        );
         assert!(
             detail.contains("找不到命令"),
             "找不到二进制要把 PATH 问题说清楚：{detail}"

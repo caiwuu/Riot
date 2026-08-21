@@ -230,7 +230,10 @@ fn scan_dir(dir: &Path, out: &mut Discovered) {
                     out.cards.push(card);
                 }
             }
-            Err(reason) => out.problems.push(Problem { path: skill_md, reason }),
+            Err(reason) => out.problems.push(Problem {
+                path: skill_md,
+                reason,
+            }),
         }
     }
 }
@@ -294,7 +297,9 @@ fn parse_skill(raw: &str, fallback_name: &str, dir: &Path) -> Result<(SkillCard,
     let description = description
         .filter(|d| !d.is_empty())
         .ok_or("缺 description —— 它是模型决定要不要加载的唯一依据")?;
-    let name = name.filter(|n| !n.is_empty()).unwrap_or_else(|| fallback_name.to_owned());
+    let name = name
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| fallback_name.to_owned());
 
     let mut body = body.trim_start_matches('\n').to_owned();
     if body.chars().count() > MAX_BODY_CHARS {
@@ -349,18 +354,25 @@ pub fn list(project_root: Option<&Path>) -> Vec<SkillInfo> {
             }
         })
         .collect();
-    out.extend(d.problems.iter().cloned().map(|p| SkillInfo {
-        name: p
-            .path
-            .parent()
-            .and_then(|d| d.file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or("?")
-            .to_owned(),
-        description: String::new(),
-        source: if p.path.starts_with(&global) { "global" } else { "project" }.into(),
-        path: p.path.display().to_string(),
-        error: Some(p.reason),
+    out.extend(d.problems.iter().cloned().map(|p| {
+        SkillInfo {
+            name: p
+                .path
+                .parent()
+                .and_then(|d| d.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("?")
+                .to_owned(),
+            description: String::new(),
+            source: if p.path.starts_with(&global) {
+                "global"
+            } else {
+                "project"
+            }
+            .into(),
+            path: p.path.display().to_string(),
+            error: Some(p.reason),
+        }
     }));
     out
 }
@@ -394,7 +406,11 @@ mod tests {
         );
 
         let d = discover_dirs(&project, &global);
-        assert!(d.problems.is_empty(), "{:?}", d.problems.first().map(|p| &p.reason));
+        assert!(
+            d.problems.is_empty(),
+            "{:?}",
+            d.problems.first().map(|p| &p.reason)
+        );
         assert_eq!(d.cards.len(), 1);
         assert_eq!(d.cards[0].name, "发布");
         assert_eq!(d.cards[0].description, "发布新版本时用", "引号要剥掉");
@@ -411,7 +427,11 @@ mod tests {
         let d = discover_dirs(&project, &global);
         assert!(d.cards.is_empty());
         assert_eq!(d.problems.len(), 1);
-        assert!(d.problems[0].reason.contains("description"), "{}", d.problems[0].reason);
+        assert!(
+            d.problems[0].reason.contains("description"),
+            "{}",
+            d.problems[0].reason
+        );
     }
 
     #[test]
@@ -427,8 +447,16 @@ mod tests {
         // 项目里的约定比全局偏好更具体。反过来的话，用户在项目里
         // 定制的流程会被全局那份悄悄顶掉。
         let (_t, project, global) = dirs();
-        write_skill(&global, "release", "---\nname: 发布\ndescription: 全局\n---\n全局做法\n");
-        write_skill(&project, "release", "---\nname: 发布\ndescription: 项目\n---\n项目做法\n");
+        write_skill(
+            &global,
+            "release",
+            "---\nname: 发布\ndescription: 全局\n---\n全局做法\n",
+        );
+        write_skill(
+            &project,
+            "release",
+            "---\nname: 发布\ndescription: 项目\n---\n项目做法\n",
+        );
 
         let d = discover_dirs(&project, &global);
         assert_eq!(d.cards.len(), 1);
@@ -449,7 +477,11 @@ mod tests {
         write_skill(&global, "plain", "就是一段普通 markdown\n");
         let d = discover_dirs(&project, &global);
         assert!(d.cards.is_empty());
-        assert!(d.problems[0].reason.contains("---"), "{}", d.problems[0].reason);
+        assert!(
+            d.problems[0].reason.contains("---"),
+            "{}",
+            d.problems[0].reason
+        );
     }
 
     /// 内置技能必须全部能解析。
@@ -465,9 +497,16 @@ mod tests {
         assert!(
             out.problems.is_empty(),
             "内置技能解析失败：{:?}",
-            out.problems.iter().map(|p| (&p.path, &p.reason)).collect::<Vec<_>>()
+            out.problems
+                .iter()
+                .map(|p| (&p.path, &p.reason))
+                .collect::<Vec<_>>()
         );
-        assert_eq!(out.cards.len(), BUILTIN_SKILLS.len(), "清单里的每一条都该出来");
+        assert_eq!(
+            out.cards.len(),
+            BUILTIN_SKILLS.len(),
+            "清单里的每一条都该出来"
+        );
         assert_eq!(out.builtin.len(), BUILTIN_SKILLS.len(), "都该被标成内置");
 
         for c in &out.cards {
@@ -478,7 +517,11 @@ mod tests {
                 c.name,
                 c.description.chars().count()
             );
-            assert!(!c.body.trim().is_empty(), "内置技能「{}」正文是空的", c.name);
+            assert!(
+                !c.body.trim().is_empty(),
+                "内置技能「{}」正文是空的",
+                c.name
+            );
         }
 
         // 刻意**不**断言正文里没有 `${SKILL_DIR}`：内置技能没有目录，但
@@ -520,10 +563,14 @@ mod tests {
         assert!(
             list.iter().any(|s| s.source == "builtin"),
             "没有项目时该列出内置技能，实际：{:?}",
-            list.iter().map(|s| (&s.name, &s.source)).collect::<Vec<_>>()
+            list.iter()
+                .map(|s| (&s.name, &s.source))
+                .collect::<Vec<_>>()
         );
         assert!(
-            list.iter().filter(|s| s.source == "builtin").all(|s| s.path.is_empty()),
+            list.iter()
+                .filter(|s| s.source == "builtin")
+                .all(|s| s.path.is_empty()),
             "内置技能不在文件系统上，不该给出路径"
         );
     }
@@ -545,9 +592,15 @@ mod tests {
         assert!(
             d.problems.is_empty(),
             "自带技能解析失败：{:?}",
-            d.problems.iter().map(|p| (&p.path, &p.reason)).collect::<Vec<_>>()
+            d.problems
+                .iter()
+                .map(|p| (&p.path, &p.reason))
+                .collect::<Vec<_>>()
         );
-        assert!(!d.cards.is_empty(), "仓库该自带技能，一个都没扫到说明目录没跟着走");
+        assert!(
+            !d.cards.is_empty(),
+            "仓库该自带技能，一个都没扫到说明目录没跟着走"
+        );
         for c in &d.cards {
             // 清单进工具 prompt，单条描述硬顶 250 字符（见 skill.rs）。
             // 超了会被截断，模型就是在残句上做"要不要加载"的判断。
@@ -572,10 +625,18 @@ mod tests {
             "danger",
             "---\nname: danger\ndescription: d\ndisable-model-invocation: true\n---\n正文\n",
         );
-        write_skill(&global, "normal", "---\nname: normal\ndescription: d\n---\n正文\n");
+        write_skill(
+            &global,
+            "normal",
+            "---\nname: normal\ndescription: d\n---\n正文\n",
+        );
 
         let d = discover_dirs(&project, &global);
-        assert!(d.problems.is_empty(), "{:?}", d.problems.first().map(|p| &p.reason));
+        assert!(
+            d.problems.is_empty(),
+            "{:?}",
+            d.problems.first().map(|p| &p.reason)
+        );
         assert_eq!(d.cards.len(), 2, "两个都该被发现（`/` 菜单要用全量）");
 
         let model = d.model_cards();

@@ -126,9 +126,9 @@ pub fn partition(calls: Vec<ToolCall>, registry: &Registry, max_concurrency: usi
 mod tests {
     use super::*;
     use crate::testing::FakeTool;
+    use pretty_assertions::assert_eq;
     use riot_protocol::id::ToolUseId;
     use riot_protocol::tool::Tool;
-    use pretty_assertions::assert_eq;
     use std::sync::Arc;
 
     fn registry() -> Registry {

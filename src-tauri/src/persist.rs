@@ -53,7 +53,10 @@ pub struct PersistedSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
     /// 会话级思考策略。默认 = 不干预（不发任何思考参数）。
-    #[serde(default, skip_serializing_if = "riot_protocol::ThinkingPolicy::is_default")]
+    #[serde(
+        default,
+        skip_serializing_if = "riot_protocol::ThinkingPolicy::is_default"
+    )]
     pub thinking: riot_protocol::ThinkingPolicy,
 }
 
@@ -131,7 +134,10 @@ fn rebuild(transcripts: &riot_store::Transcripts) -> SessionIndex {
             seq: i as u64,
             created_at_ms: s.meta.created_at_ms,
             custom_title: None,
-            auto_title: s.first_prompt.as_deref().and_then(crate::session::title_excerpt),
+            auto_title: s
+                .first_prompt
+                .as_deref()
+                .and_then(crate::session::title_excerpt),
             mode: PermissionMode::Default,
             sampling: Sampling::default(),
             python_venv: None,
@@ -200,7 +206,9 @@ mod tests {
     fn 保存后能读回() {
         let d = dir();
         let transcripts = riot_store::Transcripts::new(d.path());
-        let idx = SessionIndex { sessions: vec![one("s1", 0), one("s2", 1)] };
+        let idx = SessionIndex {
+            sessions: vec![one("s1", 0), one("s2", 1)],
+        };
         save(d.path(), &idx).expect("保存");
 
         let back = load(d.path(), &transcripts);
@@ -227,7 +235,9 @@ mod tests {
         });
         log.append(&Message::User {
             id: MessageId::from_raw("m1"),
-            content: vec![UserContent::Text { text: "重建后的标题".into() }],
+            content: vec![UserContent::Text {
+                text: "重建后的标题".into(),
+            }],
             meta: MessageMeta::default(),
         });
         log.flush().await;

@@ -146,7 +146,10 @@ mod tests {
             "BrowserScreenshot",
             "BrowserConsole",
         ] {
-            assert!(names.contains(&want.to_owned()), "{want} 不在清单里：{names:?}");
+            assert!(
+                names.contains(&want.to_owned()),
+                "{want} 不在清单里：{names:?}"
+            );
         }
     }
 
@@ -184,7 +187,16 @@ mod tests {
         // 这类普通名词也算进来。这里列的是我们自己的工具名，加上几个
         // 模型最常凭空捏造的（它们出现在描述里同样是 bug）。
         const TOOL_WORDS: &[&str] = &[
-            "Read", "Write", "Edit", "Bash", "Grep", "Glob", "LS", "Task", "WebFetch", "NotebookEdit",
+            "Read",
+            "Write",
+            "Edit",
+            "Bash",
+            "Grep",
+            "Glob",
+            "LS",
+            "Task",
+            "WebFetch",
+            "NotebookEdit",
         ];
 
         for t in &tools {

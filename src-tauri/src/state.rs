@@ -505,7 +505,9 @@ impl AppState {
             live_thinking,
         } = resp
         else {
-            return Err(HostError::Kernel(crate::kernel::KernelError::Rpc("session.resume 回了意外的应答".into())));
+            return Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
+                "session.resume 回了意外的应答".into(),
+            )));
         };
 
         // 顺手做两件登记:标记已水合;索引里没有标题时从历史第一句自愈
@@ -517,14 +519,12 @@ impl AppState {
                 m.busy = busy;
                 if m.custom_title.is_none() && m.auto_title.is_none() {
                     let first = messages.iter().find_map(|msg| match msg {
-                        Message::User { content, .. } => {
-                            content.iter().find_map(|c| match c {
-                                riot_protocol::message::UserContent::Text { text } => {
-                                    crate::session::title_excerpt(text)
-                                }
-                                _ => None,
-                            })
-                        }
+                        Message::User { content, .. } => content.iter().find_map(|c| match c {
+                            riot_protocol::message::UserContent::Text { text } => {
+                                crate::session::title_excerpt(text)
+                            }
+                            _ => None,
+                        }),
                         _ => None,
                     });
                     if first.is_some() {
@@ -879,7 +879,9 @@ impl AppState {
             })
             .await?;
         let RpcResponse::TurnSubmitted { queued_id } = resp else {
-            return Err(HostError::Kernel(crate::kernel::KernelError::Rpc("turn.submit 回了意外的应答".into())));
+            return Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
+                "turn.submit 回了意外的应答".into(),
+            )));
         };
         // 无论直接开轮还是进了插话队列,此刻都有轮子在跑(排队的前提就是
         // 上一轮还在)。Done 事件会清掉它。
@@ -1030,7 +1032,9 @@ impl AppState {
             .await?
         {
             RpcResponse::QueueList { entries } => Ok(entries),
-            _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc("queue.list 回了意外的应答".into()))),
+            _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
+                "queue.list 回了意外的应答".into(),
+            ))),
         }
     }
 
@@ -1045,7 +1049,9 @@ impl AppState {
             .await?
         {
             RpcResponse::Removed { removed } => Ok(removed),
-            _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc("queue.remove 回了意外的应答".into()))),
+            _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
+                "queue.remove 回了意外的应答".into(),
+            ))),
         }
     }
 
@@ -1064,7 +1070,9 @@ impl AppState {
             .await?
         {
             RpcResponse::QueueTaken { input } => Ok(input),
-            _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc("queue.take 回了意外的应答".into()))),
+            _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
+                "queue.take 回了意外的应答".into(),
+            ))),
         }
     }
 
@@ -1088,7 +1096,9 @@ impl AppState {
             .await?
         {
             RpcResponse::Changes { changes } => Ok(changes),
-            _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc("session.changes 回了意外的应答".into()))),
+            _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
+                "session.changes 回了意外的应答".into(),
+            ))),
         }
     }
 
@@ -1108,7 +1118,9 @@ impl AppState {
             .await?
         {
             RpcResponse::GitChanges { git } => Ok(git),
-            _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc("session.git_changes 回了意外的应答".into()))),
+            _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
+                "session.git_changes 回了意外的应答".into(),
+            ))),
         }
     }
 
@@ -1141,7 +1153,9 @@ impl AppState {
             .await?
         {
             RpcResponse::ScopeHosts { hosts } => Ok(hosts),
-            _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc("scope.list 回了意外的应答".into()))),
+            _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
+                "scope.list 回了意外的应答".into(),
+            ))),
         }
     }
 
@@ -1279,10 +1293,7 @@ impl AppState {
                 env: s.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             })
             .collect();
-        if let Err(e) = self
-            .kernel_call(RpcRequest::McpReconcile { servers })
-            .await
-        {
+        if let Err(e) = self.kernel_call(RpcRequest::McpReconcile { servers }).await {
             tracing::warn!(error = %e, "MCP 清单没送到内核");
         }
     }
@@ -1344,7 +1355,9 @@ fn host_unavailable(message: impl Into<String>) -> riot_protocol::hostcall::Host
     }
 }
 
-fn interact_resp(e: riot_protocol::browser::InteractError) -> riot_protocol::hostcall::HostResponse {
+fn interact_resp(
+    e: riot_protocol::browser::InteractError,
+) -> riot_protocol::hostcall::HostResponse {
     use riot_protocol::browser::InteractError;
     use riot_protocol::hostcall::{HostCallErrorKind, HostResponse};
     match e {
@@ -1437,9 +1450,8 @@ impl crate::kernel::HostCallHandler for HostCalls {
 
         // 终端面板是应用级的,但 spawn 的 cwd 是会话的项目根 ——
         // 每次按会话现建一个轻量的 HostTerminal 包装。
-        let terminal = |root: PathBuf| {
-            crate::term_access::HostTerminal::new(self.0.0.terminals.clone(), root)
-        };
+        let terminal =
+            |root: PathBuf| crate::term_access::HostTerminal::new(self.0.0.terminals.clone(), root);
 
         match req {
             Req::TerminalSpawn {

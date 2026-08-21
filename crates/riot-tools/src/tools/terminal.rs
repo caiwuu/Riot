@@ -276,7 +276,11 @@ mod tests {
     #[tokio::test]
     async fn 等到哨兵就返回() {
         let term = Arc::new(FakeTerm::new(
-            &["starting...", "starting...\nbuilding", "starting...\nready in 412ms"],
+            &[
+                "starting...",
+                "starting...\nbuilding",
+                "starting...\nready in 412ms",
+            ],
             true,
         ));
         let clock = Arc::new(crate::testing::FixedClock::default());
@@ -302,7 +306,10 @@ mod tests {
         let ctx = ctx_with(Arc::clone(&term), Arc::clone(&clock));
 
         let out = wait_for_sentinel("ready", &input("ready"), 80, &ctx).await;
-        let ToolOutcome::Failed { error_for_model, .. } = out else {
+        let ToolOutcome::Failed {
+            error_for_model, ..
+        } = out
+        else {
             panic!("该失败：{out:?}");
         };
         assert!(error_for_model.contains("已经退出"), "{error_for_model}");
@@ -321,10 +328,16 @@ mod tests {
         let ctx = ctx_with(Arc::clone(&term), Arc::clone(&clock));
 
         let out = wait_for_sentinel("ready", &input("ready"), 80, &ctx).await;
-        let ToolOutcome::Failed { error_for_model, .. } = out else {
+        let ToolOutcome::Failed {
+            error_for_model, ..
+        } = out
+        else {
             panic!("该超时失败：{out:?}");
         };
-        assert!(error_for_model.contains("installing deps"), "{error_for_model}");
+        assert!(
+            error_for_model.contains("installing deps"),
+            "{error_for_model}"
+        );
         assert!(
             error_for_model.contains("wait_timeout_ms"),
             "要给下一步，否则模型只会原样再等一次：{error_for_model}"
@@ -338,10 +351,16 @@ mod tests {
         let clock = Arc::new(crate::testing::FixedClock::default());
         let ctx = ctx_with(term, clock);
         let out = wait_for_sentinel("[unclosed", &input("[unclosed"), 80, &ctx).await;
-        let ToolOutcome::Failed { error_for_model, .. } = out else {
+        let ToolOutcome::Failed {
+            error_for_model, ..
+        } = out
+        else {
             panic!("非法正则该失败：{out:?}");
         };
-        assert!(error_for_model.contains("反斜杠"), "要提醒 JSON 转义：{error_for_model}");
+        assert!(
+            error_for_model.contains("反斜杠"),
+            "要提醒 JSON 转义：{error_for_model}"
+        );
     }
 
     #[test]
@@ -354,7 +373,9 @@ mod tests {
             wait_timeout_ms: Some(9_999_999),
         };
         assert_eq!(
-            over.wait_timeout_ms.unwrap_or(DEFAULT_WAIT_MS).min(MAX_WAIT_MS),
+            over.wait_timeout_ms
+                .unwrap_or(DEFAULT_WAIT_MS)
+                .min(MAX_WAIT_MS),
             MAX_WAIT_MS
         );
     }

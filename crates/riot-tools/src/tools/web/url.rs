@@ -529,7 +529,11 @@ mod tests {
             Err(UrlReject::RemoteFile { .. })
         ));
         // data: 能绕过一切网络检查；javascript: 是代码执行
-        for bad in ["data:text/html,hi", "javascript:alert(1)", "ftp://example.com/x"] {
+        for bad in [
+            "data:text/html,hi",
+            "javascript:alert(1)",
+            "ftp://example.com/x",
+        ] {
             assert!(
                 matches!(normalize_for_browser(bad), Err(UrlReject::BadScheme { .. })),
                 "{bad} 应当被拒"
@@ -560,5 +564,4 @@ mod tests {
             "domain:docs.rs"
         );
     }
-
 }

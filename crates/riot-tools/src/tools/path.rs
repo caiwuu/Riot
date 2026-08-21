@@ -67,11 +67,7 @@ impl PathError {
 /// 解析并校验一个路径。
 ///
 /// `must_exist = false` 时用于 Write 创建新文件 —— 这时解析父目录。
-pub async fn resolve(
-    raw: &str,
-    ctx: &ToolContext,
-    must_exist: bool,
-) -> Result<PathBuf, PathError> {
+pub async fn resolve(raw: &str, ctx: &ToolContext, must_exist: bool) -> Result<PathBuf, PathError> {
     if raw.trim().is_empty() {
         return Err(PathError::Empty);
     }
@@ -132,10 +128,7 @@ pub async fn resolve(
 ///
 /// 父目录也不存在时返回 `None` —— 让字面检查兜底。Write 会在真正
 /// 写入时因为目录不存在而失败，那个错误信息比这里编一个更准确。
-async fn resolve_parent(
-    absolute: &Path,
-    ctx: &ToolContext,
-) -> Result<Option<PathBuf>, PathError> {
+async fn resolve_parent(absolute: &Path, ctx: &ToolContext) -> Result<Option<PathBuf>, PathError> {
     let (Some(parent), Some(name)) = (absolute.parent(), absolute.file_name()) else {
         return Ok(None);
     };
@@ -152,8 +145,5 @@ async fn resolve_parent(
 
 /// 展示给用户/模型的短路径。绝对路径太长会挤爆 UI。
 pub fn display_relative(path: &Path, cwd: &Path) -> String {
-    path.strip_prefix(cwd)
-        .unwrap_or(path)
-        .display()
-        .to_string()
+    path.strip_prefix(cwd).unwrap_or(path).display().to_string()
 }

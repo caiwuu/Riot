@@ -229,7 +229,10 @@ fn parse_env_json(s: &str) -> Option<Vec<(String, String)>> {
 }
 
 #[cfg(unix)]
-fn run_with_timeout(mut cmd: std::process::Command, timeout: Duration) -> Option<std::process::Output> {
+fn run_with_timeout(
+    mut cmd: std::process::Command,
+    timeout: Duration,
+) -> Option<std::process::Output> {
     use std::io::Read;
     // 不另起线程：`set_var` 之前进程里必须只有主线程。超时就杀，
     // 避免 `.zshrc` 里的网络请求把启动卡住。
@@ -401,10 +404,15 @@ mod tests {
     #[test]
     fn 标记之间抽出_json_即使_zshrc_往_stdout_打过字() {
         let mark = "__RIOT_ENV_test__";
-        let raw = format!("compinit ok\n{mark}{{\"SSH_AUTH_SOCK\":\"/tmp/s\",\"PATH\":\"/bin\"}}{mark}\n");
+        let raw = format!(
+            "compinit ok\n{mark}{{\"SSH_AUTH_SOCK\":\"/tmp/s\",\"PATH\":\"/bin\"}}{mark}\n"
+        );
         let json = extract_marked(&raw, mark).expect("有标记");
         let vars = parse_env_json(json).expect("是 JSON");
-        assert!(vars.iter().any(|(k, v)| k == "SSH_AUTH_SOCK" && v == "/tmp/s"));
+        assert!(
+            vars.iter()
+                .any(|(k, v)| k == "SSH_AUTH_SOCK" && v == "/tmp/s")
+        );
     }
 
     #[test]
@@ -423,7 +431,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn posix_单引号能包住带引号的路径() {
-        assert_eq!(posix_single_quote("/Applications/Riot.app/Contents/MacOS/Riot"), "'/Applications/Riot.app/Contents/MacOS/Riot'");
+        assert_eq!(
+            posix_single_quote("/Applications/Riot.app/Contents/MacOS/Riot"),
+            "'/Applications/Riot.app/Contents/MacOS/Riot'"
+        );
         assert_eq!(posix_single_quote("/tmp/it's here"), "'/tmp/it'\\''s here'");
     }
 }

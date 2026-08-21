@@ -72,7 +72,12 @@ fn chosen(input: &serde_json::Value) -> Vec<String> {
     input
         .get(CHOSEN_KEY)
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str()).map(str::to_owned).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_owned)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -87,7 +92,10 @@ pub fn preview_parts(input: &serde_json::Value) -> Option<(String, Vec<AskChoice
         parsed
             .options
             .into_iter()
-            .map(|o| AskChoiceOption { id: o.id, label: o.label })
+            .map(|o| AskChoiceOption {
+                id: o.id,
+                label: o.label,
+            })
             .collect(),
         parsed.allow_multiple,
     ))
@@ -140,7 +148,10 @@ impl Tool for AskUserQuestion {
     }
 
     fn describe(&self, input: &serde_json::Value) -> String {
-        let q = input.get("question").and_then(|v| v.as_str()).unwrap_or("请用户决定");
+        let q = input
+            .get("question")
+            .and_then(|v| v.as_str())
+            .unwrap_or("请用户决定");
         format!("提问：{q}")
     }
 
@@ -207,7 +218,9 @@ impl Tool for AskUserQuestion {
         let mut seen = std::collections::HashSet::new();
         for o in &parsed.options {
             if o.id.trim().is_empty() || o.label.trim().is_empty() {
-                return Err(ValidationError::rejected("每个选项的 id 和 label 都不能为空。"));
+                return Err(ValidationError::rejected(
+                    "每个选项的 id 和 label 都不能为空。",
+                ));
             }
             if o.id.starts_with("__") {
                 return Err(ValidationError::rejected(
@@ -243,7 +256,10 @@ impl Tool for AskUserQuestion {
         // 回给模型的是 label，附上 id：label 才是用户实际读到并点下的那句话，
         // 只给 id 的话模型得自己回想它当初写的映射，容易记错。
         // 「其他」是用户自己写的，没有 id ↔ label 映射，前缀剥掉后原文送出。
-        let lines: Vec<String> = picked.iter().map(|id| describe_pick(id, &options)).collect();
+        let lines: Vec<String> = picked
+            .iter()
+            .map(|id| describe_pick(id, &options))
+            .collect();
         let answer = lines.join("、");
 
         ToolOutcome::Ok {
@@ -302,10 +318,16 @@ mod tests {
         let t = AskUserQuestion;
         let ctx = ctx();
 
-        let one = t.validate_input(&input(1), &ctx).await.expect_err("一个选项不该过");
+        let one = t
+            .validate_input(&input(1), &ctx)
+            .await
+            .expect_err("一个选项不该过");
         assert!(one.to_string().contains("直接说"), "{}", one.to_string());
 
-        let many = t.validate_input(&input(9), &ctx).await.expect_err("九个不该过");
+        let many = t
+            .validate_input(&input(9), &ctx)
+            .await
+            .expect_err("九个不该过");
         assert!(many.to_string().contains("最多"), "{}", many.to_string());
 
         t.validate_input(&input(2), &ctx).await.expect("两个该过");
@@ -347,7 +369,10 @@ mod tests {
                 ..Default::default()
             };
             assert!(
-                matches!(t.check_permissions(&input(2), &ctx), PermissionResult::Ask { .. }),
+                matches!(
+                    t.check_permissions(&input(2), &ctx),
+                    PermissionResult::Ask { .. }
+                ),
                 "{mode:?} 下没有问用户"
             );
         }
@@ -394,7 +419,10 @@ mod tests {
         // 按某条路走下去了。
         let t = AskUserQuestion;
         let out = t.call(input(3), ctx()).await;
-        let ToolOutcome::Failed { error_for_model, .. } = out else {
+        let ToolOutcome::Failed {
+            error_for_model, ..
+        } = out
+        else {
             panic!("没有选择时不该成功：{out:?}");
         };
         assert!(error_for_model.contains("不要自己挑"), "{error_for_model}");
@@ -453,7 +481,10 @@ mod tests {
             panic!("该成功：{out:?}");
         };
         let text = format!("{model_content:?}");
-        assert!(text.contains("选项 0") && text.contains("自己填写：再加日志"), "{text}");
+        assert!(
+            text.contains("选项 0") && text.contains("自己填写：再加日志"),
+            "{text}"
+        );
     }
 
     #[tokio::test]
@@ -466,7 +497,10 @@ mod tests {
                 { "id": "ok", "label": "乙" }
             ]
         });
-        let e = t.validate_input(&bad, &ctx()).await.expect_err("保留前缀不该过");
+        let e = t
+            .validate_input(&bad, &ctx())
+            .await
+            .expect_err("保留前缀不该过");
         assert!(e.to_string().contains("__"), "{}", e.to_string());
     }
 
@@ -480,6 +514,10 @@ mod tests {
         assert!(!multi);
 
         // 顺带确认协议里的 Choice 变体拼得起来（改了字段名这里会编译失败）。
-        let _ = AskPreview::Choice { question: q, options, allow_multiple: multi };
+        let _ = AskPreview::Choice {
+            question: q,
+            options,
+            allow_multiple: multi,
+        };
     }
 }

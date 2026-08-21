@@ -132,14 +132,14 @@ where
                         && v.get("method").is_none()
                         && let Some(id) = v.get("id").and_then(Value::as_u64)
                     {
-                        let resp = serde_json::from_value::<
-                            riot_protocol::hostcall::HostResponse,
-                        >(
-                            v.get("result").cloned().unwrap_or(Value::Null)
+                        let resp = serde_json::from_value::<riot_protocol::hostcall::HostResponse>(
+                            v.get("result").cloned().unwrap_or(Value::Null),
                         )
-                        .unwrap_or_else(|e| riot_protocol::hostcall::HostResponse::Error {
-                            kind: riot_protocol::hostcall::HostCallErrorKind::Unavailable,
-                            message: format!("宿主应答解析失败:{e}"),
+                        .unwrap_or_else(|e| {
+                            riot_protocol::hostcall::HostResponse::Error {
+                                kind: riot_protocol::hostcall::HostCallErrorKind::Unavailable,
+                                message: format!("宿主应答解析失败:{e}"),
+                            }
                         });
                         if !br.resolve(id, resp).await {
                             tracing::warn!(id, "收到无人等待的反向应答");

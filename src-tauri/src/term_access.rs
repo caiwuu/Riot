@@ -76,7 +76,9 @@ impl HostTerminal {
                  需要停请他自己来。"
             )));
         }
-        Err(TerminalUnavailable(format!("终端 {id} 不是你起的，停不了。")))
+        Err(TerminalUnavailable(format!(
+            "终端 {id} 不是你起的，停不了。"
+        )))
     }
 }
 

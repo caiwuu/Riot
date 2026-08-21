@@ -95,7 +95,12 @@ const TOOLCHAINS: &[Toolchain] = &[
         program: "cargo",
         // --all-targets 不能省:不带它测试代码不参与检查，而"改了公共结构体
         // 的字段"这类问题只在测试代码里炸。
-        args: &["check", "--workspace", "--all-targets", "--message-format=json"],
+        args: &[
+            "check",
+            "--workspace",
+            "--all-targets",
+            "--message-format=json",
+        ],
         parse: parse_cargo,
     },
     Toolchain {
@@ -457,7 +462,11 @@ mod tests {
         let items = parse_tsc(out);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].file, "src/a.ts");
-        assert!(items[0].message.contains("Record<string, unknown>"), "{:?}", items[0].message);
+        assert!(
+            items[0].message.contains("Record<string, unknown>"),
+            "{:?}",
+            items[0].message
+        );
     }
 
     #[test]
@@ -481,7 +490,11 @@ mod tests {
             },
         ];
         items.sort_by(|a, b| a.level.cmp(&b.level).then_with(|| a.file.cmp(&b.file)));
-        assert_eq!(items[0].level, Level::Error, "错误必须在前 —— 警告先出会把根因压下去");
+        assert_eq!(
+            items[0].level,
+            Level::Error,
+            "错误必须在前 —— 警告先出会把根因压下去"
+        );
     }
 
     #[test]

@@ -37,9 +37,9 @@ impl Staleness {
     /// 模型的下一步往往是重试同样的调用。
     pub fn for_model(&self, path: &str) -> String {
         match self {
-            Staleness::NeverRead => format!(
-                "还没有读过 {path}。请先用 Read 读取这个文件，然后再修改它。"
-            ),
+            Staleness::NeverRead => {
+                format!("还没有读过 {path}。请先用 Read 读取这个文件，然后再修改它。")
+            }
             Staleness::PartialOnly { .. } => format!(
                 "只读取了 {path} 的一部分。修改文件前需要看到完整内容 —— \
                  请不带 offset/limit 重新 Read 一次。"
@@ -55,10 +55,7 @@ impl Staleness {
 /// 检查一个已存在的文件能不能被修改。
 ///
 /// 返回缓存里的状态 —— 调用方用它做内容比对。
-pub async fn check_fresh(
-    resolved: &Path,
-    ctx: &ToolContext,
-) -> Result<FileState, Staleness> {
+pub async fn check_fresh(resolved: &Path, ctx: &ToolContext) -> Result<FileState, Staleness> {
     let Some(state) = ctx.file_state.get(resolved) else {
         return Err(Staleness::NeverRead);
     };

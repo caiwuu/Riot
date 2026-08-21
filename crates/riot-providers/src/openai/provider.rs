@@ -240,9 +240,7 @@ impl Provider for OpenAiProvider {
     }
 }
 
-fn decode_stream(
-    mut bytes: ByteStream,
-) -> impl futures_core::Stream<Item = ProviderEvent> + Send {
+fn decode_stream(mut bytes: ByteStream) -> impl futures_core::Stream<Item = ProviderEvent> + Send {
     stream! {
         let mut parser = SseParser::new();
         let mut decoder = StreamDecoder::new();
@@ -305,10 +303,9 @@ fn map_giveup(reason: GiveUpReason, e: &HttpError) -> ProviderError {
             // OpenAI 系用 400 + 特定文案表示上下文超长。各家措辞不同，
             // 这里认几个最常见的。认不出来就当普通错误 —— 那样主循环
             // 不会尝试压缩恢复，但至少不会误判。
-            Some(400) if is_context_overflow(&e.body) => ProviderError::ContextOverflow {
-                used: 0,
-                limit: 0,
-            },
+            Some(400) if is_context_overflow(&e.body) => {
+                ProviderError::ContextOverflow { used: 0, limit: 0 }
+            }
             // 服务端明确拒绝（参数错误、内容策略）。**没有重试过** ——
             // 报"重试耗尽"会让用户以为是网络问题，往错误的方向排查。
             Some(_) => ProviderError::Refused {

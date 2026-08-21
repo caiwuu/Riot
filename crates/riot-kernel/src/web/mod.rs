@@ -57,10 +57,14 @@ impl HostWeb {
     /// 不返回 `Result`：任何一块配坏了都只让那一块变成"未配置"，其余的
     /// 照常能用。搜索地址填错不该连带着让 WebFetch 也用不了。
     pub fn from_config(cfg: &AppConfig) -> Self {
-        let fetch = cfg.web.fetch_enabled.then(SystemWebClient::new).and_then(|r| {
-            r.inspect_err(|e| tracing::warn!(error = %e, "抓取客户端没建起来"))
-                .ok()
-        });
+        let fetch = cfg
+            .web
+            .fetch_enabled
+            .then(SystemWebClient::new)
+            .and_then(|r| {
+                r.inspect_err(|e| tracing::warn!(error = %e, "抓取客户端没建起来"))
+                    .ok()
+            });
 
         let search = cfg.web.search_ready().then(|| Searxng {
             client: search_client(),
@@ -88,16 +92,18 @@ impl HostWeb {
     /// 从 RPC 传入的 [`riot_protocol::WebSetup`] 装一套联网能力(拆进程后
     /// 内核走这条,不碰 AppConfig)。语义和 [`Self::from_config`] 一致。
     pub fn from_setup(setup: &riot_protocol::WebSetup) -> Self {
-        let fetch = setup.fetch_enabled.then(SystemWebClient::new).and_then(|r| {
-            r.inspect_err(|e| tracing::warn!(error = %e, "抓取客户端没建起来"))
-                .ok()
-        });
-        let search = (setup.search_enabled && !setup.searxng_url.trim().is_empty()).then(|| {
-            Searxng {
+        let fetch = setup
+            .fetch_enabled
+            .then(SystemWebClient::new)
+            .and_then(|r| {
+                r.inspect_err(|e| tracing::warn!(error = %e, "抓取客户端没建起来"))
+                    .ok()
+            });
+        let search =
+            (setup.search_enabled && !setup.searxng_url.trim().is_empty()).then(|| Searxng {
                 client: search_client(),
                 base_url: setup.searxng_url.trim().trim_end_matches('/').to_owned(),
-            }
-        });
+            });
         let distiller = setup.distill.as_ref().and_then(|ep| {
             crate::session::provider_from_endpoint(ep)
                 .inspect_err(|e| tracing::warn!(error = %e, "辅助模型的 provider 建不出来"))

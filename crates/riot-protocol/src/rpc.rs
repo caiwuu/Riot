@@ -100,10 +100,7 @@ pub enum RpcRequest {
     ScopeList { session_id: SessionId },
     /// 撤销一个已授权主机。
     #[serde(rename = "scope.revoke")]
-    ScopeRevoke {
-        session_id: SessionId,
-        host: String,
-    },
+    ScopeRevoke { session_id: SessionId, host: String },
 
     /// 让 MCP 连接对齐给定的服务器清单(宿主从设置里组好传入,内核不读
     /// 配置文件)。启动时和每次保存设置后调用。

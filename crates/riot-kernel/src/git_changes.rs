@@ -308,7 +308,10 @@ async fn git_raw(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
     // 变更面板就闪一串黑色控制台窗。理由的完整版见 riot-runtime 的命令执行器。
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    let out = tokio::time::timeout(GIT_TIMEOUT, cmd.output()).await.ok()?.ok()?;
+    let out = tokio::time::timeout(GIT_TIMEOUT, cmd.output())
+        .await
+        .ok()?
+        .ok()?;
     out.status.success().then_some(out.stdout)
 }
 

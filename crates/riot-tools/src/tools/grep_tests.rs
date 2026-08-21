@@ -56,7 +56,11 @@ fn harness() -> Harness {
         ),
         file_state: Arc::new(MemFileState::new()),
         // 只用于 `path` 参数的围栏解析；搜索本身走真实文件系统。
-        fs: Arc::new(MemFs::new().with_dir(p.to_path_buf()).with_dir(p.join("src"))),
+        fs: Arc::new(
+            MemFs::new()
+                .with_dir(p.to_path_buf())
+                .with_dir(p.join("src")),
+        ),
         proc: Arc::new(FakeProc::new()),
         web: Arc::new(riot_protocol::web::NoWeb),
         browser: Arc::new(riot_protocol::browser::NoBrowser),
@@ -80,7 +84,9 @@ fn text_of(o: &ToolOutcome) -> String {
             riot_protocol::message::ToolResultContent::Text { text } => text.clone(),
             other => panic!("非文本结果：{other:?}"),
         },
-        ToolOutcome::Failed { error_for_model, .. } => error_for_model.clone(),
+        ToolOutcome::Failed {
+            error_for_model, ..
+        } => error_for_model.clone(),
         ToolOutcome::Cancelled => "<cancelled>".into(),
     }
 }
@@ -331,17 +337,17 @@ fn 没走完的结果要带提示() {
 
     let partial = render_body("src/a.rs:1:foo", None, true);
     assert!(partial.contains("没走完"), "没走完必须说出来：{partial}");
-    assert!(partial.contains("src/a.rs:1:foo"), "已有结果照样要给：{partial}");
+    assert!(
+        partial.contains("src/a.rs:1:foo"),
+        "已有结果照样要给：{partial}"
+    );
 }
 
 /// 截断提示和"没走完"提示是两件事，可以同时出现。
 #[test]
 fn 截断和没走完可以同时提示() {
-    let body = super::grep::testing::render_body(
-        "a:1:x",
-        Some("共 99 条结果，这里显示前 1 条。"),
-        true,
-    );
+    let body =
+        super::grep::testing::render_body("a:1:x", Some("共 99 条结果，这里显示前 1 条。"), true);
     assert!(body.contains("共 99 条结果"), "{body}");
     assert!(body.contains("没走完"), "{body}");
 }
@@ -357,11 +363,7 @@ fn 截断和没走完可以同时提示() {
 async fn 搜索根越界要被拒() {
     let h = harness();
     for escape in ["/etc", "..", "../..", "/"] {
-        let o = grep(
-            &h,
-            serde_json::json!({ "pattern": "foo", "path": escape }),
-        )
-        .await;
+        let o = grep(&h, serde_json::json!({ "pattern": "foo", "path": escape })).await;
         assert!(
             !is_ok(&o),
             "`path: {escape}` 越出了工作目录，不该被接受：{}",

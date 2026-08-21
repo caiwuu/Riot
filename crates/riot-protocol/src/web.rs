@@ -34,8 +34,11 @@ pub trait WebAccess: Send + Sync {
     /// `[约束]` 不跟随重定向，不做 URL 校验 —— 两件事都在工具层做过了。
     /// 实现只负责两件工具层做不到的事：真的发请求，以及**在连接前拒绝
     /// 解析到私有网段的主机**（DNS 解析发生在这一层，工具层看不到）。
-    async fn get(&self, req: WebRequest, cancel: &CancellationToken)
-    -> Result<WebResponse, WebError>;
+    async fn get(
+        &self,
+        req: WebRequest,
+        cancel: &CancellationToken,
+    ) -> Result<WebResponse, WebError>;
 
     /// 执行一次搜索。
     ///

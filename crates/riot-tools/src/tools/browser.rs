@@ -20,18 +20,17 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use riot_permissions::{MatchMode, RuleSet};
 use riot_protocol::browser::{
     Action, BrowserUnavailable, InteractError, InterceptOp, Nav, NetQuery, Target, WaitCondition,
 };
 use riot_protocol::message::ToolResultContent;
-use riot_permissions::{MatchMode, RuleSet};
 use riot_protocol::permission::{
     DecisionReason, PermissionContext, PermissionMode, PermissionResult, PermissionUpdate,
     RuleDecision, SafetyKind, UpdateScope,
 };
 use riot_protocol::tool::{
-    InterruptBehavior, PromptContext, ResultBudget, Tool, ToolContext, ToolOutcome,
-    ValidationError,
+    InterruptBehavior, PromptContext, ResultBudget, Tool, ToolContext, ToolOutcome, ValidationError,
 };
 
 use super::web::url as weburl;
@@ -109,10 +108,13 @@ impl Tool for BrowserNavigate {
         input: &serde_json::Value,
         _ctx: &ToolContext,
     ) -> Result<(), ValidationError> {
-        let raw = input.get("url").and_then(|v| v.as_str()).unwrap_or_default();
-        weburl::normalize_for_browser(raw).map(|_| ()).map_err(|e| {
-            ValidationError::rejected(format!("{e}"))
-        })
+        let raw = input
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        weburl::normalize_for_browser(raw)
+            .map(|_| ())
+            .map_err(|e| ValidationError::rejected(format!("{e}")))
     }
 
     fn check_permissions(
@@ -120,7 +122,10 @@ impl Tool for BrowserNavigate {
         input: &serde_json::Value,
         ctx: &PermissionContext,
     ) -> PermissionResult {
-        let raw = input.get("url").and_then(|v| v.as_str()).unwrap_or_default();
+        let raw = input
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         // 解析不了的交给 validate_input 报错。这里说 Deny 的话，模型收到的
         // 是"没权限"，它会去要权限而不是修 URL。
         let Ok(u) = weburl::normalize_for_browser(raw) else {
@@ -130,7 +135,10 @@ impl Tool for BrowserNavigate {
     }
 
     async fn call(&self, input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
-        let raw = input.get("url").and_then(|v| v.as_str()).unwrap_or_default();
+        let raw = input
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         let u = match weburl::normalize_for_browser(raw) {
             Ok(u) => u,
             Err(e) => return ToolOutcome::failed(format!("无法打开这个地址：{e}")),
@@ -654,8 +662,14 @@ impl Tool for BrowserType {
         let Some(t) = type_target(&input) else {
             return ToolOutcome::failed("要填哪个输入框:给 ref、selector 或 target_text 之一。");
         };
-        let text = input.get("text").and_then(|v| v.as_str()).unwrap_or_default();
-        let submit = input.get("submit").and_then(|v| v.as_bool()).unwrap_or(false);
+        let text = input
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let submit = input
+            .get("submit")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         match ctx.browser.type_text(t, text, submit).await {
             Ok(msg) => ToolOutcome::ok_text(msg),
             Err(e) => ToolOutcome::failed(interact_hint(e)),
@@ -666,13 +680,25 @@ impl Tool for BrowserType {
 /// BrowserType 的定位:和点击同一套三选一，只是文本字段叫 `target_text`
 /// （`text` 已经用来装"要输入的内容"了，不能撞名）。
 fn type_target(input: &serde_json::Value) -> Option<Target> {
-    if let Some(n) = input.get("ref").and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok()) {
+    if let Some(n) = input
+        .get("ref")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+    {
         return Some(Target::Ref(n));
     }
-    if let Some(s) = input.get("selector").and_then(serde_json::Value::as_str).filter(|s| !s.is_empty()) {
+    if let Some(s) = input
+        .get("selector")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
         return Some(Target::Selector(s.to_owned()));
     }
-    if let Some(t) = input.get("target_text").and_then(serde_json::Value::as_str).filter(|t| !t.is_empty()) {
+    if let Some(t) = input
+        .get("target_text")
+        .and_then(serde_json::Value::as_str)
+        .filter(|t| !t.is_empty())
+    {
         return Some(Target::Text(t.to_owned()));
     }
     None
@@ -744,7 +770,10 @@ impl Tool for BrowserKey {
     }
 
     async fn call(&self, input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
-        let key = input.get("key").and_then(|v| v.as_str()).unwrap_or_default();
+        let key = input
+            .get("key")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         // 组合键走 act(KeyChord)，单键走 press_key —— 后者只认功能键白名单，
         // 组合键（Control+a）过不了那道校验，得分流。
         let result = if is_chord(key) {
@@ -789,7 +818,10 @@ impl Tool for BrowserScroll {
     }
 
     fn describe(&self, input: &serde_json::Value) -> String {
-        let dy = input.get("delta_y").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+        let dy = input
+            .get("delta_y")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
         if dy < 0.0 {
             format!("向上滚动页面 {:.0}px", -dy)
         } else {
@@ -831,7 +863,10 @@ impl Tool for BrowserScroll {
     }
 
     async fn call(&self, input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
-        let dy = input.get("delta_y").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+        let dy = input
+            .get("delta_y")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
         match ctx.browser.scroll(dy).await {
             Ok(msg) => ToolOutcome::ok_text(msg),
             Err(e) => ToolOutcome::failed(interact_hint(e)),
@@ -963,7 +998,11 @@ fn wait_condition(input: &serde_json::Value) -> Option<WaitCondition> {
     if let Some(v) = s("url_contains") {
         return Some(WaitCondition::UrlContains(v));
     }
-    if input.get("network_idle").and_then(serde_json::Value::as_bool) == Some(true) {
+    if input
+        .get("network_idle")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
         return Some(WaitCondition::NetworkIdle);
     }
     None
@@ -1099,8 +1138,16 @@ impl Tool for BrowserSelect {
         let Some(t) = target_from_input(&input) else {
             return ToolOutcome::failed("要给哪个下拉框设值:给 ref、selector 或 text 之一。");
         };
-        let value = input.get("value").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
-        match ctx.browser.act(Action::SelectOption { target: t, value }).await {
+        let value = input
+            .get("value")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_owned();
+        match ctx
+            .browser
+            .act(Action::SelectOption { target: t, value })
+            .await
+        {
             Ok(msg) => ToolOutcome::ok_text(msg),
             Err(e) => ToolOutcome::failed(interact_hint(e)),
         }
@@ -1189,10 +1236,14 @@ impl Tool for BrowserDrag {
         _ctx: &ToolContext,
     ) -> Result<(), ValidationError> {
         if prefixed_target(input, "from").is_none() {
-            return Err(ValidationError::rejected("缺少起点:给 from_ref/from_selector/from_text 之一。"));
+            return Err(ValidationError::rejected(
+                "缺少起点:给 from_ref/from_selector/from_text 之一。",
+            ));
         }
         if prefixed_target(input, "to").is_none() {
-            return Err(ValidationError::rejected("缺少终点:给 to_ref/to_selector/to_text 之一。"));
+            return Err(ValidationError::rejected(
+                "缺少终点:给 to_ref/to_selector/to_text 之一。",
+            ));
         }
         Ok(())
     }
@@ -1206,9 +1257,10 @@ impl Tool for BrowserDrag {
     }
 
     async fn call(&self, input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
-        let (Some(from), Some(to)) =
-            (prefixed_target(&input, "from"), prefixed_target(&input, "to"))
-        else {
+        let (Some(from), Some(to)) = (
+            prefixed_target(&input, "from"),
+            prefixed_target(&input, "to"),
+        ) else {
             return ToolOutcome::failed("拖拽要给起点和终点两端。");
         };
         match ctx.browser.act(Action::Drag { from, to }).await {
@@ -1247,7 +1299,11 @@ impl Tool for BrowserGo {
     }
 
     fn describe(&self, input: &serde_json::Value) -> String {
-        match input.get("direction").and_then(|v| v.as_str()).unwrap_or("") {
+        match input
+            .get("direction")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+        {
             "back" => "后退".to_owned(),
             "forward" => "前进".to_owned(),
             "reload" => "刷新页面".to_owned(),
@@ -1281,7 +1337,9 @@ impl Tool for BrowserGo {
     ) -> Result<(), ValidationError> {
         match input.get("direction").and_then(|v| v.as_str()) {
             Some("back" | "forward" | "reload") => Ok(()),
-            _ => Err(ValidationError::rejected("direction 要是 back / forward / reload。")),
+            _ => Err(ValidationError::rejected(
+                "direction 要是 back / forward / reload。",
+            )),
         }
     }
 
@@ -1332,7 +1390,10 @@ impl Tool for BrowserTabs {
     }
 
     fn describe(&self, input: &serde_json::Value) -> String {
-        let id = input.get("id").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let id = input
+            .get("id")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
         match input.get("action").and_then(|v| v.as_str()).unwrap_or("") {
             "list" => "列出标签页".to_owned(),
             "new" => "新开标签页".to_owned(),
@@ -1372,10 +1433,14 @@ impl Tool for BrowserTabs {
                 if tab_id(input).is_some() {
                     Ok(())
                 } else {
-                    Err(ValidationError::rejected("select / close 要给标签页号 id。"))
+                    Err(ValidationError::rejected(
+                        "select / close 要给标签页号 id。",
+                    ))
                 }
             }
-            _ => Err(ValidationError::rejected("action 要是 list / new / select / close。")),
+            _ => Err(ValidationError::rejected(
+                "action 要是 list / new / select / close。",
+            )),
         }
     }
 
@@ -1438,7 +1503,10 @@ impl Tool for BrowserEvaluate {
     }
 
     fn describe(&self, input: &serde_json::Value) -> String {
-        let e = input.get("expression").and_then(|v| v.as_str()).unwrap_or("...");
+        let e = input
+            .get("expression")
+            .and_then(|v| v.as_str())
+            .unwrap_or("...");
         let short: String = e.chars().take(50).collect();
         format!("执行 JS: {short}")
     }
@@ -1478,7 +1546,10 @@ impl Tool for BrowserEvaluate {
     }
 
     async fn call(&self, input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
-        let expr = input.get("expression").and_then(|v| v.as_str()).unwrap_or_default();
+        let expr = input
+            .get("expression")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         match ctx.browser.evaluate(expr).await {
             Ok(out) => ToolOutcome::ok_text(out),
             Err(e) => ToolOutcome::failed(interact_hint(e)),
@@ -1522,7 +1593,10 @@ impl Tool for BrowserUpload {
     }
 
     fn describe(&self, input: &serde_json::Value) -> String {
-        let n = input.get("paths").and_then(|v| v.as_array()).map_or(0, Vec::len);
+        let n = input
+            .get("paths")
+            .and_then(|v| v.as_array())
+            .map_or(0, Vec::len);
         match target_from_input(input) {
             Some(t) => format!("给{}上传 {n} 个文件", t.describe()),
             None => format!("上传 {n} 个文件"),
@@ -1541,7 +1615,9 @@ impl Tool for BrowserUpload {
         require_target(input)?;
         match input.get("paths").and_then(|v| v.as_array()) {
             Some(a) if !a.is_empty() => Ok(()),
-            _ => Err(ValidationError::rejected("缺少要上传的 paths（本地文件路径数组）。")),
+            _ => Err(ValidationError::rejected(
+                "缺少要上传的 paths（本地文件路径数组）。",
+            )),
         }
     }
 
@@ -1561,7 +1637,11 @@ impl Tool for BrowserUpload {
         let paths: Vec<String> = input
             .get("paths")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(ToOwned::to_owned)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(ToOwned::to_owned))
+                    .collect()
+            })
             .unwrap_or_default();
         match ctx.browser.upload(t, paths).await {
             Ok(msg) => ToolOutcome::ok_text(msg),
@@ -1653,9 +1733,16 @@ impl Tool for BrowserNetwork {
     }
 
     fn describe(&self, input: &serde_json::Value) -> String {
-        match input.get("action").and_then(|v| v.as_str()).unwrap_or("list") {
+        match input
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("list")
+        {
             "detail" => {
-                let id = input.get("request_id").and_then(|v| v.as_str()).unwrap_or("?");
+                let id = input
+                    .get("request_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
                 format!("看请求 #{id} 的细节")
             }
             "audit" => "审计响应头安全配置".to_owned(),
@@ -1689,21 +1776,34 @@ impl Tool for BrowserNetwork {
                 if input.get("request_id").and_then(|v| v.as_str()).is_some() {
                     Ok(())
                 } else {
-                    Err(ValidationError::rejected("detail 要给 request_id（来自 list 的 #号）。"))
+                    Err(ValidationError::rejected(
+                        "detail 要给 request_id（来自 list 的 #号）。",
+                    ))
                 }
             }
-            Some(_) => Err(ValidationError::rejected("action 要是 list / detail / audit。")),
+            Some(_) => Err(ValidationError::rejected(
+                "action 要是 list / detail / audit。",
+            )),
         }
     }
 
     async fn call(&self, input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
-        let query = match input.get("action").and_then(|v| v.as_str()).unwrap_or("list") {
+        let query = match input
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("list")
+        {
             "list" => NetQuery::List {
-                filter: input.get("filter").and_then(|v| v.as_str()).map(ToOwned::to_owned),
+                filter: input
+                    .get("filter")
+                    .and_then(|v| v.as_str())
+                    .map(ToOwned::to_owned),
             },
             "audit" => NetQuery::Audit,
             "detail" => match input.get("request_id").and_then(|v| v.as_str()) {
-                Some(id) => NetQuery::Detail { request_id: id.to_owned() },
+                Some(id) => NetQuery::Detail {
+                    request_id: id.to_owned(),
+                },
                 None => return ToolOutcome::failed("detail 要给 request_id。"),
             },
             other => return ToolOutcome::failed(format!("不认识的 action: {other}")),
@@ -1754,7 +1854,10 @@ impl Tool for BrowserReplay {
     }
 
     fn describe(&self, input: &serde_json::Value) -> String {
-        let m = input.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
+        let m = input
+            .get("method")
+            .and_then(|v| v.as_str())
+            .unwrap_or("GET");
         let u = input.get("url").and_then(|v| v.as_str()).unwrap_or("...");
         format!("重放 {m} {u}")
     }
@@ -1783,14 +1886,24 @@ impl Tool for BrowserReplay {
     }
 
     async fn call(&self, input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
-        let url = input.get("url").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+        let url = input
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_owned();
         let method = input
             .get("method")
             .and_then(|v| v.as_str())
             .unwrap_or("GET")
             .to_uppercase();
-        let headers = input.get("headers").cloned().unwrap_or(serde_json::Value::Null);
-        let body = input.get("body").and_then(|v| v.as_str()).map(ToOwned::to_owned);
+        let headers = input
+            .get("headers")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let body = input
+            .get("body")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned);
         match ctx.browser.replay(&url, &method, headers, body).await {
             Ok(out) => ToolOutcome::ok_text(out),
             Err(e) => ToolOutcome::failed(interact_hint(e)),
@@ -1841,7 +1954,10 @@ impl Tool for BrowserIntercept {
     }
 
     fn describe(&self, input: &serde_json::Value) -> String {
-        let p = input.get("url_pattern").and_then(|v| v.as_str()).unwrap_or("");
+        let p = input
+            .get("url_pattern")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         match input.get("action").and_then(|v| v.as_str()).unwrap_or("") {
             "block" => format!("拦截含 `{p}` 的请求"),
             "fulfill" => format!("伪造 `{p}` 的响应"),
@@ -1863,15 +1979,31 @@ impl Tool for BrowserIntercept {
         match input.get("action").and_then(|v| v.as_str()) {
             Some("list" | "clear") => Ok(()),
             Some("block" | "fulfill") => {
-                if input.get("host").and_then(|v| v.as_str()).and_then(target_host).is_none() {
-                    return Err(ValidationError::rejected("block/fulfill 要给 host（授权目标）。"));
+                if input
+                    .get("host")
+                    .and_then(|v| v.as_str())
+                    .and_then(target_host)
+                    .is_none()
+                {
+                    return Err(ValidationError::rejected(
+                        "block/fulfill 要给 host（授权目标）。",
+                    ));
                 }
-                if input.get("url_pattern").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).is_none() {
-                    return Err(ValidationError::rejected("block/fulfill 要给 url_pattern。"));
+                if input
+                    .get("url_pattern")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .is_none()
+                {
+                    return Err(ValidationError::rejected(
+                        "block/fulfill 要给 url_pattern。",
+                    ));
                 }
                 Ok(())
             }
-            _ => Err(ValidationError::rejected("action 要是 block / fulfill / list / clear。")),
+            _ => Err(ValidationError::rejected(
+                "action 要是 block / fulfill / list / clear。",
+            )),
         }
     }
 
@@ -1888,16 +2020,32 @@ impl Tool for BrowserIntercept {
     }
 
     async fn call(&self, input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
-        let action = input.get("action").and_then(|v| v.as_str()).unwrap_or_default();
-        let pattern = input.get("url_pattern").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+        let action = input
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let pattern = input
+            .get("url_pattern")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_owned();
         let op = match action {
             "list" => InterceptOp::List,
             "clear" => InterceptOp::Clear,
-            "block" => InterceptOp::Block { url_pattern: pattern },
+            "block" => InterceptOp::Block {
+                url_pattern: pattern,
+            },
             "fulfill" => InterceptOp::Fulfill {
                 url_pattern: pattern,
-                status: input.get("status").and_then(serde_json::Value::as_u64).unwrap_or(200) as u32,
-                body: input.get("body").and_then(|v| v.as_str()).unwrap_or_default().to_owned(),
+                status: input
+                    .get("status")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(200) as u32,
+                body: input
+                    .get("body")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_owned(),
             },
             other => return ToolOutcome::failed(format!("不认识的 action: {other}")),
         };
@@ -1948,7 +2096,11 @@ impl Tool for BrowserSecrets {
     async fn call(&self, _input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
         // 取整页 HTML（含内联脚本）。外链 JS 不在这里 —— 那要另外抓，
         // 先覆盖最常见的"密钥硬编码在页面/内联脚本里"。
-        let html = match ctx.browser.evaluate("document.documentElement.outerHTML").await {
+        let html = match ctx
+            .browser
+            .evaluate("document.documentElement.outerHTML")
+            .await
+        {
             Ok(h) => h,
             Err(e) => return ToolOutcome::failed(interact_hint(e)),
         };
@@ -2010,15 +2162,22 @@ impl Tool for BrowserDiscover {
             Ok(r) => r,
             Err(e) => return ToolOutcome::failed(interact_hint(e)),
         };
-        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
         let mut out = String::new();
 
         let forms = parsed["forms"].as_array().cloned().unwrap_or_default();
         out.push_str(&format!("表单（{}）:\n", forms.len()));
         for f in &forms {
-            let fields = f["fields"].as_array().map(|a| {
-                a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", ")
-            }).unwrap_or_default();
+            let fields = f["fields"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
             out.push_str(&format!(
                 "- {} {}  字段: [{fields}]\n",
                 f["method"].as_str().unwrap_or("GET"),
@@ -2101,7 +2260,9 @@ impl Tool for BrowserFuzz {
             Some(u) if fuzz_host(u).is_none() => {
                 Err(ValidationError::rejected("url 要是含协议的完整地址。"))
             }
-            _ => Err(ValidationError::rejected("url 里要有 FUZZ 占位符标记注入点。")),
+            _ => Err(ValidationError::rejected(
+                "url 里要有 FUZZ 占位符标记注入点。",
+            )),
         }
     }
 
@@ -2110,7 +2271,10 @@ impl Tool for BrowserFuzz {
         input: &serde_json::Value,
         ctx: &PermissionContext,
     ) -> PermissionResult {
-        let host = input.get("url").and_then(|v| v.as_str()).and_then(fuzz_host);
+        let host = input
+            .get("url")
+            .and_then(|v| v.as_str())
+            .and_then(fuzz_host);
         // fuzz_host 已经把 host 提出来了;pentest_permission 直接判。
         match host {
             Some(h) => pentest_permission(&h, ctx),
@@ -2119,7 +2283,11 @@ impl Tool for BrowserFuzz {
     }
 
     async fn call(&self, input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
-        let url = input.get("url").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+        let url = input
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_owned();
         let method = input
             .get("method")
             .and_then(|v| v.as_str())
@@ -2129,7 +2297,12 @@ impl Tool for BrowserFuzz {
         // 基线:用无害串探一次，作为对比。
         let baseline = match ctx
             .browser
-            .replay(&fuzz_url(&url, "riotbaseline"), &method, serde_json::Value::Null, None)
+            .replay(
+                &fuzz_url(&url, "riotbaseline"),
+                &method,
+                serde_json::Value::Null,
+                None,
+            )
             .await
         {
             Ok(b) => b,
@@ -2137,12 +2310,16 @@ impl Tool for BrowserFuzz {
         };
 
         // payload 集:自定义优先，否则内置。
-        let custom = input
-            .get("payloads")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(ToOwned::to_owned)).collect::<Vec<_>>());
+        let custom = input.get("payloads").and_then(|v| v.as_array()).map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(ToOwned::to_owned))
+                .collect::<Vec<_>>()
+        });
         let jobs: Vec<(String, String)> = match &custom {
-            Some(list) => list.iter().map(|p| (p.clone(), "自定义".to_owned())).collect(),
+            Some(list) => list
+                .iter()
+                .map(|p| (p.clone(), "自定义".to_owned()))
+                .collect(),
             None => super::pentest::default_payloads()
                 .into_iter()
                 .map(|p| (p.value.to_owned(), p.intent.to_owned()))
@@ -2159,7 +2336,12 @@ impl Tool for BrowserFuzz {
             }
             let resp = match ctx
                 .browser
-                .replay(&fuzz_url(&url, &payload), &method, serde_json::Value::Null, None)
+                .replay(
+                    &fuzz_url(&url, &payload),
+                    &method,
+                    serde_json::Value::Null,
+                    None,
+                )
                 .await
             {
                 Ok(r) => r,
@@ -2215,7 +2397,10 @@ impl Tool for BrowserReport {
     }
 
     fn describe(&self, input: &serde_json::Value) -> String {
-        let n = input.get("findings").and_then(|v| v.as_array()).map_or(0, Vec::len);
+        let n = input
+            .get("findings")
+            .and_then(|v| v.as_array())
+            .map_or(0, Vec::len);
         format!("生成渗透报告（{n} 条发现）")
     }
 
@@ -2250,7 +2435,10 @@ impl Tool for BrowserReport {
     }
 
     async fn call(&self, input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
-        let target = input.get("target").and_then(|v| v.as_str()).unwrap_or_default();
+        let target = input
+            .get("target")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         let findings = input
             .get("findings")
             .and_then(|v| v.as_array())
@@ -2260,7 +2448,9 @@ impl Tool for BrowserReport {
 
         // 落盘到会话工件目录，给用户一个能直接交付的文件。写不进不算失败 ——
         // 报告全文照样在结果里（和截图落盘的降级同理）。
-        let path = ctx.artifacts_dir.join(format!("report-{}.md", ctx.tool_use_id.as_str()));
+        let path = ctx
+            .artifacts_dir
+            .join(format!("report-{}.md", ctx.tool_use_id.as_str()));
         let saved = ctx.fs.write(&path, report.as_bytes()).await.is_ok();
 
         if saved {
@@ -2339,7 +2529,11 @@ impl Tool for BrowserCrawl {
     }
 
     async fn call(&self, input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
-        let start = input.get("url").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+        let start = input
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_owned();
         let Some(host) = target_host(&start) else {
             return ToolOutcome::failed("url 要是含协议的完整地址。");
         };
@@ -2377,12 +2571,17 @@ impl Tool for BrowserCrawl {
                 Ok(r) => r,
                 Err(e) => return ToolOutcome::failed(interact_hint(e)),
             };
-            let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+            let parsed: serde_json::Value =
+                serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
             let title = parsed["title"].as_str().unwrap_or("");
             let forms = parsed["forms"].as_u64().unwrap_or(0);
             let links: Vec<String> = parsed["links"]
                 .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(ToOwned::to_owned)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(ToOwned::to_owned))
+                        .collect()
+                })
                 .unwrap_or_default();
             sitemap.push_str(&format!(
                 "- {u}  「{title}」(表单 {forms}, 链接 {})\n",
@@ -2496,7 +2695,9 @@ fn single_consent(ctx: &PermissionContext, tool: &str, what: &str) -> Permission
             decision: RuleDecision::Allow,
             scope: UpdateScope::Session,
         }],
-        reason: DecisionReason::Consent { what: what.to_owned() },
+        reason: DecisionReason::Consent {
+            what: what.to_owned(),
+        },
     }
 }
 
@@ -2522,7 +2723,13 @@ fn target_host(url_or_host: &str) -> Option<String> {
     }
     // 裸域名:normalize 要求带协议，这里兜一下 host[:port] 形式。
     let h = url_or_host.trim();
-    let host = h.split('/').next().unwrap_or(h).split(':').next().unwrap_or(h);
+    let host = h
+        .split('/')
+        .next()
+        .unwrap_or(h)
+        .split(':')
+        .next()
+        .unwrap_or(h);
     looks_like_host(host).then(|| host.to_ascii_lowercase())
 }
 
@@ -2686,9 +2893,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::testing::{
-        FakeBrowser, FakeVision, FixedClock, NullFileState, NullFs, NullProc,
-    };
+    use crate::testing::{FakeBrowser, FakeVision, FixedClock, NullFileState, NullFs, NullProc};
 
     fn ctx(shot: &str, vision: FakeVision) -> ToolContext {
         // NullFs 写不进任何东西 —— 顺便钉住"落盘失败只是少了路径，
@@ -2742,7 +2947,12 @@ mod tests {
         let ToolOutcome::Ok { model_content, .. } = out else {
             panic!("应当成功：{out:?}");
         };
-        let ToolResultContent::Image { media_type, data, path } = model_content else {
+        let ToolResultContent::Image {
+            media_type,
+            data,
+            path,
+        } = model_content
+        else {
             panic!("应当是图片内容块");
         };
         assert_eq!(data, "SHOT");
@@ -2769,7 +2979,12 @@ mod tests {
         let ToolOutcome::Ok { model_content, .. } = out else {
             panic!("应当成功：{out:?}");
         };
-        let ToolResultContent::DescribedImage { media_type, data, text, .. } = model_content
+        let ToolResultContent::DescribedImage {
+            media_type,
+            data,
+            text,
+            ..
+        } = model_content
         else {
             panic!("应当是带转述的图片：{model_content:?}");
         };
@@ -2807,7 +3022,12 @@ mod tests {
         let ToolOutcome::Ok { model_content, .. } = out else {
             panic!("应当成功：{out:?}");
         };
-        let ToolResultContent::Image { media_type, data, path } = model_content else {
+        let ToolResultContent::Image {
+            media_type,
+            data,
+            path,
+        } = model_content
+        else {
             panic!("应当是图片内容块");
         };
 
@@ -2841,7 +3061,11 @@ mod tests {
         let out = BrowserScreenshot
             .call(serde_json::json!({}), ctx("SHOT", FakeVision::None))
             .await;
-        let ToolOutcome::Failed { error_for_model: text, .. } = out else {
+        let ToolOutcome::Failed {
+            error_for_model: text,
+            ..
+        } = out
+        else {
             panic!("应当失败而不是给一张模型看不了的图：{out:?}");
         };
         assert!(text.contains("视觉兼容"), "要说清缺什么：{text}");
@@ -2865,7 +3089,10 @@ mod tests {
             .expect("本地地址应当通过校验");
 
         let out = BrowserNavigate.call(input.clone(), ctx).await;
-        let ToolOutcome::Failed { error_for_model, .. } = out else {
+        let ToolOutcome::Failed {
+            error_for_model, ..
+        } = out
+        else {
             panic!("替身不导航，应当失败：{out:?}");
         };
         assert!(
@@ -2909,7 +3136,10 @@ mod tests {
             .expect("本地文件应当通过校验");
 
         let out = BrowserNavigate.call(input.clone(), ctx).await;
-        let ToolOutcome::Failed { error_for_model, .. } = out else {
+        let ToolOutcome::Failed {
+            error_for_model, ..
+        } = out
+        else {
             panic!("替身不导航，应当失败：{out:?}");
         };
         assert!(
@@ -3030,7 +3260,9 @@ mod tests {
     #[tokio::test]
     async fn 点击缺目标被校验拦下() {
         let ctx = ctx_browser(interactive(Ok("x")), FakeVision::Direct, Arc::new(NullFs));
-        let r = BrowserClick.validate_input(&serde_json::json!({}), &ctx).await;
+        let r = BrowserClick
+            .validate_input(&serde_json::json!({}), &ctx)
+            .await;
         assert!(r.is_err(), "没有 ref/selector/text 该被拦");
     }
 
@@ -3051,28 +3283,74 @@ mod tests {
                 _ => unreachable!(),
             }
         };
-        run("click", serde_json::json!({ "ref": 1, "double": true }), Arc::clone(&b)).await;
-        run("click", serde_json::json!({ "ref": 1, "right": true }), Arc::clone(&b)).await;
-        run("key", serde_json::json!({ "key": "Control+a" }), Arc::clone(&b)).await;
-        run("hover", serde_json::json!({ "selector": ".menu" }), Arc::clone(&b)).await;
-        run("select", serde_json::json!({ "selector": "#s", "value": "cn" }), Arc::clone(&b)).await;
+        run(
+            "click",
+            serde_json::json!({ "ref": 1, "double": true }),
+            Arc::clone(&b),
+        )
+        .await;
+        run(
+            "click",
+            serde_json::json!({ "ref": 1, "right": true }),
+            Arc::clone(&b),
+        )
+        .await;
+        run(
+            "key",
+            serde_json::json!({ "key": "Control+a" }),
+            Arc::clone(&b),
+        )
+        .await;
+        run(
+            "hover",
+            serde_json::json!({ "selector": ".menu" }),
+            Arc::clone(&b),
+        )
+        .await;
+        run(
+            "select",
+            serde_json::json!({ "selector": "#s", "value": "cn" }),
+            Arc::clone(&b),
+        )
+        .await;
         run(
             "drag",
             serde_json::json!({ "from_ref": 2, "to_selector": ".slot" }),
             Arc::clone(&b),
         )
         .await;
-        run("go", serde_json::json!({ "direction": "back" }), Arc::clone(&b)).await;
-        run("tabs", serde_json::json!({ "action": "list" }), Arc::clone(&b)).await;
-        run("tabs", serde_json::json!({ "action": "select", "id": 3 }), Arc::clone(&b)).await;
+        run(
+            "go",
+            serde_json::json!({ "direction": "back" }),
+            Arc::clone(&b),
+        )
+        .await;
+        run(
+            "tabs",
+            serde_json::json!({ "action": "list" }),
+            Arc::clone(&b),
+        )
+        .await;
+        run(
+            "tabs",
+            serde_json::json!({ "action": "select", "id": 3 }),
+            Arc::clone(&b),
+        )
+        .await;
 
         let calls = b.calls.lock().expect("calls");
         assert_eq!(calls[0], "act DoubleClick(Ref(1))");
         assert_eq!(calls[1], "act RightClick(Ref(1))");
         assert_eq!(calls[2], "act KeyChord(\"Control+a\")");
         assert_eq!(calls[3], "act Hover(Selector(\".menu\"))");
-        assert_eq!(calls[4], "act SelectOption { target: Selector(\"#s\"), value: \"cn\" }");
-        assert_eq!(calls[5], "act Drag { from: Ref(2), to: Selector(\".slot\") }");
+        assert_eq!(
+            calls[4],
+            "act SelectOption { target: Selector(\"#s\"), value: \"cn\" }"
+        );
+        assert_eq!(
+            calls[5],
+            "act Drag { from: Ref(2), to: Selector(\".slot\") }"
+        );
         assert_eq!(calls[6], "browse Back");
         assert_eq!(calls[7], "browse ListTabs");
         assert_eq!(calls[8], "browse SelectTab(3)");
@@ -3087,8 +3365,16 @@ mod tests {
                 .call(input, ctx_browser(b, FakeVision::Direct, Arc::new(NullFs)))
                 .await
         };
-        run(serde_json::json!({ "action": "list", "filter": "api" }), Arc::clone(&b)).await;
-        run(serde_json::json!({ "action": "detail", "request_id": "9.3" }), Arc::clone(&b)).await;
+        run(
+            serde_json::json!({ "action": "list", "filter": "api" }),
+            Arc::clone(&b),
+        )
+        .await;
+        run(
+            serde_json::json!({ "action": "detail", "request_id": "9.3" }),
+            Arc::clone(&b),
+        )
+        .await;
         run(serde_json::json!({ "action": "audit" }), Arc::clone(&b)).await;
 
         let calls = b.calls.lock().expect("calls");
@@ -3097,7 +3383,8 @@ mod tests {
         assert_eq!(calls[2], "network Audit");
 
         // 被动抓包免确认。
-        let r = BrowserNetwork.check_permissions(&serde_json::json!({}), &PermissionContext::default());
+        let r =
+            BrowserNetwork.check_permissions(&serde_json::json!({}), &PermissionContext::default());
         assert!(matches!(r, PermissionResult::Allow { .. }), "{r:?}");
     }
 
@@ -3125,10 +3412,18 @@ mod tests {
     /// evaluate 默认问一次、理由是 Consent（放行模式能压过），规划模式不抢答。
     #[test]
     fn 执行脚本权限是可放行的同意() {
-        let ask = BrowserEvaluate
-            .check_permissions(&serde_json::json!({ "expression": "x" }), &PermissionContext::default());
+        let ask = BrowserEvaluate.check_permissions(
+            &serde_json::json!({ "expression": "x" }),
+            &PermissionContext::default(),
+        );
         assert!(
-            matches!(ask, PermissionResult::Ask { reason: DecisionReason::Consent { .. }, .. }),
+            matches!(
+                ask,
+                PermissionResult::Ask {
+                    reason: DecisionReason::Consent { .. },
+                    ..
+                }
+            ),
             "{ask:?}"
         );
         let plan = PermissionContext {
@@ -3136,7 +3431,10 @@ mod tests {
             ..PermissionContext::default()
         };
         let r = BrowserEvaluate.check_permissions(&serde_json::json!({ "expression": "x" }), &plan);
-        assert!(matches!(r, PermissionResult::Passthrough), "规划模式该交给决策链：{r:?}");
+        assert!(
+            matches!(r, PermissionResult::Passthrough),
+            "规划模式该交给决策链：{r:?}"
+        );
     }
 
     /// 单个功能键仍走 press_key，不被误判成组合键。
@@ -3156,8 +3454,10 @@ mod tests {
     /// 标签页 new 不接受 URL —— 开新标签不能成为绕过域名同意的旁路。
     #[test]
     fn 新标签页操作免确认且不带地址() {
-        let r = BrowserTabs
-            .check_permissions(&serde_json::json!({ "action": "new" }), &PermissionContext::default());
+        let r = BrowserTabs.check_permissions(
+            &serde_json::json!({ "action": "new" }),
+            &PermissionContext::default(),
+        );
         assert!(matches!(r, PermissionResult::Allow { .. }), "{r:?}");
         // schema 里没有 url 字段:开标签只能开空白页。
         let schema = serde_json::to_string(&BrowserTabs.input_schema()).expect("schema");
@@ -3177,7 +3477,11 @@ mod tests {
                 ),
             )
             .await;
-        let ToolOutcome::Ok { model_content: ToolResultContent::Text { text }, .. } = out else {
+        let ToolOutcome::Ok {
+            model_content: ToolResultContent::Text { text },
+            ..
+        } = out
+        else {
             panic!("应当成功：{out:?}");
         };
         assert!(text.contains("页面跳到了"), "{text}");
@@ -3193,13 +3497,19 @@ mod tests {
             .call(
                 serde_json::json!({ "ref": 9 }),
                 ctx_browser(
-                    interactive(Err("编号 [9] 不在最近一次快照里。用 BrowserSnapshot 重新拿编号。")),
+                    interactive(Err(
+                        "编号 [9] 不在最近一次快照里。用 BrowserSnapshot 重新拿编号。",
+                    )),
                     FakeVision::Direct,
                     Arc::new(NullFs),
                 ),
             )
             .await;
-        let ToolOutcome::Failed { error_for_model: text, .. } = out else {
+        let ToolOutcome::Failed {
+            error_for_model: text,
+            ..
+        } = out
+        else {
             panic!("应当失败：{out:?}");
         };
         assert!(text.contains("BrowserSnapshot"), "{text}");
@@ -3220,7 +3530,11 @@ mod tests {
                 ),
             )
             .await;
-        let ToolOutcome::Failed { error_for_model: text, .. } = out else {
+        let ToolOutcome::Failed {
+            error_for_model: text,
+            ..
+        } = out
+        else {
             panic!("应当失败：{out:?}");
         };
         assert!(text.contains("WebFetch"), "不可用要给替代出路：{text}");
@@ -3234,7 +3548,12 @@ mod tests {
     fn 交互权限一次询问覆盖三个工具() {
         let ctx = PermissionContext::default();
         let r = BrowserClick.check_permissions(&serde_json::json!({ "ref": 1 }), &ctx);
-        let PermissionResult::Ask { suggestions, reason, .. } = r else {
+        let PermissionResult::Ask {
+            suggestions,
+            reason,
+            ..
+        } = r
+        else {
             panic!("默认模式该问：{r:?}");
         };
         assert!(
@@ -3244,7 +3563,12 @@ mod tests {
         let tools: Vec<_> = suggestions
             .iter()
             .map(|s| match s {
-                PermissionUpdate::AddRule { tool, pattern, decision, .. } => {
+                PermissionUpdate::AddRule {
+                    tool,
+                    pattern,
+                    decision,
+                    ..
+                } => {
                     assert!(pattern.is_none(), "交互规则是整工具级的");
                     assert_eq!(*decision, RuleDecision::Allow);
                     tool.as_str()
@@ -3272,8 +3596,10 @@ mod tests {
     /// 滚动免确认 —— 和截图同一信任级别。
     #[test]
     fn 滚动免确认() {
-        let r = BrowserScroll
-            .check_permissions(&serde_json::json!({ "delta_y": 700.0 }), &PermissionContext::default());
+        let r = BrowserScroll.check_permissions(
+            &serde_json::json!({ "delta_y": 700.0 }),
+            &PermissionContext::default(),
+        );
         assert!(matches!(r, PermissionResult::Allow { .. }), "{r:?}");
     }
 
@@ -3292,27 +3618,46 @@ mod tests {
 
     #[test]
     fn scope_从_url_和裸域名都能取出_host() {
-        assert_eq!(target_host("https://a.example.com/x?y=1").as_deref(), Some("a.example.com"));
+        assert_eq!(
+            target_host("https://a.example.com/x?y=1").as_deref(),
+            Some("a.example.com")
+        );
         assert_eq!(target_host("example.com").as_deref(), Some("example.com"));
-        assert_eq!(target_host("example.com:8443/path").as_deref(), Some("example.com"));
+        assert_eq!(
+            target_host("example.com:8443/path").as_deref(),
+            Some("example.com")
+        );
         assert_eq!(target_host("not a url").as_deref(), None);
         assert_eq!(
             target_host("http://localhost:8765/wechat.html").as_deref(),
             Some("localhost")
         );
-        assert_eq!(target_host("http://127.0.0.1:3000/").as_deref(), Some("127.0.0.1"));
+        assert_eq!(
+            target_host("http://127.0.0.1:3000/").as_deref(),
+            Some("127.0.0.1")
+        );
         assert_eq!(target_host("localhost").as_deref(), Some("localhost"));
     }
 
     #[test]
     fn 未授权目标要求先加入_scope() {
         let r = scope_gate("target.test", &PermissionContext::default());
-        let PermissionResult::Ask { reason, suggestions, .. } = r else {
+        let PermissionResult::Ask {
+            reason,
+            suggestions,
+            ..
+        } = r
+        else {
             panic!("未授权该问：{r:?}");
         };
         // 理由必须是 SafetyCheck::OutOfScope —— 这是它对 bypass 免疫的根据。
         assert!(
-            matches!(reason, DecisionReason::SafetyCheck { safety: SafetyKind::OutOfScope }),
+            matches!(
+                reason,
+                DecisionReason::SafetyCheck {
+                    safety: SafetyKind::OutOfScope
+                }
+            ),
             "{reason:?}"
         );
         match &suggestions[0] {
@@ -3330,9 +3675,15 @@ mod tests {
             rules: vec![scope_rule("target.test")],
             ..PermissionContext::default()
         };
-        assert!(matches!(scope_gate("target.test", &ctx), PermissionResult::Allow { .. }));
+        assert!(matches!(
+            scope_gate("target.test", &ctx),
+            PermissionResult::Allow { .. }
+        ));
         // 别的域名不受这条影响。
-        assert!(matches!(scope_gate("other.test", &ctx), PermissionResult::Ask { .. }));
+        assert!(matches!(
+            scope_gate("other.test", &ctx),
+            PermissionResult::Ask { .. }
+        ));
     }
 
     #[test]
@@ -3341,7 +3692,10 @@ mod tests {
             mode: riot_protocol::permission::PermissionModeState(Some(PermissionMode::Plan)),
             ..PermissionContext::default()
         };
-        assert!(matches!(pentest_permission("target.test", &ctx), PermissionResult::Passthrough));
+        assert!(matches!(
+            pentest_permission("target.test", &ctx),
+            PermissionResult::Passthrough
+        ));
     }
 
     /// 重放/拦截受 scope 约束:未授权目标要问，已授权放行；参数原样到宿主。
@@ -3353,7 +3707,15 @@ mod tests {
             &PermissionContext::default(),
         );
         assert!(
-            matches!(ask, PermissionResult::Ask { reason: DecisionReason::SafetyCheck { safety: SafetyKind::OutOfScope }, .. }),
+            matches!(
+                ask,
+                PermissionResult::Ask {
+                    reason: DecisionReason::SafetyCheck {
+                        safety: SafetyKind::OutOfScope
+                    },
+                    ..
+                }
+            ),
             "{ask:?}"
         );
 
@@ -3396,19 +3758,31 @@ mod tests {
             &PermissionContext::default(),
         );
         assert!(
-            matches!(ask, PermissionResult::Ask { reason: DecisionReason::SafetyCheck { safety: SafetyKind::OutOfScope }, .. }),
+            matches!(
+                ask,
+                PermissionResult::Ask {
+                    reason: DecisionReason::SafetyCheck {
+                        safety: SafetyKind::OutOfScope
+                    },
+                    ..
+                }
+            ),
             "{ask:?}"
         );
         // 少了 FUZZ 占位符 → 校验拦下。
         let ctx = ctx_browser(interactive(Ok("x")), FakeVision::Direct, Arc::new(NullFs));
         let bad = BrowserFuzz
-            .validate_input(&serde_json::json!({ "url": "https://api.test/s?q=1" }), &ctx)
+            .validate_input(
+                &serde_json::json!({ "url": "https://api.test/s?q=1" }),
+                &ctx,
+            )
             .await;
         assert!(bad.is_err(), "缺 FUZZ 该被拦");
         // 密钥扫描、接口发现都是被动免确认。
         for r in [
             BrowserSecrets.check_permissions(&serde_json::json!({}), &PermissionContext::default()),
-            BrowserDiscover.check_permissions(&serde_json::json!({}), &PermissionContext::default()),
+            BrowserDiscover
+                .check_permissions(&serde_json::json!({}), &PermissionContext::default()),
         ] {
             assert!(matches!(r, PermissionResult::Allow { .. }), "{r:?}");
         }
@@ -3425,7 +3799,11 @@ mod tests {
                 ctx_browser(Arc::clone(&b), FakeVision::Direct, Arc::new(NullFs)),
             )
             .await;
-        let ToolOutcome::Ok { model_content: ToolResultContent::Text { text }, .. } = out else {
+        let ToolOutcome::Ok {
+            model_content: ToolResultContent::Text { text },
+            ..
+        } = out
+        else {
             panic!("应当成功：{out:?}");
         };
         assert!(text.contains("AWS Access Key"), "{text}");
@@ -3442,13 +3820,25 @@ mod tests {
                 ctx_browser(Arc::clone(&b), FakeVision::Direct, Arc::new(NullFs)),
             )
             .await;
-        assert_eq!(b.calls.lock().expect("calls")[0], "upload sel:#file /tmp/a.png,/tmp/b.png");
+        assert_eq!(
+            b.calls.lock().expect("calls")[0],
+            "upload sel:#file /tmp/a.png,/tmp/b.png"
+        );
         // 上传本地文件敏感 —— 默认问一次。
         let r = BrowserUpload.check_permissions(
             &serde_json::json!({ "selector": "#f", "paths": ["/x"] }),
             &PermissionContext::default(),
         );
-        assert!(matches!(r, PermissionResult::Ask { reason: DecisionReason::Consent { .. }, .. }), "{r:?}");
+        assert!(
+            matches!(
+                r,
+                PermissionResult::Ask {
+                    reason: DecisionReason::Consent { .. },
+                    ..
+                }
+            ),
+            "{r:?}"
+        );
     }
 
     /// 爬虫受 scope 约束、要合法起点 URL。
@@ -3459,12 +3849,23 @@ mod tests {
             &PermissionContext::default(),
         );
         assert!(
-            matches!(ask, PermissionResult::Ask { reason: DecisionReason::SafetyCheck { safety: SafetyKind::OutOfScope }, .. }),
+            matches!(
+                ask,
+                PermissionResult::Ask {
+                    reason: DecisionReason::SafetyCheck {
+                        safety: SafetyKind::OutOfScope
+                    },
+                    ..
+                }
+            ),
             "{ask:?}"
         );
         let ok = BrowserCrawl.check_permissions(
             &serde_json::json!({ "url": "https://api.test/" }),
-            &PermissionContext { rules: vec![scope_rule("api.test")], ..PermissionContext::default() },
+            &PermissionContext {
+                rules: vec![scope_rule("api.test")],
+                ..PermissionContext::default()
+            },
         );
         assert!(matches!(ok, PermissionResult::Allow { .. }), "{ok:?}");
     }
@@ -3482,22 +3883,40 @@ mod tests {
                 ctx,
             )
             .await;
-        let ToolOutcome::Ok { model_content: ToolResultContent::Text { text }, .. } = out else {
+        let ToolOutcome::Ok {
+            model_content: ToolResultContent::Text { text },
+            ..
+        } = out
+        else {
             panic!("应当成功：{out:?}");
         };
         assert!(text.contains("渗透测试报告"), "{text}");
-        assert!(text.contains("反射型 XSS") && text.contains("输出编码"), "{text}");
-        let r = BrowserReport.check_permissions(&serde_json::json!({ "findings": [] }), &PermissionContext::default());
-        assert!(matches!(r, PermissionResult::Allow { .. }), "报告免确认：{r:?}");
+        assert!(
+            text.contains("反射型 XSS") && text.contains("输出编码"),
+            "{text}"
+        );
+        let r = BrowserReport.check_permissions(
+            &serde_json::json!({ "findings": [] }),
+            &PermissionContext::default(),
+        );
+        assert!(
+            matches!(r, PermissionResult::Allow { .. }),
+            "报告免确认：{r:?}"
+        );
     }
 
     /// 拦截的 list/clear 不打目标，免确认（不受 scope）。
     #[test]
     fn 拦截的列和清免确认() {
         for action in ["list", "clear"] {
-            let r = BrowserIntercept
-                .check_permissions(&serde_json::json!({ "action": action }), &PermissionContext::default());
-            assert!(matches!(r, PermissionResult::Allow { .. }), "{action}: {r:?}");
+            let r = BrowserIntercept.check_permissions(
+                &serde_json::json!({ "action": action }),
+                &PermissionContext::default(),
+            );
+            assert!(
+                matches!(r, PermissionResult::Allow { .. }),
+                "{action}: {r:?}"
+            );
         }
     }
 
@@ -3515,11 +3934,23 @@ mod tests {
         struct PentestLike;
         #[async_trait::async_trait]
         impl Tool for PentestLike {
-            fn name(&self) -> &'static str { "BrowserReplayLike" }
-            fn input_schema(&self) -> schemars::Schema { schemars::schema_for!(NoInput) }
-            fn prompt(&self, _c: &PromptContext) -> String { String::new() }
-            fn describe(&self, _i: &serde_json::Value) -> String { String::new() }
-            fn check_permissions(&self, _i: &serde_json::Value, ctx: &PermissionContext) -> PermissionResult {
+            fn name(&self) -> &'static str {
+                "BrowserReplayLike"
+            }
+            fn input_schema(&self) -> schemars::Schema {
+                schemars::schema_for!(NoInput)
+            }
+            fn prompt(&self, _c: &PromptContext) -> String {
+                String::new()
+            }
+            fn describe(&self, _i: &serde_json::Value) -> String {
+                String::new()
+            }
+            fn check_permissions(
+                &self,
+                _i: &serde_json::Value,
+                ctx: &PermissionContext,
+            ) -> PermissionResult {
                 pentest_permission("evil.test", ctx)
             }
             async fn call(&self, _i: serde_json::Value, _c: ToolContext) -> ToolOutcome {
@@ -3528,13 +3959,26 @@ mod tests {
         }
 
         let ctx = PermissionContext {
-            mode: riot_protocol::permission::PermissionModeState(Some(PermissionMode::BypassPermissions)),
+            mode: riot_protocol::permission::PermissionModeState(Some(
+                PermissionMode::BypassPermissions,
+            )),
             can_prompt_user: true,
             ..PermissionContext::default()
         };
-        let r = decide(&PentestLike, &serde_json::json!({}), &ctx, &ChainRuleSet::default());
+        let r = decide(
+            &PentestLike,
+            &serde_json::json!({}),
+            &ctx,
+            &ChainRuleSet::default(),
+        );
         assert!(
-            matches!(r, PermissionResult::Ask { reason: DecisionReason::SafetyCheck { .. }, .. }),
+            matches!(
+                r,
+                PermissionResult::Ask {
+                    reason: DecisionReason::SafetyCheck { .. },
+                    ..
+                }
+            ),
             "bypass 下未授权目标仍要问：{r:?}"
         );
     }

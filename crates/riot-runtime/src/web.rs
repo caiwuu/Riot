@@ -252,9 +252,10 @@ impl reqwest::dns::Resolve for PublicOnlyResolver {
                 .collect();
 
             if addrs.is_empty() {
-                return Err(Box::new(std::io::Error::other(format!(
-                    "{host} 没有解析到任何地址"
-                ))) as Box<dyn std::error::Error + Send + Sync>);
+                return Err(
+                    Box::new(std::io::Error::other(format!("{host} 没有解析到任何地址")))
+                        as Box<dyn std::error::Error + Send + Sync>,
+                );
             }
 
             // 全部过筛。只要有一个内网地址就整体拒绝，而不是"挑公网的连" ——
@@ -273,7 +274,8 @@ impl reqwest::dns::Resolve for PublicOnlyResolver {
                         .map(|a| a.ip().to_string())
                         .collect::<Vec<_>>()
                         .join(", ")
-                ))) as Box<dyn std::error::Error + Send + Sync>);
+                )))
+                    as Box<dyn std::error::Error + Send + Sync>);
             }
 
             Ok(Box::new(public.into_iter()) as reqwest::dns::Addrs)
@@ -346,7 +348,11 @@ mod tests {
     #[test]
     fn 公网字面量和域名照常放行() {
         // 拦得太宽的后果同样严重，只是表现成"什么都抓不了"
-        for url in ["http://1.1.1.1/", "https://example.com/", "https://[2606:4700::1111]/"] {
+        for url in [
+            "http://1.1.1.1/",
+            "https://example.com/",
+            "https://[2606:4700::1111]/",
+        ] {
             assert!(reject_private_literal(url).is_ok(), "{url} 不该被拦");
         }
         // 解析不了的地址不归这个函数管，交给 reqwest 去报错

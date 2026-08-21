@@ -171,8 +171,12 @@ pub fn convert_messages(messages: &[Message]) -> Vec<WireMessage> {
                             // Image 和 MarkedImage 都带一张给模型的图，走同一条
                             // "图放下一条 user 消息"的路（OpenAI 的 tool 消息本身
                             // 塞不了图）。
-                            if let ToolResultContent::Image { media_type, data, .. }
-                            | ToolResultContent::MarkedImage { media_type, data, .. } = content
+                            if let ToolResultContent::Image {
+                                media_type, data, ..
+                            }
+                            | ToolResultContent::MarkedImage {
+                                media_type, data, ..
+                            } = content
                             {
                                 tool_images.push(WirePart::Text {
                                     text: format!("上一个工具结果（{tool_use_id}）的图片："),
@@ -211,7 +215,9 @@ pub fn convert_messages(messages: &[Message]) -> Vec<WireMessage> {
                 // 而它的 content 只收字符串 —— 唯一能带图的位置就是后面
                 // 这条 user 消息。
                 if !tool_images.is_empty() {
-                    out.push(WireMessage::UserParts { content: tool_images });
+                    out.push(WireMessage::UserParts {
+                        content: tool_images,
+                    });
                 }
             }
 
@@ -295,7 +301,9 @@ fn render_result(content: &ToolResultContent, is_error: bool) -> String {
         // 图跟在下一条 user 消息里（见 convert_messages 的 tool_images）；
         // 这里给配套文字 + 一句指路，tool 消息不能为空。措辞保持中性 ——
         // 这个变体不只装 Set-of-Marks 截图，也装 MCP 的图文混合结果。
-        ToolResultContent::MarkedImage { media_type, text, .. } => {
+        ToolResultContent::MarkedImage {
+            media_type, text, ..
+        } => {
             format!("{text}\n（结果配套的图片见下一条消息，{media_type}）")
         }
     };

@@ -70,8 +70,7 @@ fn diff_one(
         }
     };
 
-    let (added, removed, hunks, truncated) =
-        build_hunks(before.unwrap_or(""), after.unwrap_or(""));
+    let (added, removed, hunks, truncated) = build_hunks(before.unwrap_or(""), after.unwrap_or(""));
 
     Some(FileChange {
         path: rel(root, path),
@@ -299,10 +298,17 @@ pub fn reconstruct_baselines(cwd: &Path, messages: &[Message]) -> Vec<(PathBuf, 
             }
             Message::User { content, .. } => {
                 for c in content {
-                    let UserContent::ToolResult { tool_use_id, content, is_error } = c else {
+                    let UserContent::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } = c
+                    else {
                         continue;
                     };
-                    let Some(use_) = pending.remove(tool_use_id) else { continue };
+                    let Some(use_) = pending.remove(tool_use_id) else {
+                        continue;
+                    };
                     if *is_error {
                         continue;
                     }
@@ -326,12 +332,15 @@ pub fn reconstruct_baselines(cwd: &Path, messages: &[Message]) -> Vec<(PathBuf, 
                             let before = if use_.name == "Write" && text.contains("已创建") {
                                 None
                             } else {
-                                last_read.get(&path).cloned().or_else(|| {
-                                    recover_edit_baseline(&path, &use_.input)
-                                })
+                                last_read
+                                    .get(&path)
+                                    .cloned()
+                                    .or_else(|| recover_edit_baseline(&path, &use_.input))
                             };
                             // 覆盖写但既没有先前的 Read、也反推不了：宁缺毋假。
-                            if before.is_none() && !(use_.name == "Write" && text.contains("已创建")) {
+                            if before.is_none()
+                                && !(use_.name == "Write" && text.contains("已创建"))
+                            {
                                 continue;
                             }
                             first.insert(path, before);
@@ -399,7 +408,10 @@ fn recover_edit_baseline(path: &Path, input: &serde_json::Value) -> Option<Strin
     if !current.contains(new) {
         return None;
     }
-    let replace_all = input.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
+    let replace_all = input
+        .get("replace_all")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     Some(if replace_all {
         current.replace(new, old)
     } else {
@@ -448,13 +460,13 @@ mod tests {
 
     #[test]
     fn 新建和删除分得出来() {
-        let created = diff_one(&root(), Path::new("/work/n.rs"), None, Some("hi\n"))
-            .expect("新建也是改动");
+        let created =
+            diff_one(&root(), Path::new("/work/n.rs"), None, Some("hi\n")).expect("新建也是改动");
         assert_eq!(created.status, ChangeStatus::Created);
         assert_eq!(created.added, 1);
 
-        let deleted = diff_one(&root(), Path::new("/work/g.rs"), Some("bye\n"), None)
-            .expect("删除也是改动");
+        let deleted =
+            diff_one(&root(), Path::new("/work/g.rs"), Some("bye\n"), None).expect("删除也是改动");
         assert_eq!(deleted.status, ChangeStatus::Deleted);
         assert_eq!(deleted.removed, 1);
 
@@ -473,17 +485,18 @@ mod tests {
             .map(|i| format!("line {i}\n"))
             .collect();
 
-        let c = diff_one(&root(), Path::new("/work/big.rs"), Some(&before), Some(&after))
-            .expect("有改动");
+        let c = diff_one(
+            &root(),
+            Path::new("/work/big.rs"),
+            Some(&before),
+            Some(&after),
+        )
+        .expect("有改动");
 
         assert!(c.truncated);
         let shown: usize = c.hunks.iter().map(|h| h.lines.len()).sum();
         assert_eq!(shown, MAX_LINES_PER_FILE);
-        assert_eq!(
-            c.added,
-            MAX_LINES_PER_FILE + 50,
-            "计数是全量，截的只是显示"
-        );
+        assert_eq!(c.added, MAX_LINES_PER_FILE + 50, "计数是全量，截的只是显示");
     }
 
     #[test]
@@ -501,8 +514,14 @@ mod tests {
 
         let got = load_baselines(&path);
         assert_eq!(got.len(), 2);
-        assert!(got.iter().any(|(p, b)| p == Path::new("/work/a.rs") && b.as_deref() == Some("old\n")));
-        assert!(got.iter().any(|(p, b)| p == Path::new("/work/n.rs") && b.is_none()));
+        assert!(
+            got.iter()
+                .any(|(p, b)| p == Path::new("/work/a.rs") && b.as_deref() == Some("old\n"))
+        );
+        assert!(
+            got.iter()
+                .any(|(p, b)| p == Path::new("/work/n.rs") && b.is_none())
+        );
     }
 
     #[test]
@@ -540,7 +559,11 @@ mod tests {
     fn 从对话能认出新建文件() {
         let cwd = Path::new("/work");
         let msgs = [
-            msg_use("w1", "Write", serde_json::json!({ "path": "n.rs", "content": "hi\n" })),
+            msg_use(
+                "w1",
+                "Write",
+                serde_json::json!({ "path": "n.rs", "content": "hi\n" }),
+            ),
             msg_result("w1", "已创建 n.rs（1 行）。"),
         ];
         let got = reconstruct_baselines(cwd, &msgs);
@@ -554,11 +577,18 @@ mod tests {
         let msgs = [
             msg_use("r1", "Read", serde_json::json!({ "path": "a.rs" })),
             msg_result("r1", read),
-            msg_use("w1", "Write", serde_json::json!({ "path": "a.rs", "content": "new\n" })),
+            msg_use(
+                "w1",
+                "Write",
+                serde_json::json!({ "path": "a.rs", "content": "new\n" }),
+            ),
             msg_result("w1", "已覆盖 a.rs（1 行）。"),
         ];
         let got = reconstruct_baselines(cwd, &msgs);
-        assert_eq!(got, vec![(PathBuf::from("/work/a.rs"), Some("old line\n".into()))]);
+        assert_eq!(
+            got,
+            vec![(PathBuf::from("/work/a.rs"), Some("old line\n".into()))]
+        );
     }
 
     #[test]
@@ -567,18 +597,29 @@ mod tests {
         let msgs = [
             msg_use("r1", "Read", serde_json::json!({ "path": "a.rs" })),
             msg_result("r1", "     1\tfirst\n"),
-            msg_use("e1", "Edit", serde_json::json!({
-                "path": "a.rs", "old_string": "first", "new_string": "second"
-            })),
+            msg_use(
+                "e1",
+                "Edit",
+                serde_json::json!({
+                    "path": "a.rs", "old_string": "first", "new_string": "second"
+                }),
+            ),
             msg_result("e1", "已修改 a.rs（替换了 1 处）。"),
             msg_use("r2", "Read", serde_json::json!({ "path": "a.rs" })),
             msg_result("r2", "     1\tsecond\n"),
-            msg_use("e2", "Edit", serde_json::json!({
-                "path": "a.rs", "old_string": "second", "new_string": "third"
-            })),
+            msg_use(
+                "e2",
+                "Edit",
+                serde_json::json!({
+                    "path": "a.rs", "old_string": "second", "new_string": "third"
+                }),
+            ),
             msg_result("e2", "已修改 a.rs（替换了 1 处）。"),
         ];
         let got = reconstruct_baselines(cwd, &msgs);
-        assert_eq!(got, vec![(PathBuf::from("/work/a.rs"), Some("first\n".into()))]);
+        assert_eq!(
+            got,
+            vec![(PathBuf::from("/work/a.rs"), Some("first\n".into()))]
+        );
     }
 }

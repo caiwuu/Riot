@@ -19,8 +19,8 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::wire::{
-    self, CallToolResult, Incoming, InitializeResult, ListToolsResult, Outgoing,
-    OutgoingError, OutgoingResponse, RpcError, ToolDef,
+    self, CallToolResult, Incoming, InitializeResult, ListToolsResult, Outgoing, OutgoingError,
+    OutgoingResponse, RpcError, ToolDef,
 };
 
 /// 各阶段的等待上限。
@@ -63,7 +63,10 @@ pub enum ClientError {
 
 impl From<RpcError> for ClientError {
     fn from(e: RpcError) -> Self {
-        Self::Rpc { code: e.code, message: e.message }
+        Self::Rpc {
+            code: e.code,
+            message: e.message,
+        }
     }
 }
 

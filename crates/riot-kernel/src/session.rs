@@ -529,7 +529,10 @@ impl PendingAsks {
         detail: PermissionAsk,
     ) {
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-        self.map.lock().await.insert(id, PendingEntry { tx, detail, seq });
+        self.map
+            .lock()
+            .await
+            .insert(id, PendingEntry { tx, detail, seq });
     }
 
     pub async fn resolve(&self, id: &str, response: PermissionResponse) -> bool {
@@ -589,9 +592,9 @@ fn is_user_prompt(m: &Message) -> bool {
 
 /// 重新生成的截断点：指定助手消息前面最近一条用户提示的下标。
 fn cut_at_user_prompt(history: &[Message], assistant_id: &str) -> Option<usize> {
-    let ast = history.iter().position(|m| {
-        matches!(m, Message::Assistant { .. }) && m.id().as_str() == assistant_id
-    })?;
+    let ast = history
+        .iter()
+        .position(|m| matches!(m, Message::Assistant { .. }) && m.id().as_str() == assistant_id)?;
     history[..ast].iter().rposition(is_user_prompt)
 }
 
@@ -2537,7 +2540,9 @@ impl HostGate {
         };
         // 详情和应答通道一起挂着：事件只发一次，界面切走再切回时靠
         // session.resume 的快照重建弹窗（见 PendingAsks::snapshot）。
-        self.pending.insert(request_id.clone(), tx, ask.clone()).await;
+        self.pending
+            .insert(request_id.clone(), tx, ask.clone())
+            .await;
 
         let sent = self.sink.send(AgentEvent::PermissionRequest {
             request_id: RequestId::from_raw(request_id.clone()),
@@ -4411,9 +4416,7 @@ mod tests {
     fn hist_assistant(id: &str, text: &str) -> Message {
         Message::Assistant {
             id: MessageId::from_raw(id),
-            content: vec![riot_protocol::message::AssistantContent::Text {
-                text: text.into(),
-            }],
+            content: vec![riot_protocol::message::AssistantContent::Text { text: text.into() }],
             usage: None,
             meta: MessageMeta::default(),
         }
@@ -4490,14 +4493,14 @@ mod tests {
             std::path::PathBuf::from("/tmp"),
             None,
         );
-        s.ui_archive.lock().await.extend([
-            hist_user("m1", "压缩前"),
-            hist_assistant("a1", "旧答"),
-        ]);
-        s.history.lock().await.extend([
-            hist_user("m2", "压缩后"),
-            hist_assistant("a2", "新答"),
-        ]);
+        s.ui_archive
+            .lock()
+            .await
+            .extend([hist_user("m1", "压缩前"), hist_assistant("a1", "旧答")]);
+        s.history
+            .lock()
+            .await
+            .extend([hist_user("m2", "压缩后"), hist_assistant("a2", "新答")]);
         s.rewind_to_prompt("a1").await.expect("能截回归档");
         assert_eq!(s.ui_archive().await.len(), 1);
         assert!(s.history().await.is_empty(), "截回归档后活历史应清空");
@@ -4512,13 +4515,7 @@ mod tests {
         ));
         *s.running.lock().await = Some(CancellationToken::new());
         let err = s
-            .regenerate(
-                "a1",
-                test_model(),
-                test_caps(),
-                test_sink(),
-                test_limits(),
-            )
+            .regenerate("a1", test_model(), test_caps(), test_sink(), test_limits())
             .await
             .expect_err("忙着不该开重新生成");
         assert!(err.contains("正在跑"), "{err}");

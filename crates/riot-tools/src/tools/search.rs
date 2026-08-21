@@ -304,7 +304,10 @@ mod tests {
     }
 
     fn test_deadline() -> Deadline {
-        Deadline::new(Arc::new(crate::testing::FixedClock::default()), TIME_BUDGET_SECS)
+        Deadline::new(
+            Arc::new(crate::testing::FixedClock::default()),
+            TIME_BUDGET_SECS,
+        )
     }
 
     /// 分隔符归一成 `/`：Windows 上是 `\`，不归一的话下面每条断言都要写两份。
@@ -326,11 +329,21 @@ mod tests {
         std::fs::create_dir_all(t.path().join(".git")).expect("目录");
         std::fs::write(t.path().join(".git/HEAD"), "x").expect("写");
 
-        let w = walk(t.path(), None, 1000, &CancellationToken::new(), &test_deadline()).expect("遍历");
+        let w = walk(
+            t.path(),
+            None,
+            1000,
+            &CancellationToken::new(),
+            &test_deadline(),
+        )
+        .expect("遍历");
         let got = names(&w.files, t.path());
         assert!(got.contains(&"a.rs".to_owned()));
         assert!(got.contains(&"src/c.rs".to_owned()));
-        assert!(!got.contains(&"ignored.rs".to_owned()), "gitignore 要生效：{got:?}");
+        assert!(
+            !got.contains(&"ignored.rs".to_owned()),
+            "gitignore 要生效：{got:?}"
+        );
         assert!(!got.iter().any(|p| p.starts_with("target/")), "{got:?}");
         assert!(!got.iter().any(|p| p.starts_with(".git/")), "{got:?}");
         assert!(!w.cut_short);
@@ -339,35 +352,80 @@ mod tests {
     #[test]
     fn glob_过滤与_rg_同语义() {
         let t = tree();
-        let w = walk(t.path(), Some("**/*.rs"), 1000, &CancellationToken::new(), &test_deadline()).expect("遍历");
+        let w = walk(
+            t.path(),
+            Some("**/*.rs"),
+            1000,
+            &CancellationToken::new(),
+            &test_deadline(),
+        )
+        .expect("遍历");
         let got = names(&w.files, t.path());
         // 只要 .rs —— 包括被 gitignore 掉的那个：显式点名压过忽略规则，
         // 和 `rg --files -g '**/*.rs'` 的实测结果一致（见 walk 的注释）。
         assert_eq!(
             got,
-            vec!["a.rs".to_owned(), "ignored.rs".to_owned(), "src/c.rs".to_owned()],
+            vec![
+                "a.rs".to_owned(),
+                "ignored.rs".to_owned(),
+                "src/c.rs".to_owned()
+            ],
             "{got:?}"
         );
 
-        let w = walk(t.path(), Some("src/*.rs"), 1000, &CancellationToken::new(), &test_deadline()).expect("遍历");
+        let w = walk(
+            t.path(),
+            Some("src/*.rs"),
+            1000,
+            &CancellationToken::new(),
+            &test_deadline(),
+        )
+        .expect("遍历");
         assert_eq!(names(&w.files, t.path()), vec!["src/c.rs".to_owned()]);
     }
 
     #[test]
     fn 坏的_glob_给出可读的错() {
-        let e = walk(Path::new("."), Some("["), 10, &CancellationToken::new(), &test_deadline())
-            .expect_err("坏模式该报错");
+        let e = walk(
+            Path::new("."),
+            Some("["),
+            10,
+            &CancellationToken::new(),
+            &test_deadline(),
+        )
+        .expect_err("坏模式该报错");
         assert!(e.contains("glob"), "{e}");
     }
 
     #[test]
     fn 顺序确定_且尊重上限() {
         let t = tree();
-        let once = walk(t.path(), None, 1000, &CancellationToken::new(), &test_deadline()).expect("遍历");
-        let twice = walk(t.path(), None, 1000, &CancellationToken::new(), &test_deadline()).expect("遍历");
+        let once = walk(
+            t.path(),
+            None,
+            1000,
+            &CancellationToken::new(),
+            &test_deadline(),
+        )
+        .expect("遍历");
+        let twice = walk(
+            t.path(),
+            None,
+            1000,
+            &CancellationToken::new(),
+            &test_deadline(),
+        )
+        .expect("遍历");
         assert_eq!(once.files, twice.files, "两次调用必须给出同样的顺序");
 
-        let cut = walk(t.path(), None, 2, &CancellationToken::new(), &test_deadline()).expect("遍历");
+        let cut = walk(
+            t.path(),
+            None,
+            2,
+            &CancellationToken::new(),
+            &test_deadline(),
+        )
+        .expect("遍历");
         assert_eq!(cut.files.len(), 2);
         assert!(cut.cut_short, "被上限截断要说出来");
     }
@@ -385,24 +443,54 @@ mod tests {
     #[test]
     fn 内容模式带路径行号() {
         let t = tree();
-        let files = walk(t.path(), Some("a.rs"), 100, &CancellationToken::new(), &test_deadline())
-            .expect("遍历")
-            .files;
-        let found = grep(&files, "foo", false, Mode::Content { context: 0 }, &CancellationToken::new(), &test_deadline())
-            .expect("搜索");
+        let files = walk(
+            t.path(),
+            Some("a.rs"),
+            100,
+            &CancellationToken::new(),
+            &test_deadline(),
+        )
+        .expect("遍历")
+        .files;
+        let found = grep(
+            &files,
+            "foo",
+            false,
+            Mode::Content { context: 0 },
+            &CancellationToken::new(),
+            &test_deadline(),
+        )
+        .expect("搜索");
         assert_eq!(found.lines.len(), 2, "两处匹配：{:?}", found.lines);
-        assert!(found.lines[0].ends_with(":1:fn foo() {}"), "{:?}", found.lines);
+        assert!(
+            found.lines[0].ends_with(":1:fn foo() {}"),
+            "{:?}",
+            found.lines
+        );
         assert!(found.lines[1].ends_with(":3:foo();"), "{:?}", found.lines);
     }
 
     #[test]
     fn 上下文行用短横线区分() {
         let t = tree();
-        let files = walk(t.path(), Some("a.rs"), 100, &CancellationToken::new(), &test_deadline())
-            .expect("遍历")
-            .files;
-        let found = grep(&files, "let x", false, Mode::Content { context: 1 }, &CancellationToken::new(), &test_deadline())
-            .expect("搜索");
+        let files = walk(
+            t.path(),
+            Some("a.rs"),
+            100,
+            &CancellationToken::new(),
+            &test_deadline(),
+        )
+        .expect("遍历")
+        .files;
+        let found = grep(
+            &files,
+            "let x",
+            false,
+            Mode::Content { context: 1 },
+            &CancellationToken::new(),
+            &test_deadline(),
+        )
+        .expect("搜索");
         // 前一行、匹配行、后一行；只有中间那条用 `:`。
         assert_eq!(found.lines.len(), 3, "{:?}", found.lines);
         assert!(found.lines[0].contains("-1-fn foo"), "{:?}", found.lines);
@@ -413,16 +501,46 @@ mod tests {
     #[test]
     fn 大小写与另外两种模式() {
         let t = tree();
-        let files = walk(t.path(), None, 100, &CancellationToken::new(), &test_deadline()).expect("遍历").files;
+        let files = walk(
+            t.path(),
+            None,
+            100,
+            &CancellationToken::new(),
+            &test_deadline(),
+        )
+        .expect("遍历")
+        .files;
         let cancel = CancellationToken::new();
 
-        let sensitive = grep(&files, "FOO", false, Mode::FilesWithMatches, &cancel, &test_deadline()).expect("搜索");
+        let sensitive = grep(
+            &files,
+            "FOO",
+            false,
+            Mode::FilesWithMatches,
+            &cancel,
+            &test_deadline(),
+        )
+        .expect("搜索");
         assert_eq!(sensitive.lines.len(), 1, "只有 src/c.rs 是大写的");
 
-        let insensitive = grep(&files, "FOO", true, Mode::FilesWithMatches, &cancel, &test_deadline()).expect("搜索");
-        assert_eq!(insensitive.lines.len(), 3, "忽略大小写后三个文件都算：{:?}", insensitive.lines);
+        let insensitive = grep(
+            &files,
+            "FOO",
+            true,
+            Mode::FilesWithMatches,
+            &cancel,
+            &test_deadline(),
+        )
+        .expect("搜索");
+        assert_eq!(
+            insensitive.lines.len(),
+            3,
+            "忽略大小写后三个文件都算：{:?}",
+            insensitive.lines
+        );
 
-        let counted = grep(&files, "foo", true, Mode::Count, &cancel, &test_deadline()).expect("搜索");
+        let counted =
+            grep(&files, "foo", true, Mode::Count, &cancel, &test_deadline()).expect("搜索");
         assert!(
             counted.lines.iter().any(|l| l.ends_with("a.rs:2")),
             "a.rs 里两处：{:?}",
@@ -435,22 +553,59 @@ mod tests {
         // 不挡的话，一个 .so 里的"匹配"能吐出几 MB 乱码。
         let t = tempfile::tempdir().expect("目录");
         std::fs::write(t.path().join("bin.dat"), b"foo\x00\x01foo").expect("写");
-        let files = walk(t.path(), None, 10, &CancellationToken::new(), &test_deadline()).expect("遍历").files;
-        let found = grep(&files, "foo", false, Mode::Content { context: 0 }, &CancellationToken::new(), &test_deadline())
-            .expect("搜索");
-        assert!(found.lines.len() <= 1, "NUL 之后不该继续：{:?}", found.lines);
+        let files = walk(
+            t.path(),
+            None,
+            10,
+            &CancellationToken::new(),
+            &test_deadline(),
+        )
+        .expect("遍历")
+        .files;
+        let found = grep(
+            &files,
+            "foo",
+            false,
+            Mode::Content { context: 0 },
+            &CancellationToken::new(),
+            &test_deadline(),
+        )
+        .expect("搜索");
+        assert!(
+            found.lines.len() <= 1,
+            "NUL 之后不该继续：{:?}",
+            found.lines
+        );
     }
 
     #[test]
     fn 读不了的文件不影响其它() {
         let t = tree();
-        let mut files = walk(t.path(), Some("**/*.rs"), 100, &CancellationToken::new(), &test_deadline())
-            .expect("遍历")
-            .files;
+        let mut files = walk(
+            t.path(),
+            Some("**/*.rs"),
+            100,
+            &CancellationToken::new(),
+            &test_deadline(),
+        )
+        .expect("遍历")
+        .files;
         let real = files.len();
         files.insert(0, t.path().join("不存在.rs"));
-        let found = grep(&files, "foo", true, Mode::FilesWithMatches, &CancellationToken::new(), &test_deadline())
-            .expect("搜索");
-        assert_eq!(found.lines.len(), real, "其余文件照常出结果：{:?}", found.lines);
+        let found = grep(
+            &files,
+            "foo",
+            true,
+            Mode::FilesWithMatches,
+            &CancellationToken::new(),
+            &test_deadline(),
+        )
+        .expect("搜索");
+        assert_eq!(
+            found.lines.len(),
+            real,
+            "其余文件照常出结果：{:?}",
+            found.lines
+        );
     }
 }

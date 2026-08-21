@@ -183,7 +183,10 @@ fn load_file(path: &Path, problems: &mut Vec<Problem>) -> HooksFile {
         Ok(r) => r,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return HooksFile::default(),
         Err(e) => {
-            problems.push(Problem { path: path.to_path_buf(), reason: format!("读不出来：{e}") });
+            problems.push(Problem {
+                path: path.to_path_buf(),
+                reason: format!("读不出来：{e}"),
+            });
             return HooksFile::default();
         }
     };
@@ -191,7 +194,10 @@ fn load_file(path: &Path, problems: &mut Vec<Problem>) -> HooksFile {
     let value: serde_json::Value = match serde_json::from_str(&raw) {
         Ok(v) => v,
         Err(e) => {
-            problems.push(Problem { path: path.to_path_buf(), reason: format!("JSON 解析失败：{e}") });
+            problems.push(Problem {
+                path: path.to_path_buf(),
+                reason: format!("JSON 解析失败：{e}"),
+            });
             return HooksFile::default();
         }
     };
@@ -202,7 +208,10 @@ fn load_file(path: &Path, problems: &mut Vec<Problem>) -> HooksFile {
     match serde_json::from_value(table) {
         Ok(f) => f,
         Err(e) => {
-            problems.push(Problem { path: path.to_path_buf(), reason: format!("结构不对：{e}") });
+            problems.push(Problem {
+                path: path.to_path_buf(),
+                reason: format!("结构不对：{e}"),
+            });
             HooksFile::default()
         }
     }
@@ -285,7 +294,11 @@ impl HookEngine {
 
     #[cfg(test)]
     fn from_config(cfg: HooksFile, cwd: &Path) -> Self {
-        Self { cfg, cwd: cwd.to_path_buf(), session_id: "test".into() }
+        Self {
+            cfg,
+            cwd: cwd.to_path_buf(),
+            session_id: "test".into(),
+        }
     }
 
     pub fn has_pre_tool_use(&self) -> bool {
@@ -301,7 +314,10 @@ impl HookEngine {
     }
 
     pub fn has_user_prompt_submit(&self) -> bool {
-        self.cfg.user_prompt_submit.iter().any(|g| !g.hooks.is_empty())
+        self.cfg
+            .user_prompt_submit
+            .iter()
+            .any(|g| !g.hooks.is_empty())
     }
 
     /// PreToolUse：工具名匹配的全部 hook 并行跑。
@@ -319,7 +335,8 @@ impl HookEngine {
             "tool_input": input,
             "tool_use_id": tool_use_id,
         });
-        self.run_matching(&self.cfg.pre_tool_use, Some(tool), &payload).await
+        self.run_matching(&self.cfg.pre_tool_use, Some(tool), &payload)
+            .await
     }
 
     /// PostToolUse：反馈段落已按"给模型看"的口吻整理。
@@ -339,7 +356,8 @@ impl HookEngine {
             "tool_response": output_preview,
             "is_error": is_error,
         });
-        self.run_matching(&self.cfg.post_tool_use, Some(tool), &payload).await
+        self.run_matching(&self.cfg.post_tool_use, Some(tool), &payload)
+            .await
     }
 
     /// Stop：`stop_hook_active` 告诉脚本"这已经不是第一次拦了"，
@@ -362,7 +380,8 @@ impl HookEngine {
             "cwd": self.cwd.display().to_string(),
             "prompt": prompt,
         });
-        self.run_matching(&self.cfg.user_prompt_submit, None, &payload).await
+        self.run_matching(&self.cfg.user_prompt_submit, None, &payload)
+            .await
     }
 
     async fn run_matching(
@@ -514,26 +533,36 @@ fn parse_success_output(command: &str, stdout: &str) -> Vec<Outcome> {
     // hookSpecificOutput.permissionDecision 优先于顶层 decision（CC 的新旧两代接口）。
     if let Some(spec) = v.get("hookSpecificOutput") {
         match spec.get("permissionDecision").and_then(|d| d.as_str()) {
-            Some("deny") => out.push(Outcome::Block { reason: reason(spec, "permissionDecisionReason") }),
+            Some("deny") => out.push(Outcome::Block {
+                reason: reason(spec, "permissionDecisionReason"),
+            }),
             Some("allow") => out.push(Outcome::Allow),
-            Some("ask") => out.push(Outcome::Ask { reason: reason(spec, "permissionDecisionReason") }),
+            Some("ask") => out.push(Outcome::Ask {
+                reason: reason(spec, "permissionDecisionReason"),
+            }),
             _ => {}
         }
         if let Some(updated) = spec.get("updatedInput")
             && updated.is_object()
         {
-            out.push(Outcome::Rewrite { input: updated.clone() });
+            out.push(Outcome::Rewrite {
+                input: updated.clone(),
+            });
         }
         if let Some(ctx) = spec.get("additionalContext").and_then(|c| c.as_str())
             && !ctx.trim().is_empty()
         {
-            out.push(Outcome::Context { text: ctx.trim().to_owned() });
+            out.push(Outcome::Context {
+                text: ctx.trim().to_owned(),
+            });
         }
     }
 
     if out.is_empty() {
         match v.get("decision").and_then(|d| d.as_str()) {
-            Some("block") => out.push(Outcome::Block { reason: reason(&v, "reason") }),
+            Some("block") => out.push(Outcome::Block {
+                reason: reason(&v, "reason"),
+            }),
             Some("approve") => out.push(Outcome::Allow),
             _ => {}
         }
@@ -548,7 +577,9 @@ fn matches_tool(matcher: &str, tool: &str) -> bool {
     if m.is_empty() || m == "*" {
         return true;
     }
-    if m.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '|') {
+    if m.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '|')
+    {
         return m.split('|').any(|p| p == tool);
     }
     match regex_lite::Regex::new(m) {
@@ -572,7 +603,11 @@ fn truncated(bytes: &[u8]) -> String {
 
 fn short(command: &str) -> String {
     let c = command.trim();
-    if c.chars().count() <= 60 { c.to_owned() } else { c.chars().take(60).collect::<String>() + "…" }
+    if c.chars().count() <= 60 {
+        c.to_owned()
+    } else {
+        c.chars().take(60).collect::<String>() + "…"
+    }
 }
 
 // ────────────────────────────────────────────────────────────
@@ -627,7 +662,9 @@ impl riot_core::state::StopGate for HookStopGate {
         if reasons.is_empty() {
             riot_core::state::StopDecision::Allow
         } else {
-            riot_core::state::StopDecision::Block { reason: reasons.join("\n") }
+            riot_core::state::StopDecision::Block {
+                reason: reasons.join("\n"),
+            }
         }
     }
 }
@@ -649,7 +686,10 @@ mod tests {
         assert!(matches_tool("Bash|Write", "Write"));
         assert!(matches_tool("Web.*", "WebFetch"), "正则要能用");
         assert!(!matches_tool("Web.*", "Bash"));
-        assert!(!matches_tool("(", "Bash"), "坏正则按不匹配处理，不放行也不拦全部");
+        assert!(
+            !matches_tool("(", "Bash"),
+            "坏正则按不匹配处理，不放行也不拦全部"
+        );
     }
 
     #[test]
@@ -693,7 +733,12 @@ mod tests {
             "c",
             r#"{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"不行"}}"#,
         );
-        assert_eq!(got, vec![Outcome::Block { reason: "不行".into() }]);
+        assert_eq!(
+            got,
+            vec![Outcome::Block {
+                reason: "不行".into()
+            }]
+        );
 
         let got = parse_success_output("c", r#"{"decision":"approve"}"#);
         assert_eq!(got, vec![Outcome::Allow]);
@@ -705,18 +750,27 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                Outcome::Ask { reason: "敏感".into() },
-                Outcome::Context { text: "注意备份".into() }
+                Outcome::Ask {
+                    reason: "敏感".into()
+                },
+                Outcome::Context {
+                    text: "注意备份".into()
+                }
             ]
         );
 
         assert_eq!(
             parse_success_output("c", "记得跑测试"),
-            vec![Outcome::Context { text: "记得跑测试".into() }],
+            vec![Outcome::Context {
+                text: "记得跑测试".into()
+            }],
             "纯文本 stdout 当附加上下文"
         );
         assert!(parse_success_output("c", "").is_empty());
-        assert!(parse_success_output("c", "{ 坏 json").is_empty(), "坏 JSON 忽略不阻断");
+        assert!(
+            parse_success_output("c", "{ 坏 json").is_empty(),
+            "坏 JSON 忽略不阻断"
+        );
     }
 
     // 引擎测试跑真实 shell，只在 unix 上执行（CI 的 Windows 宿主没有 sh；
@@ -741,7 +795,12 @@ mod tests {
                 t.path(),
             );
             let got = e.pre_tool_use("Bash", &serde_json::json!({}), "tu1").await;
-            assert_eq!(got, vec![Outcome::Block { reason: "危险命令".into() }]);
+            assert_eq!(
+                got,
+                vec![Outcome::Block {
+                    reason: "危险命令".into()
+                }]
+            );
         }
 
         #[tokio::test]
@@ -755,7 +814,11 @@ mod tests {
                 }),
                 t.path(),
             );
-            assert!(e.pre_tool_use("Bash", &serde_json::json!({}), "tu1").await.is_empty());
+            assert!(
+                e.pre_tool_use("Bash", &serde_json::json!({}), "tu1")
+                    .await
+                    .is_empty()
+            );
         }
 
         #[tokio::test]
@@ -770,8 +833,15 @@ mod tests {
                 }),
                 t.path(),
             );
-            let got = e.pre_tool_use("Bash", &serde_json::json!({"command": "ls"}), "tu1").await;
-            assert_eq!(got, vec![Outcome::Block { reason: r#""tool_name":"Bash""#.into() }]);
+            let got = e
+                .pre_tool_use("Bash", &serde_json::json!({"command": "ls"}), "tu1")
+                .await;
+            assert_eq!(
+                got,
+                vec![Outcome::Block {
+                    reason: r#""tool_name":"Bash""#.into()
+                }]
+            );
         }
 
         #[tokio::test]
@@ -835,7 +905,12 @@ mod tests {
                 }),
                 t.path(),
             );
-            assert_eq!(e.stop(false).await, vec![Outcome::Block { reason: "再检查一次".into() }]);
+            assert_eq!(
+                e.stop(false).await,
+                vec![Outcome::Block {
+                    reason: "再检查一次".into()
+                }]
+            );
             assert!(e.stop(true).await.is_empty(), "脚本读到 active 后放行");
         }
 
@@ -853,8 +928,13 @@ mod tests {
             ));
             let hooks = HookToolHooks(e);
             assert!(hooks.enabled());
-            let got = hooks.post_tool_use("Write", &serde_json::json!({}), "ok", false).await;
-            assert_eq!(got, vec!["PostToolUse hook 检查未通过：格式不对，跑一下 fmt".to_owned()]);
+            let got = hooks
+                .post_tool_use("Write", &serde_json::json!({}), "ok", false)
+                .await;
+            assert_eq!(
+                got,
+                vec!["PostToolUse hook 检查未通过：格式不对，跑一下 fmt".to_owned()]
+            );
         }
 
         #[tokio::test]

@@ -19,7 +19,6 @@
 // 这些测试的全部意义就是真跑 OS：真起进程、真等时间。禁用列表
 // 针对的是内核逻辑，不是它的验证。
 #![allow(clippy::disallowed_methods)]
-
 #![cfg(unix)]
 
 use std::time::Duration;

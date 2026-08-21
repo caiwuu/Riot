@@ -217,7 +217,11 @@ fn resolve_ref(r: &str, base_dir: &Path) -> Option<PathBuf> {
         return Some(Path::new(&home).join(home_rel));
     }
     let p = Path::new(r);
-    Some(if p.is_absolute() { p.to_path_buf() } else { base_dir.join(p) })
+    Some(if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        base_dir.join(p)
+    })
 }
 
 #[cfg(test)]
@@ -248,7 +252,10 @@ mod tests {
         let files = collect_in(&global, &project);
         assert_eq!(files.len(), 2);
         assert!(files[0].content.contains("全局偏好"), "全局在前");
-        assert!(files[1].content.contains("项目约定"), "项目在后 —— 越晚出现权重越高");
+        assert!(
+            files[1].content.contains("项目约定"),
+            "项目在后 —— 越晚出现权重越高"
+        );
     }
 
     #[test]
@@ -260,13 +267,20 @@ mod tests {
         write(&project, "CLAUDE.md", "C");
 
         let files = collect_in(&global, &project);
-        assert_eq!(files.len(), 1, "两个都有时只取一个 —— 两份多半重复还互相矛盾");
+        assert_eq!(
+            files.len(),
+            1,
+            "两个都有时只取一个 —— 两份多半重复还互相矛盾"
+        );
         assert!(files[0].content.contains('A'), "AGENTS.md 优先");
 
         std::fs::remove_file(project.join("AGENTS.md")).expect("删");
         let files = collect_in(&global, &project);
         assert_eq!(files.len(), 1);
-        assert!(files[0].content.contains('C'), "没有 AGENTS.md 时回退 CLAUDE.md");
+        assert!(
+            files[0].content.contains('C'),
+            "没有 AGENTS.md 时回退 CLAUDE.md"
+        );
     }
 
     #[test]
@@ -287,8 +301,16 @@ mod tests {
     fn 引用展开_相对路径以包含文件为基准() {
         let d = dir();
         let project = d.path().join("proj");
-        write(&project, "AGENTS.md", "总则。\n细节见 @./docs/style.md 一文。\n");
-        write(&project, "docs/style.md", "缩进用两个空格。\n再看 @./naming.md\n");
+        write(
+            &project,
+            "AGENTS.md",
+            "总则。\n细节见 @./docs/style.md 一文。\n",
+        );
+        write(
+            &project,
+            "docs/style.md",
+            "缩进用两个空格。\n再看 @./naming.md\n",
+        );
         write(&project, "docs/naming.md", "驼峰命名。");
 
         let files = collect_in(&d.path().join("cfg"), &project);
@@ -298,7 +320,10 @@ mod tests {
             c.contains("驼峰命名"),
             "嵌套引用相对于 docs/ 解析（包含文件的目录），不是项目根：{c}"
         );
-        assert!(c.contains("<引用文件"), "展开要带来源路径，模型才知道内容从哪来");
+        assert!(
+            c.contains("<引用文件"),
+            "展开要带来源路径，模型才知道内容从哪来"
+        );
     }
 
     #[test]
@@ -329,15 +354,25 @@ mod tests {
 
         let c = &collect_in(&d.path().join("cfg"), &project)[0].content;
         assert!(c.contains("真引用"));
-        assert!(!c.contains("不该出现"), "围栏代码块里的 @ 是代码不是引用：{c}");
-        assert!(!c.contains("引用文件 路径=\"@types"), "行内反引号里的 @ 不是引用");
+        assert!(
+            !c.contains("不该出现"),
+            "围栏代码块里的 @ 是代码不是引用：{c}"
+        );
+        assert!(
+            !c.contains("引用文件 路径=\"@types"),
+            "行内反引号里的 @ 不是引用"
+        );
     }
 
     #[test]
     fn 社交语法的_at_不当成引用() {
         let d = dir();
         let project = d.path().join("proj");
-        write(&project, "AGENTS.md", "联系 user@example.com 或 @teamname 询问。");
+        write(
+            &project,
+            "AGENTS.md",
+            "联系 user@example.com 或 @teamname 询问。",
+        );
         let files = collect_in(&d.path().join("cfg"), &project);
         assert!(
             !files[0].content.contains("<引用文件"),
@@ -362,7 +397,10 @@ mod tests {
         write(&project, "AGENTS.md", &"长".repeat(MAX_FILE_CHARS + 100));
         let files = collect_in(&d.path().join("cfg"), &project);
         let c = &files[0].content;
-        assert!(c.chars().count() < MAX_FILE_CHARS + 200, "必须截断 —— 这是每个会话都付的成本");
+        assert!(
+            c.chars().count() < MAX_FILE_CHARS + 200,
+            "必须截断 —— 这是每个会话都付的成本"
+        );
         assert!(c.contains("已截断"), "要告诉模型内容不完整");
     }
 

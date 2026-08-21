@@ -512,10 +512,7 @@ pub struct FakeBrowser {
 }
 
 impl FakeBrowser {
-    fn interaction(
-        &self,
-        what: String,
-    ) -> Result<String, riot_protocol::browser::InteractError> {
+    fn interaction(&self, what: String) -> Result<String, riot_protocol::browser::InteractError> {
         self.calls.lock().expect("calls poisoned").push(what);
         match &self.interact {
             Some(Ok(msg)) => Ok(msg.clone()),
@@ -529,18 +526,22 @@ impl FakeBrowser {
 
 #[async_trait::async_trait]
 impl riot_protocol::browser::BrowserAccess for FakeBrowser {
-    async fn navigate(
-        &self,
-        url: &str,
-    ) -> Result<(), riot_protocol::browser::BrowserUnavailable> {
-        self.calls.lock().expect("calls poisoned").push(format!("navigate {url}"));
-        Err(riot_protocol::browser::BrowserUnavailable("替身不导航".into()))
+    async fn navigate(&self, url: &str) -> Result<(), riot_protocol::browser::BrowserUnavailable> {
+        self.calls
+            .lock()
+            .expect("calls poisoned")
+            .push(format!("navigate {url}"));
+        Err(riot_protocol::browser::BrowserUnavailable(
+            "替身不导航".into(),
+        ))
     }
     async fn screenshot(&self) -> Result<String, riot_protocol::browser::BrowserUnavailable> {
         Ok(self.shot.clone())
     }
     async fn snapshot(&self) -> Result<String, riot_protocol::browser::BrowserUnavailable> {
-        Err(riot_protocol::browser::BrowserUnavailable("替身没有快照".into()))
+        Err(riot_protocol::browser::BrowserUnavailable(
+            "替身没有快照".into(),
+        ))
     }
     /// 和 [`Self::snapshot`] 一致地报不可用。
     ///
@@ -550,13 +551,16 @@ impl riot_protocol::browser::BrowserAccess for FakeBrowser {
     /// 那样用例就在替身造出来的第三种世界里跑。
     async fn snapshot_marked(
         &self,
-    ) -> Result<riot_protocol::browser::MarkedView, riot_protocol::browser::BrowserUnavailable> {
-        Err(riot_protocol::browser::BrowserUnavailable("替身没有快照".into()))
+    ) -> Result<riot_protocol::browser::MarkedView, riot_protocol::browser::BrowserUnavailable>
+    {
+        Err(riot_protocol::browser::BrowserUnavailable(
+            "替身没有快照".into(),
+        ))
     }
-    async fn console(
-        &self,
-    ) -> Result<Vec<String>, riot_protocol::browser::BrowserUnavailable> {
-        Err(riot_protocol::browser::BrowserUnavailable("替身没有 console".into()))
+    async fn console(&self) -> Result<Vec<String>, riot_protocol::browser::BrowserUnavailable> {
+        Err(riot_protocol::browser::BrowserUnavailable(
+            "替身没有 console".into(),
+        ))
     }
     async fn current_url(&self) -> String {
         String::new()
@@ -573,18 +577,15 @@ impl riot_protocol::browser::BrowserAccess for FakeBrowser {
         text: &str,
         submit: bool,
     ) -> Result<String, riot_protocol::browser::InteractError> {
-        self.interaction(format!("type {} {text:?} submit={submit}", fake_target(&target)))
+        self.interaction(format!(
+            "type {} {text:?} submit={submit}",
+            fake_target(&target)
+        ))
     }
-    async fn press_key(
-        &self,
-        key: &str,
-    ) -> Result<String, riot_protocol::browser::InteractError> {
+    async fn press_key(&self, key: &str) -> Result<String, riot_protocol::browser::InteractError> {
         self.interaction(format!("key {key}"))
     }
-    async fn scroll(
-        &self,
-        delta_y: f64,
-    ) -> Result<String, riot_protocol::browser::InteractError> {
+    async fn scroll(&self, delta_y: f64) -> Result<String, riot_protocol::browser::InteractError> {
         self.interaction(format!("scroll {delta_y}"))
     }
     async fn wait_for(
@@ -606,10 +607,7 @@ impl riot_protocol::browser::BrowserAccess for FakeBrowser {
     ) -> Result<String, riot_protocol::browser::InteractError> {
         self.interaction(format!("browse {nav:?}"))
     }
-    async fn evaluate(
-        &self,
-        expr: &str,
-    ) -> Result<String, riot_protocol::browser::InteractError> {
+    async fn evaluate(&self, expr: &str) -> Result<String, riot_protocol::browser::InteractError> {
         self.interaction(format!("eval {expr}"))
     }
     async fn upload(
@@ -617,7 +615,11 @@ impl riot_protocol::browser::BrowserAccess for FakeBrowser {
         target: riot_protocol::browser::Target,
         paths: Vec<String>,
     ) -> Result<String, riot_protocol::browser::InteractError> {
-        self.interaction(format!("upload {} {}", fake_target(&target), paths.join(",")))
+        self.interaction(format!(
+            "upload {} {}",
+            fake_target(&target),
+            paths.join(",")
+        ))
     }
     async fn cookies(&self) -> Result<String, riot_protocol::browser::InteractError> {
         self.interaction("cookies".to_owned())

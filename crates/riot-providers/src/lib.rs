@@ -21,9 +21,9 @@ pub mod transport;
 pub mod watchdog;
 
 pub use anthropic::{AnthropicConfig, AnthropicProvider};
-pub use retry::{RequestSource, RetryPolicy};
 pub use http::ReqwestTransport;
 pub use openai::{OpenAiConfig, OpenAiProvider};
+pub use retry::{RequestSource, RetryPolicy};
 pub use transport::{HttpError, HttpRequest, HttpTransport};
 
 /// 采样参数。`None` = 不发送该字段，用服务端默认值。

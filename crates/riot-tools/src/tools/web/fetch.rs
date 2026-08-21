@@ -15,9 +15,7 @@
 
 use async_trait::async_trait;
 use riot_protocol::message::ToolResultContent;
-use riot_protocol::permission::{
-    PermissionContext, PermissionResult,
-};
+use riot_protocol::permission::{PermissionContext, PermissionResult};
 use riot_protocol::tool::{
     InterruptBehavior, PromptContext, ResultBudget, Tool, ToolContext, ToolOutcome, UiPayload,
     ValidationError,
@@ -87,7 +85,10 @@ impl Tool for WebFetch {
 
     fn describe(&self, input: &serde_json::Value) -> String {
         let url = input.get("url").and_then(|v| v.as_str()).unwrap_or("");
-        match url::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_owned)) {
+        match url::Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_owned))
+        {
             Some(h) => format!("抓取 {h}"),
             None => "抓取网页".to_owned(),
         }
@@ -123,7 +124,10 @@ impl Tool for WebFetch {
         input: &serde_json::Value,
         ctx: &PermissionContext,
     ) -> PermissionResult {
-        let raw = input.get("url").and_then(|v| v.as_str()).unwrap_or_default();
+        let raw = input
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
 
         // 解析不了的 URL 交给 validate_input 去报错。这里表态成 Deny 的话，
         // 模型收到的是"没权限"，它会去请求权限而不是修 URL。
@@ -232,7 +236,6 @@ impl Tool for WebFetch {
     }
 }
 
-
 /// 把网络错误翻译成模型能据此改变行为的话。
 ///
 /// `[约束]` 不要直接贴原始错误。"HTTP 403" 只会让模型换个 header 重试，
@@ -255,7 +258,9 @@ fn fetch_hint(e: &WebError, url: &str) -> String {
                  不要重试 —— 如果是 GitHub 上的内容，改用 `Bash(gh ...)`；\
                  否则告诉用户这个地址无法公开访问。"
             ),
-            404 => format!("{url} 不存在（404）。检查地址是否拼错，或者先用 WebSearch 找到正确的页面。"),
+            404 => format!(
+                "{url} 不存在（404）。检查地址是否拼错，或者先用 WebSearch 找到正确的页面。"
+            ),
             429 => format!("{url} 触发了限流（429）。换个信息来源，不要立刻重试。"),
             500..=599 => format!("{url} 服务端错误（{code}）。这是对方的问题，换个来源。"),
             _ => format!("{url} 返回 HTTP {code}：{body}"),

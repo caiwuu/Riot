@@ -230,8 +230,10 @@ pub fn build_request(
         thinking: match req.thinking {
             // Anthropic 默认就不思考，Disabled 等价于不发。
             ThinkingConfig::Off | ThinkingConfig::Disabled => None,
-            ThinkingConfig::Effort { level } => clamp_thinking_budget(effort_budget(level), max_tokens)
-                .map(|budget_tokens| WireThinking::Enabled { budget_tokens }),
+            ThinkingConfig::Effort { level } => {
+                clamp_thinking_budget(effort_budget(level), max_tokens)
+                    .map(|budget_tokens| WireThinking::Enabled { budget_tokens })
+            }
             ThinkingConfig::Budget { tokens } => clamp_thinking_budget(tokens, max_tokens)
                 .map(|budget_tokens| WireThinking::Enabled { budget_tokens }),
         },
@@ -434,7 +436,12 @@ fn convert_tool_result_content(c: &ToolResultContent) -> serde_json::Value {
         }
         // Set-of-Marks:一条 result 里图文都发。text 在前 —— 模型先读编号
         // 清单建立"[n] 是什么"，再看图上的框定位，两路对齐。
-        ToolResultContent::MarkedImage { media_type, data, path: _, text } => {
+        ToolResultContent::MarkedImage {
+            media_type,
+            data,
+            path: _,
+            text,
+        } => {
             serde_json::json!([
                 { "type": "text", "text": text },
                 {
@@ -568,9 +575,9 @@ pub fn validate_cache_breakpoints(req: &WireRequest) -> Result<(), CacheError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
     use riot_protocol::id::{MessageId, ToolUseId};
     use riot_protocol::message::MessageMeta;
-    use pretty_assertions::assert_eq;
 
     fn user(text: &str) -> Message {
         Message::User {
@@ -952,10 +959,14 @@ mod tests {
 
         // 默认 max_tokens 8192：high 档被夹到 8192 - 1024。
         let mut r = req(vec![user("hi")]);
-        r.thinking = ThinkingConfig::Effort { level: ThinkingEffort::High };
+        r.thinking = ThinkingConfig::Effort {
+            level: ThinkingEffort::High,
+        };
         assert_eq!(
             build_request(&r, &sections(), &RetryContext::initial()).thinking,
-            Some(WireThinking::Enabled { budget_tokens: 7_168 })
+            Some(WireThinking::Enabled {
+                budget_tokens: 7_168
+            })
         );
 
         // max_tokens 小到挤不下思考 + 输出：不开思考，而不是发非法组合。

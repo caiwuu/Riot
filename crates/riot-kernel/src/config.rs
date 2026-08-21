@@ -310,7 +310,11 @@ pub struct McpServerConfig {
 
 impl McpServerConfig {
     pub fn label(&self) -> &str {
-        if self.name.trim().is_empty() { &self.id } else { &self.name }
+        if self.name.trim().is_empty() {
+            &self.id
+        } else {
+            &self.name
+        }
     }
 }
 
@@ -368,9 +372,7 @@ pub fn mcp_servers_from_json(raw: &str) -> Result<Vec<McpServerConfig>, ConfigEr
         .or_else(|| root.get("servers"))
         .unwrap_or(&root);
     let map = map.as_object().ok_or_else(|| {
-        ConfigError::Parse(
-            "形状不对。期待 {\"mcpServers\": {\"名字\": {\"command\": …}}}".into(),
-        )
+        ConfigError::Parse("形状不对。期待 {\"mcpServers\": {\"名字\": {\"command\": …}}}".into())
     })?;
     if map.is_empty() {
         return Err(ConfigError::Parse("里面一个服务器都没有".into()));
@@ -391,8 +393,14 @@ pub fn mcp_servers_from_json(raw: &str) -> Result<Vec<McpServerConfig>, ConfigEr
 
         if raw.url.is_some()
             || raw.server_url.is_some()
-            || matches!(raw.kind.as_deref(), Some("http" | "sse" | "streamable-http"))
-            || matches!(raw.transport.as_deref(), Some("http" | "sse" | "streamable-http"))
+            || matches!(
+                raw.kind.as_deref(),
+                Some("http" | "sse" | "streamable-http")
+            )
+            || matches!(
+                raw.transport.as_deref(),
+                Some("http" | "sse" | "streamable-http")
+            )
         {
             return Err(ConfigError::Parse(format!(
                 "「{key}」是 http/sse 远程服务器，Riot 暂时只支持 stdio（command + args）"
@@ -411,7 +419,11 @@ pub fn mcp_servers_from_json(raw: &str) -> Result<Vec<McpServerConfig>, ConfigEr
             )));
         }
         servers.push(McpServerConfig {
-            name: if id == *key { String::new() } else { key.clone() },
+            name: if id == *key {
+                String::new()
+            } else {
+                key.clone()
+            },
             id,
             command: raw.command.trim().to_owned(),
             args: raw.args,
@@ -438,7 +450,10 @@ pub fn mcp_servers_to_json(servers: &[McpServerConfig]) -> String {
             entry.insert(
                 "env".into(),
                 serde_json::Value::Object(
-                    s.env.iter().map(|(k, v)| (k.clone(), v.clone().into())).collect(),
+                    s.env
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone().into()))
+                        .collect(),
                 ),
             );
         }
@@ -455,9 +470,19 @@ pub fn mcp_servers_to_json(servers: &[McpServerConfig]) -> String {
 fn sanitize_mcp_id(key: &str) -> String {
     let id: String = key
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
-    if id.trim_matches('-').is_empty() { "server".into() } else { id }
+    if id.trim_matches('-').is_empty() {
+        "server".into()
+    } else {
+        id
+    }
 }
 
 impl Default for WebConfig {
@@ -714,9 +739,11 @@ impl AppConfig {
             self.validate_mcp()?;
             return Ok(());
         }
-        self.provider(&self.active_provider).map(|_| ()).ok_or_else(|| {
-            ConfigError::Parse(format!("找不到 provider「{}」", self.active_provider))
-        })?;
+        self.provider(&self.active_provider)
+            .map(|_| ())
+            .ok_or_else(|| {
+                ConfigError::Parse(format!("找不到 provider「{}」", self.active_provider))
+            })?;
         self.validate_mcp()
     }
 
@@ -735,14 +762,21 @@ impl AppConfig {
             if s.id.trim().is_empty() {
                 return Err(ConfigError::Parse("MCP 服务器的 id 不能为空".into()));
             }
-            if !s.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            if !s
+                .id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
                 return Err(ConfigError::Parse(format!(
                     "MCP 服务器 id「{}」只能用字母、数字、- 和 _（它要进工具名）",
                     s.id
                 )));
             }
             if !seen.insert(s.id.as_str()) {
-                return Err(ConfigError::Parse(format!("MCP 服务器 id「{}」重复了", s.id)));
+                return Err(ConfigError::Parse(format!(
+                    "MCP 服务器 id「{}」重复了",
+                    s.id
+                )));
             }
         }
         Ok(())
@@ -758,7 +792,11 @@ impl AppConfig {
     ///
     /// 辅助模型（网页蒸馏）走这条路 —— 它和 `active_*` 是两回事，用户
     /// 完全可以主对话用贵模型、蒸馏用便宜的本地模型。
-    pub fn resolve_named(&self, provider_id: &str, model: &str) -> Result<ResolvedModel, ConfigError> {
+    pub fn resolve_named(
+        &self,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<ResolvedModel, ConfigError> {
         // 一个字都没配的时候，「找不到 provider「」」这种话等于没说。
         // 报错要能直接告诉用户下一步做什么。
         if provider_id.is_empty() {
@@ -790,7 +828,9 @@ impl AppConfig {
             // 顺序是 模型 → 服务方 → 服务端默认。会话覆盖再叠在这之上（见
             // state.rs 的 send_turn）—— 越具体的赢，这条链任何一环反了都
             // 会表现为"我明明设了 temperature，它没生效"。
-            sampling: p.model(model).map_or(p.sampling, |m| m.sampling.or(p.sampling)),
+            sampling: p
+                .model(model)
+                .map_or(p.sampling, |m| m.sampling.or(p.sampling)),
         })
     }
 
@@ -896,9 +936,7 @@ impl ConfigStatus {
         Self {
             key_status: config.key_status(),
             config_path: config_path().display().to_string(),
-            config_backup: RECOVERED_BACKUP
-                .get()
-                .map(|p| p.display().to_string()),
+            config_backup: RECOVERED_BACKUP.get().map(|p| p.display().to_string()),
             config,
         }
     }
@@ -967,7 +1005,8 @@ fn save_key_at(p: &Path, env_name: &str, key: &str) -> Result<(), ConfigError> {
         #[allow(clippy::disallowed_methods)]
         std::fs::create_dir_all(d).map_err(|e| ConfigError::Io(e.to_string()))?;
     }
-    let json = serde_json::to_string_pretty(&auth).map_err(|e| ConfigError::Parse(e.to_string()))?;
+    let json =
+        serde_json::to_string_pretty(&auth).map_err(|e| ConfigError::Parse(e.to_string()))?;
     #[allow(clippy::disallowed_methods)]
     std::fs::write(p, json).map_err(|e| ConfigError::Io(e.to_string()))?;
 
@@ -1178,7 +1217,9 @@ fn normalize(mut c: AppConfig) -> AppConfig {
 
     // 夹在合理区间。config.json 是用户能手改的文件，0 会让每个弹窗
     // 瞬间超时（等于静默拒绝一切），过大的值等于回到"任务永远卡住"。
-    c.ask_timeout_secs = c.ask_timeout_secs.clamp(MIN_ASK_TIMEOUT_SECS, MAX_ASK_TIMEOUT_SECS);
+    c.ask_timeout_secs = c
+        .ask_timeout_secs
+        .clamp(MIN_ASK_TIMEOUT_SECS, MAX_ASK_TIMEOUT_SECS);
     // 轮数同理夹一下。0 会让任何任务一开就到顶（等于什么都做不了），
     // 过大的值让跑飞的循环烧很久才被兜住。
     c.max_turns = c.max_turns.clamp(MIN_MAX_TURNS, MAX_MAX_TURNS);
@@ -1313,7 +1354,11 @@ mod tests {
             "activeModel": "glm-5.2"
         }"#;
         let c: AppConfig = serde_json::from_str(json).expect("老配置要能读");
-        let ids: Vec<&str> = c.providers[0].models.iter().map(|m| m.id.as_str()).collect();
+        let ids: Vec<&str> = c.providers[0]
+            .models
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
         assert_eq!(ids, vec!["glm-4.6v", "glm-5.2"]);
         // 老格式里没有能力信息，一律按"不能看图"读 —— 猜"能"的代价是
         // 每次带图的请求都被服务方拒。
@@ -1380,7 +1425,10 @@ mod tests {
         }"#;
         let c = parse(json);
         assert_eq!(c.active_provider, "ds");
-        assert_eq!(c.active_model, "deepseek-v4-flash", "用户选过的模型不能被盖掉");
+        assert_eq!(
+            c.active_model, "deepseek-v4-flash",
+            "用户选过的模型不能被盖掉"
+        );
     }
 
     #[test]
@@ -1399,7 +1447,10 @@ mod tests {
     fn 同一家里能看图和不能看图的模型互不影响() {
         let mut c = one_provider();
         c.providers[0].models = vec![
-            ModelConfig { vision: true, ..ModelConfig::new("glm-4.6v") },
+            ModelConfig {
+                vision: true,
+                ..ModelConfig::new("glm-4.6v")
+            },
             ModelConfig::new("glm-5.2"),
         ];
 
@@ -1420,7 +1471,10 @@ mod tests {
             ..Sampling::default()
         };
         c.providers[0].models = vec![ModelConfig {
-            sampling: Sampling { temperature: Some(0.9), ..Sampling::default() },
+            sampling: Sampling {
+                temperature: Some(0.9),
+                ..Sampling::default()
+            },
             ..ModelConfig::new("m1")
         }];
 
@@ -1442,7 +1496,11 @@ mod tests {
         let mut c = one_provider();
         c.vision_model = "acme/m1".into();
 
-        assert_eq!(c.vision_target(), Some(("acme", "m1")), "纯文本模型该走兼容");
+        assert_eq!(
+            c.vision_target(),
+            Some(("acme", "m1")),
+            "纯文本模型该走兼容"
+        );
 
         c.providers[0].models[0].vision = true;
         assert_eq!(c.vision_target(), None, "能看图就不该再转述一遍");
@@ -1486,9 +1544,18 @@ mod tests {
     fn max_turns_默认_48_且越界会被夹回() {
         assert_eq!(default_max_turns(), 48);
         // 手改 config.json 把它写成 0 或天文数字，normalize 要夹回区间。
-        let zero = normalize(AppConfig { max_turns: 0, ..Default::default() });
-        assert_eq!(zero.max_turns, MIN_MAX_TURNS, "0 轮等于什么都做不了，抬到下限");
-        let huge = normalize(AppConfig { max_turns: 999_999, ..Default::default() });
+        let zero = normalize(AppConfig {
+            max_turns: 0,
+            ..Default::default()
+        });
+        assert_eq!(
+            zero.max_turns, MIN_MAX_TURNS,
+            "0 轮等于什么都做不了，抬到下限"
+        );
+        let huge = normalize(AppConfig {
+            max_turns: 999_999,
+            ..Default::default()
+        });
         assert_eq!(huge.max_turns, MAX_MAX_TURNS, "过大要压到上限");
     }
 
@@ -1622,7 +1689,10 @@ mod tests {
 
         assert_eq!(c.active_model, "deepseek-chat");
         assert!(c.web.fetch_enabled, "抓取默认开");
-        assert!(!c.web.search_enabled, "搜索默认关 —— 没填地址时开着只会调一次失败一次");
+        assert!(
+            !c.web.search_enabled,
+            "搜索默认关 —— 没填地址时开着只会调一次失败一次"
+        );
         assert!(!c.web.search_ready());
     }
 
@@ -1636,9 +1706,15 @@ mod tests {
             .distill_target()
             .map(|(p, m)| (p.to_owned(), m.to_owned()))
         };
-        assert_eq!(t("deepseek/deepseek-chat"), Some(("deepseek".into(), "deepseek-chat".into())));
+        assert_eq!(
+            t("deepseek/deepseek-chat"),
+            Some(("deepseek".into(), "deepseek-chat".into()))
+        );
         // 模型名里带斜杠是常态（ollama、各家中转），只能按第一个斜杠拆
-        assert_eq!(t("ollama/qwen2.5/7b"), Some(("ollama".into(), "qwen2.5/7b".into())));
+        assert_eq!(
+            t("ollama/qwen2.5/7b"),
+            Some(("ollama".into(), "qwen2.5/7b".into()))
+        );
         assert_eq!(t(""), None);
         assert_eq!(t("没有斜杠"), None);
         assert_eq!(t("/只有模型"), None);
@@ -1660,7 +1736,10 @@ mod tests {
     fn mcp_配置的坏_id_在保存时就拦下() {
         // id 进工具名和权限规则，坏 id 的失败发生在几天后的权限匹配上 ——
         // 必须在保存的那一刻报。
-        let ok = AppConfig { mcp_servers: vec![mcp("fs", "npx")], ..Default::default() };
+        let ok = AppConfig {
+            mcp_servers: vec![mcp("fs", "npx")],
+            ..Default::default()
+        };
         assert!(ok.validate().is_ok());
 
         let dup = AppConfig {
@@ -1669,8 +1748,14 @@ mod tests {
         };
         assert!(dup.validate().is_err(), "重复 id 必须拦");
 
-        let bad_char = AppConfig { mcp_servers: vec![mcp("my.server", "npx")], ..Default::default() };
-        let e = bad_char.validate().expect_err("带点的 id 必须拦").to_string();
+        let bad_char = AppConfig {
+            mcp_servers: vec![mcp("my.server", "npx")],
+            ..Default::default()
+        };
+        let e = bad_char
+            .validate()
+            .expect_err("带点的 id 必须拦")
+            .to_string();
         assert!(e.contains("my.server"), "报错要点名：{e}");
     }
 
@@ -1678,7 +1763,10 @@ mod tests {
     fn mcp_空命令是合法的中间状态() {
         // "刚点了添加、还没填命令"必须能保存 —— 拒绝的表现是设置页
         // "添加按钮点了没反应"（真实发生过）。空命令由 reconcile 跳过。
-        let c = AppConfig { mcp_servers: vec![mcp("fs", "")], ..Default::default() };
+        let c = AppConfig {
+            mcp_servers: vec![mcp("fs", "")],
+            ..Default::default()
+        };
         assert!(c.validate().is_ok(), "空命令不该拦保存，连接时才要求非空");
     }
 
@@ -1699,14 +1787,23 @@ mod tests {
         let servers = mcp_servers_from_json(raw).expect("标准格式必须能读");
         assert_eq!(servers.len(), 2);
 
-        let fs = servers.iter().find(|s| s.id == "filesystem").expect("有 filesystem");
+        let fs = servers
+            .iter()
+            .find(|s| s.id == "filesystem")
+            .expect("有 filesystem");
         assert_eq!(fs.command, "npx");
-        assert_eq!(fs.args, vec!["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]);
+        assert_eq!(
+            fs.args,
+            vec!["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+        );
         assert_eq!(fs.env.get("LOG").map(String::as_str), Some("1"));
         assert!(fs.enabled);
         assert!(fs.name.is_empty(), "键名合法时不需要另存显示名");
 
-        let gh = servers.iter().find(|s| s.id == "github").expect("有 github");
+        let gh = servers
+            .iter()
+            .find(|s| s.id == "github")
+            .expect("有 github");
         assert!(!gh.enabled, "disabled: true 要变成停用");
     }
 
@@ -1735,7 +1832,9 @@ mod tests {
             r#"{ "mcpServers": { "r": { "url": "https://x.test/mcp" } } }"#,
             r#"{ "mcpServers": { "r": { "type": "sse", "command": "x" } } }"#,
         ] {
-            let e = mcp_servers_from_json(raw).expect_err("远程该拒").to_string();
+            let e = mcp_servers_from_json(raw)
+                .expect_err("远程该拒")
+                .to_string();
             assert!(e.contains("stdio"), "报错要说清暂不支持什么：{e}");
         }
     }
@@ -1756,7 +1855,10 @@ mod tests {
         assert_eq!(servers[0].id, "my-server-v2", "id 只能用工具名允许的字符");
         assert_eq!(servers[0].name, "my.server v2", "用户看到的名字不变");
         // 消毒结果必须过得了保存校验，否则导入成功、保存失败，用户懵
-        let c = AppConfig { mcp_servers: servers, ..Default::default() };
+        let c = AppConfig {
+            mcp_servers: servers,
+            ..Default::default()
+        };
         assert!(c.validate().is_ok());
     }
 
@@ -1793,7 +1895,10 @@ mod tests {
         ];
         let json = mcp_servers_to_json(&servers);
         assert!(json.contains("mcpServers"), "导出要用标准包装：{json}");
-        assert!(!json.contains("GitHub"), "显示名不是标准字段，不该出现在导出里");
+        assert!(
+            !json.contains("GitHub"),
+            "显示名不是标准字段，不该出现在导出里"
+        );
 
         let back = mcp_servers_from_json(&json).expect("自己导出的自己要能读");
         assert_eq!(back.len(), 2);
@@ -1806,10 +1911,11 @@ mod tests {
 
     #[test]
     fn 没有_mcp_段的老配置照常能读() {
-        let c = parse(
-            r#"{"providers":[],"activeProvider":"","activeModel":"","projects":[]}"#,
+        let c = parse(r#"{"providers":[],"activeProvider":"","activeModel":"","projects":[]}"#);
+        assert!(
+            c.mcp_servers.is_empty(),
+            "缺字段按空列表读，不能整体解析失败"
         );
-        assert!(c.mcp_servers.is_empty(), "缺字段按空列表读，不能整体解析失败");
     }
 
     #[test]
@@ -1856,11 +1962,19 @@ mod tests {
         assert_eq!(c.projects, vec!["/work/a"]);
         // v1 里用户设的 max_output_tokens 落在激活的 provider 上
         assert_eq!(
-            c.provider("deepseek").expect("有 deepseek").sampling.max_output_tokens,
+            c.provider("deepseek")
+                .expect("有 deepseek")
+                .sampling
+                .max_output_tokens,
             Some(4096)
         );
         // 迁移只搬用户配过的那一家，不附赠出厂预设
-        assert_eq!(c.providers.len(), 1, "迁移不该凭空多出服务方：{:?}", c.providers);
+        assert_eq!(
+            c.providers.len(),
+            1,
+            "迁移不该凭空多出服务方：{:?}",
+            c.providers
+        );
     }
 
     #[test]
@@ -1996,7 +2110,10 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let p = temp_auth();
         save_key_at(&p, "TEST_PERM_KEY", "sk-x").expect("保存");
-        let mode = std::fs::metadata(&p).expect("metadata").permissions().mode();
+        let mode = std::fs::metadata(&p)
+            .expect("metadata")
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600, "auth.json 权限是 {mode:o}，应该是 600");
         std::fs::remove_file(&p).ok();
     }
@@ -2008,7 +2125,10 @@ mod tests {
         assert!(load_auth(&p).is_empty());
         // 还能在坏文件之上继续保存
         save_key_at(&p, "TEST_RECOVER", "sk-x").expect("覆盖保存");
-        assert_eq!(load_auth(&p).get("TEST_RECOVER").map(String::as_str), Some("sk-x"));
+        assert_eq!(
+            load_auth(&p).get("TEST_RECOVER").map(String::as_str),
+            Some("sk-x")
+        );
         std::fs::remove_file(&p).ok();
     }
 }

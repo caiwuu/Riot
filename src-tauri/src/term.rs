@@ -119,12 +119,7 @@ impl Terminals {
     /// 这是模型开 dev server 的唯一正路：走 Bash 那条子进程的话，收尾时
     /// 整个进程组会被清掉，服务活不过一次调用；而用 `setsid` 逃出来的
     /// 进程谁也管不了。放在这里，用户能看见能 Ctrl-C，模型能读能停。
-    pub fn spawn(
-        &self,
-        root: Option<String>,
-        command: &str,
-        title: &str,
-    ) -> Result<u32, String> {
+    pub fn spawn(&self, root: Option<String>, command: &str, title: &str) -> Result<u32, String> {
         // 尺寸随便给一个像样的：面板挂上来时会按真实宽度 resize。
         // 太窄的话服务启动那几行 banner 会折得没法看。
         self.start(
@@ -721,7 +716,10 @@ mod tests {
         let done = wait_until(|| terms.info(id).is_some_and(|i| !i.running));
         assert!(done, "printf 跑完就该退");
         assert!(
-            terms.read(id, 50).expect("退了也能读").contains("riot-spawn-ok"),
+            terms
+                .read(id, 50)
+                .expect("退了也能读")
+                .contains("riot-spawn-ok"),
             "进程退出不该带走它的日志"
         );
 
@@ -781,15 +779,14 @@ mod tests {
         // Windows 上 ConPTY 的光标查询由宿主应答（见 DsrFilter），
         // 等提示符出来再敲命令 —— 应答之前 shell 不收输入。
         #[cfg(windows)]
-        assert!(
-            wait_until(|| !decoded(&got).is_empty()),
-            "shell 该出提示符"
-        );
+        assert!(wait_until(|| !decoded(&got).is_empty()), "shell 该出提示符");
 
         // 命令按各自 shell 的方言写:unix 是 zsh/bash 的 printf，
         // Windows 是 PowerShell 的 echo。
         #[cfg(not(windows))]
-        terms.write(id, "printf 'riot-term-ok\\n'\r").expect("写命令");
+        terms
+            .write(id, "printf 'riot-term-ok\\n'\r")
+            .expect("写命令");
         #[cfg(windows)]
         terms.write(id, "echo riot-term-ok\r").expect("写命令");
 
@@ -806,7 +803,10 @@ mod tests {
         let id = terms.open(None, 80, 24, ch).expect("开终端");
 
         terms.close(id);
-        assert!(terms.write(id, "echo hi\r").is_err(), "关掉的终端不该还能写");
+        assert!(
+            terms.write(id, "echo hi\r").is_err(),
+            "关掉的终端不该还能写"
+        );
         // 再关一次是无操作，不是错误
         terms.close(id);
     }
@@ -819,10 +819,7 @@ mod tests {
 
         // 等提示符:应答光标查询（宿主做，见 DsrFilter）之前 shell 不收输入。
         #[cfg(windows)]
-        assert!(
-            wait_until(|| !decoded(&got).is_empty()),
-            "shell 该出提示符"
-        );
+        assert!(wait_until(|| !decoded(&got).is_empty()), "shell 该出提示符");
 
         terms.write(id, "exit\r").expect("写 exit");
 

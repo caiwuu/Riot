@@ -108,7 +108,10 @@ pub async fn screenshot(tab: Tab<'_>) -> Result<String, BrowserError> {
     // 本身有问题。
     let Some(content_h) = content_height(tab).await else {
         let r = tab
-            .cdp("Page.captureScreenshot", json!({ "format": "jpeg", "quality": 80 }))
+            .cdp(
+                "Page.captureScreenshot",
+                json!({ "format": "jpeg", "quality": 80 }),
+            )
             .await?;
         return Ok(r["data"].as_str().unwrap_or_default().to_owned());
     };
@@ -165,7 +168,10 @@ pub async fn screenshot(tab: Tab<'_>) -> Result<String, BrowserError> {
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     let shot = tab
-        .cdp("Page.captureScreenshot", json!({ "format": "jpeg", "quality": 80 }))
+        .cdp(
+            "Page.captureScreenshot",
+            json!({ "format": "jpeg", "quality": 80 }),
+        )
         .await;
 
     // 无论截没截成，表面必须复原 —— 不复原的话面板从此显示一个被拉长的
@@ -290,7 +296,10 @@ async fn element_rects(tab: Tab<'_>) -> Result<HashMap<i64, Rect>, BrowserError>
     // 非 Retina（dpr=1）上一切正常，是最容易漏测的那类坑（Codex 的截图
     // 错位 bug 就是同一族的 CSS/DIP 混淆）。
     let dpr = tab
-        .cdp("Runtime.evaluate", json!({ "expression": "devicePixelRatio", "returnByValue": true }))
+        .cdp(
+            "Runtime.evaluate",
+            json!({ "expression": "devicePixelRatio", "returnByValue": true }),
+        )
         .await
         .ok()
         .and_then(|r| r["result"]["value"].as_f64())
@@ -298,7 +307,10 @@ async fn element_rects(tab: Tab<'_>) -> Result<HashMap<i64, Rect>, BrowserError>
         .unwrap_or(1.0);
     // computedStyles 要空数组:样式表很大，而这里只要布局盒。
     let r = tab
-        .cdp("DOMSnapshot.captureSnapshot", json!({ "computedStyles": [] }))
+        .cdp(
+            "DOMSnapshot.captureSnapshot",
+            json!({ "computedStyles": [] }),
+        )
         .await?;
     let doc = &r["documents"][0];
     let sox = doc["scrollOffsetX"].as_f64().unwrap_or(0.0);
@@ -325,7 +337,15 @@ async fn element_rects(tab: Tab<'_>) -> Result<HashMap<i64, Rect>, BrowserError>
         else {
             continue;
         };
-        map.insert(bid, Rect { x: (x - sox) / dpr, y: (y - soy) / dpr, w: w / dpr, h: h / dpr });
+        map.insert(
+            bid,
+            Rect {
+                x: (x - sox) / dpr,
+                y: (y - soy) / dpr,
+                w: w / dpr,
+                h: h / dpr,
+            },
+        );
     }
     Ok(map)
 }
@@ -349,7 +369,14 @@ fn render_nodes(nodes: &[Value], rects: &HashMap<i64, Rect>) -> (String, HashMap
             Some(backend_id) => {
                 out.push_str(&format!("[{next}] {line}\n"));
                 let rect = rects.get(&backend_id).copied();
-                refs.insert(next, SnapRef { backend_id, label: line, rect });
+                refs.insert(
+                    next,
+                    SnapRef {
+                        backend_id,
+                        label: line,
+                        rect,
+                    },
+                );
                 next += 1;
             }
             None => {
@@ -374,7 +401,10 @@ fn describe_node(node: &Value) -> Option<String> {
     }
     let role = node["role"]["value"].as_str().unwrap_or_default();
     // 纯结构性的容器对"点哪儿"没有帮助，滤掉能省下大量篇幅。
-    if matches!(role, "" | "none" | "generic" | "InlineTextBox" | "StaticText") {
+    if matches!(
+        role,
+        "" | "none" | "generic" | "InlineTextBox" | "StaticText"
+    ) {
         return None;
     }
     let name = node["name"]["value"].as_str().unwrap_or_default().trim();
@@ -393,9 +423,23 @@ fn describe_node(node: &Value) -> Option<String> {
 /// main / navigation / region 这类容器也有 a11y 角色，但框住的是一整块
 /// 区域 —— 对"点哪个"没帮助，叠上去只会糊满画面、还和真正的控件框重叠。
 const MARKABLE_ROLES: &[&str] = &[
-    "button", "link", "textbox", "searchbox", "checkbox", "radio", "combobox",
-    "menuitem", "menuitemcheckbox", "menuitemradio", "tab", "switch", "slider",
-    "option", "spinbutton", "listbox", "disclosuretriangle",
+    "button",
+    "link",
+    "textbox",
+    "searchbox",
+    "checkbox",
+    "radio",
+    "combobox",
+    "menuitem",
+    "menuitemcheckbox",
+    "menuitemradio",
+    "tab",
+    "switch",
+    "slider",
+    "option",
+    "spinbutton",
+    "listbox",
+    "disclosuretriangle",
 ];
 
 /// 这个快照标签是不是可叠框的可交互控件。
@@ -446,16 +490,24 @@ pub async fn screenshot_marked(
     tab: Tab<'_>,
     marks: &[(u32, Rect)],
 ) -> Result<String, BrowserError> {
-    let payload: Vec<(u32, f64, f64, f64, f64)> =
-        marks.iter().map(|(n, r)| (*n, r.x, r.y, r.w, r.h)).collect();
+    let payload: Vec<(u32, f64, f64, f64, f64)> = marks
+        .iter()
+        .map(|(n, r)| (*n, r.x, r.y, r.w, r.h))
+        .collect();
     let json = serde_json::to_string(&payload).unwrap_or_else(|_| "[]".to_owned());
     let inject = INJECT_MARKS.replace("__MARKS__", &json);
 
-    tab.cdp("Runtime.evaluate", json!({ "expression": inject })).await?;
+    tab.cdp("Runtime.evaluate", json!({ "expression": inject }))
+        .await?;
     let shot = tab
-        .cdp("Page.captureScreenshot", json!({ "format": "jpeg", "quality": 80 }))
+        .cdp(
+            "Page.captureScreenshot",
+            json!({ "format": "jpeg", "quality": 80 }),
+        )
         .await;
-    let _ = tab.cdp("Runtime.evaluate", json!({ "expression": REMOVE_MARKS })).await;
+    let _ = tab
+        .cdp("Runtime.evaluate", json!({ "expression": REMOVE_MARKS }))
+        .await;
 
     Ok(shot?["data"].as_str().unwrap_or_default().to_owned())
 }
@@ -530,7 +582,9 @@ pub async fn resolve_selector(
     // 非法选择器会让 querySelector 抛异常，try/catch 兜成 null —— 当成
     // "没匹配到"，而不是让整条 evaluate 失败。
     let sel = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".into());
-    let expr = format!("(() => {{ try {{ return document.querySelector({sel}); }} catch (e) {{ return null; }} }})()");
+    let expr = format!(
+        "(() => {{ try {{ return document.querySelector({sel}); }} catch (e) {{ return null; }} }})()"
+    );
     let r = tab
         .cdp("Runtime.evaluate", json!({ "expression": expr }))
         .await?;
@@ -585,7 +639,10 @@ pub async fn wait_predicate(
         // 换文档的瞬间 evaluate 会失败（agent 正在换）——那不是"条件不成立"，
         // 是"这会儿问不到"，继续等。
         if let Ok(r) = tab
-            .cdp("Runtime.evaluate", json!({ "expression": expr, "returnByValue": true }))
+            .cdp(
+                "Runtime.evaluate",
+                json!({ "expression": expr, "returnByValue": true }),
+            )
             .await
             && r["result"]["value"].as_bool() == Some(true)
         {
@@ -1079,7 +1136,9 @@ pub async fn replay(
     let parsed: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
 
     if let Some(err) = parsed.get("error").and_then(Value::as_str) {
-        return Ok(format!("重放失败:{err}\n（跨源请求会撞 CORS —— 同源接口才能带会话重放。）"));
+        return Ok(format!(
+            "重放失败:{err}\n（跨源请求会撞 CORS —— 同源接口才能带会话重放。）"
+        ));
     }
     let status = parsed["status"].as_i64().unwrap_or(0);
     let headers = parsed["headers"].as_object();
@@ -1087,12 +1146,17 @@ pub async fn replay(
 
     let mut out = format!("状态:{status}\n响应头:\n");
     if let Some(h) = headers {
-        let mut lines: Vec<String> =
-            h.iter().map(|(k, v)| format!("  {k}: {}", v.as_str().unwrap_or_default())).collect();
+        let mut lines: Vec<String> = h
+            .iter()
+            .map(|(k, v)| format!("  {k}: {}", v.as_str().unwrap_or_default()))
+            .collect();
         lines.sort();
         out.push_str(&lines.join("\n"));
     }
-    out.push_str(&format!("\n响应体:\n{}", truncate_chars(body, MAX_EVAL_LEN)));
+    out.push_str(&format!(
+        "\n响应体:\n{}",
+        truncate_chars(body, MAX_EVAL_LEN)
+    ));
     Ok(out)
 }
 
@@ -1184,27 +1248,23 @@ pub async fn install_console_hook(tab: Tab<'_>) -> Result<(), BrowserError> {
           });
         })()
     ";
-    tab
-        .cdp(
-            "Page.addScriptToEvaluateOnNewDocument",
-            json!({ "source": HOOK }),
-        )
-        .await?;
+    tab.cdp(
+        "Page.addScriptToEvaluateOnNewDocument",
+        json!({ "source": HOOK }),
+    )
+    .await?;
     // 当前这个文档是在注入之前加载的，补一次。
-    tab
-        .cdp("Runtime.evaluate", json!({ "expression": HOOK }))
+    tab.cdp("Runtime.evaluate", json!({ "expression": HOOK }))
         .await?;
 
     // 禁回弹和 console 钩子同款:每个新文档注一遍 + 当前文档补一次。
     // 这个函数本就是"每个标签页一次的初始化"，搭同一趟车。
-    tab
-        .cdp(
-            "Page.addScriptToEvaluateOnNewDocument",
-            json!({ "source": NO_BOUNCE }),
-        )
-        .await?;
-    tab
-        .cdp("Runtime.evaluate", json!({ "expression": NO_BOUNCE }))
+    tab.cdp(
+        "Page.addScriptToEvaluateOnNewDocument",
+        json!({ "source": NO_BOUNCE }),
+    )
+    .await?;
+    tab.cdp("Runtime.evaluate", json!({ "expression": NO_BOUNCE }))
         .await?;
 
     // 顺手开 Page 域。JS 对话框（alert/confirm/beforeunload）的事件只在
@@ -1245,7 +1305,11 @@ mod tests {
         let long = "很".repeat(300);
         let n = json!({ "role": { "value": "link" }, "name": { "value": long } });
         let out = describe_node(&n).expect("有描述");
-        assert!(out.chars().count() < 100, "应当截断，实际 {} 字", out.chars().count());
+        assert!(
+            out.chars().count() < 100,
+            "应当截断，实际 {} 字",
+            out.chars().count()
+        );
     }
 
     #[test]
@@ -1295,9 +1359,15 @@ mod tests {
         ];
         let (text, refs) = render_nodes(&nodes, &HashMap::new());
 
-        assert!(text.contains("heading \"标题\"\n"), "无号节点原样输出：{text}");
+        assert!(
+            text.contains("heading \"标题\"\n"),
+            "无号节点原样输出：{text}"
+        );
         assert!(!text.contains("[1] heading"), "不能给它发号：{text}");
-        assert!(text.contains("[1] button \"好\""), "号从能点的第一个开始：{text}");
+        assert!(
+            text.contains("[1] button \"好\""),
+            "号从能点的第一个开始：{text}"
+        );
         assert_eq!(refs[&1].backend_id, 7);
     }
 
@@ -1315,12 +1385,28 @@ mod tests {
                     "backendDOMNodeId": 99 }),
         ];
         let mut rects = HashMap::new();
-        rects.insert(11_i64, Rect { x: 10.0, y: 20.0, w: 80.0, h: 30.0 });
+        rects.insert(
+            11_i64,
+            Rect {
+                x: 10.0,
+                y: 20.0,
+                w: 80.0,
+                h: 30.0,
+            },
+        );
         // 99 号故意不给几何 —— iframe 内 / display:none 的形态。
 
         let (_text, refs) = render_nodes(&nodes, &rects);
 
-        assert_eq!(refs[&1].rect, Some(Rect { x: 10.0, y: 20.0, w: 80.0, h: 30.0 }));
+        assert_eq!(
+            refs[&1].rect,
+            Some(Rect {
+                x: 10.0,
+                y: 20.0,
+                w: 80.0,
+                h: 30.0
+            })
+        );
         assert_eq!(refs[&2].rect, None, "拿不到几何的元素 rect 该是 None");
     }
 
@@ -1343,8 +1429,19 @@ mod tests {
     fn 功能键都有键码() {
         // 键码是 0 的功能键会"按了没反应"——事件送到了，默认行为不执行。
         for key in [
-            "Enter", "Backspace", "Tab", "Escape", "ArrowLeft", "ArrowUp",
-            "ArrowRight", "ArrowDown", "Delete", "Home", "End", "PageUp", "PageDown",
+            "Enter",
+            "Backspace",
+            "Tab",
+            "Escape",
+            "ArrowLeft",
+            "ArrowUp",
+            "ArrowRight",
+            "ArrowDown",
+            "Delete",
+            "Home",
+            "End",
+            "PageUp",
+            "PageDown",
         ] {
             assert_ne!(key_code(key), 0, "{key} 缺键码");
         }

@@ -6,8 +6,8 @@ pub mod ast;
 pub mod decide;
 pub mod readonly;
 
-pub use decide::decide;
 pub use ast::{Analysis, ComplexReason, Complexity, SubCommand, analyze};
+pub use decide::decide;
 pub use readonly::is_read_only;
 
 #[cfg(test)]

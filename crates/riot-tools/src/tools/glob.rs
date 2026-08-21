@@ -72,7 +72,10 @@ impl Tool for Glob {
     }
 
     fn describe(&self, input: &serde_json::Value) -> String {
-        let pat = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("...");
+        let pat = input
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .unwrap_or("...");
         match input.get("path").and_then(|v| v.as_str()) {
             Some(p) => format!("在 {p} 里查找 {pat}"),
             None => format!("查找 {pat}"),
@@ -93,7 +96,10 @@ impl Tool for Glob {
     }
 
     fn target_path(&self, input: &serde_json::Value) -> Option<PathBuf> {
-        input.get("path").and_then(|v| v.as_str()).map(PathBuf::from)
+        input
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
     }
 
     fn check_permissions(
@@ -227,7 +233,6 @@ async fn sort_by_mtime(files: &mut [String], ctx: &ToolContext) -> bool {
     true
 }
 
-
 fn no_match_text(input: &Input) -> String {
     let where_ = input.path.as_deref().unwrap_or("工作目录");
     format!(
@@ -237,8 +242,6 @@ fn no_match_text(input: &Input) -> String {
         input.pattern
     )
 }
-
-
 
 fn schema_hint(e: &serde_json::Error) -> String {
     let raw = e.to_string();

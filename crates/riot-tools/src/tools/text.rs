@@ -250,10 +250,7 @@ mod tests {
     #[test]
     fn 行号格式稳定() {
         // 模型会照着行号提 Edit 请求，换格式等于让历史引用全部失效
-        assert_eq!(
-            with_line_numbers("a\nb", 1),
-            "     1\ta\n     2\tb\n"
-        );
+        assert_eq!(with_line_numbers("a\nb", 1), "     1\ta\n     2\tb\n");
         assert_eq!(with_line_numbers("x", 100), "   100\tx\n");
     }
 

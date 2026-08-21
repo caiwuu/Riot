@@ -149,7 +149,13 @@ mod tests {
         // 永久失效 —— 用户开了放行还在被问，而且找不到是哪条规则。
         let r = decide_for_domain("WebFetch", &url("https://unknown.test/x"), &ctx(vec![]));
         assert!(
-            matches!(r, PermissionResult::Ask { reason: DecisionReason::Consent { .. }, .. }),
+            matches!(
+                r,
+                PermissionResult::Ask {
+                    reason: DecisionReason::Consent { .. },
+                    ..
+                }
+            ),
             "{r:?}"
         );
     }

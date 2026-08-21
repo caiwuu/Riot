@@ -310,8 +310,14 @@ pub struct PendingAsk {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AskPreview {
-    Command { command: String, cwd: PathBuf },
-    FileEdit { path: PathBuf, diff: String },
+    Command {
+        command: String,
+        cwd: PathBuf,
+    },
+    FileEdit {
+        path: PathBuf,
+        diff: String,
+    },
     /// 写整文件。`preview` 是内容的前若干行 —— 只显示路径和字节数
     /// 等于让用户盲签，而这个文件顶上的约束明说了不能这样。`lines`
     /// 是总行数，`truncated` 标记 preview 是否被截断。
@@ -322,8 +328,12 @@ pub enum AskPreview {
         lines: u64,
         truncated: bool,
     },
-    NetworkFetch { url: String },
-    Plain { text: String },
+    NetworkFetch {
+        url: String,
+    },
+    Plain {
+        text: String,
+    },
     /// 模型主动提的结构化问题（`AskUserQuestion` 工具）。
     ///
     /// `[取舍]` 复用权限的 ask 通道而不是另建一条问答链路。理由是这条通道

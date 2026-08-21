@@ -7,9 +7,7 @@
 use async_trait::async_trait;
 use riot_permissions::RuleSet;
 use riot_permissions::bash;
-use riot_protocol::permission::{
-    DecisionReason, PermissionContext, PermissionResult, SafetyKind,
-};
+use riot_protocol::permission::{DecisionReason, PermissionContext, PermissionResult, SafetyKind};
 use riot_protocol::tool::{
     InterruptBehavior, ProcessSpec, PromptContext, Tool, ToolContext, ToolOutcome, UiPayload,
     ValidationError,
@@ -501,10 +499,16 @@ fn render(
 
     let mut notes = Vec::new();
     if stdout.truncated {
-        notes.push(format!("stdout 共 {} 行，已省略中间部分", stdout.total_lines));
+        notes.push(format!(
+            "stdout 共 {} 行，已省略中间部分",
+            stdout.total_lines
+        ));
     }
     if stderr.truncated {
-        notes.push(format!("stderr 共 {} 行，已省略中间部分", stderr.total_lines));
+        notes.push(format!(
+            "stderr 共 {} 行，已省略中间部分",
+            stderr.total_lines
+        ));
     }
     if !notes.is_empty() {
         parts.push(format!(

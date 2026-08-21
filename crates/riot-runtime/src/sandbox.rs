@@ -330,10 +330,8 @@ mod tests {
             eprintln!("这台机器没有 sandbox-exec，跳过");
             return;
         };
-        let runner = SandboxedRunner::new(
-            std::sync::Arc::new(SystemProcessRunner::default()),
-            active,
-        );
+        let runner =
+            SandboxedRunner::new(std::sync::Arc::new(SystemProcessRunner::default()), active);
 
         let run = |cmd: String| {
             let r = &runner;

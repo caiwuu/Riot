@@ -124,10 +124,10 @@ fn 无害结构不能掩护后面的危险结构() {
     //
     // 所以"看不懂"必须攒着扫完全树，危险的才立刻返回。
     for cmd in [
-        "eval \"$CMD\"",                     // 展开在前，eval 在后
-        "echo $HOME >> ~/.zshrc",            // 展开在前，敏感重定向在后
-        "cd $DIR && LD_PRELOAD=/e.so ls",    // 展开在前，链接器劫持在后
-        "for f in *; do eval $f; done",      // 循环在前，eval 在里面
+        "eval \"$CMD\"",                  // 展开在前，eval 在后
+        "echo $HOME >> ~/.zshrc",         // 展开在前，敏感重定向在后
+        "cd $DIR && LD_PRELOAD=/e.so ls", // 展开在前，链接器劫持在后
+        "for f in *; do eval $f; done",   // 循环在前，eval 在里面
     ] {
         assert_eq!(
             verdict(cmd, PermissionMode::BypassPermissions),
@@ -142,7 +142,10 @@ fn 普通重定向和敏感重定向要分得开() {
     // 同一个语法结构，危险程度差着量级。分不开就只能二选一：
     // 要么长任务寸步难行，要么放开持久化执行权。
     assert_eq!(
-        verdict("cargo test > /tmp/out.log", PermissionMode::BypassPermissions),
+        verdict(
+            "cargo test > /tmp/out.log",
+            PermissionMode::BypassPermissions
+        ),
         "allow"
     );
     assert_eq!(

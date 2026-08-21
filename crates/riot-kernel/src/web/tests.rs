@@ -293,8 +293,11 @@ async fn 本地过滤兜住不认site的引擎() {
 #[tokio::test]
 async fn 实例没开json输出时给出可操作的提示() {
     // 官方 docker 镜像默认只开 HTML。接 SearXNG 十个人有八个先踩这个。
-    let (base, _) =
-        fake_server("<!DOCTYPE html><html><body>搜索页</body></html>", "text/html").await;
+    let (base, _) = fake_server(
+        "<!DOCTYPE html><html><body>搜索页</body></html>",
+        "text/html",
+    )
+    .await;
 
     let e = web(&base)
         .search(query("tokio"), &CancellationToken::new())
@@ -315,7 +318,10 @@ async fn 连不上时说清是哪个地址() {
         .expect_err("连不上必须报错");
 
     assert!(matches!(e, WebError::Transport { .. }), "{e:?}");
-    assert!(e.to_string().contains("127.0.0.1:9"), "错误里要带上地址：{e}");
+    assert!(
+        e.to_string().contains("127.0.0.1:9"),
+        "错误里要带上地址：{e}"
+    );
 }
 
 #[tokio::test]
@@ -368,5 +374,3 @@ async fn 测试连接成功时报条数() {
     let msg = test_searxng(&base).await.expect("应当连通");
     assert!(msg.contains('2'), "{msg}");
 }
-
-

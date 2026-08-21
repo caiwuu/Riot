@@ -58,7 +58,8 @@ async fn fake_401_endpoint() -> String {
                 use tokio::io::{AsyncReadExt, AsyncWriteExt};
                 let mut buf = [0u8; 8192];
                 let _ = sock.read(&mut buf).await;
-                let body = r#"{"error":{"message":"e2e 假端点:key 无效","type":"invalid_request_error"}}"#;
+                let body =
+                    r#"{"error":{"message":"e2e 假端点:key 无效","type":"invalid_request_error"}}"#;
                 let resp = format!(
                     "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len(),
@@ -172,7 +173,10 @@ async fn 内核关停后下一次调用自动重启() {
     let state = AppState::restore_at(cfg_dir.join("config.json"));
     state.spawn_host_bridge();
     state.set_config(test_config(&base)).await;
-    let info = state.create_session(ws.to_str().expect("utf8")).await.expect("会话");
+    let info = state
+        .create_session(ws.to_str().expect("utf8"))
+        .await
+        .expect("会话");
 
     // 第一次触达:拉起内核(history 走 resume,不需要模型)。
     let h = state.history(&info.id).await.expect("第一次水合");

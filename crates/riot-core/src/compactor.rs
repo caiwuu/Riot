@@ -100,7 +100,8 @@ impl Compactor for ClearOldResults {
             // 说清楚是哪一种"压不动"。主循环会累加熔断计数，而排查时
             // "没有可清理的" 和 "清了但没瘦下来" 要采取的动作完全不同。
             return CompactResult::Failed {
-                reason: "没有可清理的历史工具结果 —— 占用 token 的是对话本身，需要摘要式压缩".into(),
+                reason: "没有可清理的历史工具结果 —— 占用 token 的是对话本身，需要摘要式压缩"
+                    .into(),
             };
         }
 
@@ -201,7 +202,9 @@ impl Compactor for Layered {
                     tracing::warn!(reason, "总结失败，退回轻档的清理结果");
                     light
                 }
-                CompactResult::Failed { reason: light_reason } => CompactResult::Failed {
+                CompactResult::Failed {
+                    reason: light_reason,
+                } => CompactResult::Failed {
                     reason: format!("轻档：{light_reason}；总结：{reason}"),
                 },
             },
@@ -269,10 +272,19 @@ mod layered_tests {
 
         let messages = vec![user_text("m1", &"话很多。".repeat(500))];
         let r = layered
-            .compact(messages, CompactBudget { target_tokens: 10, current_tokens: 1000 })
+            .compact(
+                messages,
+                CompactBudget {
+                    target_tokens: 10,
+                    current_tokens: 1000,
+                },
+            )
             .await;
 
-        let CompactResult::Compacted { messages, strategy, .. } = r else {
+        let CompactResult::Compacted {
+            messages, strategy, ..
+        } = r
+        else {
             panic!("该升级到总结：{r:?}");
         };
         assert_eq!(strategy, CompactStrategy::FullSummary);
@@ -284,14 +296,19 @@ mod layered_tests {
         // 总结请求本身不带工具
         let reqs = provider.requests();
         assert_eq!(reqs.len(), 1);
-        assert!(reqs[0].tools.is_empty(), "总结模型调工具等于烧掉它唯一的一轮");
+        assert!(
+            reqs[0].tools.is_empty(),
+            "总结模型调工具等于烧掉它唯一的一轮"
+        );
     }
 
     #[tokio::test]
     async fn 总结失败但轻档有进步时退回轻档() {
         // 有进步就别当失败 —— Failed 会把熔断计数往前推一格。
         let provider = Arc::new(ScriptedProvider::new(vec![vec![ProviderEvent::Error(
-            riot_protocol::provider::ProviderError::Transport { message: "断网".into() },
+            riot_protocol::provider::ProviderError::Transport {
+                message: "断网".into(),
+            },
         )]]));
         let layered = Layered::new(
             Arc::clone(&provider) as Arc<dyn riot_protocol::provider::Provider>,
@@ -316,7 +333,13 @@ mod layered_tests {
         }
 
         let r = layered
-            .compact(messages, CompactBudget { target_tokens: 1, current_tokens: 10_000 })
+            .compact(
+                messages,
+                CompactBudget {
+                    target_tokens: 1,
+                    current_tokens: 10_000,
+                },
+            )
             .await;
         let CompactResult::Compacted { strategy, .. } = r else {
             panic!("轻档有进步就该交出去：{r:?}");
@@ -327,7 +350,9 @@ mod layered_tests {
     #[tokio::test]
     async fn 两档都不行才算失败() {
         let provider = Arc::new(ScriptedProvider::new(vec![vec![ProviderEvent::Error(
-            riot_protocol::provider::ProviderError::Transport { message: "断网".into() },
+            riot_protocol::provider::ProviderError::Transport {
+                message: "断网".into(),
+            },
         )]]));
         let layered = Layered::new(
             Arc::clone(&provider) as Arc<dyn riot_protocol::provider::Provider>,
@@ -338,13 +363,19 @@ mod layered_tests {
         let r = layered
             .compact(
                 vec![user_text("m1", "没有工具结果可清")],
-                CompactBudget { target_tokens: 1, current_tokens: 100 },
+                CompactBudget {
+                    target_tokens: 1,
+                    current_tokens: 100,
+                },
             )
             .await;
         let CompactResult::Failed { reason } = r else {
             panic!("两档都不行必须如实报失败：{r:?}");
         };
-        assert!(reason.contains("总结"), "失败原因要包含两档各自的说法：{reason}");
+        assert!(
+            reason.contains("总结"),
+            "失败原因要包含两档各自的说法：{reason}"
+        );
     }
 }
 
@@ -477,9 +508,7 @@ mod tests {
 
     #[tokio::test]
     async fn 压缩后的估算变小() {
-        let msgs: Vec<_> = (0..6)
-            .map(|i| result_msg(i, &"x".repeat(4000)))
-            .collect();
+        let msgs: Vec<_> = (0..6).map(|i| result_msg(i, &"x".repeat(4000))).collect();
 
         let CompactResult::Compacted {
             before_tokens,

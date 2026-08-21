@@ -15,7 +15,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::StreamExt;
 use riot_protocol::id::MessageId;
-use riot_protocol::message::{Attachment, AssistantContent, Message, MessageMeta, UserContent};
+use riot_protocol::message::{AssistantContent, Attachment, Message, MessageMeta, UserContent};
 use riot_protocol::provider::{
     Provider, ProviderError, ProviderEvent, ProviderRequest, ThinkingConfig,
 };
@@ -87,7 +87,10 @@ impl HostVision {
             crate::session::provider_from_endpoint(ep)
                 .inspect_err(|e| tracing::warn!(error = %e, "视觉兼容模型的 provider 建不出来"))
                 .ok()
-                .map(|provider| Aux { provider, model: ep.model.clone() })
+                .map(|provider| Aux {
+                    provider,
+                    model: ep.model.clone(),
+                })
         });
         Self {
             accepts: setup.accepts_images,
@@ -256,7 +259,10 @@ mod tests {
             .expect("转述");
         assert!(got.contains("两栏"), "要带上内容：{got}");
         assert!(got.contains("亲眼所见"), "要指示模型当作自己看到的：{got}");
-        assert!(got.contains("不要凭空断言"), "有损描述要拦住细节断言：{got}");
+        assert!(
+            got.contains("不要凭空断言"),
+            "有损描述要拦住细节断言：{got}"
+        );
         // 用户说"把图贴出来"时，模型得知道图已经在界面上，指过去就行 ——
         // 不知道的话它会道歉"无法嵌入图片"，顺手把管道抖出来。
         assert!(
@@ -302,16 +308,22 @@ mod tests {
     async fn 截断但一个字都没攒到时仍然报错() {
         // 极小的 max_tokens 或纯思考型输出可能一个字都没发出来就撞顶。
         // 这时没有任何可用内容，必须报错，不能包一个空描述出去。
-        let e = vision(false, vec![ProviderEvent::Error(ProviderError::OutputLimit)])
-            .describe(req())
-            .await
-            .expect_err("没内容必须报错");
+        let e = vision(
+            false,
+            vec![ProviderEvent::Error(ProviderError::OutputLimit)],
+        )
+        .describe(req())
+        .await
+        .expect_err("没内容必须报错");
         assert!(matches!(e, VisionError::Failed { .. }), "{e}");
     }
 
     #[tokio::test]
     async fn 没配兼容模型时报未配置() {
-        let v = HostVision { accepts: false, aux: None };
+        let v = HostVision {
+            accepts: false,
+            aux: None,
+        };
         assert_eq!(
             v.describe(req()).await.expect_err("必须报错"),
             VisionError::NotConfigured

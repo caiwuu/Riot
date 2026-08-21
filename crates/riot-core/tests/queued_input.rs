@@ -29,10 +29,7 @@ fn state() -> AgentState {
         .with_messages(vec![user_text("m_in", "干活")])
 }
 
-async fn collect(
-    state: AgentState,
-    deps: riot_core::state::AgentDeps,
-) -> Vec<AgentEvent> {
+async fn collect(state: AgentState, deps: riot_core::state::AgentDeps) -> Vec<AgentEvent> {
     let s = riot_core::run_agent(state, deps, CancellationToken::new());
     futures::pin_mut!(s);
     let mut out = Vec::new();
@@ -78,7 +75,10 @@ async fn 模型收尾时的插话当新一轮继续跑() {
     // 第二响应收尾时队列空 → Completed。
     let provider = Arc::new(ScriptedProvider::new(vec![
         vec![ProviderEvent::Message(assistant_text("m_a1", "做完了"))],
-        vec![ProviderEvent::Message(assistant_text("m_a2", "补充也做完了"))],
+        vec![ProviderEvent::Message(assistant_text(
+            "m_a2",
+            "补充也做完了",
+        ))],
     ]));
     let tools = Arc::new(ScriptedToolRunner::new(HashMap::new()));
     let mut deps = mock_deps_with(
@@ -132,7 +132,9 @@ async fn 工具轮不注入插话_等任务跑完才发() {
     ]));
     let tools = Arc::new(ScriptedToolRunner::new(HashMap::from([(
         "Read".to_owned(),
-        ScriptedResult::Ok { text: "内容".into() },
+        ScriptedResult::Ok {
+            text: "内容".into(),
+        },
     )])));
     let mut deps = mock_deps_with(
         Arc::clone(&provider) as _,

@@ -57,7 +57,11 @@ const BYTES_PER_TOKEN: usize = 4;
 pub const fn estimate_tokens(bytes: usize) -> u32 {
     // 饱和转换:u32 装不下的字节数在这里没有意义，夹住比回绕安全。
     let t = bytes / BYTES_PER_TOKEN;
-    if t > u32::MAX as usize { u32::MAX } else { t as u32 }
+    if t > u32::MAX as usize {
+        u32::MAX
+    } else {
+        t as u32
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -150,7 +154,11 @@ impl ThinkingPolicy {
         match self {
             ThinkingPolicy::Default => ThinkingConfig::Off,
             ThinkingPolicy::Adaptive => ThinkingConfig::Effort {
-                level: if turn == 0 { ThinkingEffort::Medium } else { ThinkingEffort::Low },
+                level: if turn == 0 {
+                    ThinkingEffort::Medium
+                } else {
+                    ThinkingEffort::Low
+                },
             },
             ThinkingPolicy::Disabled => ThinkingConfig::Disabled,
             ThinkingPolicy::Fixed { level } => ThinkingConfig::Effort { level },
@@ -239,15 +247,21 @@ mod tests {
     fn 自适应首请求中档续轮低档() {
         assert_eq!(
             ThinkingPolicy::Adaptive.config_for(0),
-            ThinkingConfig::Effort { level: ThinkingEffort::Medium }
+            ThinkingConfig::Effort {
+                level: ThinkingEffort::Medium
+            }
         );
         assert_eq!(
             ThinkingPolicy::Adaptive.config_for(1),
-            ThinkingConfig::Effort { level: ThinkingEffort::Low }
+            ThinkingConfig::Effort {
+                level: ThinkingEffort::Low
+            }
         );
         assert_eq!(
             ThinkingPolicy::Adaptive.config_for(7),
-            ThinkingConfig::Effort { level: ThinkingEffort::Low }
+            ThinkingConfig::Effort {
+                level: ThinkingEffort::Low
+            }
         );
     }
 

@@ -22,9 +22,7 @@ use futures::StreamExt;
 use riot_protocol::event::StreamDelta;
 use riot_protocol::id::MessageId;
 use riot_protocol::message::{AssistantContent, Message, MessageMeta, UserContent};
-use riot_protocol::provider::{
-    Provider, ProviderEvent, ProviderRequest, ThinkingConfig, ToolSpec,
-};
+use riot_protocol::provider::{Provider, ProviderEvent, ProviderRequest, ThinkingConfig, ToolSpec};
 use riot_providers::watchdog::TokioClock;
 use riot_providers::{OpenAiConfig, OpenAiProvider, ReqwestTransport};
 use tokio_util::sync::CancellationToken;

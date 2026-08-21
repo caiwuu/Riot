@@ -219,12 +219,10 @@ fn mode_default(
             reason: DecisionReason::Mode { mode },
         },
 
-        PermissionMode::BypassPermissions | PermissionMode::Unattended => {
-            PermissionResult::Allow {
-                updated_input: None,
-                reason: DecisionReason::Mode { mode },
-            }
-        }
+        PermissionMode::BypassPermissions | PermissionMode::Unattended => PermissionResult::Allow {
+            updated_input: None,
+            reason: DecisionReason::Mode { mode },
+        },
 
         _ => {
             // 有内容维度的工具给内容级建议（精确命令、具体路径）。
@@ -286,9 +284,7 @@ fn finish_ask(
         };
     }
 
-    if mode == PermissionMode::Unattended
-        && !matches!(reason, DecisionReason::UserChoice { .. })
-    {
+    if mode == PermissionMode::Unattended && !matches!(reason, DecisionReason::UserChoice { .. }) {
         return PermissionResult::Allow {
             updated_input: None,
             reason: DecisionReason::Mode { mode },
@@ -363,8 +359,8 @@ fn allow_content_suggestion(tool: &str, content: &str) -> PermissionUpdate {
 mod tests {
     use super::*;
     use crate::testing::{PermTool, ctx_with, rules_of};
-    use riot_protocol::permission::{PermissionRule, SafetyKind};
     use pretty_assertions::assert_eq;
+    use riot_protocol::permission::{PermissionRule, SafetyKind};
 
     fn input(path: &str) -> serde_json::Value {
         serde_json::json!({ "path": path })
@@ -374,12 +370,7 @@ mod tests {
         serde_json::json!({ "command": c })
     }
 
-    fn rule(
-        tool: &str,
-        pattern: Option<&str>,
-        d: RuleDecision,
-        s: RuleSource,
-    ) -> PermissionRule {
+    fn rule(tool: &str, pattern: Option<&str>, d: RuleDecision, s: RuleSource) -> PermissionRule {
         PermissionRule {
             tool: tool.into(),
             pattern: pattern.map(Into::into),
@@ -483,13 +474,15 @@ mod tests {
             "/work/.bashrc",
         ] {
             let r = decide(&tool, &input(sensitive), &ctx, &RuleSet::default());
-            assert_eq!(
-                behavior(&r),
-                "ask",
-                "{sensitive} 必须对 bypass 免疫"
-            );
+            assert_eq!(behavior(&r), "ask", "{sensitive} 必须对 bypass 免疫");
             assert!(
-                matches!(r, PermissionResult::Ask { reason: DecisionReason::SafetyCheck { .. }, .. }),
+                matches!(
+                    r,
+                    PermissionResult::Ask {
+                        reason: DecisionReason::SafetyCheck { .. },
+                        ..
+                    }
+                ),
                 "理由要指向安全检查，用户才知道为什么 bypass 也拦"
             );
         }
@@ -565,7 +558,12 @@ mod tests {
         let ctx = ctx_with(PermissionMode::BypassPermissions);
 
         assert_eq!(
-            behavior(&decide(&tool, &input("/work/src/main.rs"), &ctx, &RuleSet::default())),
+            behavior(&decide(
+                &tool,
+                &input("/work/src/main.rs"),
+                &ctx,
+                &RuleSet::default()
+            )),
             "allow"
         );
     }
@@ -760,7 +758,12 @@ mod tests {
         let ctx = ctx_with(PermissionMode::DontAsk);
 
         assert_eq!(
-            behavior(&decide(&tool, &input("/work/a.rs"), &ctx, &RuleSet::default())),
+            behavior(&decide(
+                &tool,
+                &input("/work/a.rs"),
+                &ctx,
+                &RuleSet::default()
+            )),
             "deny"
         );
     }
@@ -773,7 +776,12 @@ mod tests {
         ctx.can_prompt_user = false;
 
         assert_eq!(
-            behavior(&decide(&tool, &input("/work/a.rs"), &ctx, &RuleSet::default())),
+            behavior(&decide(
+                &tool,
+                &input("/work/a.rs"),
+                &ctx,
+                &RuleSet::default()
+            )),
             "deny"
         );
     }
@@ -786,7 +794,12 @@ mod tests {
         ctx.can_prompt_user = false;
 
         assert_eq!(
-            behavior(&decide(&tool, &input("/work/a.rs"), &ctx, &RuleSet::default())),
+            behavior(&decide(
+                &tool,
+                &input("/work/a.rs"),
+                &ctx,
+                &RuleSet::default()
+            )),
             "allow"
         );
     }
@@ -1006,7 +1019,12 @@ mod tests {
                 PermTool::writer("Bash"),
                 cmd("ls"),
                 ctx_with(PermissionMode::Default),
-                rules_of(vec![rule("Bash", None, RuleDecision::Deny, RuleSource::Policy)]),
+                rules_of(vec![rule(
+                    "Bash",
+                    None,
+                    RuleDecision::Deny,
+                    RuleSource::Policy,
+                )]),
             ),
         ];
 

@@ -55,7 +55,10 @@ pub fn from_paths(paths: &[String], cwd: &Path) -> Vec<Mention> {
     paths
         .iter()
         .filter_map(|p| {
-            resolve(p, cwd).map(|path| Mention { raw: p.clone(), path })
+            resolve(p, cwd).map(|path| Mention {
+                raw: p.clone(),
+                path,
+            })
         })
         .collect()
 }
@@ -91,7 +94,9 @@ pub fn parse(text: &str, cwd: &Path) -> Vec<Mention> {
             continue;
         }
         for raw in extract(line) {
-            let Some(path) = resolve(&raw, cwd) else { continue };
+            let Some(path) = resolve(&raw, cwd) else {
+                continue;
+            };
             // 同一条消息里引用两遍同一个文件只带一份。
             if out.iter().any(|m| m.path == path) {
                 continue;
@@ -158,7 +163,20 @@ fn extract(line: &str) -> Vec<String> {
 fn is_stop_punct(c: char) -> bool {
     matches!(
         c,
-        '，' | '。' | '；' | '：' | '、' | '！' | '？' | '）' | '（' | '「' | '」' | '《' | '》' | '“' | '”'
+        '，' | '。'
+            | '；'
+            | '：'
+            | '、'
+            | '！'
+            | '？'
+            | '）'
+            | '（'
+            | '「'
+            | '」'
+            | '《'
+            | '》'
+            | '“'
+            | '”'
     )
 }
 
@@ -194,7 +212,11 @@ fn resolve(raw: &str, cwd: &Path) -> Option<PathBuf> {
         return Some(Path::new(&home).join(rel));
     }
     let p = Path::new(raw);
-    Some(if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) })
+    Some(if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        cwd.join(p)
+    })
 }
 
 /// 把引用读成附件。
@@ -202,10 +224,7 @@ fn resolve(raw: &str, cwd: &Path) -> Option<PathBuf> {
 /// `file_state` 是可选的工作集登记：登记之后模型可以直接 Edit 这个文件，
 /// 不用先 Read 一遍（先读后写协议认这份缓存）。截断过的内容登记成
 /// `Partial` —— 那道协议存在的意义就是"没看全就别改"。
-pub fn expand(
-    mentions: &[Mention],
-    file_state: Option<&dyn FileStateCache>,
-) -> Vec<Attachment> {
+pub fn expand(mentions: &[Mention], file_state: Option<&dyn FileStateCache>) -> Vec<Attachment> {
     let mut out = Vec::new();
     let mut budget = MAX_TOTAL_CHARS;
 
@@ -260,13 +279,20 @@ pub fn expand(
         if let Some(fs) = file_state {
             // 登记进工作集：模型可以直接改（截断的只算读了个开头）。
             let view = if truncated {
-                FileView::Partial { offset: 0, limit: body.lines().count() }
+                FileView::Partial {
+                    offset: 0,
+                    limit: body.lines().count(),
+                }
             } else {
                 FileView::Full
             };
             fs.put(
                 m.path.clone(),
-                FileState { content: content.clone(), mtime_ms: mtime_ms(&meta), view },
+                FileState {
+                    content: content.clone(),
+                    mtime_ms: mtime_ms(&meta),
+                    view,
+                },
             );
         }
 
@@ -298,7 +324,11 @@ fn list_dir(dir: &Path) -> String {
         .flatten()
         .map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
-            if e.path().is_dir() { format!("{name}/") } else { name }
+            if e.path().is_dir() {
+                format!("{name}/")
+            } else {
+                name
+            }
         })
         .collect();
     names.sort();
@@ -338,9 +368,8 @@ const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
 type FileCache = std::sync::Mutex<Option<(PathBuf, std::time::Instant, Vec<String>)>>;
 
-static FILES: std::sync::LazyLock<FileCache> = std::sync::LazyLock::new(|| {
-    std::sync::Mutex::new(None)
-});
+static FILES: std::sync::LazyLock<FileCache> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
 /// 一次最多收多少个路径。大仓库全量收下来只会让菜单变慢，而用户
 /// 要找的文件几乎不可能排在第五万个。
@@ -375,7 +404,10 @@ pub async fn search_files(root: &Path, query: &str) -> Vec<String> {
         })
         .collect();
     hits.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
-    hits.into_iter().take(SEARCH_LIMIT).map(|(_, _, p)| p).collect()
+    hits.into_iter()
+        .take(SEARCH_LIMIT)
+        .map(|(_, _, p)| p)
+        .collect()
 }
 
 /// 把 `query` 当子序列去匹配，返回跨度（越小越紧）。匹配不上是 None。
@@ -426,8 +458,14 @@ mod search_tests {
             "点开头的目录要进 —— 用户会引用 CI 配置：{got:?}"
         );
         assert!(!got.contains(&"ignored.txt".to_owned()), "gitignore 要生效");
-        assert!(!got.iter().any(|p| p.starts_with("target/")), "构建产物不该进菜单");
-        assert!(!got.iter().any(|p| p.starts_with(".git/")), ".git 内部不该进菜单");
+        assert!(
+            !got.iter().any(|p| p.starts_with("target/")),
+            "构建产物不该进菜单"
+        );
+        assert!(
+            !got.iter().any(|p| p.starts_with(".git/")),
+            ".git 内部不该进菜单"
+        );
 
         // 缓存这一层也要通：搜索走的是它。
         let hits = search_files(root, "keep").await;
@@ -437,7 +475,11 @@ mod search_tests {
     #[test]
     fn 子序列匹配与紧凑度() {
         assert_eq!(subsequence_span("src/main.rs", "smrs"), Some(11));
-        assert_eq!(subsequence_span("src/main.rs", "main"), Some(4), "连着的跨度最小");
+        assert_eq!(
+            subsequence_span("src/main.rs", "main"),
+            Some(4),
+            "连着的跨度最小"
+        );
         assert_eq!(subsequence_span("src/main.rs", "xyz"), None);
         assert_eq!(subsequence_span("abc", ""), None, "空查询不该冒充匹配");
     }
@@ -511,15 +553,32 @@ mod tests {
     #[test]
     fn 认出常见写法() {
         assert_eq!(raws("看看 @src/main.rs"), vec!["src/main.rs"]);
-        assert_eq!(raws("@README.md 里写了"), vec!["README.md"], "带扩展名的裸文件名也算");
-        assert_eq!(raws("对比 @./a/b.txt 和 @/etc/hosts"), vec!["./a/b.txt", "/etc/hosts"]);
-        assert_eq!(raws("@\"docs/设计 稿.md\" 看下"), vec!["docs/设计 稿.md"], "引号裹住带空格的");
+        assert_eq!(
+            raws("@README.md 里写了"),
+            vec!["README.md"],
+            "带扩展名的裸文件名也算"
+        );
+        assert_eq!(
+            raws("对比 @./a/b.txt 和 @/etc/hosts"),
+            vec!["./a/b.txt", "/etc/hosts"]
+        );
+        assert_eq!(
+            raws("@\"docs/设计 稿.md\" 看下"),
+            vec!["docs/设计 稿.md"],
+            "引号裹住带空格的"
+        );
     }
 
     #[test]
     fn 不该被误当引用的() {
-        assert!(raws("联系 me@example.com").is_empty(), "@ 前面不是空白就不算");
-        assert!(raws("装 `@types/node` 这个包").is_empty(), "行内代码里的不算");
+        assert!(
+            raws("联系 me@example.com").is_empty(),
+            "@ 前面不是空白就不算"
+        );
+        assert!(
+            raws("装 `@types/node` 这个包").is_empty(),
+            "行内代码里的不算"
+        );
         assert!(raws("@这里 改一下").is_empty(), "中文口语不像路径");
         assert!(raws("```\n@src/main.rs\n```").is_empty(), "代码块整段跳过");
     }
@@ -529,7 +588,10 @@ mod tests {
         // 中文标点不是空白，不特判的话半句话都会被当成路径。
         assert_eq!(raws("见 @src/main.rs。"), vec!["src/main.rs"]);
         assert_eq!(raws("见 @src/main.rs，还有别的"), vec!["src/main.rs"]);
-        assert_eq!(raws("见 @src/main.rs、@a/b.rs"), vec!["src/main.rs", "a/b.rs"]);
+        assert_eq!(
+            raws("见 @src/main.rs、@a/b.rs"),
+            vec!["src/main.rs", "a/b.rs"]
+        );
         assert_eq!(raws("看 @docs/a.md."), vec!["docs/a.md"]);
     }
 
@@ -559,7 +621,10 @@ mod tests {
         let paths: Vec<_> = merged.iter().map(|m| m.path.clone()).collect();
         assert_eq!(
             paths,
-            vec![PathBuf::from("/proj/src/a.rs"), PathBuf::from("/proj/src/b.rs")]
+            vec![
+                PathBuf::from("/proj/src/a.rs"),
+                PathBuf::from("/proj/src/b.rs")
+            ]
         );
     }
 
@@ -582,7 +647,9 @@ mod tests {
             }
             other => panic!("该是一个 UserFile：{other:?}"),
         }
-        let cached = state.get(&f).expect("该登记进工作集，否则模型要再 Read 一遍");
+        let cached = state
+            .get(&f)
+            .expect("该登记进工作集，否则模型要再 Read 一遍");
         assert_eq!(cached.view, FileView::Full);
     }
 
@@ -640,10 +707,7 @@ mod tests {
         for i in 0..4 {
             std::fs::write(t.path().join(format!("f{i}.txt")), &big).expect("写");
         }
-        let got = expand(
-            &parse("@f0.txt @f1.txt @f2.txt @f3.txt", t.path()),
-            None,
-        );
+        let got = expand(&parse("@f0.txt @f1.txt @f2.txt @f3.txt", t.path()), None);
         let total: usize = got
             .iter()
             .filter_map(|a| match a {

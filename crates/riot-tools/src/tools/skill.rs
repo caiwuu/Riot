@@ -130,7 +130,11 @@ impl Tool for SkillTool {
         };
         ToolOutcome::Ok {
             ui_payload: Some(UiPayload::Plain {
-                text: format!("已加载技能「{}」（{} 字符）", skill.name, text.chars().count()),
+                text: format!(
+                    "已加载技能「{}」（{} 字符）",
+                    skill.name,
+                    text.chars().count()
+                ),
             }),
             model_content: riot_protocol::message::ToolResultContent::text(text),
             side_messages: Vec::new(),
@@ -220,9 +224,7 @@ mod tests {
     #[tokio::test]
     async fn 加载返回正文并带目录说明() {
         let t = SkillTool::new(vec![card("发布", "d", "按 checklist 走。")]);
-        let out = t
-            .call(serde_json::json!({ "name": "发布" }), ctx())
-            .await;
+        let out = t.call(serde_json::json!({ "name": "发布" }), ctx()).await;
         let text = model_text(&out);
         assert!(text.contains("按 checklist 走"));
         assert!(
@@ -233,9 +235,16 @@ mod tests {
 
     #[tokio::test]
     async fn 参数替换进占位符() {
-        let t = SkillTool::new(vec![card("查", "d", "查询目标：$ARGUMENTS，配置在 ${SKILL_DIR}/conf.json")]);
+        let t = SkillTool::new(vec![card(
+            "查",
+            "d",
+            "查询目标：$ARGUMENTS，配置在 ${SKILL_DIR}/conf.json",
+        )]);
         let out = t
-            .call(serde_json::json!({ "name": "查", "args": "example.com" }), ctx())
+            .call(
+                serde_json::json!({ "name": "查", "args": "example.com" }),
+                ctx(),
+            )
             .await;
         let text = model_text(&out);
         assert!(text.contains("查询目标：example.com"));
@@ -286,9 +295,13 @@ mod tests {
         let t = SkillTool::new(vec![card("a", "d", "x"), card("b", "d", "y")]);
         let out = t.call(serde_json::json!({ "name": "c" }), ctx()).await;
         match out {
-            ToolOutcome::Failed { error_for_model, .. } => {
-                assert!(error_for_model.contains('a') && error_for_model.contains('b'),
-                    "报错要带可用名单，否则模型只会换个错名字再试：{error_for_model}");
+            ToolOutcome::Failed {
+                error_for_model, ..
+            } => {
+                assert!(
+                    error_for_model.contains('a') && error_for_model.contains('b'),
+                    "报错要带可用名单，否则模型只会换个错名字再试：{error_for_model}"
+                );
             }
             other => panic!("该失败：{other:?}"),
         }

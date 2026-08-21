@@ -421,9 +421,7 @@ fn schema_hint(e: &serde_json::Error) -> String {
         return "缺少必需参数 `path`。请提供要读取的文件路径。".to_owned();
     }
     if raw.contains("unknown field") {
-        return format!(
-            "Read 只接受 `path`、`offset`、`limit` 三个参数。（{raw}）"
-        );
+        return format!("Read 只接受 `path`、`offset`、`limit` 三个参数。（{raw}）");
     }
     format!("参数格式不对：{raw}。请检查参数类型。")
 }

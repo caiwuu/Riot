@@ -120,10 +120,7 @@ impl Scheduler {
     }
 
     /// 启用延迟加载。池由装配方（session）在超过阈值时构建。
-    pub fn with_deferred(
-        mut self,
-        pool: Arc<crate::tools::tool_search::DeferredPool>,
-    ) -> Self {
+    pub fn with_deferred(mut self, pool: Arc<crate::tools::tool_search::DeferredPool>) -> Self {
         self.deferred = Some(pool);
         self
     }
@@ -138,10 +135,7 @@ impl Scheduler {
         self
     }
 
-    pub fn with_browser(
-        mut self,
-        browser: Arc<dyn riot_protocol::browser::BrowserAccess>,
-    ) -> Self {
+    pub fn with_browser(mut self, browser: Arc<dyn riot_protocol::browser::BrowserAccess>) -> Self {
         self.browser = browser;
         self
     }
@@ -154,10 +148,7 @@ impl Scheduler {
         self
     }
 
-    pub fn with_vision(
-        mut self,
-        vision: Arc<dyn riot_protocol::vision::VisionAccess>,
-    ) -> Self {
+    pub fn with_vision(mut self, vision: Arc<dyn riot_protocol::vision::VisionAccess>) -> Self {
         self.vision = vision;
         self
     }
@@ -195,7 +186,10 @@ impl ToolRunner for Scheduler {
         // 未发现的延迟工具不进请求。specs 每轮请求都会重算（agent loop
         // 每次组请求都调它），所以本轮中途 ToolSearch 发现的工具，
         // 下一次请求就带上完整定义。
-        specs.into_iter().filter(|s| !pool.is_hidden(&s.name)).collect()
+        specs
+            .into_iter()
+            .filter(|s| !pool.is_hidden(&s.name))
+            .collect()
     }
 
     fn run_batch(&self, calls: Vec<ToolCall>, ctx: BatchContext) -> BatchStream {
@@ -540,7 +534,9 @@ fn outcome_preview(outcome: &ToolOutcome) -> String {
             // 编号清单是纯文本，喂 hook 安全又有用；图片本体照旧不给。
             ToolResultContent::MarkedImage { text, .. } => text.clone(),
         },
-        ToolOutcome::Failed { error_for_model, .. } => error_for_model.clone(),
+        ToolOutcome::Failed {
+            error_for_model, ..
+        } => error_for_model.clone(),
         ToolOutcome::Cancelled => String::new(),
     }
 }
@@ -595,8 +591,8 @@ fn cancelled_result(id: &ToolUseId) -> UserContent {
 mod tests {
     use super::*;
     use crate::testing::FakeTool;
-    use riot_protocol::id::SessionId;
     use pretty_assertions::assert_eq;
+    use riot_protocol::id::SessionId;
     use std::sync::atomic::Ordering;
 
     fn scheduler(tools: Vec<Arc<dyn Tool>>) -> Scheduler {
@@ -680,7 +676,8 @@ mod tests {
             }
         }
 
-        let s = scheduler(vec![Arc::new(FakeTool::read_only("Echo"))]).with_hooks(Arc::new(Feedback));
+        let s =
+            scheduler(vec![Arc::new(FakeTool::read_only("Echo"))]).with_hooks(Arc::new(Feedback));
         let events = run(&s, vec![call("t1", "Echo")]).await;
         let o = outcome(&events);
 

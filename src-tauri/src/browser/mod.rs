@@ -319,12 +319,7 @@ impl Browser {
     ///
     /// `[约束]` 仍然要占一个 id。CDP 不接受没有 id 的命令，而复用固定 id
     /// 会和真正在等结果的调用撞车。
-    pub fn cdp_no_wait(
-        &self,
-        tab: TabId,
-        method: &str,
-        params: Value,
-    ) -> Result<(), BrowserError> {
+    pub fn cdp_no_wait(&self, tab: TabId, method: &str, params: Value) -> Result<(), BrowserError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.send(&Command::Cdp {
             tab,
@@ -356,11 +351,7 @@ impl Browser {
             // 进程组已空时返回 ESRCH，那是正常路径。
             tracing::debug!(error = %e, "清理浏览器进程组");
         }
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            self.child.wait(),
-        )
-        .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), self.child.wait()).await;
     }
 }
 
@@ -419,9 +410,10 @@ async fn route_cdp_response(pending: &Pending, ev: &Event) -> bool {
 /// Windows 没有 bundle 概念，dll 按"和 exe 同目录"加载）。
 #[cfg(not(windows))]
 fn executable_in(app: &std::path::Path) -> PathBuf {
-    let name = app
-        .file_stem()
-        .map_or_else(|| "riot-browser".into(), |s| s.to_string_lossy().into_owned());
+    let name = app.file_stem().map_or_else(
+        || "riot-browser".into(),
+        |s| s.to_string_lossy().into_owned(),
+    );
     app.join("Contents/MacOS").join(name)
 }
 

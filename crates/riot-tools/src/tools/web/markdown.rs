@@ -193,7 +193,10 @@ mod tests {
     #[test]
     fn 不认识的字符集退回_utf8() {
         // 站点乱写 charset 是常态，不能因此整个抓取失败
-        assert_eq!(decode_body("中文".as_bytes(), "text/html; charset=x-nope"), "中文");
+        assert_eq!(
+            decode_body("中文".as_bytes(), "text/html; charset=x-nope"),
+            "中文"
+        );
     }
 
     #[test]

@@ -128,16 +128,17 @@ impl StreamDecoder {
                 // 几十秒，而完整的 tool_use 到 message_stop 才给得出来 ——
                 // 不在这里报，界面那几十秒里连卡片都画不出来。
                 let started = match &acc {
-                    BlockAccumulator::ToolUse { id, name, .. } => {
-                        Some((id.clone(), name.clone()))
-                    }
+                    BlockAccumulator::ToolUse { id, name, .. } => Some((id.clone(), name.clone())),
                     _ => None,
                 };
                 self.put_block(index, acc);
                 match started {
-                    Some((tool_use_id, name)) => vec![ProviderEvent::Delta(
-                        StreamDelta::ToolStart { tool_use_id, name },
-                    )],
+                    Some((tool_use_id, name)) => {
+                        vec![ProviderEvent::Delta(StreamDelta::ToolStart {
+                            tool_use_id,
+                            name,
+                        })]
+                    }
                     None => Vec::new(),
                 }
             }

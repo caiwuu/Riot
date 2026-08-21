@@ -53,9 +53,12 @@ async fn open_tab(browser: &Browser, rx: &mut mpsc::UnboundedReceiver<Event>) ->
     browser
         .send(&Command::OpenTab { tab: FIRST })
         .expect("发开标签页");
-    wait_for(rx, 30, "标签页就绪", |e| {
-        matches!(e, Event::TabOpened { tab } if *tab == FIRST)
-    })
+    wait_for(
+        rx,
+        30,
+        "标签页就绪",
+        |e| matches!(e, Event::TabOpened { tab } if *tab == FIRST),
+    )
     .await;
     FIRST
 }
@@ -96,7 +99,10 @@ async fn 宿主能驱动浏览器加载页面并跑_cdp() {
 
     wait_for(&mut rx, 30, "ready", |e| matches!(e, Event::Ready)).await;
     let id = open_tab(&browser, &mut rx).await;
-    let tab = Tab { browser: &browser, id };
+    let tab = Tab {
+        browser: &browser,
+        id,
+    };
 
     // 帧能出来，说明离屏渲染这条路是活的。
     wait_for(&mut rx, 30, "首帧", |e| matches!(e, Event::Frame { .. })).await;
@@ -108,9 +114,12 @@ async fn 宿主能驱动浏览器加载页面并跑_cdp() {
         })
         .expect("发导航");
 
-    let ev = wait_for(&mut rx, 40, "example.com 加载完成", |e| {
-        matches!(e, Event::LoadEnd { url, .. } if url.contains("example.com"))
-    })
+    let ev = wait_for(
+        &mut rx,
+        40,
+        "example.com 加载完成",
+        |e| matches!(e, Event::LoadEnd { url, .. } if url.contains("example.com")),
+    )
     .await;
     let Event::LoadEnd { status, .. } = ev else {
         unreachable!()
@@ -302,7 +311,10 @@ async fn cdp_的错误会翻出来而不是当成成功() {
         .expect("起浏览器");
     wait_for(&mut rx, 30, "ready", |e| matches!(e, Event::Ready)).await;
     let id = open_tab(&browser, &mut rx).await;
-    let tab = Tab { browser: &browser, id };
+    let tab = Tab {
+        browser: &browser,
+        id,
+    };
 
     // CDP 把错误放在响应体的 `error` 字段里，传输层是成功的。
     // 不翻出来的话，上层拿到一个没有 result 的对象，只能自己猜哪儿不对。
@@ -332,7 +344,10 @@ async fn 高层操作在真实页面上成立() {
         .expect("起浏览器");
     wait_for(&mut rx, 30, "ready", |e| matches!(e, Event::Ready)).await;
     let id = open_tab(&browser, &mut rx).await;
-    let tab = Tab { browser: &browser, id };
+    let tab = Tab {
+        browser: &browser,
+        id,
+    };
 
     // console 钩子要在导航**之前**装。页面加载期间的报错最有价值，
     // 而那时候如果还没装钩子就永远抓不到了。
@@ -354,9 +369,12 @@ async fn 高层操作在真实页面上成立() {
         <script>console.warn('来自页面的警告');</script>\
         </body></html>";
     ops::navigate(tab, page).await.expect("导航");
-    wait_for(&mut rx, 30, "页面加载完成", |e| {
-        matches!(e, Event::LoadEnd { url, .. } if url.starts_with("data:"))
-    })
+    wait_for(
+        &mut rx,
+        30,
+        "页面加载完成",
+        |e| matches!(e, Event::LoadEnd { url, .. } if url.starts_with("data:")),
+    )
     .await;
 
     // 快照:要能看见可交互元素，且不该被结构性节点淹没。
@@ -381,7 +399,11 @@ async fn 高层操作在真实页面上成立() {
     // 截图:PNG 的 base64。只验非空和能解码 —— 像素内容不该被断言，
     // 那会让用例随字体渲染的细微变化而红。
     let shot = ops::screenshot(tab).await.expect("截图");
-    assert!(shot.len() > 1000, "截图太小，可能是白屏：{} 字节", shot.len());
+    assert!(
+        shot.len() > 1000,
+        "截图太小，可能是白屏：{} 字节",
+        shot.len()
+    );
 
     // console:钩子装在导航前，所以页面脚本里的 warn 应当被抓到。
     let logs = ops::console(tab).await.expect("取 console");
@@ -437,7 +459,10 @@ async fn 叠框截图在真实页面成立() {
         .expect("起浏览器");
     wait_for(&mut rx, 30, "ready", |e| matches!(e, Event::Ready)).await;
     let id = open_tab(&browser, &mut rx).await;
-    let tab = Tab { browser: &browser, id };
+    let tab = Tab {
+        browser: &browser,
+        id,
+    };
 
     let page = "data:text/html;charset=utf-8,\
         <html><body>\
@@ -445,9 +470,12 @@ async fn 叠框截图在真实页面成立() {
         <a href='%23x'>帮助链接</a>\
         </body></html>";
     ops::navigate(tab, page).await.expect("导航");
-    wait_for(&mut rx, 30, "页面加载完成", |e| {
-        matches!(e, Event::LoadEnd { url, .. } if url.starts_with("data:"))
-    })
+    wait_for(
+        &mut rx,
+        30,
+        "页面加载完成",
+        |e| matches!(e, Event::LoadEnd { url, .. } if url.starts_with("data:")),
+    )
     .await;
 
     // 几何:按钮的 backendId 要能在 DOMSnapshot 里查到一个正矩形。这一步
@@ -458,12 +486,20 @@ async fn 叠框截图在真实页面成立() {
         .find(|(_, r)| r.label.contains("提交"))
         .map(|(n, _)| *n)
         .expect("按钮该有编号");
-    let rect = refs[&button].rect.expect("按钮该有几何（backendId 没对上就会是 None）");
+    let rect = refs[&button]
+        .rect
+        .expect("按钮该有几何（backendId 没对上就会是 None）");
     assert!(rect.w > 0.0 && rect.h > 0.0, "矩形该是正的：{rect:?}");
 
     // 叠框截图:注入 overlay → 截视口 → 撤 overlay，出的图非空。
-    let shot = ops::screenshot_marked(tab, &[(button, rect)]).await.expect("叠框截图");
-    assert!(shot.len() > 1000, "叠框截图太小，可能白屏：{} 字节", shot.len());
+    let shot = ops::screenshot_marked(tab, &[(button, rect)])
+        .await
+        .expect("叠框截图");
+    assert!(
+        shot.len() > 1000,
+        "叠框截图太小，可能白屏：{} 字节",
+        shot.len()
+    );
 
     // overlay 必须撤干净 —— 留一层红框在页面上，之后每张普通截图都会带框。
     let left = ops::evaluate(tab, "!!document.getElementById('__riot_marks__')")
@@ -508,7 +544,10 @@ async fn 工具层能真的驱动浏览器() {
     assert!(shot.len() > 1000, "截图应当是有内容的 base64");
 
     let url = browser.current_url().await;
-    assert!(url.starts_with("data:"), "当前地址应当是刚打开的那个：{url}");
+    assert!(
+        url.starts_with("data:"),
+        "当前地址应当是刚打开的那个：{url}"
+    );
 }
 
 /// 交互走完整条链路:快照发号 → 编号换坐标 → 合成输入 → 页面真的反应。
@@ -538,7 +577,10 @@ async fn 点击和输入能驱动真实页面() {
     host.navigate(page).await.expect("导航");
 
     // 还没拍快照就用编号点 —— 要一个说清"先快照"的错误，不是 CDP 报错。
-    let early = host.click(Target::Ref(1)).await.expect_err("没快照不该能点");
+    let early = host
+        .click(Target::Ref(1))
+        .await
+        .expect_err("没快照不该能点");
     assert!(
         matches!(&early, InteractError::Target(m) if m.contains("BrowserSnapshot")),
         "要指引先拍快照：{early:?}"
@@ -554,16 +596,23 @@ async fn 点击和输入能驱动真实页面() {
     wait_console(&host, "log: btn-clicked").await;
 
     // 输入并回车（编号定位）:值原样到达，表单提交真的发生。
-    host.type_text(Target::Ref(input), "riot 测试", true).await.expect("输入");
+    host.type_text(Target::Ref(input), "riot 测试", true)
+        .await
+        .expect("输入");
     wait_console(&host, "log: submitted:riot 测试").await;
 
     // 选择器定位:不用快照编号也能点中同一个按钮。
-    let by_sel = host.click(Target::Selector("#go".into())).await.expect("按选择器点击");
+    let by_sel = host
+        .click(Target::Selector("#go".into()))
+        .await
+        .expect("按选择器点击");
     assert!(by_sel.contains("选择器"), "结果要指明是选择器：{by_sel}");
     wait_console(&host, "log: btn-clicked").await;
 
     // 文本定位:按可见文字点。
-    host.click(Target::Text("点我".into())).await.expect("按文本点击");
+    host.click(Target::Text("点我".into()))
+        .await
+        .expect("按文本点击");
 
     // 选择器匹配不到 —— 要一个明确的"没匹配到"，不是 CDP 报错。
     let miss = host
@@ -586,7 +635,10 @@ async fn 点击和输入能驱动真实页面() {
     );
 
     // 编号超出快照范围 —— 指引重新快照。
-    let stale = host.click(Target::Ref(9999)).await.expect_err("越界编号不该能点");
+    let stale = host
+        .click(Target::Ref(9999))
+        .await
+        .expect_err("越界编号不该能点");
     assert!(
         matches!(&stale, InteractError::Target(m) if m.contains("BrowserSnapshot")),
         "要指引重新快照：{stale:?}"
@@ -605,7 +657,10 @@ async fn 点击和输入能驱动真实页面() {
     assert!(matches!(&timed_out, InteractError::Target(m) if m.contains("仍未发生")));
 
     // 网络空闲:静态页没有在途请求，应当很快判定空闲。
-    let idle = host.wait_for(WaitCondition::NetworkIdle, 5000).await.expect("应当空闲");
+    let idle = host
+        .wait_for(WaitCondition::NetworkIdle, 5000)
+        .await
+        .expect("应当空闲");
     assert!(idle.contains("空闲"), "{idle}");
 
     // 滚动:位置真的动了，消息里带得有进度。
@@ -613,7 +668,10 @@ async fn 点击和输入能驱动真实页面() {
     assert!(scrolled.contains("滚动"), "{scrolled}");
 
     // 不认识的键名当场拒绝，不发一个页面不会理的事件。
-    let bad_key = host.press_key("Meta+Q").await.expect_err("怪键名不该发出去");
+    let bad_key = host
+        .press_key("Meta+Q")
+        .await
+        .expect_err("怪键名不该发出去");
     assert!(matches!(&bad_key, InteractError::Target(m) if m.contains("Enter")));
 }
 
@@ -644,7 +702,9 @@ async fn 扩展交互在真实页面成立() {
     host.navigate(page).await.expect("导航");
 
     // 点触发 confirm 的按钮:不该卡住，且页面拿到了 accept（true）。
-    host.click(Target::Selector("#ask".into())).await.expect("点击带 confirm 的按钮");
+    host.click(Target::Selector("#ask".into()))
+        .await
+        .expect("点击带 confirm 的按钮");
     wait_console(&host, "log: confirmed:true").await;
 
     // 下拉选择:设值并派发 change，onchange 回读确认。
@@ -659,8 +719,12 @@ async fn 扩展交互在真实页面成立() {
     // 组合键:聚焦输入框后按 Meta+a。断言的是"带 metaKey 的 a 事件送达了
     // 页面"——这才是工具的契约。至于全选这个**编辑命令**要不要执行，是
     // CEF 平台加速键的事（离屏渲染下合成按键未必触发），不归工具管。
-    host.click(Target::Selector("#box".into())).await.expect("聚焦输入框");
-    host.act(Action::KeyChord("Meta+a".into())).await.expect("组合键");
+    host.click(Target::Selector("#box".into()))
+        .await
+        .expect("聚焦输入框");
+    host.act(Action::KeyChord("Meta+a".into()))
+        .await
+        .expect("组合键");
     wait_console(&host, "log: chord:meta-a").await;
 
     // 标签管理:开新标签 → 列表里有两个 → 切回、关掉都不报错。
@@ -671,11 +735,17 @@ async fn 扩展交互在真实页面成立() {
     // 执行 JS:算个值、读 DOM，结果整形成文本回来。
     let sum = host.evaluate("1 + 41").await.expect("算术");
     assert_eq!(sum, "42");
-    let title_present = host.evaluate("typeof document.querySelector('#ask')").await.expect("查 DOM");
+    let title_present = host
+        .evaluate("typeof document.querySelector('#ask')")
+        .await
+        .expect("查 DOM");
     assert_eq!(title_present, "object", "#ask 是个元素");
 
     // 脚本抛异常:要拿到异常信息（Target 错误），不是"浏览器不可用"。
-    let boom = host.evaluate("throw new Error('boom')").await.expect_err("异常该冒出来");
+    let boom = host
+        .evaluate("throw new Error('boom')")
+        .await
+        .expect_err("异常该冒出来");
     assert!(
         matches!(&boom, riot_protocol::browser::InteractError::Target(m) if m.contains("boom")),
         "异常信息要给模型看：{boom:?}"
@@ -698,12 +768,18 @@ async fn 抓包在真实页面成立() {
     host.navigate(page).await.expect("导航");
 
     // 第一次 list 开启累积。之后刷新，让加载流量进桶。
-    let _ = host.network(NetQuery::List { filter: None }).await.expect("开抓包");
+    let _ = host
+        .network(NetQuery::List { filter: None })
+        .await
+        .expect("开抓包");
     host.reload().await.expect("刷新");
     // 给子请求一点时间落地。
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    let list = host.network(NetQuery::List { filter: None }).await.expect("列请求");
+    let list = host
+        .network(NetQuery::List { filter: None })
+        .await
+        .expect("列请求");
     assert!(list.contains('#'), "该列出至少一条请求：{list}");
 
     // 审计不报错，给出结论（data: 页多半缺各种安全头，或说没抓到主文档）。
@@ -722,12 +798,16 @@ async fn 拦截与重放在真实页面成立() {
     use riot_protocol::browser::{BrowserAccess as _, InterceptOp};
     let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("intercept"));
 
-    host.navigate("data:text/html;charset=utf-8,<body>拦截页</body>").await.expect("导航");
+    host.navigate("data:text/html;charset=utf-8,<body>拦截页</body>")
+        .await
+        .expect("导航");
 
     // 加一条拦截规则:URL 含 blocked 的请求一律阻断。
-    host.intercept(InterceptOp::Block { url_pattern: "blocked".into() })
-        .await
-        .expect("加拦截规则");
+    host.intercept(InterceptOp::Block {
+        url_pattern: "blocked".into(),
+    })
+    .await
+    .expect("加拦截规则");
 
     // 页面里 fetch 一个被拦的地址 + 一个不被拦的地址。被拦的应当 reject，
     // 不被拦的应当成功 —— 后者证明"不匹配的请求被正常放行"，没有卡死。
@@ -743,7 +823,10 @@ async fn 拦截与重放在真实页面成立() {
         )
         .await
         .expect("探测 fetch");
-    assert_eq!(probe, "rejected,ok", "被拦的失败、放行的成功且不卡死：{probe}");
+    assert_eq!(
+        probe, "rejected,ok",
+        "被拦的失败、放行的成功且不卡死：{probe}"
+    );
 
     // 清空拦截:之后被拦的地址也能发出去（这里只验证 clear 不报错）。
     host.intercept(InterceptOp::Clear).await.expect("清空拦截");
@@ -754,7 +837,10 @@ async fn 拦截与重放在真实页面成立() {
         .replay("data:text/plain,hi", "GET", serde_json::Value::Null, None)
         .await
         .expect("重放");
-    assert!(replayed.contains("状态") || replayed.contains("重放失败"), "{replayed}");
+    assert!(
+        replayed.contains("状态") || replayed.contains("重放失败"),
+        "{replayed}"
+    );
 }
 
 /// Cookie 读取带安全属性:HttpOnly 的 cookie 也要能看到。
@@ -770,9 +856,14 @@ async fn 读cookie带安全属性() {
     // data: URL 设不了 cookie（opaque origin）—— 用页面脚本往一个真实的
     // http 源写不现实，这里退而验证"没有 cookie 时给的是明确的空说明"，
     // 以及命令本身在真实浏览器上不报错。真实站点的属性解析由单测覆盖。
-    host.navigate("data:text/html,<body>cookie 页</body>").await.expect("导航");
+    host.navigate("data:text/html,<body>cookie 页</body>")
+        .await
+        .expect("导航");
     let out = host.cookies().await.expect("读 cookie");
-    assert!(out.contains("没有 Cookie") || out.contains("="), "要么空、要么列出：{out}");
+    assert!(
+        out.contains("没有 Cookie") || out.contains("="),
+        "要么空、要么列出：{out}"
+    );
 }
 
 /// 探针:密钥扫描、接口发现在真实页面上跑通并给出结果。
@@ -798,10 +889,19 @@ async fn 被动探针在真实页面成立() {
     host.navigate(page).await.expect("导航");
 
     // 密钥扫描:抓到 AWS key，且打码（原值不出现）。
-    let secrets = host.evaluate("document.documentElement.outerHTML").await.expect("取 HTML");
+    let secrets = host
+        .evaluate("document.documentElement.outerHTML")
+        .await
+        .expect("取 HTML");
     let found = riot_tools::tools::pentest::scan_secrets(&secrets);
-    assert!(found.iter().any(|f| f.starts_with("AWS Access Key")), "该扫到 key：{found:?}");
-    assert!(!found.iter().any(|f| f.contains("AKIAIOSFODNN7EXAMPLE")), "要打码");
+    assert!(
+        found.iter().any(|f| f.starts_with("AWS Access Key")),
+        "该扫到 key：{found:?}"
+    );
+    assert!(
+        !found.iter().any(|f| f.contains("AKIAIOSFODNN7EXAMPLE")),
+        "要打码"
+    );
 
     // 接口发现:页面里的表单 action 能被 JS 枚举到。
     let forms = host
@@ -838,7 +938,10 @@ async fn 文件上传在真实页面成立() {
 
     let want = format!(
         "log: uploaded:{}",
-        std::path::Path::new(&path).file_name().unwrap().to_string_lossy()
+        std::path::Path::new(&path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
     );
     wait_console(&host, &want).await;
 }
@@ -904,7 +1007,10 @@ async fn screencast_在离屏模式下能出帧() {
         .expect("起浏览器");
     wait_for(&mut rx, 30, "ready", |e| matches!(e, Event::Ready)).await;
     let id = open_tab(&browser, &mut rx).await;
-    let tab = Tab { browser: &browser, id };
+    let tab = Tab {
+        browser: &browser,
+        id,
+    };
 
     ops::navigate(
         tab,
@@ -913,18 +1019,17 @@ async fn screencast_在离屏模式下能出帧() {
     .await
     .expect("导航");
 
-    tab
-        .cdp(
-            "Page.startScreencast",
-            serde_json::json!({
-                "format": "jpeg",
-                "quality": 60,
-                "maxWidth": 1280,
-                "maxHeight": 800,
-            }),
-        )
-        .await
-        .expect("开 screencast");
+    tab.cdp(
+        "Page.startScreencast",
+        serde_json::json!({
+            "format": "jpeg",
+            "quality": 60,
+            "maxWidth": 1280,
+            "maxHeight": 800,
+        }),
+    )
+    .await
+    .expect("开 screencast");
 
     // screencastFrame 是不带 id 的 CDP 事件，走事件流。
     let ev = wait_for(&mut rx, 30, "screencast 帧", |e| {
@@ -941,7 +1046,11 @@ async fn screencast_在离屏模式下能出帧() {
 
     // JPEG 的 base64 一定以 /9j/ 开头（FF D8 FF）。验一下确实是图，
     // 而不是某个恰好非空的字符串。
-    assert!(data.starts_with("/9j/"), "应当是 JPEG：{}", &data[..20.min(data.len())]);
+    assert!(
+        data.starts_with("/9j/"),
+        "应当是 JPEG：{}",
+        &data[..20.min(data.len())]
+    );
 
     browser.shutdown().await;
 }
@@ -1021,7 +1130,14 @@ async fn 改视口之后帧尺寸跟着变() {
     // `[约束]` 尺寸必须真的传到 CEF。只改本地变量而没调 was_resized 的话，
     // 帧会一直是旧尺寸，面板上表现为"拖动没反应"。
     wait_for(&mut rx, 30, "640x480 的帧", |e| {
-        matches!(e, Event::Frame { width: 640, height: 480, .. })
+        matches!(
+            e,
+            Event::Frame {
+                width: 640,
+                height: 480,
+                ..
+            }
+        )
     })
     .await;
 
@@ -1180,7 +1296,10 @@ async fn 画面尺寸跟着面板走() {
     let mut seen = Vec::new();
     loop {
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-        assert!(!left.is_zero(), "20 秒内没等到 720x900 的帧，收到过：{seen:?}");
+        assert!(
+            !left.is_zero(),
+            "20 秒内没等到 720x900 的帧，收到过：{seen:?}"
+        );
         let Ok(Some(f)) = tokio::time::timeout(left, rx.recv()).await else {
             panic!("等帧失败，收到过：{seen:?}");
         };
@@ -1251,9 +1370,7 @@ async fn 帧按屏幕的像素密度出() {
             .decode(&f.data)
             .expect("帧是 base64");
         let real = jpeg_size(&bytes);
-        if (f.width, f.height) == (W, H)
-            && real == ((W * SCALE) as u16, (H * SCALE) as u16)
-        {
+        if (f.width, f.height) == (W, H) && real == ((W * SCALE) as u16, (H * SCALE) as u16) {
             break;
         }
         let pair = ((f.width, f.height), real);
@@ -1375,8 +1492,8 @@ async fn 输入法的组字和确认都落进页面() {
         return;
     };
 
-    use riot_protocol::browser::BrowserAccess as _;
     use riot_host_lib::browser::access::Input;
+    use riot_protocol::browser::BrowserAccess as _;
     let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("ime"));
 
     // 输入框把自己的值打进 console —— 这一层唯一现成的"页面内部状态"窗口。
@@ -1467,11 +1584,16 @@ async fn 整页截图不平铺视口() {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(shot)
         .expect("合法 base64");
-    let img = image::load_from_memory(&bytes).expect("解得开 JPEG").to_rgb8();
+    let img = image::load_from_memory(&bytes)
+        .expect("解得开 JPEG")
+        .to_rgb8();
     let (w, h) = img.dimensions();
 
     // 高度 = 页面内容高度（CSS 像素、1× 出图）。矮一截说明整页路径没走到。
-    assert!((4700..=4900).contains(&h), "整页截图高度该约 4800，实际 {w}×{h}");
+    assert!(
+        (4700..=4900).contains(&h),
+        "整页截图高度该约 4800，实际 {w}×{h}"
+    );
 
     // 每段中点采一个像素。JPEG 有损，±32 足够分辨这四种颜色。
     let near = |got: image::Rgb<u8>, want: [u8; 3]| {
@@ -1588,7 +1710,11 @@ async fn 多个标签页各自独立() {
     let a = s.tabs.iter().find(|t| t.id == first).expect("第一页还在");
     let b = s.tabs.iter().find(|t| t.id == second).expect("第二页在");
     // 这两条断言是整条用例的核心:两个标签页停在**各自**的地址上。
-    assert!(a.url.contains("AAA"), "第一页不该被第二页的导航带走：{}", a.url);
+    assert!(
+        a.url.contains("AAA"),
+        "第一页不该被第二页的导航带走：{}",
+        a.url
+    );
     assert!(b.url.contains("BBB"), "第二页应当在 B：{}", b.url);
 
     // 切回第一页，工具栏和模型的工具都要跟着换过去。
@@ -1615,7 +1741,9 @@ async fn 多个标签页各自独立() {
 
     // 但浏览器进程还活着:模型的工具下次用到时应当现开一页，而不是报
     // "浏览器不可用"。用户关掉面板不等于关掉模型的浏览器。
-    host.navigate(&page("CCC")).await.expect("关完之后模型还能用");
+    host.navigate(&page("CCC"))
+        .await
+        .expect("关完之后模型还能用");
     let s = host.state().await.expect("取状态");
     assert_eq!(s.tabs.len(), 1, "该现开一页");
     assert!(s.active_tab().url.contains("CCC"));
@@ -1649,7 +1777,10 @@ async fn 弹窗被拦成事件而母页面还能用() {
         .expect("起浏览器");
     wait_for(&mut rx, 30, "ready", |e| matches!(e, Event::Ready)).await;
     let id = open_tab(&browser, &mut rx).await;
-    let tab = Tab { browser: &browser, id };
+    let tab = Tab {
+        browser: &browser,
+        id,
+    };
 
     // `userGesture` 不能省：没有手势的 `window.open` 会被 Chromium 自己的
     // 弹窗拦截挡在 CEF 之前，那样这条用例测的就是拦截器而不是我们的处理。
@@ -1667,7 +1798,12 @@ async fn 弹窗被拦成事件而母页面还能用() {
         matches!(e, Event::PopupRequested { .. })
     })
     .await;
-    let Event::PopupRequested { source, url, background } = ev else {
+    let Event::PopupRequested {
+        source,
+        url,
+        background,
+    } = ev
+    else {
         unreachable!("上面的谓词只放 PopupRequested 过")
     };
     assert_eq!(source, id, "要报出是哪一页发起的 —— 新页要排在它右边");
@@ -1698,11 +1834,17 @@ async fn 弹窗被拦成事件而母页面还能用() {
     // 永远比不上（同一个坑写在 `BLANK_PAGE` 上）。
     let page = "data:text/html;charset=utf-8,<h1>ALIVE</h1>";
     browser
-        .send(&Command::Navigate { tab: id, url: page.into() })
+        .send(&Command::Navigate {
+            tab: id,
+            url: page.into(),
+        })
         .expect("发导航");
-    wait_for(&mut rx, 20, "母页面加载完", |e| {
-        matches!(e, Event::LoadEnd { tab, url, .. } if *tab == id && url.contains("ALIVE"))
-    })
+    wait_for(
+        &mut rx,
+        20,
+        "母页面加载完",
+        |e| matches!(e, Event::LoadEnd { tab, url, .. } if *tab == id && url.contains("ALIVE")),
+    )
     .await;
 }
 
@@ -1731,7 +1873,9 @@ async fn 点外链开在新标签页里() {
     host.navigate(page).await.expect("导航到 A");
     let first = host.state().await.expect("取状态").active;
 
-    host.click(Target::Text("去别处".into())).await.expect("点链接");
+    host.click(Target::Text("去别处".into()))
+        .await
+        .expect("点链接");
 
     // 开页是异步的（子进程报事件 → 这一层开页 → 等它就绪），点击返回时
     // 通常还没开完。
@@ -2012,9 +2156,7 @@ async fn 工具栏能在历史里前进后退() {
     use riot_protocol::browser::BrowserAccess as _;
     let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("history"));
 
-    let page = |tag: &str| {
-        format!("data:text/html;charset=utf-8,<body><h1>{tag}</h1></body>")
-    };
+    let page = |tag: &str| format!("data:text/html;charset=utf-8,<body><h1>{tag}</h1></body>");
     host.navigate(&page("AAA")).await.expect("导航到 A");
     host.navigate(&page("BBB")).await.expect("导航到 B");
 
@@ -2024,7 +2166,11 @@ async fn 工具栏能在历史里前进后退() {
     assert!(!here.can_forward, "最新的一条前面没有东西");
 
     let back = host.go(-1).await.expect("后退");
-    assert!(back.url.contains("AAA"), "回来的状态应当指向 A：{}", back.url);
+    assert!(
+        back.url.contains("AAA"),
+        "回来的状态应当指向 A：{}",
+        back.url
+    );
     assert!(back.can_forward, "退回来之后前进键该亮");
     wait_url(&host, "AAA").await;
 
@@ -2035,7 +2181,11 @@ async fn 工具栏能在历史里前进后退() {
     // 到头了再按不该出事。按钮那时候是灰的，这里兜的是状态还没同步过来的
     // 那一瞬间 —— 越界没拦住的话会跳到一个别的条目上去。
     let past_end = host.go(1).await.expect("前进到头");
-    assert!(past_end.url.contains("BBB"), "越界应当原地不动：{}", past_end.url);
+    assert!(
+        past_end.url.contains("BBB"),
+        "越界应当原地不动：{}",
+        past_end.url
+    );
 
     // 刷新只验它不报错。CDP 的方法名写错会在这里翻出来（见
     // `cdp_的错误会翻出来而不是当成成功`），而"页面确实重新加载了一遍"

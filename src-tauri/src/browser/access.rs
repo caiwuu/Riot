@@ -22,7 +22,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use riot_protocol::browser::{
     Action, BLANK_PAGE, BrowserAccess, BrowserUnavailable, Command, Event, InteractError,
-    InterceptOp, MarkedView, Nav, NetQuery, Target, TabId, WaitCondition,
+    InterceptOp, MarkedView, Nav, NetQuery, TabId, Target, WaitCondition,
 };
 use tokio::sync::{Mutex, mpsc, oneshot};
 
@@ -74,35 +74,67 @@ pub struct NavState {
 /// 整条命令在 Tauri 解析参数的阶段就失败了。失败的现象是"滚轮转了没反应"：
 /// 前端拿到的是一个 reject 的 Promise，宿主侧连日志都没有。
 #[derive(Debug, Clone, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Input {
     /// 按下并抬起。合成一次完整点击，而不是让前端发两条 —— 中间要是
     /// 丢了一条，页面会停在"按住"状态，后续所有交互都不对。
-    Click { x: f64, y: f64, button: String },
+    Click {
+        x: f64,
+        y: f64,
+        button: String,
+    },
     /// 单独的按下 / 抬起。面板转发原生 mousedown/mouseup（而不只是合成的
     /// click），页面里才拖得动滑块、选得中文字。`click_count` 让双击选词、
     /// 三击选段成立。丢一条会停在按住态，但那是真实鼠标本来就有的风险，
     /// 换来的是完整的指针语义。
-    Down { x: f64, y: f64, button: String, click_count: i64 },
-    Up { x: f64, y: f64, button: String, click_count: i64 },
-    Move { x: f64, y: f64 },
+    Down {
+        x: f64,
+        y: f64,
+        button: String,
+        click_count: i64,
+    },
+    Up {
+        x: f64,
+        y: f64,
+        button: String,
+        click_count: i64,
+    },
+    Move {
+        x: f64,
+        y: f64,
+    },
     /// 滚轮。两个轴都要带。
     ///
     /// `[约束]` `delta_x` 不能丢。页面比视口宽是常态（面板通常只有半个
     /// 窗口宽，而多数站点的布局有个上千像素的最小宽度），横向滚不动的话
     /// 右边那一截内容永远看不到 —— 而且看起来像是页面被裁掉了，不像是
     /// 输入没送到。
-    Scroll { x: f64, y: f64, delta_x: f64, delta_y: f64 },
+    Scroll {
+        x: f64,
+        y: f64,
+        delta_x: f64,
+        delta_y: f64,
+    },
     /// 输入文本。走 insertText 而不是逐字符 keyDown ——
     /// 中文、emoji 这些没有对应键码，逐字符发根本发不出来。
-    Text { text: String },
+    Text {
+        text: String,
+    },
     /// 输入法正在组字：`text` 是还没上屏的临时内容，空串表示取消。
     ///
     /// 只发最终结果也能用，但页面在整个打字过程中一个字都不显示 ——
     /// 带自动补全的搜索框会一直是空的，直到你按下回车。
-    Compose { text: String },
+    Compose {
+        text: String,
+    },
     /// 功能键（Enter、Backspace、方向键之类）。
-    Key { key: String },
+    Key {
+        key: String,
+    },
 }
 
 /// 标签栏上的一页。
@@ -158,7 +190,11 @@ struct Tabs {
 
 impl Default for Tabs {
     fn default() -> Self {
-        Self { next: 1, order: Vec::new(), active: 0 }
+        Self {
+            next: 1,
+            order: Vec::new(),
+            active: 0,
+        }
     }
 }
 
@@ -354,7 +390,12 @@ impl HostBrowser {
             tabs.order.remove(at);
             if tabs.active == tab {
                 // 顶掉右边那个，没有右边就取左边 —— 和常见浏览器一致。
-                tabs.active = tabs.order.get(at).or_else(|| tabs.order.last()).copied().unwrap_or(0);
+                tabs.active = tabs
+                    .order
+                    .get(at)
+                    .or_else(|| tabs.order.last())
+                    .copied()
+                    .unwrap_or(0);
             }
             tabs.active
         };
@@ -454,7 +495,10 @@ impl HostBrowser {
         // 走 `Command::Navigate` 而不是 `ops::navigate`:后者要等
         // `readyState` 到 complete（最多 20 秒）。这里没人在等结果 ——
         // 用户要的是"标签页立刻出现、然后自己转起来"，和真实浏览器一样。
-        if let Err(e) = b.send(&Command::Navigate { tab: id, url: url.to_owned() }) {
+        if let Err(e) = b.send(&Command::Navigate {
+            tab: id,
+            url: url.to_owned(),
+        }) {
             tracing::warn!(error = %e, tab = id, url, "新标签页导航失败");
         }
     }
@@ -501,11 +545,17 @@ impl HostBrowser {
                 Ok((entries, index)) => info_at(id, &entries, index),
                 // 问不到就给个只有号的占位。页面正在换文档时会这样，
                 // 而让整条查询失败会连带把标签栏清空。
-                Err(_) => TabInfo { id, ..TabInfo::default() },
+                Err(_) => TabInfo {
+                    id,
+                    ..TabInfo::default()
+                },
             };
             infos.push(info);
         }
-        Ok(PanelState { tabs: infos, active })
+        Ok(PanelState {
+            tabs: infos,
+            active,
+        })
     }
 
     /// 真的开一个标签页:发命令、等它就绪、装 console 钩子、切过去。
@@ -573,7 +623,12 @@ impl HostBrowser {
                 tabs.active = id;
             }
             if let Some((width, height, scale)) = *self.view.lock().await {
-                let _ = b.send(&Command::Resize { tab: id, width, height, scale });
+                let _ = b.send(&Command::Resize {
+                    tab: id,
+                    width,
+                    height,
+                    scale,
+                });
             }
             show
         };
@@ -599,10 +654,15 @@ impl HostBrowser {
             && old != tab
         {
             // 停不掉也继续。旧页可能已经关了，而那时候"停"本来就没意义。
-            let _ = b.cdp(old, "Page.stopScreencast", serde_json::json!({})).await;
+            let _ = b
+                .cdp(old, "Page.stopScreencast", serde_json::json!({}))
+                .await;
         }
         *cur = Some(tab);
-        if let Err(e) = b.cdp(tab, "Page.startScreencast", screencast_params()).await {
+        if let Err(e) = b
+            .cdp(tab, "Page.startScreencast", screencast_params())
+            .await
+        {
             tracing::warn!(error = %e, tab, "开 screencast 失败");
         }
     }
@@ -669,8 +729,13 @@ impl HostBrowser {
         let tabs = self.tabs.lock().await;
         *self.view.lock().await = Some((width, height, scale));
         for &tab in &tabs.order {
-            b.send(&Command::Resize { tab, width, height, scale })
-                .map_err(|e| BrowserUnavailable(e.to_string()))?;
+            b.send(&Command::Resize {
+                tab,
+                width,
+                height,
+                scale,
+            })
+            .map_err(|e| BrowserUnavailable(e.to_string()))?;
         }
         Ok(())
     }
@@ -687,23 +752,39 @@ impl HostBrowser {
         let (b, tab) = self.active().await?;
         let calls: Vec<(&str, serde_json::Value)> = match input {
             Input::Click { x, y, button } => vec![
-                ("Input.dispatchMouseEvent", serde_json::json!({
-                    "type": "mousePressed", "x": x, "y": y,
-                    "button": button, "clickCount": 1,
-                })),
-                ("Input.dispatchMouseEvent", serde_json::json!({
-                    "type": "mouseReleased", "x": x, "y": y,
-                    "button": button, "clickCount": 1,
-                })),
+                (
+                    "Input.dispatchMouseEvent",
+                    serde_json::json!({
+                        "type": "mousePressed", "x": x, "y": y,
+                        "button": button, "clickCount": 1,
+                    }),
+                ),
+                (
+                    "Input.dispatchMouseEvent",
+                    serde_json::json!({
+                        "type": "mouseReleased", "x": x, "y": y,
+                        "button": button, "clickCount": 1,
+                    }),
+                ),
             ],
-            Input::Down { x, y, button, click_count } => vec![(
+            Input::Down {
+                x,
+                y,
+                button,
+                click_count,
+            } => vec![(
                 "Input.dispatchMouseEvent",
                 serde_json::json!({
                     "type": "mousePressed", "x": x, "y": y,
                     "button": button, "clickCount": click_count,
                 }),
             )],
-            Input::Up { x, y, button, click_count } => vec![(
+            Input::Up {
+                x,
+                y,
+                button,
+                click_count,
+            } => vec![(
                 "Input.dispatchMouseEvent",
                 serde_json::json!({
                     "type": "mouseReleased", "x": x, "y": y,
@@ -714,7 +795,12 @@ impl HostBrowser {
                 "Input.dispatchMouseEvent",
                 serde_json::json!({ "type": "mouseMoved", "x": x, "y": y }),
             )],
-            Input::Scroll { x, y, delta_x, delta_y } => vec![(
+            Input::Scroll {
+                x,
+                y,
+                delta_x,
+                delta_y,
+            } => vec![(
                 "Input.dispatchMouseEvent",
                 serde_json::json!({
                     "type": "mouseWheel", "x": x, "y": y,
@@ -723,10 +809,7 @@ impl HostBrowser {
             )],
             // insertText 走的是 ImeCommitText，所以它同时也是"确认候选"——
             // 组字进行中发这条，临时内容会被最终结果替掉，不会两份都留下。
-            Input::Text { text } => vec![(
-                "Input.insertText",
-                serde_json::json!({ "text": text }),
-            )],
+            Input::Text { text } => vec![("Input.insertText", serde_json::json!({ "text": text }))],
             Input::Compose { text } => {
                 // `[约束]` 取消组字要把选区传 -1。传 0 的话 Chromium 认为
                 // 组字还在继续，页面里会留下一段带下划线、删不掉的空文本，
@@ -759,9 +842,12 @@ impl HostBrowser {
                 }
                 vec![
                     ("Input.dispatchKeyEvent", down),
-                    ("Input.dispatchKeyEvent", serde_json::json!({
-                        "type": "keyUp", "key": key, "windowsVirtualKeyCode": code,
-                    })),
+                    (
+                        "Input.dispatchKeyEvent",
+                        serde_json::json!({
+                            "type": "keyUp", "key": key, "windowsVirtualKeyCode": code,
+                        }),
+                    ),
                 ]
             }
         };
@@ -831,7 +917,9 @@ impl HostBrowser {
         let Some(tab) = self.streaming.lock().await.take() else {
             return;
         };
-        let _ = b.cdp(tab, "Page.stopScreencast", serde_json::json!({})).await;
+        let _ = b
+            .cdp(tab, "Page.stopScreencast", serde_json::json!({}))
+            .await;
     }
 
     /// 活着的浏览器，`None` = 没起来，或者起过但已经不在了。
@@ -923,7 +1011,11 @@ impl HostBrowser {
                     }
                     // 子进程已经把 CEF 的弹窗拦下来了，这里把它变成一个真的
                     // 标签页 —— 见 [`Event::PopupRequested`]。
-                    Event::PopupRequested { source, url, background } => {
+                    Event::PopupRequested {
+                        source,
+                        url,
+                        background,
+                    } => {
                         if let Some(h) = host.upgrade() {
                             tokio::spawn(async move {
                                 h.open_popup(source, &url, background).await;
@@ -1008,8 +1100,9 @@ impl BrowserAccess for HostBrowser {
 
         // 视口尺寸（CSS 像素）。没 resize 过就不做视口过滤 —— 宁可多画几个框，
         // 也不因为不知道视口大小而一个都不画。
-        let (vw, vh) = (*self.view.lock().await)
-            .map_or((f64::MAX, f64::MAX), |(w, h, _)| (f64::from(w), f64::from(h)));
+        let (vw, vh) = (*self.view.lock().await).map_or((f64::MAX, f64::MAX), |(w, h, _)| {
+            (f64::from(w), f64::from(h))
+        });
 
         // 只框可交互、有几何、在视口内的；按编号排序，让框的出现顺序和清单一致。
         let mut marks: Vec<(u32, ops::Rect)> = refs
@@ -1026,7 +1119,10 @@ impl BrowserAccess for HostBrowser {
         let screenshot = ops::screenshot_marked(tab, &marks)
             .await
             .map_err(|e| BrowserUnavailable(e.to_string()))?;
-        Ok(MarkedView { listing, screenshot })
+        Ok(MarkedView {
+            listing,
+            screenshot,
+        })
     }
 
     async fn console(&self) -> Result<Vec<String>, BrowserUnavailable> {
@@ -1054,7 +1150,11 @@ impl BrowserAccess for HostBrowser {
         ops::click_at(tab, x, y).await.map_err(stale_target)?;
         ops::settle(tab).await;
 
-        Ok(after_action(format!("已点击 {label}"), &before, &ops::url_of(tab).await))
+        Ok(after_action(
+            format!("已点击 {label}"),
+            &before,
+            &ops::url_of(tab).await,
+        ))
     }
 
     async fn type_text(
@@ -1088,7 +1188,11 @@ impl BrowserAccess for HostBrowser {
             let before = ops::url_of(tab).await;
             ops::press(tab, "Enter").await.map_err(stale_target)?;
             ops::settle(tab).await;
-            msg = after_action(format!("{msg} 并按了回车"), &before, &ops::url_of(tab).await);
+            msg = after_action(
+                format!("{msg} 并按了回车"),
+                &before,
+                &ops::url_of(tab).await,
+            );
         }
         Ok(msg)
     }
@@ -1109,7 +1213,11 @@ impl BrowserAccess for HostBrowser {
         let before = ops::url_of(tab).await;
         ops::press(tab, key).await.map_err(stale_target)?;
         ops::settle(tab).await;
-        Ok(after_action(format!("已按 {key}"), &before, &ops::url_of(tab).await))
+        Ok(after_action(
+            format!("已按 {key}"),
+            &before,
+            &ops::url_of(tab).await,
+        ))
     }
 
     async fn scroll(&self, delta_y: f64) -> Result<String, InteractError> {
@@ -1151,7 +1259,10 @@ impl BrowserAccess for HostBrowser {
                 format!("元素 `{s}` 消失"),
             ),
             WaitCondition::Text(t) => (
-                format!("!!(document.body && document.body.innerText.includes({}))", js_str(t)),
+                format!(
+                    "!!(document.body && document.body.innerText.includes({}))",
+                    js_str(t)
+                ),
                 format!("文本 “{t}” 出现"),
             ),
             WaitCondition::UrlContains(u) => (
@@ -1188,9 +1299,15 @@ impl BrowserAccess for HostBrowser {
                 let tab = Tab { browser: &b, id };
                 let before = ops::url_of(tab).await;
                 let (x, y) = ops::locate(tab, &oid).await.map_err(stale_target)?;
-                ops::double_click_at(tab, x, y).await.map_err(stale_target)?;
+                ops::double_click_at(tab, x, y)
+                    .await
+                    .map_err(stale_target)?;
                 ops::settle(tab).await;
-                Ok(after_action(format!("已双击 {label}"), &before, &ops::url_of(tab).await))
+                Ok(after_action(
+                    format!("已双击 {label}"),
+                    &before,
+                    &ops::url_of(tab).await,
+                ))
             }
             Action::RightClick(t) => {
                 let (b, id, oid, label) = self.resolve(t).await?;
@@ -1225,7 +1342,11 @@ impl BrowserAccess for HostBrowser {
                 let before = ops::url_of(tab).await;
                 ops::key_chord(tab, &chord).await.map_err(stale_target)?;
                 ops::settle(tab).await;
-                Ok(after_action(format!("已按 {chord}"), &before, &ops::url_of(tab).await))
+                Ok(after_action(
+                    format!("已按 {chord}"),
+                    &before,
+                    &ops::url_of(tab).await,
+                ))
             }
         }
     }
@@ -1251,7 +1372,11 @@ impl BrowserAccess for HostBrowser {
                 }
                 let mut out = String::from("标签页:\n");
                 for t in &st.tabs {
-                    let active = if t.id == st.active { "（活动）" } else { "" };
+                    let active = if t.id == st.active {
+                        "（活动）"
+                    } else {
+                        ""
+                    };
                     out.push_str(&format!("[{}] {}{active}\n", t.id, tab_line(t)));
                 }
                 Ok(out)
@@ -1314,9 +1439,7 @@ impl BrowserAccess for HostBrowser {
             .map_err(InteractError::Unavailable)?;
         let events = self.tap_read("Network").await;
         match query {
-            NetQuery::List { filter } => {
-                Ok(super::netlog::list(&events, filter.as_deref()))
-            }
+            NetQuery::List { filter } => Ok(super::netlog::list(&events, filter.as_deref())),
             NetQuery::Detail { request_id } => {
                 let Some(headers) = super::netlog::detail_headers(&events, &request_id) else {
                     return Err(InteractError::Target(format!(
@@ -1325,7 +1448,9 @@ impl BrowserAccess for HostBrowser {
                 };
                 // 响应体要现取:getResponseBody 只在响应还留着时有效。
                 let (b, id) = self.active().await.map_err(InteractError::Unavailable)?;
-                let body = self.response_body(Tab { browser: &b, id }, &request_id).await;
+                let body = self
+                    .response_body(Tab { browser: &b, id }, &request_id)
+                    .await;
                 Ok(match body {
                     Some(text) => format!("{headers}\n\n响应体:\n{text}"),
                     None => format!("{headers}\n\n（响应体取不到:可能已释放，或是二进制/太大。）"),
@@ -1347,9 +1472,15 @@ impl BrowserAccess for HostBrowser {
         body: Option<String>,
     ) -> Result<String, InteractError> {
         let (b, id) = self.active().await.map_err(InteractError::Unavailable)?;
-        ops::replay(Tab { browser: &b, id }, url, method, &headers, body.as_deref())
-            .await
-            .map_err(eval_err)
+        ops::replay(
+            Tab { browser: &b, id },
+            url,
+            method,
+            &headers,
+            body.as_deref(),
+        )
+        .await
+        .map_err(eval_err)
     }
 
     async fn intercept(&self, op: InterceptOp) -> Result<String, InteractError> {
@@ -1382,18 +1513,30 @@ impl BrowserAccess for HostBrowser {
                 Ok("已清空拦截规则。".to_owned())
             }
             InterceptOp::Block { url_pattern } => {
-                self.add_rule(id, tab, InterceptRule {
-                    needle: url_pattern.clone(),
-                    action: InterceptAction::Block,
-                })
+                self.add_rule(
+                    id,
+                    tab,
+                    InterceptRule {
+                        needle: url_pattern.clone(),
+                        action: InterceptAction::Block,
+                    },
+                )
                 .await?;
                 Ok(format!("已加规则:阻断 URL 含 `{url_pattern}` 的请求。"))
             }
-            InterceptOp::Fulfill { url_pattern, status, body } => {
-                self.add_rule(id, tab, InterceptRule {
-                    needle: url_pattern.clone(),
-                    action: InterceptAction::Fulfill { status, body },
-                })
+            InterceptOp::Fulfill {
+                url_pattern,
+                status,
+                body,
+            } => {
+                self.add_rule(
+                    id,
+                    tab,
+                    InterceptRule {
+                        needle: url_pattern.clone(),
+                        action: InterceptAction::Fulfill { status, body },
+                    },
+                )
                 .await?;
                 Ok(format!(
                     "已加规则:对 URL 含 `{url_pattern}` 的请求伪造 {status} 响应。"
@@ -1595,9 +1738,12 @@ impl HostBrowser {
             // 空 patterns = 拦截所有请求。事件循环对不匹配规则的一律
             // continue，所以"拦所有再逐条放行"是安全的，也是唯一能覆盖
             // 任意 URL 的开法。
-            tab.cdp("Fetch.enable", serde_json::json!({ "patterns": [{ "urlPattern": "*" }] }))
-                .await
-                .map_err(|e| InteractError::Unavailable(BrowserUnavailable(e.to_string())))?;
+            tab.cdp(
+                "Fetch.enable",
+                serde_json::json!({ "patterns": [{ "urlPattern": "*" }] }),
+            )
+            .await
+            .map_err(|e| InteractError::Unavailable(BrowserUnavailable(e.to_string())))?;
         }
         Ok(())
     }
@@ -1731,7 +1877,10 @@ fn info_at(id: TabId, entries: &[serde_json::Value], index: i64) -> TabInfo {
     // 下标落在表外说明历史还没建立起来。这时候除了号什么都不给，
     // 而不是让 can_forward 去看第 0 条 —— 那会让一个空页面的前进键亮着。
     let Some(current) = at(index) else {
-        return TabInfo { id, ..TabInfo::default() };
+        return TabInfo {
+            id,
+            ..TabInfo::default()
+        };
     };
     let url = displayable(current["url"].as_str().unwrap_or_default());
     TabInfo {
@@ -1779,7 +1928,10 @@ async fn handle_cdp_event(
     tab: TabId,
     payload: &serde_json::Value,
 ) {
-    let method = payload.get("method").and_then(|m| m.as_str()).unwrap_or_default();
+    let method = payload
+        .get("method")
+        .and_then(|m| m.as_str())
+        .unwrap_or_default();
 
     // `[约束]` JS 对话框必须无条件、立即放行。alert/confirm/beforeunload 会
     // **阻塞页面**直到有人应答 —— 没人应答的话，紧跟着的每一条 CDP 都超时，
@@ -1992,7 +2144,13 @@ mod tests {
             "kind": "scroll", "x": 1.0, "y": 2.0, "deltaX": 40.0, "deltaY": -120.0,
         }))
         .expect("解析");
-        let Input::Scroll { x, y, delta_x, delta_y } = input else {
+        let Input::Scroll {
+            x,
+            y,
+            delta_x,
+            delta_y,
+        } = input
+        else {
             panic!("应当是 Scroll");
         };
         assert_eq!((x, y, delta_x, delta_y), (1.0, 2.0, 40.0, -120.0));
@@ -2025,7 +2183,10 @@ mod tests {
     async fn 崩溃清理丢掉所有标签页号() {
         let host = 用过的();
         *host.streaming.lock().await = Some(2);
-        host.taps.lock().await.insert(1, crate::browser::taps::EventTaps::default());
+        host.taps
+            .lock()
+            .await
+            .insert(1, crate::browser::taps::EventTaps::default());
         host.intercept.lock().await.insert(1, Vec::new());
         *host.snap_refs.lock().await = Some((1, HashMap::new()));
 
@@ -2033,7 +2194,10 @@ mod tests {
 
         {
             let tabs = host.tabs.lock().await;
-            assert!(tabs.order.is_empty(), "幻影标签页会让面板上每一下点击都静默失败");
+            assert!(
+                tabs.order.is_empty(),
+                "幻影标签页会让面板上每一下点击都静默失败"
+            );
             assert_eq!(tabs.active, 0, "0 不是合法的号，正是「什么都没打开」");
         }
         assert!(host.streaming.lock().await.is_none());
@@ -2129,7 +2293,19 @@ mod tests {
     fn 没有历史时工具栏整个是空的() {
         // currentIndex 在浏览器刚起来、还没有任何文档时会是 -1。
         // 那时候拿它去索引会 panic，或者（更隐蔽）折回表尾拿到最后一条。
-        assert_eq!(info_at(1, &[], -1), TabInfo { id: 1, ..TabInfo::default() });
-        assert_eq!(info_at(1, &[json!({ "url": "x" })], -1), TabInfo { id: 1, ..TabInfo::default() });
+        assert_eq!(
+            info_at(1, &[], -1),
+            TabInfo {
+                id: 1,
+                ..TabInfo::default()
+            }
+        );
+        assert_eq!(
+            info_at(1, &[json!({ "url": "x" })], -1),
+            TabInfo {
+                id: 1,
+                ..TabInfo::default()
+            }
+        );
     }
 }

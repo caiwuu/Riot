@@ -87,7 +87,9 @@ fn text_of(o: &ToolOutcome) -> String {
             riot_protocol::message::ToolResultContent::Text { text } => text.clone(),
             other => panic!("非文本结果：{other:?}"),
         },
-        ToolOutcome::Failed { error_for_model, .. } => error_for_model.clone(),
+        ToolOutcome::Failed {
+            error_for_model, ..
+        } => error_for_model.clone(),
         ToolOutcome::Cancelled => "<cancelled>".into(),
     }
 }
@@ -228,6 +230,10 @@ async fn 结果过多时截断并说明() {
 #[tokio::test]
 async fn head_limit_限制条数() {
     let h = harness(&["a.rs", "b.rs", "c.rs"]);
-    let o = glob(&h, serde_json::json!({ "pattern": "**/*.rs", "head_limit": 2 })).await;
+    let o = glob(
+        &h,
+        serde_json::json!({ "pattern": "**/*.rs", "head_limit": 2 }),
+    )
+    .await;
     assert_eq!(names(&text_of(&o), &h.ctx.cwd).len(), 2);
 }

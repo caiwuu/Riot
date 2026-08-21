@@ -87,12 +87,16 @@ pub enum WireMessage {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WirePart {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     /// `url` 用 data URL 形式:`data:image/jpeg;base64,...`。
     ///
     /// 不传外链是刻意的:截图是本地产物，没有可访问的 URL，而让服务方去拉
     /// 一个我们临时起的 HTTP 服务只会多一条会坏的链路。
-    ImageUrl { image_url: WireImageUrl },
+    ImageUrl {
+        image_url: WireImageUrl,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]

@@ -8,8 +8,8 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use riot_protocol::tool::{ProcessOutput, ProcessRunner, ProcessSpec};
 use process_wrap::tokio::{ChildWrapper, CommandWrap};
+use riot_protocol::tool::{ProcessOutput, ProcessRunner, ProcessSpec};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_util::sync::CancellationToken;
 
@@ -249,7 +249,9 @@ where
 }
 
 /// 读取任务 panic 属于 bug，但不该让整个会话崩掉。
-async fn join(h: tokio::task::JoinHandle<std::io::Result<(Vec<u8>, bool)>>) -> std::io::Result<(Vec<u8>, bool)> {
+async fn join(
+    h: tokio::task::JoinHandle<std::io::Result<(Vec<u8>, bool)>>,
+) -> std::io::Result<(Vec<u8>, bool)> {
     match h.await {
         Ok(r) => r,
         Err(e) => Err(std::io::Error::other(format!("读取输出的任务异常：{e}"))),

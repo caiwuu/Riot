@@ -3,12 +3,12 @@
 //! 重点在**报文形状**。这一层的错误不会崩，只会让服务端回一句
 //! `invalid request`，而那句话不告诉你是哪个字段错了。
 
+use pretty_assertions::assert_eq;
 use riot_protocol::id::{MessageId, ToolUseId};
 use riot_protocol::message::{
     AssistantContent, Message, MessageMeta, ToolResultContent, UserContent,
 };
 use riot_protocol::provider::{ProviderEvent, ProviderRequest, ThinkingConfig, ToolSpec};
-use pretty_assertions::assert_eq;
 
 use super::decode::StreamDecoder;
 use super::request::{RetryContext, build_request, convert_messages, wire_bytes};
@@ -72,7 +72,9 @@ fn 思考配置映射成_wire_参数() {
     assert_eq!(w.reasoning_effort, None, "Off 不发力度");
     assert_eq!(w.thinking, None, "Off 不发开关");
 
-    r.thinking = ThinkingConfig::Effort { level: ThinkingEffort::Low };
+    r.thinking = ThinkingConfig::Effort {
+        level: ThinkingEffort::Low,
+    };
     let w = build_request(&r, &[], &RetryContext::initial());
     assert_eq!(w.reasoning_effort, Some("low"));
     assert_eq!(w.thinking, None, "力度档不捎非标准的开关字段");
@@ -206,7 +208,10 @@ fn 工具结果里的图片跟在后面的_user_消息里() {
     // 都是服务方 400，而错误信息不会指向这里。
     let json = serde_json::to_value(&out[1]).expect("序列化");
     assert_eq!(json["role"], "user");
-    assert!(json["content"].is_array(), "content 必须是内容块数组：{json}");
+    assert!(
+        json["content"].is_array(),
+        "content 必须是内容块数组：{json}"
+    );
     assert_eq!(json["content"][1]["type"], "image_url");
 }
 
@@ -267,7 +272,9 @@ fn 系统提醒附件渲染成文本不是_json() {
             UserContent::Attachment(Attachment::SystemReminder {
                 text: "这是一条带外提示".into(),
             }),
-            UserContent::Text { text: "继续".into() },
+            UserContent::Text {
+                text: "继续".into(),
+            },
         ],
         meta: MessageMeta::default(),
     }];
@@ -310,7 +317,10 @@ fn 视觉兼容的图只发转述() {
         panic!("不发图片时应该是纯文本 user：{:?}", out[0]);
     };
     assert!(content.contains("两栏布局"), "转述要发给模型：{content}");
-    assert!(!content.contains("BASE64PAYLOAD"), "图片本体不能发出去：{content}");
+    assert!(
+        !content.contains("BASE64PAYLOAD"),
+        "图片本体不能发出去：{content}"
+    );
 }
 
 #[test]
@@ -406,10 +416,7 @@ fn 转述图的_base64_不计入估算() {
 
     let with_image = wire_bytes(&described(base64));
     let without = wire_bytes(&described(String::new()));
-    assert_eq!(
-        with_image, without,
-        "base64 不随请求发出去，就不能算进预算"
-    );
+    assert_eq!(with_image, without, "base64 不随请求发出去，就不能算进预算");
     assert!(with_image < 200, "只该剩下那句转述：{with_image} 字节");
 }
 
@@ -459,13 +466,17 @@ fn system_消息不计入估算() {
 fn 消息_id_和_usage_不计入估算() {
     let plain = wire_bytes(&[Message::Assistant {
         id: MessageId::from_raw("a1"),
-        content: vec![AssistantContent::Text { text: "答案".into() }],
+        content: vec![AssistantContent::Text {
+            text: "答案".into(),
+        }],
         usage: None,
         meta: MessageMeta::default(),
     }]);
     let bookkept = wire_bytes(&[Message::Assistant {
         id: MessageId::from_raw("msg_01JQRSTUVWXYZ0123456789"),
-        content: vec![AssistantContent::Text { text: "答案".into() }],
+        content: vec![AssistantContent::Text {
+            text: "答案".into(),
+        }],
         usage: Some(riot_protocol::message::Usage {
             input_tokens: 12345,
             output_tokens: 6789,
@@ -784,7 +795,9 @@ fn done_标记不产生内容() {
 fn 畸形帧被跳过而不是中断整条流() {
     // 一帧坏了就作废前面所有内容，比丢一帧糟糕得多
     let mut d = StreamDecoder::new();
-    d.push(&sse(r#"{"id":"c1","choices":[{"delta":{"content":"前"}}]}"#));
+    d.push(&sse(
+        r#"{"id":"c1","choices":[{"delta":{"content":"前"}}]}"#,
+    ));
     d.push(&sse("{这不是合法 JSON"));
     d.push(&sse(r#"{"choices":[{"delta":{"content":"后"}}]}"#));
 

@@ -172,9 +172,13 @@ fn describe(kind: SafetyKind, path: &Path) -> String {
         }
         SafetyKind::SshConfig => format!("这会读写 SSH 配置或密钥 {p}。"),
         SafetyKind::ShellRc => {
-            format!("这会修改 shell 启动脚本 {p}。改这个等于取得持久化执行权 —— 下次开终端就会运行。")
+            format!(
+                "这会修改 shell 启动脚本 {p}。改这个等于取得持久化执行权 —— 下次开终端就会运行。"
+            )
         }
-        SafetyKind::AgentConfig => format!("这会修改本应用自己的配置 {p}，可能影响后续的权限判断。"),
+        SafetyKind::AgentConfig => {
+            format!("这会修改本应用自己的配置 {p}，可能影响后续的权限判断。")
+        }
         SafetyKind::Credentials => format!("{p} 看起来是凭证文件。"),
         SafetyKind::CommandInjection => format!("命令里检测到注入模式：{p}"),
         SafetyKind::UnparseableCommand => format!("无法解析这个命令：{p}"),
@@ -188,8 +192,8 @@ fn describe(kind: SafetyKind, path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::testing::{PermTool, ctx_with};
-    use riot_protocol::permission::PermissionMode;
     use pretty_assertions::assert_eq;
+    use riot_protocol::permission::PermissionMode;
 
     fn found(tool: &PermTool, path: &str) -> Option<SafetyKind> {
         check(
@@ -210,7 +214,10 @@ mod tests {
 
     #[test]
     fn git_内部文件() {
-        assert_eq!(on_write("/work/.git/config"), Some(SafetyKind::GitInternals));
+        assert_eq!(
+            on_write("/work/.git/config"),
+            Some(SafetyKind::GitInternals)
+        );
         assert_eq!(
             on_write("/work/.git/hooks/pre-commit"),
             Some(SafetyKind::GitInternals),
@@ -264,11 +271,7 @@ mod tests {
 
     #[test]
     fn 普通源文件不触发() {
-        for ok in [
-            "/work/src/main.rs",
-            "/work/README.md",
-            "/work/tests/env.rs",
-        ] {
+        for ok in ["/work/src/main.rs", "/work/README.md", "/work/tests/env.rs"] {
             assert_eq!(on_write(ok), None, "{ok}");
         }
     }

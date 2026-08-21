@@ -134,7 +134,12 @@ impl McpHub {
                     detail: String::new(),
                     tools: Vec::new(),
                 },
-                ServerState::Ready { client, server_name, tools, .. } => {
+                ServerState::Ready {
+                    client,
+                    server_name,
+                    tools,
+                    ..
+                } => {
                     if client.is_alive() {
                         ServerStatus {
                             id: id.clone(),
@@ -183,7 +188,9 @@ impl McpHub {
             if client.take_list_changed() {
                 match client.list_tools().await {
                     Ok(fresh) => *tools = fresh,
-                    Err(e) => tracing::warn!(server = %id, error = %e, "工具清单刷新失败，沿用旧清单"),
+                    Err(e) => {
+                        tracing::warn!(server = %id, error = %e, "工具清单刷新失败，沿用旧清单")
+                    }
                 }
             }
             for def in tools.iter() {
@@ -205,8 +212,16 @@ impl McpHub {
 fn start(spec: ServerSpec) -> Handle {
     let state = Arc::new(Mutex::new(ServerState::Connecting));
     let cancel = CancellationToken::new();
-    tokio::spawn(connect_task(spec.clone(), Arc::clone(&state), cancel.clone()));
-    Handle { spec, state, cancel }
+    tokio::spawn(connect_task(
+        spec.clone(),
+        Arc::clone(&state),
+        cancel.clone(),
+    ));
+    Handle {
+        spec,
+        state,
+        cancel,
+    }
 }
 
 async fn connect_task(spec: ServerSpec, state: Arc<Mutex<ServerState>>, cancel: CancellationToken) {
@@ -275,9 +290,12 @@ async fn shutdown_handle(h: Handle) {
     // 还在连接中的任务看到取消会自己杀进程；已就绪的从状态里取出句柄杀。
     h.cancel.cancel();
     let mut st = h.state.lock().await;
-    if let ServerState::Ready { child, .. } =
-        std::mem::replace(&mut *st, ServerState::Failed { error: "已停止".into() })
-    {
+    if let ServerState::Ready { child, .. } = std::mem::replace(
+        &mut *st,
+        ServerState::Failed {
+            error: "已停止".into(),
+        },
+    ) {
         stdio::terminate(child).await;
     }
 }

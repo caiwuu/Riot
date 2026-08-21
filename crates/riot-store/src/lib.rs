@@ -62,9 +62,7 @@ pub enum Record {
     /// 加载时截断到这条消息（含）。之后继续追加的是新生成的回复。
     /// 旧加载器不认识这个类型会当坏行跳过 —— 那会把本该丢掉的回复
     /// 读回来，所以新版本必须处理它，不能靠"坏行跳过"凑合。
-    Rewind {
-        keep_until: String,
-    },
+    Rewind { keep_until: String },
 }
 
 /// 会话的不变事实，写在 transcript 首行。
@@ -147,7 +145,11 @@ impl Transcripts {
     /// 模型只看 `live`（边界之后）。界面要画完整对话流，归档还在文件里，
     /// 丢掉的话用户切回会话只能看到一条"已压缩"，以为聊天记录没了。
     pub async fn load_parts(&self, id: &SessionId) -> LoadedTranscript {
-        let empty = LoadedTranscript { meta: None, live: Vec::new(), archived: Vec::new() };
+        let empty = LoadedTranscript {
+            meta: None,
+            live: Vec::new(),
+            archived: Vec::new(),
+        };
         let path = self.path_of(id);
         let bytes = match tokio::fs::read(&path).await {
             Ok(b) => b,
@@ -195,7 +197,11 @@ impl Transcripts {
                 "transcript 里有 {skipped} 行读不懂，已跳过（多半是上次崩溃留下的半行）"
             );
         }
-        LoadedTranscript { meta, live, archived }
+        LoadedTranscript {
+            meta,
+            live,
+            archived,
+        }
     }
 
     /// 扫描目录里所有 transcript 的首行元数据和第一句用户输入。
@@ -216,7 +222,9 @@ impl Transcripts {
                 Some(s) => out.push(s),
                 // 首行都读不出来的文件没法安全恢复（不知道 root），跳过但
                 // 保留文件 —— 删数据的决定永远留给用户。
-                None => tracing::warn!(path = %path.display(), "transcript 首行不是元数据，无法恢复这个会话"),
+                None => {
+                    tracing::warn!(path = %path.display(), "transcript 首行不是元数据，无法恢复这个会话")
+                }
             }
         }
         out
@@ -282,9 +290,14 @@ fn scan_one(path: &Path) -> Option<ScannedTranscript> {
 enum Cmd {
     Append(Box<Message>),
     /// 压缩边界。
-    Boundary { before_tokens: u32, after_tokens: u32 },
+    Boundary {
+        before_tokens: u32,
+        after_tokens: u32,
+    },
     /// 重新生成：截断到这条消息。
-    Rewind { keep_until: String },
+    Rewind {
+        keep_until: String,
+    },
     /// 等所有已提交的追加真正写进文件。
     Flush(oneshot::Sender<()>),
     /// 写完手上的、关掉文件句柄、此后 append 静默丢弃。
@@ -316,7 +329,11 @@ impl SessionLog {
     /// `[约束]` 写失败只告警不上抛。持久化故障不该打断正在跑的轮次 ——
     /// 代价是这之后的历史重启找不回，但日志里有痕迹，而对话此刻还活着。
     pub fn append(&self, m: &Message) {
-        if self.sender().send(Cmd::Append(Box::new(m.clone()))).is_err() {
+        if self
+            .sender()
+            .send(Cmd::Append(Box::new(m.clone())))
+            .is_err()
+        {
             // shutdown 之后还有消息到达：会话正在被删除，丢弃是正确行为。
             tracing::debug!(path = %self.path.display(), "写入任务已关闭，丢弃一条追加");
         }
@@ -328,7 +345,13 @@ impl SessionLog {
     /// 会把续接消息也一起丢掉，会话醒来就是一片空白。
     pub fn append_boundary(&self, before_tokens: u32, after_tokens: u32) {
         let tx = self.sender();
-        if tx.send(Cmd::Boundary { before_tokens, after_tokens }).is_err() {
+        if tx
+            .send(Cmd::Boundary {
+                before_tokens,
+                after_tokens,
+            })
+            .is_err()
+        {
             tracing::debug!(path = %self.path.display(), "写入任务已关闭，丢弃压缩边界");
         }
     }
@@ -384,9 +407,13 @@ async fn write_loop(path: PathBuf, meta: TranscriptMeta, mut rx: mpsc::Unbounded
         for cmd in batch.drain(..) {
             let record = match cmd {
                 Cmd::Append(m) => Some(Record::Message { message: m }),
-                Cmd::Boundary { before_tokens, after_tokens } => {
-                    Some(Record::CompactBoundary { before_tokens, after_tokens })
-                }
+                Cmd::Boundary {
+                    before_tokens,
+                    after_tokens,
+                } => Some(Record::CompactBoundary {
+                    before_tokens,
+                    after_tokens,
+                }),
                 Cmd::Rewind { keep_until } => Some(Record::Rewind { keep_until }),
                 Cmd::Flush(ack) => {
                     acks.push(ack);
@@ -467,7 +494,10 @@ async fn ensure_file<'a>(
                 f
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let mut f = tokio::fs::OpenOptions::new().append(true).open(path).await?;
+                let mut f = tokio::fs::OpenOptions::new()
+                    .append(true)
+                    .open(path)
+                    .await?;
                 repair_tail(&mut f, path, meta).await?;
                 f
             }
@@ -491,8 +521,8 @@ async fn repair_tail(
 ) -> std::io::Result<()> {
     let len = f.metadata().await?.len();
     if len == 0 {
-        let line = serde_json::to_string(&Record::Meta(meta.clone()))
-            .map_err(std::io::Error::other)?;
+        let line =
+            serde_json::to_string(&Record::Meta(meta.clone())).map_err(std::io::Error::other)?;
         f.write_all(format!("{line}\n").as_bytes()).await?;
         return Ok(());
     }
@@ -537,9 +567,7 @@ mod tests {
     fn assistant(id: &str, text: &str) -> Message {
         Message::Assistant {
             id: MessageId::from_raw(id),
-            content: vec![riot_protocol::message::AssistantContent::Text {
-                text: text.into(),
-            }],
+            content: vec![riot_protocol::message::AssistantContent::Text { text: text.into() }],
             usage: None,
             meta: MessageMeta::default(),
         }
@@ -701,7 +729,10 @@ mod tests {
         std::fs::write(d.path().join("bad.jsonl"), "{不是元数据}\n").expect("写坏文件");
         let store = Transcripts::new(d.path());
         assert!(store.scan().is_empty(), "首行读不出 root，没法安全恢复");
-        assert!(d.path().join("bad.jsonl").exists(), "删数据的决定要留给用户");
+        assert!(
+            d.path().join("bad.jsonl").exists(),
+            "删数据的决定要留给用户"
+        );
     }
 
     #[tokio::test]
@@ -712,8 +743,14 @@ mod tests {
         log.append(&user("m1", "x"));
         log.shutdown().await;
 
-        store.remove(&SessionId::from_raw("s1")).await.expect("第一次删");
-        store.remove(&SessionId::from_raw("s1")).await.expect("再删一次不是错误");
+        store
+            .remove(&SessionId::from_raw("s1"))
+            .await
+            .expect("第一次删");
+        store
+            .remove(&SessionId::from_raw("s1"))
+            .await
+            .expect("再删一次不是错误");
         assert!(!d.path().join("s1.jsonl").exists());
     }
 

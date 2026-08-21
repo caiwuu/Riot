@@ -343,10 +343,10 @@ mod tests {
     use super::*;
     use crate::transport::{ScriptedResponse, ScriptedTransport};
     use crate::watchdog::TokioClock;
+    use pretty_assertions::assert_eq;
     use riot_protocol::id::MessageId;
     use riot_protocol::message::{MessageMeta, UserContent};
     use riot_protocol::provider::ThinkingConfig;
-    use pretty_assertions::assert_eq;
 
     fn sections() -> Vec<SystemSection> {
         vec![SystemSection::stable("intro", "你是助手")]

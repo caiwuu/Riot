@@ -79,7 +79,8 @@ impl MemFs {
     }
 
     pub fn text(&self, path: impl AsRef<Path>) -> Option<String> {
-        self.content(path).map(|b| String::from_utf8_lossy(&b).into_owned())
+        self.content(path)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
     }
 }
 

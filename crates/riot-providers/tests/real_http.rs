@@ -239,7 +239,10 @@ async fn 认证失败不重试() {
 
     match events.last().expect("要有事件") {
         ProviderEvent::Error(ProviderError::Auth { message }) => {
-            assert!(message.contains("Authentication"), "错误原文要带上：{message}");
+            assert!(
+                message.contains("Authentication"),
+                "错误原文要带上：{message}"
+            );
         }
         other => panic!("401 应该映射成 Auth 错误：{other:?}"),
     }
@@ -362,7 +365,9 @@ async fn 取消之后流立刻停下() {
         // 一直吐，直到对端断开
         loop {
             if sock
-                .write_all(b"data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n")
+                .write_all(
+                    b"data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n",
+                )
                 .await
                 .is_err()
             {

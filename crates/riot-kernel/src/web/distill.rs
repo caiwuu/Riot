@@ -201,7 +201,8 @@ mod tests {
             .enable_all()
             .build()
             .expect("runtime");
-        rt.block_on(d.run(req(), &CancellationToken::new())).expect("蒸馏");
+        rt.block_on(d.run(req(), &CancellationToken::new()))
+            .expect("蒸馏");
 
         let seen = spy.0.lock().expect("锁").clone().expect("请求");
         assert!(seen.tools.is_empty(), "辅助模型不能拿到任何工具");

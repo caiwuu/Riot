@@ -15,9 +15,7 @@ use async_trait::async_trait;
 use riot_protocol::event::ProgressPayload;
 use riot_protocol::id::{IdGenerator, MessageId, ToolUseId};
 use riot_protocol::message::{Message, MessageMeta, ToolResultContent, UserContent};
-use riot_protocol::provider::{
-    Provider, ProviderEvent, ProviderRequest, ProviderStream, ToolSpec,
-};
+use riot_protocol::provider::{Provider, ProviderEvent, ProviderRequest, ProviderStream, ToolSpec};
 use riot_protocol::tool::Clock;
 use tokio_util::sync::CancellationToken;
 

@@ -61,8 +61,7 @@ impl RuleSet {
         self.rules.iter().find(|r| {
             r.tool == tool
                 && r.decision == want
-                && r
-                    .pattern
+                && r.pattern
                     .as_deref()
                     .is_some_and(|p| matches_pattern_with(p, content, mode))
         })
@@ -247,10 +246,7 @@ mod tests {
             "npm run test\nrm -rf /",
             "npm run test > /etc/passwd",
         ] {
-            assert!(
-                !matches_pattern("npm run *", evil),
-                "不该匹配：{evil}"
-            );
+            assert!(!matches_pattern("npm run *", evil), "不该匹配：{evil}");
         }
     }
 
@@ -324,7 +320,11 @@ mod tests {
             "yarn run build",
             MatchMode::AstVerified
         ));
-        assert!(!matches_pattern_with("", "anything", MatchMode::AstVerified));
+        assert!(!matches_pattern_with(
+            "",
+            "anything",
+            MatchMode::AstVerified
+        ));
     }
 
     #[test]

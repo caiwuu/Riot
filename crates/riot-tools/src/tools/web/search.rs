@@ -284,9 +284,9 @@ fn search_hint(e: &WebError) -> String {
             "搜索后端返回 HTTP {code}：{body}。\
              可能是地址配错了或者后端没开启 JSON 输出。告诉用户去检查设置，不要重试。"
         ),
-        WebError::Transport { message } => format!(
-            "连不上搜索后端：{message}。让用户检查「设置 → 联网」里的地址，不要重试。"
-        ),
+        WebError::Transport { message } => {
+            format!("连不上搜索后端：{message}。让用户检查「设置 → 联网」里的地址，不要重试。")
+        }
         WebError::Blocked { reason } => format!("搜索请求被拦截：{reason}。"),
         WebError::TooLarge { .. } => "搜索后端返回的内容过大，已放弃。".to_owned(),
         WebError::Cancelled => "已取消。".to_owned(),
@@ -322,7 +322,11 @@ mod tests {
 
     #[test]
     fn 结果排版成可引用的链接() {
-        let out = format_results("tokio select", &[hit("Tokio", "https://tokio.rs", "摘要")], 1200);
+        let out = format_results(
+            "tokio select",
+            &[hit("Tokio", "https://tokio.rs", "摘要")],
+            1200,
+        );
         assert!(out.contains("[Tokio](https://tokio.rs)"), "{out}");
         assert!(out.contains("摘要"), "{out}");
         assert!(out.contains("1.2s"), "{out}");
@@ -342,7 +346,11 @@ mod tests {
         let mut h = hit("T", "https://a.com", "s");
         h.raw_content = Some("正".repeat(RAW_CONTENT_CHARS + 500));
         let out = format_results("q", &[h], 0);
-        assert!(out.contains("截断"), "超长正文必须截断：{}", &out[..200.min(out.len())]);
+        assert!(
+            out.contains("截断"),
+            "超长正文必须截断：{}",
+            &out[..200.min(out.len())]
+        );
     }
 
     #[test]

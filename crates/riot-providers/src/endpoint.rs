@@ -85,7 +85,11 @@ mod tests {
         // `[约束]` 这条盯的是智谱那个 404。它的 API 根是 /api/paas/v4，
         // 无条件补 /v1 会拼出 .../api/paas/v4/v1/chat/completions。
         assert_eq!(
-            api_url("https://open.bigmodel.cn/api/paas/v4", "v1", "chat/completions"),
+            api_url(
+                "https://open.bigmodel.cn/api/paas/v4",
+                "v1",
+                "chat/completions"
+            ),
             "https://open.bigmodel.cn/api/paas/v4/chat/completions"
         );
         // 自己带了 /v1 的也不能变成 /v1/v1。

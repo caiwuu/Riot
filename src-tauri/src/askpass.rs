@@ -215,10 +215,7 @@ fn native_prompt(prompt: &str) -> Option<String> {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn looks_secret(prompt: &str) -> bool {
     let p = prompt.to_ascii_lowercase();
-    p.contains("password")
-        || p.contains("passphrase")
-        || p.contains("密码")
-        || p.contains("口令")
+    p.contains("password") || p.contains("passphrase") || p.contains("密码") || p.contains("口令")
 }
 
 #[cfg(target_os = "macos")]
@@ -270,7 +267,11 @@ fn linux_dialog(prompt: &str) -> Option<String> {
         (
             "zenity",
             if secret {
-                vec!["--password".into(), "--title=Riot".into(), format!("--text={prompt}")]
+                vec![
+                    "--password".into(),
+                    "--title=Riot".into(),
+                    format!("--text={prompt}"),
+                ]
             } else {
                 vec![
                     "--entry".into(),
@@ -282,9 +283,19 @@ fn linux_dialog(prompt: &str) -> Option<String> {
         (
             "kdialog",
             if secret {
-                vec!["--title".into(), "Riot".into(), "--password".into(), prompt.into()]
+                vec![
+                    "--title".into(),
+                    "Riot".into(),
+                    "--password".into(),
+                    prompt.into(),
+                ]
             } else {
-                vec!["--title".into(), "Riot".into(), "--inputbox".into(), prompt.into()]
+                vec![
+                    "--title".into(),
+                    "Riot".into(),
+                    "--inputbox".into(),
+                    prompt.into(),
+                ]
             },
         ),
     ] {
@@ -327,10 +338,14 @@ mod tests {
     #[test]
     fn 密码类提示走隐藏输入() {
         assert!(looks_secret("Password for 'https://github.com':"));
-        assert!(looks_secret("Enter passphrase for key '/Users/me/.ssh/id_ed25519':"));
+        assert!(looks_secret(
+            "Enter passphrase for key '/Users/me/.ssh/id_ed25519':"
+        ));
         assert!(looks_secret("请输入密码"));
         assert!(!looks_secret("Username for 'https://github.com':"));
-        assert!(!looks_secret("Are you sure you want to continue connecting (yes/no)?"));
+        assert!(!looks_secret(
+            "Are you sure you want to continue connecting (yes/no)?"
+        ));
     }
 
     #[cfg(target_os = "macos")]

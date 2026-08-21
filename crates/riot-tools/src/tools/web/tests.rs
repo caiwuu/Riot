@@ -59,7 +59,9 @@ fn fetch_tool() -> WebFetch {
 fn text_of(o: &ToolOutcome) -> String {
     match o {
         ToolOutcome::Ok { model_content, .. } => format!("{model_content:?}"),
-        ToolOutcome::Failed { error_for_model, .. } => error_for_model.clone(),
+        ToolOutcome::Failed {
+            error_for_model, ..
+        } => error_for_model.clone(),
         ToolOutcome::Cancelled => "<cancelled>".to_owned(),
     }
 }
@@ -92,7 +94,13 @@ fn 白名单文档站免确认() {
         &perm_ctx(vec![]),
     );
     assert!(
-        matches!(r, PermissionResult::Allow { reason: DecisionReason::Preapproved { .. }, .. }),
+        matches!(
+            r,
+            PermissionResult::Allow {
+                reason: DecisionReason::Preapproved { .. },
+                ..
+            }
+        ),
         "查文档每次都弹窗，用户第三次就会去开全部允许 —— 那比白名单危险得多。实际：{r:?}"
     );
 }
@@ -133,7 +141,11 @@ fn 域名级_deny_压过白名单() {
     // 用户明确禁掉一个域名之后，不该有任何路径能把它打开
     let r = fetch_tool().check_permissions(
         &serde_json::json!({ "url": "https://docs.rs/x", "prompt": "读" }),
-        &perm_ctx(vec![rule("WebFetch", Some("domain:docs.rs"), RuleDecision::Deny)]),
+        &perm_ctx(vec![rule(
+            "WebFetch",
+            Some("domain:docs.rs"),
+            RuleDecision::Deny,
+        )]),
     );
     assert!(matches!(r, PermissionResult::Deny { .. }), "{r:?}");
 }
@@ -142,7 +154,11 @@ fn 域名级_deny_压过白名单() {
 fn 通配域名规则可用() {
     let r = fetch_tool().check_permissions(
         &serde_json::json!({ "url": "https://a.internal.corp/x", "prompt": "读" }),
-        &perm_ctx(vec![rule("WebFetch", Some("domain:*.corp"), RuleDecision::Deny)]),
+        &perm_ctx(vec![rule(
+            "WebFetch",
+            Some("domain:*.corp"),
+            RuleDecision::Deny,
+        )]),
     );
     assert!(matches!(r, PermissionResult::Deny { .. }), "{r:?}");
 }
@@ -166,7 +182,13 @@ fn 陌生域名的询问理由是同意请求而非规则() {
         &perm_ctx(vec![]),
     );
     assert!(
-        matches!(r, PermissionResult::Ask { reason: DecisionReason::Consent { .. }, .. }),
+        matches!(
+            r,
+            PermissionResult::Ask {
+                reason: DecisionReason::Consent { .. },
+                ..
+            }
+        ),
         "实际：{r:?}"
     );
 }
@@ -184,7 +206,13 @@ fn 规则要求询问时理由仍是规则() {
         )]),
     );
     assert!(
-        matches!(r, PermissionResult::Ask { reason: DecisionReason::Rule { .. }, .. }),
+        matches!(
+            r,
+            PermissionResult::Ask {
+                reason: DecisionReason::Rule { .. },
+                ..
+            }
+        ),
         "实际：{r:?}"
     );
 }
@@ -216,7 +244,11 @@ fn chain_says(url: &str, mode: PermissionMode, rules: Vec<PermissionRule>) -> &'
 #[test]
 fn 全部放行下抓取陌生域名不再询问() {
     assert_eq!(
-        chain_says("https://www.rust-lang.org", PermissionMode::BypassPermissions, vec![]),
+        chain_says(
+            "https://www.rust-lang.org",
+            PermissionMode::BypassPermissions,
+            vec![]
+        ),
         "allow"
     );
 }
@@ -242,7 +274,11 @@ fn 全部放行压不过用户写的_deny_规则() {
         chain_says(
             "https://blog.example/a",
             PermissionMode::BypassPermissions,
-            vec![rule("WebFetch", Some("domain:blog.example"), RuleDecision::Deny)],
+            vec![rule(
+                "WebFetch",
+                Some("domain:blog.example"),
+                RuleDecision::Deny
+            )],
         ),
         "deny"
     );
@@ -254,7 +290,11 @@ fn 全部放行压不过用户写的_ask_规则() {
         chain_says(
             "https://blog.example/a",
             PermissionMode::BypassPermissions,
-            vec![rule("WebFetch", Some("domain:blog.example"), RuleDecision::Ask)],
+            vec![rule(
+                "WebFetch",
+                Some("domain:blog.example"),
+                RuleDecision::Ask
+            )],
         ),
         "ask",
         "用户写下「问我一下」之后，切到全部放行不等于撤回它"
@@ -515,7 +555,10 @@ fn hits() -> Vec<SearchHit> {
 async fn 搜索返回可引用的链接列表() {
     let h = harness(FakeWeb::new().search_hits(hits()));
     let out = WebSearch
-        .call(serde_json::json!({ "query": "tokio select" }), h.ctx.clone())
+        .call(
+            serde_json::json!({ "query": "tokio select" }),
+            h.ctx.clone(),
+        )
         .await;
 
     let t = text_of(&out);
@@ -541,7 +584,10 @@ async fn 搜索不会去抓取结果页() {
 async fn 搜索无结果时给出改进建议() {
     let h = harness(FakeWeb::new().search_hits(vec![]));
     let out = WebSearch
-        .call(serde_json::json!({ "query": "不存在的东西" }), h.ctx.clone())
+        .call(
+            serde_json::json!({ "query": "不存在的东西" }),
+            h.ctx.clone(),
+        )
         .await;
 
     assert!(!out.is_error(), "没搜到不是失败：{out:?}");
@@ -595,9 +641,8 @@ fn 允许过之后不再确认() {
 fn 全部放行下搜索不再确认() {
     // 和 WebFetch 同一个毛病：工具的 Ask 曾经让整条链跳过 bypass。
     let mut ctx = perm_ctx(vec![]);
-    ctx.mode = riot_protocol::permission::PermissionModeState(Some(
-        PermissionMode::BypassPermissions,
-    ));
+    ctx.mode =
+        riot_protocol::permission::PermissionModeState(Some(PermissionMode::BypassPermissions));
     let r = riot_permissions::decide(
         &WebSearch,
         &serde_json::json!({ "query": "x" }),

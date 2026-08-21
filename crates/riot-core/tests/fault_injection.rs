@@ -68,14 +68,12 @@ fn transcript(events: &[AgentEvent]) -> Vec<Message> {
 #[should_panic(expected = "没有 BatchEvent::Done")]
 async fn 工具批次不返回_done_时不变量报警() {
     let provider = Arc::new(ScriptedProvider::new(vec![vec![
-        riot_protocol::provider::ProviderEvent::Message(
-            riot_core::testing::assistant_tool_use(
-                "msg_a1",
-                "tu_1",
-                "Read",
-                serde_json::json!({}),
-            ),
-        ),
+        riot_protocol::provider::ProviderEvent::Message(riot_core::testing::assistant_tool_use(
+            "msg_a1",
+            "tu_1",
+            "Read",
+            serde_json::json!({}),
+        )),
     ]]));
     let tools = Arc::new(BreachingToolRunner {
         breach: Breach::NoDone,
@@ -181,7 +179,11 @@ mod ignores_cancel {
                 input_schema: serde_json::json!({ "type": "object" }),
             }]
         }
-        fn run_batch(&self, _calls: Vec<ToolCall>, _ctx: riot_core::state::BatchContext) -> BatchStream {
+        fn run_batch(
+            &self,
+            _calls: Vec<ToolCall>,
+            _ctx: riot_core::state::BatchContext,
+        ) -> BatchStream {
             Box::pin(futures::stream::pending())
         }
     }
@@ -212,7 +214,9 @@ mod ignores_cancel {
         assert!(
             matches!(
                 events.last(),
-                Some(AgentEvent::Done { reason: TerminalReason::Aborted { .. } })
+                Some(AgentEvent::Done {
+                    reason: TerminalReason::Aborted { .. }
+                })
             ),
             "该以用户中断收场，实际：{:?}",
             events.last()
@@ -223,16 +227,27 @@ mod ignores_cancel {
     async fn 工具不理取消也要停下_且补齐配对() {
         let provider = Arc::new(ScriptedProvider::new(vec![vec![
             riot_protocol::provider::ProviderEvent::Message(
-                riot_core::testing::assistant_tool_use("msg_a1", "tu_1", "Read", serde_json::json!({})),
+                riot_core::testing::assistant_tool_use(
+                    "msg_a1",
+                    "tu_1",
+                    "Read",
+                    serde_json::json!({}),
+                ),
             ),
         ]]));
-        let deps = mock_deps_with(provider, Arc::new(DeafTools), Arc::new(FakeCompactor::default()));
+        let deps = mock_deps_with(
+            provider,
+            Arc::new(DeafTools),
+            Arc::new(FakeCompactor::default()),
+        );
         let events = done_within(deps, CancellationToken::new()).await;
 
         assert!(
             matches!(
                 events.last(),
-                Some(AgentEvent::Done { reason: TerminalReason::Aborted { .. } })
+                Some(AgentEvent::Done {
+                    reason: TerminalReason::Aborted { .. }
+                })
             ),
             "该以用户中断收场，实际：{:?}",
             events.last()
@@ -262,9 +277,10 @@ async fn 被截断的_tool_use_不进_transcript() {
             )),
             ProviderEvent::Error(ProviderError::OutputLimit),
         ],
-        vec![ProviderEvent::Message(
-            riot_core::testing::assistant_text("msg_a2", "重来一遍，这次说完了。"),
-        )],
+        vec![ProviderEvent::Message(riot_core::testing::assistant_text(
+            "msg_a2",
+            "重来一遍，这次说完了。",
+        ))],
     ]));
     let tools = Arc::new(ScriptedToolRunner::new(Default::default()));
     let deps = mock_deps_with(provider, tools, Arc::new(FakeCompactor::default()));

@@ -120,7 +120,9 @@ async fn 连续拦截触发熔断() {
     );
     let gate = Arc::new(ScriptedStopGate::new(
         (0..8)
-            .map(|_| StopDecision::Block { reason: "永远不满意".into() })
+            .map(|_| StopDecision::Block {
+                reason: "永远不满意".into(),
+            })
             .collect(),
     ));
     deps.stop_gate = Arc::clone(&gate) as _;

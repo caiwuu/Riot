@@ -21,9 +21,7 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
-use riot_protocol::message::{
-    Attachment, Message, MessageMeta, ToolResultContent, UserContent,
-};
+use riot_protocol::message::{Attachment, Message, MessageMeta, ToolResultContent, UserContent};
 use riot_protocol::provider::{Provider, ProviderEvent, ProviderRequest, ThinkingConfig};
 use tokio_util::sync::CancellationToken;
 
@@ -68,8 +66,13 @@ pub async fn summarize_history(
     let mut request_messages = strip_for_summary(messages);
     request_messages.push(Message::User {
         id: riot_protocol::id::MessageId::from_raw("msg_compact_prompt"),
-        content: vec![UserContent::Text { text: COMPACT_PROMPT.into() }],
-        meta: MessageMeta { synthetic: true, ..Default::default() },
+        content: vec![UserContent::Text {
+            text: COMPACT_PROMPT.into(),
+        }],
+        meta: MessageMeta {
+            synthetic: true,
+            ..Default::default()
+        },
     });
 
     let request = ProviderRequest {
@@ -115,8 +118,7 @@ pub fn continuation_message(
     restored: Vec<Attachment>,
     id: riot_protocol::id::MessageId,
 ) -> Message {
-    let mut content: Vec<UserContent> =
-        memory.into_iter().map(UserContent::Attachment).collect();
+    let mut content: Vec<UserContent> = memory.into_iter().map(UserContent::Attachment).collect();
     content.push(UserContent::Text {
         text: format!(
             "本会话由一段更早的对话延续而来，先前内容已压缩。以下是前文的完整总结：\n\n{summary}\n\n\
@@ -128,7 +130,10 @@ pub fn continuation_message(
     Message::User {
         id,
         content,
-        meta: MessageMeta { synthetic: true, ..Default::default() },
+        meta: MessageMeta {
+            synthetic: true,
+            ..Default::default()
+        },
     }
 }
 
@@ -184,19 +189,21 @@ fn strip_for_summary(messages: &[Message]) -> Vec<Message> {
                                 text: text.clone(),
                             })
                         }
-                        UserContent::ToolResult { tool_use_id, content, is_error } => {
-                            UserContent::ToolResult {
-                                tool_use_id: tool_use_id.clone(),
-                                content: match content {
-                                    ToolResultContent::Image { .. }
-                                    | ToolResultContent::DescribedImage { .. } => {
-                                        ToolResultContent::text("[图片结果，总结时已省略]")
-                                    }
-                                    other => other.clone(),
-                                },
-                                is_error: *is_error,
-                            }
-                        }
+                        UserContent::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error,
+                        } => UserContent::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            content: match content {
+                                ToolResultContent::Image { .. }
+                                | ToolResultContent::DescribedImage { .. } => {
+                                    ToolResultContent::text("[图片结果，总结时已省略]")
+                                }
+                                other => other.clone(),
+                            },
+                            is_error: *is_error,
+                        },
                         other => other.clone(),
                     })
                     .collect(),
@@ -214,7 +221,8 @@ mod tests {
 
     #[test]
     fn 剥掉_analysis_取出_summary() {
-        let raw = "<analysis>我想想……这里有三段对话</analysis>\n<summary>1. 主要请求：修 bug</summary>";
+        let raw =
+            "<analysis>我想想……这里有三段对话</analysis>\n<summary>1. 主要请求：修 bug</summary>";
         assert_eq!(extract_summary(raw), "1. 主要请求：修 bug");
     }
 
@@ -241,14 +249,28 @@ mod tests {
     fn 续接消息带记忆和工作集_文本居中() {
         let m = continuation_message(
             "九节总结",
-            vec![Attachment::Memory { path: "/p/AGENTS.md".into(), content: "约定".into() }],
-            vec![Attachment::RestoredFile { path: "/p/a.rs".into(), content: "code".into() }],
+            vec![Attachment::Memory {
+                path: "/p/AGENTS.md".into(),
+                content: "约定".into(),
+            }],
+            vec![Attachment::RestoredFile {
+                path: "/p/a.rs".into(),
+                content: "code".into(),
+            }],
             MessageId::from_raw("m1"),
         );
-        let Message::User { content, meta, .. } = &m else { panic!("是 user") };
-        assert!(meta.synthetic, "合成消息要打标，UI 靠它区分于用户亲口说的话");
+        let Message::User { content, meta, .. } = &m else {
+            panic!("是 user")
+        };
         assert!(
-            matches!(&content[0], UserContent::Attachment(Attachment::Memory { .. })),
+            meta.synthetic,
+            "合成消息要打标，UI 靠它区分于用户亲口说的话"
+        );
+        assert!(
+            matches!(
+                &content[0],
+                UserContent::Attachment(Attachment::Memory { .. })
+            ),
             "记忆在最前 —— 压缩把带着记忆的首条消息吞了，必须重注"
         );
         assert!(matches!(&content[1], UserContent::Text { text } if text.contains("九节总结")));
@@ -271,12 +293,16 @@ mod tests {
                     media_type: "image/png".into(),
                     data: "AAAA".repeat(1000),
                 }),
-                UserContent::Text { text: "看图".into() },
+                UserContent::Text {
+                    text: "看图".into(),
+                },
             ],
             meta: MessageMeta::default(),
         }];
         let stripped = strip_for_summary(&msgs);
-        let Message::User { content, .. } = &stripped[0] else { panic!() };
+        let Message::User { content, .. } = &stripped[0] else {
+            panic!()
+        };
         assert!(
             !format!("{content:?}").contains("AAAA"),
             "base64 图片进总结请求是纯浪费 —— 总结是文本任务"

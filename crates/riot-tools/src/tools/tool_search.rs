@@ -71,8 +71,8 @@ impl DeferredPool {
             .map(|t| {
                 let name = t.name().to_owned();
                 let description = t.prompt(ctx);
-                let schema_json = serde_json::to_string(&t.input_schema())
-                    .unwrap_or_else(|_| "{}".into());
+                let schema_json =
+                    serde_json::to_string(&t.input_schema()).unwrap_or_else(|_| "{}".into());
                 Entry {
                     search_name_parts: split_name(&name),
                     search_description: description.to_lowercase(),
@@ -82,7 +82,10 @@ impl DeferredPool {
                 }
             })
             .collect();
-        Self { entries, discovered }
+        Self {
+            entries,
+            discovered,
+        }
     }
 
     /// 延迟候选的总体积。低于阈值就别启用 —— 省的不如多跳一次的贵。
@@ -119,7 +122,9 @@ impl DeferredPool {
     }
 
     fn get(&self, name: &str) -> Option<&Entry> {
-        self.entries.iter().find(|e| e.name.eq_ignore_ascii_case(name))
+        self.entries
+            .iter()
+            .find(|e| e.name.eq_ignore_ascii_case(name))
     }
 }
 
@@ -165,11 +170,12 @@ impl ToolSearch {
 
     /// 把命中的工具渲染成结果文本并标记为已发现。
     fn render_matches(&self, names: &[&str]) -> String {
-        let mut out = String::from(
-            "以下工具已加载，从下一步起可以直接调用（定义如下）：\n\n<functions>\n",
-        );
+        let mut out =
+            String::from("以下工具已加载，从下一步起可以直接调用（定义如下）：\n\n<functions>\n");
         for name in names {
-            let Some(e) = self.pool.get(name) else { continue };
+            let Some(e) = self.pool.get(name) else {
+                continue;
+            };
             self.pool.discover(&e.name);
             // 和请求里 tools 数组的字段一致（name/description/parameters），
             // 模型见过这个形状。
@@ -280,7 +286,9 @@ impl Tool for ToolSearch {
             let name = e.name.clone();
             let text = self.render_matches(&[name.as_str()]);
             return ToolOutcome::Ok {
-                ui_payload: Some(UiPayload::Plain { text: format!("已加载工具：{name}") }),
+                ui_payload: Some(UiPayload::Plain {
+                    text: format!("已加载工具：{name}"),
+                }),
                 model_content: riot_protocol::message::ToolResultContent::text(text),
                 side_messages: Vec::new(),
             };
@@ -308,7 +316,11 @@ impl Tool for ToolSearch {
                 for term in &terms {
                     if e.search_name_parts.iter().any(|p| p == term) {
                         score += 10;
-                    } else if e.search_name_parts.iter().any(|p| p.contains(term.as_str())) {
+                    } else if e
+                        .search_name_parts
+                        .iter()
+                        .any(|p| p.contains(term.as_str()))
+                    {
                         score += 5;
                     }
                     if e.search_description.contains(term.as_str()) {
@@ -390,7 +402,10 @@ mod tests {
     }
 
     fn tool(name: &str, desc: &str) -> Arc<dyn Tool> {
-        Arc::new(Deferred { name: name.into(), desc: desc.into() })
+        Arc::new(Deferred {
+            name: name.into(),
+            desc: desc.into(),
+        })
     }
 
     fn prompt_ctx() -> PromptContext {
@@ -446,8 +461,11 @@ mod tests {
 
         let ts = ToolSearch::new(Arc::clone(&p));
         let text = ok_text(
-            ts.call(serde_json::json!({ "query": "select:mcp__gh__create_issue" }), ctx())
-                .await,
+            ts.call(
+                serde_json::json!({ "query": "select:mcp__gh__create_issue" }),
+                ctx(),
+            )
+            .await,
         );
         assert!(text.contains("create_issue"), "要有名字");
         assert!(text.contains("GitHub"), "要有描述");
@@ -462,11 +480,17 @@ mod tests {
         let ts = ToolSearch::new(Arc::clone(&p));
 
         let text = ok_text(
-            ts.call(serde_json::json!({ "query": "select:mcp__a__x, mcp__nope__z" }), ctx())
-                .await,
+            ts.call(
+                serde_json::json!({ "query": "select:mcp__a__x, mcp__nope__z" }),
+                ctx(),
+            )
+            .await,
         );
         assert!(text.contains("da"), "命中的要返回");
-        assert!(text.contains("没找到") && text.contains("mcp__nope__z"), "缺的要点名：{text}");
+        assert!(
+            text.contains("没找到") && text.contains("mcp__nope__z"),
+            "缺的要点名：{text}"
+        );
         assert!(!p.is_hidden("mcp__a__x"));
         assert!(p.is_hidden("mcp__b__y"), "没选的不该被顺带发现");
     }
@@ -477,7 +501,13 @@ mod tests {
         let tools = [tool("mcp__gh__create_issue", "d")];
         let p = pool(&tools);
         let ts = ToolSearch::new(Arc::clone(&p));
-        ok_text(ts.call(serde_json::json!({ "query": "mcp__gh__create_issue" }), ctx()).await);
+        ok_text(
+            ts.call(
+                serde_json::json!({ "query": "mcp__gh__create_issue" }),
+                ctx(),
+            )
+            .await,
+        );
         assert!(!p.is_hidden("mcp__gh__create_issue"));
     }
 
@@ -492,10 +522,16 @@ mod tests {
         let ts = ToolSearch::new(Arc::clone(&p));
 
         let text = ok_text(
-            ts.call(serde_json::json!({ "query": "issue create", "max_results": 1 }), ctx())
-                .await,
+            ts.call(
+                serde_json::json!({ "query": "issue create", "max_results": 1 }),
+                ctx(),
+            )
+            .await,
         );
-        assert!(text.contains("create_issue"), "名字整词双命中该排第一：{text}");
+        assert!(
+            text.contains("create_issue"),
+            "名字整词双命中该排第一：{text}"
+        );
         assert!(!text.contains("slack"), "无关的不该进结果");
     }
 
@@ -503,8 +539,13 @@ mod tests {
     async fn 搜不到时报可用清单() {
         let tools = [tool("mcp__a__x", "d")];
         let ts = ToolSearch::new(pool(&tools));
-        match ts.call(serde_json::json!({ "query": "毫无关系的词" }), ctx()).await {
-            ToolOutcome::Failed { error_for_model, .. } => {
+        match ts
+            .call(serde_json::json!({ "query": "毫无关系的词" }), ctx())
+            .await
+        {
+            ToolOutcome::Failed {
+                error_for_model, ..
+            } => {
                 assert!(
                     error_for_model.contains("mcp__a__x"),
                     "要带清单，否则模型只会换个错词再搜：{error_for_model}"
@@ -521,7 +562,11 @@ mod tests {
         let discovered = Arc::new(RwLock::new(HashSet::new()));
         let tools = [tool("mcp__a__x", "d")];
 
-        let p1 = Arc::new(DeferredPool::new(&tools, &prompt_ctx(), Arc::clone(&discovered)));
+        let p1 = Arc::new(DeferredPool::new(
+            &tools,
+            &prompt_ctx(),
+            Arc::clone(&discovered),
+        ));
         ToolSearch::new(Arc::clone(&p1))
             .call(serde_json::json!({ "query": "select:mcp__a__x" }), ctx())
             .await;
@@ -532,16 +577,25 @@ mod tests {
 
     #[test]
     fn 名字清单进_prompt_定义不进() {
-        let tools = [tool("mcp__gh__create_issue", "这段描述很长不该出现在清单里")];
+        let tools = [tool(
+            "mcp__gh__create_issue",
+            "这段描述很长不该出现在清单里",
+        )];
         let ts = ToolSearch::new(pool(&tools));
         let p = ts.prompt(&prompt_ctx());
         assert!(p.contains("mcp__gh__create_issue"), "名字要在");
-        assert!(!p.contains("这段描述"), "描述绝不能进清单 —— 那正是要省的东西");
+        assert!(
+            !p.contains("这段描述"),
+            "描述绝不能进清单 —— 那正是要省的东西"
+        );
     }
 
     #[test]
     fn 拆词覆盖_mcp_和驼峰() {
-        assert_eq!(split_name("mcp__gh__create_issue"), vec!["mcp", "gh", "create", "issue"]);
+        assert_eq!(
+            split_name("mcp__gh__create_issue"),
+            vec!["mcp", "gh", "create", "issue"]
+        );
         assert_eq!(split_name("WebSearch"), vec!["web", "search"]);
     }
 

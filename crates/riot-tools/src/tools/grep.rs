@@ -230,9 +230,7 @@ impl Tool for Grep {
 
         ToolOutcome::Ok {
             model_content: riot_protocol::message::ToolResultContent::text(body),
-            ui_payload: Some(UiPayload::Plain {
-                text: clamped.text,
-            }),
+            ui_payload: Some(UiPayload::Plain { text: clamped.text }),
             side_messages: Vec::new(),
         }
     }
@@ -258,7 +256,6 @@ fn render_body(clamped: &Clamped, cut_short: bool) -> String {
     }
     body
 }
-
 
 struct Clamped {
     text: String,
@@ -290,7 +287,11 @@ fn clamp(stdout: &str, head_limit: Option<usize>) -> Clamped {
             "共 {total} 条结果，这里显示前 {shown} 条{}。\
              请用 `glob` 缩小范围或让 `pattern` 更具体；\
              想先看分布可以用 `output_mode: \"count\"`。",
-            if hit_chars { "（已达字符上限）" } else { "" }
+            if hit_chars {
+                "（已达字符上限）"
+            } else {
+                ""
+            }
         ))
     } else {
         None
@@ -315,8 +316,6 @@ fn no_match_text(input: &Input) -> String {
         input.pattern
     )
 }
-
-
 
 fn schema_hint(e: &serde_json::Error) -> String {
     let raw = e.to_string();

@@ -46,7 +46,10 @@ pub fn check_shape(path: &Path) -> Result<(), FenceViolation> {
         // 而目录列表里只看得到 file.txt
         (has_ads(&s), "NTFS 备用数据流"),
         // `\\?\` 绕过 Win32 路径规范化，能造出 `..` 不被处理的路径
-        (s.contains("\\\\?\\") || s.contains("\\\\.\\"), "Win32 设备路径前缀"),
+        (
+            s.contains("\\\\?\\") || s.contains("\\\\.\\"),
+            "Win32 设备路径前缀",
+        ),
         // 8.3 短名：PROGRA~1 指向 "Program Files"，规则匹配不上
         (has_short_name(&s), "8.3 短文件名"),
         // Windows 会静默去掉尾部的点和空格，`foo.txt.` 实际写的是 `foo.txt`
@@ -236,7 +239,10 @@ mod tests {
             "/work/PROGRA~1/x",       // 8.3 短名
         ] {
             assert!(
-                matches!(check_shape(&p(evil)), Err(FenceViolation::Suspicious { .. })),
+                matches!(
+                    check_shape(&p(evil)),
+                    Err(FenceViolation::Suspicious { .. })
+                ),
                 "{evil} 应该被形状检查拦下"
             );
         }

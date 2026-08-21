@@ -100,7 +100,9 @@ impl Tool for TodoWrite {
     ) -> PermissionResult {
         PermissionResult::Allow {
             updated_input: None,
-            reason: DecisionReason::Preapproved { what: "任务清单".into() },
+            reason: DecisionReason::Preapproved {
+                what: "任务清单".into(),
+            },
         }
     }
 
@@ -129,7 +131,11 @@ impl Tool for TodoWrite {
         }
 
         let total = input.todos.len();
-        let done = input.todos.iter().filter(|t| t.status == TodoStatus::Completed).count();
+        let done = input
+            .todos
+            .iter()
+            .filter(|t| t.status == TodoStatus::Completed)
+            .count();
         let doing = input
             .todos
             .iter()
@@ -198,7 +204,12 @@ mod tests {
                 ctx(),
             )
             .await;
-        let ToolOutcome::Ok { model_content, ui_payload, .. } = out else {
+        let ToolOutcome::Ok {
+            model_content,
+            ui_payload,
+            ..
+        } = out
+        else {
             panic!("该成功");
         };
         let text = format!("{model_content:?}");
@@ -222,10 +233,16 @@ mod tests {
                 ctx(),
             )
             .await;
-        let ToolOutcome::Failed { error_for_model, .. } = out else {
+        let ToolOutcome::Failed {
+            error_for_model, ..
+        } = out
+        else {
             panic!("该失败");
         };
-        assert!(error_for_model.contains("第 2 项"), "要点名第几项：{error_for_model}");
+        assert!(
+            error_for_model.contains("第 2 项"),
+            "要点名第几项：{error_for_model}"
+        );
     }
 
     #[tokio::test]
@@ -238,7 +255,10 @@ mod tests {
                 ctx(),
             )
             .await;
-        let ToolOutcome::Failed { error_for_model, .. } = out else {
+        let ToolOutcome::Failed {
+            error_for_model, ..
+        } = out
+        else {
             panic!("该失败");
         };
         assert!(
@@ -263,9 +283,6 @@ mod tests {
             &ctx,
             &riot_permissions::RuleSet::default(),
         );
-        assert!(
-            r.is_allow(),
-            "规划模式下 TodoWrite 必须静默放行：{r:?}"
-        );
+        assert!(r.is_allow(), "规划模式下 TodoWrite 必须静默放行：{r:?}");
     }
 }

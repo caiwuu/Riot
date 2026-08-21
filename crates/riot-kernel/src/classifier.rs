@@ -79,7 +79,10 @@ impl HostClassifier {
     /// 没配便宜档返回 None，调用方装 `NoClassifier`。
     pub fn from_config(config: &crate::config::AppConfig) -> Option<Self> {
         let cheap = crate::subagent::CheapModel::from_config(config)?;
-        Some(Self { provider: cheap.provider, model: cheap.model })
+        Some(Self {
+            provider: cheap.provider,
+            model: cheap.model,
+        })
     }
 }
 
@@ -124,7 +127,10 @@ impl SafetyClassifier for HostClassifier {
                 content: vec![UserContent::Text {
                     text: format!("工具：{tool}\n操作：{what}"),
                 }],
-                meta: MessageMeta { synthetic: true, ..Default::default() },
+                meta: MessageMeta {
+                    synthetic: true,
+                    ..Default::default()
+                },
             }],
             system: SYSTEM.into(),
             // 不给工具：判危的模型能调工具就不是判危了。
@@ -202,11 +208,11 @@ mod tests {
         for raw in [
             "",
             "  ",
-            "SAFE",                      // 没给数字
-            "我觉得这个命令应该没问题",  // 模型开始聊天
+            "SAFE",                     // 没给数字
+            "我觉得这个命令应该没问题", // 模型开始聊天
             "MAYBE 90",
-            "{\"verdict\":\"safe\"}",     // 换了个格式
-            "SAFE 1000",                  // 越界（clamp 到 1.0 也不该靠这个过）
+            "{\"verdict\":\"safe\"}", // 换了个格式
+            "SAFE 1000",              // 越界（clamp 到 1.0 也不该靠这个过）
         ] {
             let v = parse(raw);
             if raw == "SAFE 1000" {

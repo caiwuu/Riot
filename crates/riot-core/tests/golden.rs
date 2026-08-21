@@ -268,9 +268,7 @@ fn summarize(ev: &AgentEvent) -> String {
             riot_protocol::message::Message::User { content, .. } => {
                 let n = content
                     .iter()
-                    .filter(|c| {
-                        matches!(c, riot_protocol::message::UserContent::ToolResult { .. })
-                    })
+                    .filter(|c| matches!(c, riot_protocol::message::UserContent::ToolResult { .. }))
                     .count();
                 format!("user [{n} 个 tool_result]")
             }

@@ -171,7 +171,9 @@ impl StreamDecoder {
         self.finished = true;
 
         if let Some(msg) = self.error.take() {
-            return vec![ProviderEvent::Error(ProviderError::Refused { message: msg })];
+            return vec![ProviderEvent::Error(ProviderError::Refused {
+                message: msg,
+            })];
         }
 
         let mut out = Vec::new();

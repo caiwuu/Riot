@@ -79,7 +79,10 @@ pub async fn fetch_page(
                 WebRequest {
                     url: current.to_string(),
                     headers: vec![
-                        ("accept".into(), "text/markdown, text/html, text/plain, */*".into()),
+                        (
+                            "accept".into(),
+                            "text/markdown, text/html, text/plain, */*".into(),
+                        ),
                         ("user-agent".into(), user_agent()),
                         // 不接受压缩以外的编码协商。让客户端自己处理 gzip，
                         // 这里拿到的是解压后的字节。
@@ -204,7 +207,11 @@ fn distill_prompt(content: &str, prompt: &str, trusted_source: bool) -> String {
 }
 
 fn first_line(s: &str) -> String {
-    let line = s.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    let line = s
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
     let max = 200;
     if line.chars().count() <= max {
         return line.to_owned();

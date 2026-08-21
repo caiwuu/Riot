@@ -101,11 +101,8 @@ pub trait BrowserAccess: Send + Sync {
     /// 自动化里最容易踩的坑是时序:点完立刻找下一个元素，而它还没渲染出来。
     /// 与其让模型 sleep 猜时间，不如显式等一个可验证的条件。返回等到了
     /// 什么（或超时）。
-    async fn wait_for(
-        &self,
-        cond: WaitCondition,
-        timeout_ms: u64,
-    ) -> Result<String, InteractError>;
+    async fn wait_for(&self, cond: WaitCondition, timeout_ms: u64)
+    -> Result<String, InteractError>;
 
     /// 元素级动作:悬停、双击、右键、下拉选择、拖拽、组合键。见 [`Action`]。
     ///
@@ -360,11 +357,7 @@ impl BrowserAccess for NoBrowser {
     async fn evaluate(&self, _expr: &str) -> Result<String, InteractError> {
         Err(unavailable().into())
     }
-    async fn upload(
-        &self,
-        _target: Target,
-        _paths: Vec<String>,
-    ) -> Result<String, InteractError> {
+    async fn upload(&self, _target: Target, _paths: Vec<String>) -> Result<String, InteractError> {
         Err(unavailable().into())
     }
     async fn cookies(&self) -> Result<String, InteractError> {
@@ -450,7 +443,10 @@ pub enum Command {
     /// `[约束]` CDP 的 `id` 由主应用在整个进程范围内分配，不是每个标签页
     /// 一套。响应从哪个标签页回来都靠 `id` 认领 —— 各标签页各发号的话，
     /// 两个标签页的第 1 号响应会撞在一起，而这种错乱只在多标签并发时出现。
-    Cdp { tab: TabId, payload: serde_json::Value },
+    Cdp {
+        tab: TabId,
+        payload: serde_json::Value,
+    },
     /// 关掉浏览器，进程退出。
     Shutdown,
 }
@@ -527,7 +523,11 @@ pub enum Event {
         height: i32,
     },
     /// 页面加载结束。
-    LoadEnd { tab: TabId, status: i32, url: String },
+    LoadEnd {
+        tab: TabId,
+        status: i32,
+        url: String,
+    },
     /// 页面加载失败。
     LoadError {
         tab: TabId,
@@ -574,8 +574,8 @@ mod tests {
             r#"{"cmd":"cdp","tab":1,"payload":{"id":1,"method":"Page.enable"}}"#,
         ];
         for json in cases {
-            let cmd: Command = serde_json::from_str(json)
-                .unwrap_or_else(|e| panic!("{json} 解析失败：{e}"));
+            let cmd: Command =
+                serde_json::from_str(json).unwrap_or_else(|e| panic!("{json} 解析失败：{e}"));
             assert!(!matches!(cmd, Command::Shutdown));
         }
         // 关机不针对某个标签页 —— 它关的是整个进程。
@@ -594,7 +594,13 @@ mod tests {
     fn 不带像素密度的_resize_按一倍算() {
         let json = r#"{"cmd":"resize","tab":1,"width":700,"height":900}"#;
         let cmd: Command = serde_json::from_str(json).expect("解析");
-        let Command::Resize { width, height, scale, .. } = cmd else {
+        let Command::Resize {
+            width,
+            height,
+            scale,
+            ..
+        } = cmd
+        else {
             panic!("应该是 Resize");
         };
         assert_eq!((width, height), (700, 900));
@@ -635,8 +641,15 @@ mod tests {
         for ev in [
             Event::TabOpened { tab: 3 },
             Event::TabClosed { tab: 3 },
-            Event::LoadEnd { tab: 3, status: 200, url: "https://x.test/".into() },
-            Event::Cdp { tab: 3, payload: serde_json::json!({ "id": 1 }) },
+            Event::LoadEnd {
+                tab: 3,
+                status: 200,
+                url: "https://x.test/".into(),
+            },
+            Event::Cdp {
+                tab: 3,
+                payload: serde_json::json!({ "id": 1 }),
+            },
         ] {
             let line = serde_json::to_string(&ev).expect("序列化");
             assert!(line.contains("\"tab\":3"), "{line} 里应当有标签页号");

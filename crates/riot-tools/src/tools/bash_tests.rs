@@ -7,12 +7,12 @@
 
 use std::sync::Arc;
 
+use pretty_assertions::assert_eq;
 use riot_protocol::permission::{
     PermissionContext, PermissionModeState, PermissionResult, PermissionRule, RuleDecision,
     RuleSource,
 };
 use riot_protocol::tool::{Tool, ToolContext, ToolOutcome};
-use pretty_assertions::assert_eq;
 use tokio_util::sync::CancellationToken;
 
 use super::Bash;
@@ -127,7 +127,10 @@ async fn 在会话工作目录里执行() {
     let h = harness(FakeProc::new().default_script(Script::ok("x")));
     run(&h, "pwd").await;
 
-    assert_eq!(h.proc.last_spec().expect("起过进程").cwd, std::path::PathBuf::from("/work"));
+    assert_eq!(
+        h.proc.last_spec().expect("起过进程").cwd,
+        std::path::PathBuf::from("/work")
+    );
 }
 
 #[tokio::test]
@@ -174,10 +177,7 @@ async fn 超时值传给了执行器() {
     )
     .await;
 
-    assert_eq!(
-        h.proc.last_spec().expect("起过进程").timeout_ms,
-        Some(5000)
-    );
+    assert_eq!(h.proc.last_spec().expect("起过进程").timeout_ms, Some(5000));
 }
 
 #[tokio::test]
@@ -325,7 +325,11 @@ async fn 长输出保留开头和结尾() {
     let h = harness(FakeProc::new().on("build", Script::ok(&big)));
     let t = text_of(&run(&h, "build").await);
 
-    assert!(t.contains("第 0 行"), "开头要在：{}", &t[..200.min(t.len())]);
+    assert!(
+        t.contains("第 0 行"),
+        "开头要在：{}",
+        &t[..200.min(t.len())]
+    );
     assert!(
         t.contains("aborting due to 3 previous errors"),
         "结尾必须在，那是最有价值的部分"
@@ -511,7 +515,10 @@ async fn 超时超过上限时给出替代方案() {
 
     let msg = err.to_string();
     assert!(msg.contains("600000") || msg.contains("10 分钟"), "{msg}");
-    assert!(msg.contains("拆成") || msg.contains("子集"), "要给出路：{msg}");
+    assert!(
+        msg.contains("拆成") || msg.contains("子集"),
+        "要给出路：{msg}"
+    );
 }
 
 #[tokio::test]
