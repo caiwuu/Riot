@@ -1,0 +1,6 @@
+# git blame 该跳过的纯格式化提交。
+# 本地生效需要配一次：git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub 的 blame 视图自动认这个文件。
+
+# 全仓对齐当前 stable 的 rustfmt 风格基线
+363ec090bdbab0548d2370beeb0296bed5f9160e
