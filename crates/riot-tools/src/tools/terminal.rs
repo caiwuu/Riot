@@ -239,11 +239,15 @@ mod tests {
                 title: "t".into(),
                 command: Some("serve".into()),
                 running: self.running.load(Ordering::SeqCst),
+                shared: false,
             }]
         }
     }
 
-    fn ctx_with(term: Arc<FakeTerm>, clock: Arc<crate::testing::FixedClock>) -> ToolContext {
+    fn ctx_with(
+        term: Arc<dyn TerminalAccess>,
+        clock: Arc<crate::testing::FixedClock>,
+    ) -> ToolContext {
         let id = riot_protocol::id::ToolUseId::from_raw("t1");
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         ToolContext {
@@ -284,7 +288,7 @@ mod tests {
             true,
         ));
         let clock = Arc::new(crate::testing::FixedClock::default());
-        let ctx = ctx_with(Arc::clone(&term), Arc::clone(&clock));
+        let ctx = ctx_with(term.clone(), Arc::clone(&clock));
 
         let out = wait_for_sentinel("ready in", &input("ready in"), 80, &ctx).await;
         let ToolOutcome::Ok { model_content, .. } = out else {
@@ -303,7 +307,7 @@ mod tests {
         // 这是子串匹配的经典坑，写正则的人（和模型）都会踩。
         let term = Arc::new(FakeTerm::new(&["Error: EADDRINUSE port 3000"], false));
         let clock = Arc::new(crate::testing::FixedClock::default());
-        let ctx = ctx_with(Arc::clone(&term), Arc::clone(&clock));
+        let ctx = ctx_with(term.clone(), Arc::clone(&clock));
 
         let out = wait_for_sentinel("ready", &input("ready"), 80, &ctx).await;
         let ToolOutcome::Failed {
@@ -325,7 +329,7 @@ mod tests {
     async fn 超时失败要附上目前的输出和下一步() {
         let term = Arc::new(FakeTerm::new(&["installing deps..."], true));
         let clock = Arc::new(crate::testing::FixedClock::default());
-        let ctx = ctx_with(Arc::clone(&term), Arc::clone(&clock));
+        let ctx = ctx_with(term.clone(), Arc::clone(&clock));
 
         let out = wait_for_sentinel("ready", &input("ready"), 80, &ctx).await;
         let ToolOutcome::Failed {
@@ -378,6 +382,105 @@ mod tests {
                 .min(MAX_WAIT_MS),
             MAX_WAIT_MS
         );
+    }
+
+    /// TerminalList：有终端时列出来并标来源，一个都没有时指路而不是给空串
+    /// （空结果会被部分模型当成任务结束，见 ARCHITECTURE.md §6.7）。
+    #[tokio::test]
+    async fn 列表标出来源_空列表给指路() {
+        let term = Arc::new(FakeTerm::new(&["x"], true));
+        let clock = Arc::new(crate::testing::FixedClock::default());
+        let ctx = ctx_with(term, Arc::clone(&clock));
+        let out = TerminalList.call(serde_json::json!({}), ctx).await;
+        let ToolOutcome::Ok { model_content, .. } = out else {
+            panic!("该成功：{out:?}");
+        };
+        let text = format!("{model_content:?}");
+        assert!(text.contains("[1] t — serve — 在跑"), "{text}");
+        assert!(
+            text.contains("你起的"),
+            "要标来源，kill 的语义靠它区分：{text}"
+        );
+
+        let empty = ctx_with(
+            Arc::new(riot_protocol::terminal::NoTerminal),
+            Arc::new(crate::testing::FixedClock::default()),
+        );
+        let out = TerminalList.call(serde_json::json!({}), empty).await;
+        let ToolOutcome::Ok { model_content, .. } = out else {
+            panic!("空列表也该成功：{out:?}");
+        };
+        let text = format!("{model_content:?}");
+        assert!(
+            text.contains("background"),
+            "空列表要指路怎么让终端出现：{text}"
+        );
+    }
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ListInput {}
+
+pub struct TerminalList;
+
+#[async_trait]
+impl Tool for TerminalList {
+    fn name(&self) -> &'static str {
+        "TerminalList"
+    }
+
+    fn input_schema(&self) -> schemars::Schema {
+        schemars::schema_for!(ListInput)
+    }
+
+    fn prompt(&self, _ctx: &PromptContext) -> String {
+        "列出你能看的终端：你自己起的服务，加上用户在面板上共享给你的。\n\
+         \n\
+         - 每条给出 id、命令、在跑/已退出、来源。\n\
+         - 读输出用 TerminalOutput(id)；停只对你自己起的有效（TerminalKill）。\n\
+         - 记得 id 就直接去读，不用先列一遍 —— 这个工具是给 id 丢了\
+           （比如上下文被压缩之后）或者想确认服务死活时用的。"
+            .to_owned()
+    }
+
+    fn describe(&self, _input: &serde_json::Value) -> String {
+        "列出可见的终端".to_owned()
+    }
+
+    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+
+    async fn call(&self, _input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
+        let items = ctx.terminal.list().await;
+        if items.is_empty() {
+            return ToolOutcome::ok_text(
+                "现在没有你能看的终端。用 Bash 的 background 起的服务会出现在这里；\
+                 用户也可以在终端面板上把他的终端共享给你。"
+                    .to_owned(),
+            );
+        }
+        let lines: Vec<String> = items
+            .iter()
+            .map(|t| {
+                let state = if t.running { "在跑" } else { "已退出" };
+                let origin = if t.shared {
+                    "用户共享，只能读"
+                } else {
+                    "你起的"
+                };
+                match &t.command {
+                    Some(cmd) => format!("[{}] {} — {cmd} — {state}（{origin}）", t.id, t.title),
+                    None => format!("[{}] {} — {state}（{origin}）", t.id, t.title),
+                }
+            })
+            .collect();
+        ToolOutcome::ok_text(lines.join("\n"))
     }
 }
 

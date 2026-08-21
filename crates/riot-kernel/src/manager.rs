@@ -102,13 +102,17 @@ impl SessionManager {
     }
 
     /// 给一个新建/水合的会话挂上宿主能力的远程代理。
-    /// 终端和浏览器都在宿主进程 —— 这两个代理把 trait 调用变成反向 RPC。
+    /// 终端、浏览器、环境探针都在宿主进程 —— 这些代理把 trait 调用变成反向 RPC。
     fn attach_host_proxies(&self, session: &Session, id: &SessionId) {
         session.attach_terminal(Arc::new(crate::bridge::RemoteTerminal {
             session_id: id.clone(),
             bridge: Arc::clone(&self.bridge),
         }));
         session.attach_browser(Arc::new(crate::bridge::RemoteBrowser {
+            session_id: id.clone(),
+            bridge: Arc::clone(&self.bridge),
+        }));
+        session.attach_env(Arc::new(crate::bridge::RemoteEnv {
             session_id: id.clone(),
             bridge: Arc::clone(&self.bridge),
         }));

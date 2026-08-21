@@ -17,43 +17,55 @@
 //!   里没有 share 方法，这是结构上的不存在，不是靠提示词劝；
 //! - 共享只给读。[`TerminalAccess::kill`] 仍然只认自己起的 —— 停掉用户的
 //!   shell 是破坏性的，而他共享的意思是"你看"，不是"你随便动"。
+//!
+//! # 所有权在注册表里，不在这里
+//!
+//! `[约束]` "哪个会话起的"记在 [`crate::term::Terminals`] 的条目上
+//! （`owner` 字段），这个包装自己**不存任何状态**。它曾经把 owned 集合
+//! 存在自己身上 —— 而宿主对每个 hostcall 现建一个包装，集合活不过一次
+//! 调用，表现是模型起了服务、下一次读就被拒。事故记录见
+//! docs/ENV_DESIGN.md §6；`所有权跨实例仍然成立` 是钉住它的回归测试。
 
-use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use async_trait::async_trait;
 use riot_protocol::terminal::{TerminalAccess, TerminalInfo, TerminalUnavailable};
 
 use crate::term::Terminals;
 
-/// 绑定一个会话的终端访问。
+/// 绑定一个会话的终端访问。无状态：每个 hostcall 现建一个也是安全的。
 pub struct HostTerminal {
     terms: Terminals,
     /// 服务的工作目录 = 会话的项目根。
     cwd: PathBuf,
-    /// 本会话起过的终端。跟着会话活，不能每轮重建 —— 那样上一轮起的
-    /// 服务这一轮就不认了。
-    owned: Mutex<HashSet<u32>>,
+    /// 这个包装代表哪个会话。所有权判定拿它对注册表里的 owner。
+    session: String,
 }
 
 impl HostTerminal {
-    pub fn new(terms: Terminals, cwd: PathBuf) -> Self {
+    pub fn new(terms: Terminals, cwd: PathBuf, session: String) -> Self {
         Self {
             terms,
             cwd,
-            owned: Mutex::new(HashSet::new()),
+            session,
         }
     }
 
     fn is_owned(&self, id: u32) -> bool {
-        self.owned.lock().expect("owned 锁").contains(&id)
+        self.terms.owner_of(id).as_deref() == Some(self.session.as_str())
     }
 
     /// 读的门槛：自己起的，或者用户共享过的。
+    ///
+    /// 拒绝的理由分两种，不能混（ARCHITECTURE.md §6.6.2 同款要求）：
+    /// "条目没了"该指路重新起服务，"不是你的"该指路请用户共享 ——
+    /// 给错方向模型会空转一轮。
     fn check_read(&self, id: u32) -> Result<(), TerminalUnavailable> {
         if self.is_owned(id) || self.terms.is_shared(id) {
             return Ok(());
+        }
+        if self.terms.info(id).is_none() {
+            return Err(closed(id));
         }
         Err(TerminalUnavailable(format!(
             "终端 {id} 不是你起的，也没被共享给你。用户自己开的终端里可能有密码和\
@@ -76,55 +88,72 @@ impl HostTerminal {
                  需要停请他自己来。"
             )));
         }
+        if self.terms.info(id).is_none() {
+            // 已经没了：停一个不存在的终端不是权限问题，别把模型往那边带。
+            return Err(TerminalUnavailable(format!(
+                "终端 {id} 已经不在了，不用停。"
+            )));
+        }
         Err(TerminalUnavailable(format!(
             "终端 {id} 不是你起的，停不了。"
         )))
     }
 }
 
+/// "条目已经没了"的统一说法。check_read 和 read 的 TOCTOU 兜底共用 ——
+/// 各写一遍迟早措辞分叉，模型看到两种说法会当成两种情况。
+fn closed(id: u32) -> TerminalUnavailable {
+    TerminalUnavailable(format!(
+        "终端 {id} 已经不在了（多半是用户在面板上关掉了它），这个 id 不会复活。\
+         还需要这个服务的话，用 Bash 的 background 重新起一个。"
+    ))
+}
+
 #[async_trait]
 impl TerminalAccess for HostTerminal {
     async fn spawn(&self, command: &str, title: &str) -> Result<u32, TerminalUnavailable> {
-        let id = self
-            .terms
-            .spawn(Some(self.cwd.display().to_string()), command, title)
-            .map_err(TerminalUnavailable)?;
-        self.owned.lock().expect("owned 锁").insert(id);
-        Ok(id)
+        self.terms
+            .spawn(
+                Some(self.cwd.display().to_string()),
+                command,
+                title,
+                &self.session,
+            )
+            .map_err(TerminalUnavailable)
     }
 
     async fn read(&self, id: u32, lines: usize) -> Result<String, TerminalUnavailable> {
         self.check_read(id)?;
-        // 过了 check_read 还读不到，只剩一种情况：id 归本会话管，但条目
-        // 已经没了 —— 用户在面板上把它关掉了。底层那句「这个终端已经关了」
-        // 是给面板看的，对模型不够：不指路的话，它会拿着旧 id 再试一轮，
-        // 或者从零猜。直接告诉它下一步。
-        self.terms.read(id, lines).map_err(|_| {
-            TerminalUnavailable(format!(
-                "终端 {id} 已经不在了（多半是用户在面板上关掉了它），这个 id 不会复活。\
-                 还需要这个服务的话，用 Bash 的 background 重新起一个。"
-            ))
-        })
+        // 过了 check_read 还读不到 = 检查和读之间条目被移走了（用户点了 ×）。
+        // 底层那句「这个终端已经关了」是给面板看的，对模型不够 —— 不指路
+        // 的话，它会拿着旧 id 再试一轮，或者从零猜。
+        self.terms.read(id, lines).map_err(|_| closed(id))
     }
 
     async fn kill(&self, id: u32) -> Result<(), TerminalUnavailable> {
         self.check_kill(id)?;
         self.terms.close(id);
-        self.owned.lock().expect("owned 锁").remove(&id);
         Ok(())
     }
 
     async fn list(&self) -> Vec<TerminalInfo> {
-        let owned = self.owned.lock().expect("owned 锁").clone();
         self.terms
             .list()
             .into_iter()
-            .filter(|t| owned.contains(&t.id) || t.shared)
-            .map(|t| TerminalInfo {
-                id: t.id,
-                title: t.title,
-                command: t.command,
-                running: t.running,
+            .filter_map(|t| {
+                let mine = t.owner.as_deref() == Some(self.session.as_str());
+                if !mine && !t.shared {
+                    return None;
+                }
+                Some(TerminalInfo {
+                    id: t.id,
+                    title: t.title,
+                    command: t.command,
+                    running: t.running,
+                    // 语义是"用户共享给你的"（对照"你起的"）。自己起的服务
+                    // 即使被用户顺手点了共享，对本会话仍然是"你起的"。
+                    shared: !mine,
+                })
             })
             .collect()
     }
@@ -135,19 +164,65 @@ mod tests {
     use super::*;
 
     fn host() -> HostTerminal {
-        HostTerminal::new(Terminals::default(), std::env::temp_dir())
+        HostTerminal::new(Terminals::default(), std::env::temp_dir(), "s1".into())
     }
 
     /// 这条边界是这个模块存在的理由。破了它，模型就能把用户 shell 里
     /// 的历史命令连同密码一起读走。
     #[tokio::test]
     async fn 读不了不是自己起的终端() {
-        let h = host();
-        let err = h.read(999, 10).await.expect_err("不该给读");
+        let terms = Terminals::default();
+        let (ch, _probe) = crate::term::testing::probe();
+        let his = terms.open(None, 80, 24, ch).expect("用户开一个终端");
+        let h = HostTerminal::new(terms.clone(), std::env::temp_dir(), "s1".into());
+
+        let err = h.read(his, 10).await.expect_err("不该给读");
         assert!(err.0.contains("不是你起的"), "{}", err.0);
 
-        let err = h.kill(999).await.expect_err("不该给停");
+        let err = h.kill(his).await.expect_err("不该给停");
         assert!(err.0.contains("不是你起的"), "{}", err.0);
+        terms.close(his);
+    }
+
+    /// 不存在的 id 和"不是你的"要分开说：前者指路重新起服务，后者指路
+    /// 请用户共享。给错方向模型会空转一轮。
+    #[tokio::test]
+    async fn 不存在的终端不当成权限问题() {
+        let h = host();
+        let err = h.read(999, 10).await.expect_err("不该给读");
+        assert!(err.0.contains("已经不在了"), "{}", err.0);
+        assert!(!err.0.contains("不是你起的"), "{}", err.0);
+
+        let err = h.kill(999).await.expect_err("不该给停");
+        assert!(err.0.contains("已经不在了"), "{}", err.0);
+    }
+
+    /// 所有权记在注册表条目上 —— 换一个包装实例、甚至换一个进程重来，
+    /// 都不该丢。
+    ///
+    /// 这是一次真实事故的回归测试：owned 集合曾存在包装对象里，而宿主对
+    /// 每个 hostcall 现建一个包装 —— 模型起了 dev server，下一次
+    /// TerminalOutput 就被拒（"不是你起的"）。单元测试当时全绿，因为
+    /// 它们都用同一个实例。见 docs/ENV_DESIGN.md §6。
+    #[tokio::test]
+    async fn 所有权跨实例仍然成立() {
+        let terms = Terminals::default();
+        let a = HostTerminal::new(terms.clone(), std::env::temp_dir(), "s1".into());
+        let id = a.spawn("sleep 30", "服务").await.expect("起服务");
+        drop(a);
+
+        // 同会话的新实例（对应下一次 hostcall）：读得到、列得出、停得掉。
+        let b = HostTerminal::new(terms.clone(), std::env::temp_dir(), "s1".into());
+        assert!(b.read(id, 10).await.is_ok(), "同会话新实例该读得到");
+        assert_eq!(b.list().await.len(), 1, "同会话新实例该列得出");
+
+        // 别的会话：一律不认。
+        let other = HostTerminal::new(terms.clone(), std::env::temp_dir(), "s2".into());
+        assert!(other.read(id, 10).await.is_err(), "别的会话不该读得到");
+        assert!(other.list().await.is_empty(), "别的会话不该列得出");
+        assert!(other.kill(id).await.is_err(), "别的会话不该停得掉");
+
+        b.kill(id).await.expect("同会话新实例该停得掉");
     }
 
     /// 共享是**用户**的动作，而且只给读。
@@ -161,7 +236,7 @@ mod tests {
         let (ch, _probe) = crate::term::testing::probe();
         let his = terms.open(None, 80, 24, ch).expect("用户开一个终端");
 
-        let h = HostTerminal::new(terms.clone(), std::env::temp_dir());
+        let h = HostTerminal::new(terms.clone(), std::env::temp_dir(), "s1".into());
 
         // 默认：读不到，也不在清单里。
         assert!(h.read(his, 10).await.is_err(), "没共享就不该读得到");
@@ -170,7 +245,9 @@ mod tests {
         // 用户点开共享。
         terms.set_shared(his, true);
         assert!(h.read(his, 10).await.is_ok(), "共享之后该读得到");
-        assert_eq!(h.list().await.len(), 1, "共享的终端要出现在清单里");
+        let listed = h.list().await;
+        assert_eq!(listed.len(), 1, "共享的终端要出现在清单里");
+        assert!(listed[0].shared, "清单要标出它是共享的，不是模型起的");
 
         let err = h.kill(his).await.expect_err("共享不该附带停的权力");
         assert!(err.0.contains("不能停它"), "理由要说清是为什么：{}", err.0);
@@ -188,7 +265,7 @@ mod tests {
     #[tokio::test]
     async fn 用户关掉的服务再读要指路重开() {
         let terms = Terminals::default();
-        let h = HostTerminal::new(terms.clone(), std::env::temp_dir());
+        let h = HostTerminal::new(terms.clone(), std::env::temp_dir(), "s1".into());
         let id = h.spawn("sleep 30", "测试服务").await.expect("起服务");
 
         // 用户在面板上点 ×：宿主把条目彻底移除。
@@ -198,7 +275,7 @@ mod tests {
         assert!(err.0.contains("重新起"), "要指路而不是只说关了：{}", err.0);
         assert!(
             !err.0.contains("不是你起的"),
-            "明明是它起的，语义不能串：{}",
+            "条目没了不是权限问题，语义不能串：{}",
             err.0
         );
     }
@@ -220,7 +297,7 @@ mod tests {
         let (ch, _) = crate::term::testing::probe();
         let mine_not = terms.open(None, 80, 24, ch).expect("开终端");
 
-        let h = HostTerminal::new(terms.clone(), std::env::temp_dir());
+        let h = HostTerminal::new(terms.clone(), std::env::temp_dir(), "s1".into());
         // 命令按 shell 方言走:Windows 的默认 shell 是 PowerShell，没有
         // printf；echo 和 sleep（Start-Sleep 的别名）两边语义一致。
         #[cfg(not(windows))]
@@ -233,6 +310,7 @@ mod tests {
         assert_eq!(listed.len(), 1, "只列模型自己起的");
         assert_eq!(listed[0].id, id);
         assert_eq!(listed[0].command.as_deref(), Some(CMD));
+        assert!(!listed[0].shared, "自己起的不该标成共享");
 
         let seen = crate::term::testing::wait_until(|| {
             h.terms

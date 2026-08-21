@@ -56,6 +56,12 @@ pub struct TermSummary {
     pub running: bool,
     /// 用户把这个终端交给模型看了。见 [`Terminals::set_shared`]。
     pub shared: bool,
+    /// 起它的那个会话。用户自己开的 shell 是 None。
+    ///
+    /// `[约束]` 所有权必须记在注册表条目上，不能记在包装对象里 ——
+    /// 包装对象（`term_access::HostTerminal`）每个 hostcall 现建一个，
+    /// 记在它身上的集合活不过一次调用。事故记录见 docs/ENV_DESIGN.md §6。
+    pub owner: Option<String>,
 }
 
 /// 一个终端。
@@ -87,6 +93,8 @@ struct Term {
     /// `[约束]` 默认 false，且只能由用户在面板上点开 —— 模型没有任何接口
     /// 能把它置真。见 [`Terminals::set_shared`]。
     shared: std::sync::atomic::AtomicBool,
+    /// 起它的会话（模型经 spawn 起的服务才有）。见 [`TermSummary::owner`]。
+    owner: Option<String>,
 }
 
 /// 所有终端的注册表。`Clone` 是浅拷贝（内部是 `Arc`），和 `AppState` 同款。
@@ -111,7 +119,7 @@ impl Terminals {
         rows: u16,
         sink: Channel<TermEvent>,
     ) -> Result<u32, String> {
-        self.start(root, None, "终端".to_owned(), Some(sink), cols, rows)
+        self.start(root, None, "终端".to_owned(), Some(sink), cols, rows, None)
     }
 
     /// 起一条长期命令，跑在用户看得见的终端里。立刻返回 id，不等它结束。
@@ -119,7 +127,16 @@ impl Terminals {
     /// 这是模型开 dev server 的唯一正路：走 Bash 那条子进程的话，收尾时
     /// 整个进程组会被清掉，服务活不过一次调用；而用 `setsid` 逃出来的
     /// 进程谁也管不了。放在这里，用户能看见能 Ctrl-C，模型能读能停。
-    pub fn spawn(&self, root: Option<String>, command: &str, title: &str) -> Result<u32, String> {
+    ///
+    /// `owner` 是起它的会话 —— 所有权记在条目上（见 [`TermSummary::owner`]），
+    /// 后续读/停/列表按它判定。
+    pub fn spawn(
+        &self,
+        root: Option<String>,
+        command: &str,
+        title: &str,
+        owner: &str,
+    ) -> Result<u32, String> {
         // 尺寸随便给一个像样的：面板挂上来时会按真实宽度 resize。
         // 太窄的话服务启动那几行 banner 会折得没法看。
         self.start(
@@ -129,9 +146,13 @@ impl Terminals {
             None,
             120,
             30,
+            Some(owner.to_owned()),
         )
     }
 
+    // 私有装配函数：参数就是 Term 的字段清单，收成结构体只是把同一张
+    // 清单换个地方写一遍。
+    #[allow(clippy::too_many_arguments)]
     fn start(
         &self,
         root: Option<String>,
@@ -140,6 +161,7 @@ impl Terminals {
         sink: Option<Channel<TermEvent>>,
         cols: u16,
         rows: u16,
+        owner: Option<String>,
     ) -> Result<u32, String> {
         let pty = native_pty_system()
             .openpty(PtySize {
@@ -200,6 +222,7 @@ impl Terminals {
             // 默认不共享。模型起的服务不需要这个标记（它按"自己起的"放行），
             // 用户自己开的 shell 要他显式点开才给看。
             shared: std::sync::atomic::AtomicBool::new(false),
+            owner,
         });
         self.0
             .map
@@ -345,6 +368,7 @@ impl Terminals {
                 command: t.command.clone(),
                 running: t.running.load(std::sync::atomic::Ordering::Relaxed),
                 shared: t.shared.load(std::sync::atomic::Ordering::Relaxed),
+                owner: t.owner.clone(),
             })
             .collect();
         out.sort_by_key(|s| s.id);
@@ -370,7 +394,18 @@ impl Terminals {
             command: t.command.clone(),
             running: t.running.load(std::sync::atomic::Ordering::Relaxed),
             shared: t.shared.load(std::sync::atomic::Ordering::Relaxed),
+            owner: t.owner.clone(),
         })
+    }
+
+    /// 起这个终端的会话。用户自己开的（或已经不存在的）终端是 None。
+    pub fn owner_of(&self, id: u32) -> Option<String> {
+        self.0
+            .map
+            .lock()
+            .expect("终端表锁")
+            .get(&id)
+            .and_then(|t| t.owner.clone())
     }
 
     /// 把键盘输入写进 shell。`data` 是 xterm 给的原始串（含控制序列）。
@@ -702,8 +737,12 @@ mod tests {
                 Some(std::env::temp_dir().display().to_string()),
                 CMD,
                 "测试服务",
+                "s1",
             )
             .expect("起服务");
+
+        // 所有权记在条目上，跟注册表一样长寿 —— 不跟任何包装对象走。
+        assert_eq!(terms.owner_of(id).as_deref(), Some("s1"));
 
         let seen = wait_until(|| {
             terms

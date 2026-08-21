@@ -828,6 +828,8 @@ export interface TermSummary {
   running: boolean;
   /** 用户把这个终端交给模型看了。 */
   shared: boolean;
+  /** 起它的会话（模型起的服务才有）。用户自己开的 shell 是 null。 */
+  owner: string | null;
 }
 
 /**

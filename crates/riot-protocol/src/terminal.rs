@@ -33,6 +33,10 @@ pub struct TerminalInfo {
     pub command: Option<String>,
     /// 进程还活着。退出之后终端条目还留着，输出可以继续读。
     pub running: bool,
+    /// 这是用户共享给模型看的终端（不是模型自己起的）。共享只给读：
+    /// 停它的请求会被宿主拒绝。`default` 兼容旧数据。
+    #[serde(default)]
+    pub shared: bool,
 }
 
 /// 终端能力不可用（宿主没装配，或这个终端不归模型管）。

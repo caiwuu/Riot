@@ -164,6 +164,8 @@ struct Inner {
     /// screencast / 输入转发是宿主能力,浏览器进程完全归宿主。
     /// M-B3 反向 RPC 后,内核的浏览器工具经宿主服务端用同一个实例。
     browsers: Mutex<HashMap<String, Arc<crate::browser::access::HostBrowser>>>,
+    /// 环境告警的去重表（env.snapshot 用）。见 `env_probe`。
+    env_alerts: crate::env_probe::AlertSeen,
 }
 
 impl Inner {
@@ -190,6 +192,7 @@ impl Inner {
             index_lock: Mutex::default(),
             terminals: crate::term::Terminals::default(),
             browsers: Mutex::default(),
+            env_alerts: crate::env_probe::AlertSeen::default(),
         }
     }
 }
@@ -782,6 +785,19 @@ impl AppState {
             .contains_key(id)
             .then_some(())
             .ok_or(HostError::NoSession)
+    }
+
+    /// 环境快照组装（`env_probe`）要用的内部件。只开 crate 内。
+    /// （终端句柄走已有的 [`Self::terminals`]。）
+    pub(crate) async fn browser_of(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<crate::browser::access::HostBrowser>> {
+        self.0.browsers.lock().await.get(session_id).cloned()
+    }
+
+    pub(crate) fn env_alerts(&self) -> &crate::env_probe::AlertSeen {
+        &self.0.env_alerts
     }
 
     /// 会话的项目根。
@@ -1448,10 +1464,16 @@ impl crate::kernel::HostCallHandler for HostCalls {
         use riot_protocol::hostcall::{HostRequest as Req, HostResponse as R};
         use riot_protocol::terminal::TerminalAccess;
 
-        // 终端面板是应用级的,但 spawn 的 cwd 是会话的项目根 ——
-        // 每次按会话现建一个轻量的 HostTerminal 包装。
-        let terminal =
-            |root: PathBuf| crate::term_access::HostTerminal::new(self.0.0.terminals.clone(), root);
+        // 终端面板是应用级的,但 spawn 的 cwd 是会话的项目根、所有权按会话
+        // 判定 —— 每次现建一个轻量的 HostTerminal 包装是安全的:它无状态,
+        // 所有权在 Terminals 注册表里(docs/ENV_DESIGN.md §6)。
+        let terminal = |root: PathBuf, sid: &riot_protocol::id::SessionId| {
+            crate::term_access::HostTerminal::new(
+                self.0.0.terminals.clone(),
+                root,
+                sid.as_str().to_owned(),
+            )
+        };
 
         match req {
             Req::TerminalSpawn {
@@ -1463,7 +1485,7 @@ impl crate::kernel::HostCallHandler for HostCalls {
                     Ok(r) => r,
                     Err(_) => return host_unavailable("会话不存在,起不了终端"),
                 };
-                match terminal(root).spawn(&command, &title).await {
+                match terminal(root, &session_id).spawn(&command, &title).await {
                     Ok(id) => R::TerminalId { id },
                     Err(e) => host_unavailable(e.0),
                 }
@@ -1477,7 +1499,7 @@ impl crate::kernel::HostCallHandler for HostCalls {
                     Ok(r) => r,
                     Err(_) => return host_unavailable("会话不存在"),
                 };
-                match terminal(root).read(id, lines).await {
+                match terminal(root, &session_id).read(id, lines).await {
                     Ok(text) => R::Text { text },
                     Err(e) => host_unavailable(e.0),
                 }
@@ -1487,7 +1509,7 @@ impl crate::kernel::HostCallHandler for HostCalls {
                     Ok(r) => r,
                     Err(_) => return host_unavailable("会话不存在"),
                 };
-                match terminal(root).kill(id).await {
+                match terminal(root, &session_id).kill(id).await {
                     Ok(()) => R::Ok,
                     Err(e) => host_unavailable(e.0),
                 }
@@ -1498,7 +1520,15 @@ impl crate::kernel::HostCallHandler for HostCalls {
                     Err(_) => return host_unavailable("会话不存在"),
                 };
                 R::Terminals {
-                    items: terminal(root).list().await,
+                    items: terminal(root, &session_id).list().await,
+                }
+            }
+            Req::EnvSnapshot { session_id } => {
+                if self.0.session_root(session_id.as_str()).await.is_err() {
+                    return host_unavailable("会话不存在");
+                }
+                R::Env {
+                    snapshot: crate::env_probe::assemble(&self.0, session_id.as_str()).await,
                 }
             }
             Req::BrowserCall { session_id, call } => {

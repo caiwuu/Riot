@@ -21,6 +21,7 @@ use riot_protocol::browser::{
     Action, BrowserAccess, BrowserUnavailable, InteractError, InterceptOp, MarkedView, Nav,
     NetQuery, Target, WaitCondition,
 };
+use riot_protocol::env::{EnvProbe, EnvSnapshot};
 use riot_protocol::hostcall::{BrowserCall, HostCallErrorKind, HostRequest, HostResponse};
 use riot_protocol::id::SessionId;
 use riot_protocol::terminal::{TerminalAccess, TerminalInfo, TerminalUnavailable};
@@ -144,6 +145,30 @@ impl TerminalAccess for RemoteTerminal {
             Ok(HostResponse::Terminals { items }) => items,
             // 清单拿不到就是空的 —— trait 这个方法没有错误通道。
             _ => Vec::new(),
+        }
+    }
+}
+
+/// 宿主环境探针的远程代理。
+pub struct RemoteEnv {
+    pub session_id: SessionId,
+    pub bridge: Arc<HostBridge>,
+}
+
+#[async_trait]
+impl EnvProbe for RemoteEnv {
+    async fn sample(&self) -> Option<EnvSnapshot> {
+        match self
+            .bridge
+            .call(HostRequest::EnvSnapshot {
+                session_id: self.session_id.clone(),
+            })
+            .await
+        {
+            Ok(HostResponse::Env { snapshot }) => Some(snapshot),
+            // 拿不到就是"这一轮没有感知"。工具都还在，模型不因此变盲，
+            // 不值得为一次采样失败打断轮次。
+            _ => None,
         }
     }
 }

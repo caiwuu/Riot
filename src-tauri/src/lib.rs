@@ -22,6 +22,7 @@ mod gui_env;
 pub use askpass::run_client as run_askpass;
 pub use gui_env::print_process_env;
 
+pub mod env_probe;
 pub mod kernel;
 pub mod persist;
 pub mod state;

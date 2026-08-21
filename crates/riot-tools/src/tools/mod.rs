@@ -78,6 +78,8 @@ pub fn builtin() -> Vec<Arc<dyn Tool>> {
     // 让模型能把决定交回给用户。放末尾同上：追加不动前缀。
     tools.push(Arc::new(ask::AskUserQuestion));
     tools.push(Arc::new(diagnostics::Diagnostics));
+    // 可见终端的清单（自己起的 + 用户共享的）。追加在末尾，不动前缀。
+    tools.push(Arc::new(terminal::TerminalList));
     tools
 }
 

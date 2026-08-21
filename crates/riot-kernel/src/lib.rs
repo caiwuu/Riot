@@ -30,6 +30,7 @@ pub mod bridge;
 pub mod changes;
 pub mod classifier;
 pub mod config;
+pub mod env;
 pub mod git;
 pub mod git_changes;
 pub mod hooks;

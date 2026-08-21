@@ -9,6 +9,7 @@
 pub mod browser;
 pub mod changes;
 pub mod compact;
+pub mod env;
 pub mod event;
 pub mod hook;
 pub mod hostcall;
@@ -31,6 +32,7 @@ pub use browser::{
 };
 pub use changes::{ChangeStatus, DiffLine, FileChange, GitChanges, Hunk, LineKind};
 pub use compact::{CompactBudget, CompactResult, Compactor};
+pub use env::{BrowserGlance, EnvAlert, EnvProbe, EnvSnapshot, NoEnvProbe};
 pub use event::{
     AbortSource, AgentError, AgentEvent, CompactStrategy, ProgressPayload, StreamDelta,
     TerminalReason, Transition,

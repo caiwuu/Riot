@@ -57,6 +57,11 @@ pub enum HostRequest {
         session_id: SessionId,
         call: BrowserCall,
     },
+
+    /// 环境快照:终端与浏览器现状 + 新告警。内核在轮首采样,差分注入,
+    /// 见 docs/ENV_DESIGN.md §3。
+    #[serde(rename = "env.snapshot")]
+    EnvSnapshot { session_id: SessionId },
 }
 
 /// [`crate::browser::BrowserAccess`] 各方法的序列化形状,一一对应。
@@ -133,6 +138,8 @@ pub enum HostResponse {
     Lines { lines: Vec<String> },
     /// browser.snapshot_marked:编号清单 + 带框视口截图(base64 JPEG)。
     Marked { listing: String, screenshot: String },
+    /// env.snapshot。
+    Env { snapshot: crate::env::EnvSnapshot },
     /// 无返回数据的成功(terminal.kill、browser.navigate)。
     Ok,
     /// 失败。`kind` 必须区分开 —— 工具层对两种失败给模型的指引相反:
