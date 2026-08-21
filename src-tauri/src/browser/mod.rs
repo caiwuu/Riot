@@ -408,8 +408,13 @@ async fn route_cdp_response(pending: &Pending, ev: &Event) -> bool {
 /// macOS 上产物是 `.app`（可执行文件埋在 `Contents/MacOS/` 里），
 /// Windows 上是平铺目录 —— exe、libcef.dll、资源全在一层（CEF 在
 /// Windows 没有 bundle 概念，dll 按"和 exe 同目录"加载）。
+///
+/// `pub` 是给"有没有打包"的判定用的（`access::is_browser_bundle`、
+/// browser_e2e 的跳过条件）：判据必须和 [`Browser::spawn`] 同源 ——
+/// 各看各的（比如只查目录存在）的话，CI 里一个空占位目录就能让
+/// e2e 以为有浏览器、进而全军覆没。
 #[cfg(not(windows))]
-fn executable_in(app: &std::path::Path) -> PathBuf {
+pub fn executable_in(app: &std::path::Path) -> PathBuf {
     let name = app.file_stem().map_or_else(
         || "riot-browser".into(),
         |s| s.to_string_lossy().into_owned(),
@@ -418,7 +423,7 @@ fn executable_in(app: &std::path::Path) -> PathBuf {
 }
 
 #[cfg(windows)]
-fn executable_in(app: &std::path::Path) -> PathBuf {
+pub fn executable_in(app: &std::path::Path) -> PathBuf {
     app.join("riot-browser.exe")
 }
 

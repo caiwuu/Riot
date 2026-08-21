@@ -87,6 +87,12 @@ jobs:
       # pnpm tauri dev/build 顺手 stage，CI 得显式来一遍。
       # kernel_e2e 也靠这一步产出的 target/debug/riot-kernel。
       - run: node scripts/stage-kernel.mjs
+      # 浏览器 bundle 同理也是 tauri-build 检查的资源，但 CEF 有几百 MB，
+      # 不该是 CI 的前置条件 —— 给空占位目录过存在性检查。空目录里没有
+      # 可执行文件，宿主和 e2e 的"有没有打包"判据（executable_in）会正确
+      # 判成没打包：装 NoBrowser、浏览器用例跳过。
+      - run: mkdir -p crates/riot-browser/target/bundle/riot-browser.app crates/riot-browser/target/bundle/riot-browser
+        shell: bash
       - run: cargo clippy -p riot-host --all-targets -- -D warnings
       # 进程生命周期测试是这里最重要的一项：
       # 孤儿进程泄漏在功能测试里完全看不出来

@@ -34,13 +34,17 @@ fn profile(tag: &str) -> PathBuf {
 
 fn bundle() -> Option<PathBuf> {
     // 打包布局按平台走:macOS 是 .app，Windows 是平铺目录。
-    // 见 riot_host_lib::browser::executable_in。
+    // 跳过判据 = 可执行文件存在，与 Browser::spawn 同源
+    // （riot_host_lib::browser::executable_in）—— 只查目录的话，CI 为了
+    // 过 tauri-build 资源检查造的空占位目录会让这批用例不跳过、全失败。
     #[cfg(windows)]
     const BUNDLE: &str = "../crates/riot-browser/target/bundle/riot-browser";
     #[cfg(not(windows))]
     const BUNDLE: &str = "../crates/riot-browser/target/bundle/riot-browser.app";
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(BUNDLE);
-    p.is_dir().then_some(p)
+    riot_host_lib::browser::executable_in(&p)
+        .is_file()
+        .then_some(p)
 }
 
 /// 开第一个标签页，等它就绪。

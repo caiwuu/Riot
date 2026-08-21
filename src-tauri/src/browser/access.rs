@@ -2065,14 +2065,10 @@ async fn handle_request_paused(
 }
 
 fn is_browser_bundle(path: &std::path::Path) -> bool {
-    #[cfg(windows)]
-    {
-        path.is_dir() && path.join("riot-browser.exe").is_file()
-    }
-    #[cfg(not(windows))]
-    {
-        path.is_dir()
-    }
+    // 判据 = 里面的可执行文件存在，与 Browser::spawn 同源（executable_in）。
+    // 只查目录存在的话，CI 为了过 tauri-build 资源检查造的空占位目录
+    // 会被当成"有浏览器"，会话装上一个永远起不来的 HostBrowser。
+    path.is_dir() && super::executable_in(path).is_file()
 }
 
 /// 打包好的浏览器在哪儿。
