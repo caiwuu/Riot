@@ -369,6 +369,9 @@ mod tests {
         }
     }
 
+    // 只有被 debug_assertions 门着的 inv2 用它，跟着一起编译出去，
+    // 否则 release 下是 dead_code。
+    #[cfg(debug_assertions)]
     fn user_text(id: &str, s: &str) -> Message {
         Message::User {
             id: MessageId::from_raw(id),
@@ -382,6 +385,12 @@ mod tests {
         check_tool_pairing(&[assistant_with_tool("m1", "t1"), tool_result("m2", "t1")]);
     }
 
+    // 下面这批 should_panic 验证的是 **debug 下的 panic 行为**。release 里
+    // invariant! 记录而不炸（生产不能因断言宕机），should_panic 在那边
+    // 必然落空 —— 所以按 debug_assertions 整个编译出去，而不是让
+    // test-release 跑一批注定失败的用例。release 侧的"记录不炸"由
+    // chaos_soak 覆盖。
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "配对缺失")]
     fn inv1_rejects_orphan_use() {
@@ -398,6 +407,7 @@ mod tests {
         assert_eq!(orphan_tool_uses(&msgs), vec![ToolUseId::from_raw("t2")]);
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "插在了 tool_use 和 tool_result 之间")]
     fn inv2_rejects_interleaved_user_text() {
@@ -409,6 +419,7 @@ mod tests {
         check_message_sequence(&[assistant_with_tool("m1", "t1"), tool_result("m2", "t1")]);
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "非并发安全的工具")]
     fn inv3_rejects_writer_in_parallel_batch() {
@@ -432,6 +443,7 @@ mod tests {
         }]);
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "从未发出 Done")]
     fn inv4_requires_done_on_drop() {
@@ -451,6 +463,7 @@ mod tests {
         });
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "无限压缩循环")]
     fn inv5_rejects_flag_reset_within_turn() {
@@ -488,6 +501,7 @@ mod tests {
         );
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "死循环")]
     fn inv6_rejects_hooks_on_api_error() {
@@ -503,6 +517,7 @@ mod tests {
         check_hook_eligibility(Some(&m), true);
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "泄漏进了 API 请求")]
     fn inv7_rejects_system_message_in_payload() {
@@ -513,12 +528,14 @@ mod tests {
         }]);
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "最多允许 1 个")]
     fn inv8_rejects_multiple_cache_markers() {
         check_cache_breakpoints(2);
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "thinking signature")]
     fn inv9_rejects_cross_model_signature() {
@@ -537,6 +554,7 @@ mod tests {
         check_thinking_signatures(&[m], "sonnet");
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "逃出了工作目录围栏")]
     fn inv10_rejects_escaped_path() {

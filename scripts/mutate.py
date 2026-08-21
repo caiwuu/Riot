@@ -12,6 +12,7 @@
     python3 scripts/mutate.py --check-anchors  只检查锚点还在不在
 """
 
+import os
 import re
 import subprocess
 import sys
@@ -736,10 +737,19 @@ def sources(layer: str) -> Path:
 def run_tests(layer: str) -> tuple[int, list[str]]:
     """返回 (失败数, 失败的测试名)。"""
     pkg = LAYERS[layer][0]
+    # 子进程的环境要钉死，不能继承 CI 的两样东西（真实事故：五个变异在
+    # CI 被误报成"存活"，本地却全被抓住）：
+    # - RUSTFLAGS=-D warnings 会让"变异顺带引出一个 warning"直接死在编译，
+    #   测试没机会表态 —— 这个脚本测的是测试套件，不是编译器；
+    # - CARGO_TERM_COLOR=always 会把 error: 拆进 ANSI 序列，下面按裸文本
+    #   识别"编译失败"的分支失灵，编译失败落进"没有测试失败"= 存活。
+    env = {k: v for k, v in os.environ.items() if k != "RUSTFLAGS"}
+    env["CARGO_TERM_COLOR"] = "never"
     try:
         r = subprocess.run(
             ["cargo", "test", "-p", pkg, *LAYERS[layer][2], "--", "--test-threads=4"],
             cwd=ROOT,
+            env=env,
             capture_output=True,
             text=True,
             # 有些变异的表现是挂死而不是失败 —— 去掉进程组清理、
@@ -749,7 +759,9 @@ def run_tests(layer: str) -> tuple[int, list[str]]:
         )
     except subprocess.TimeoutExpired:
         return 1, ["超时（挂死也是一种被抓住）"]
-    out = r.stdout + r.stderr
+    # 再剥一遍 ANSI 当保险：哪个工具链哪天又在管道里上色，文本解析
+    # 也不该跟着失灵。
+    out = re.sub(r"\x1b\[[0-9;]*m", "", r.stdout + r.stderr)
     if "error[" in out or ("error:" in out and "test result" not in out):
         return -1, ["编译失败"]
     failed = re.findall(r"^test (\S+) \.\.\. FAILED", out, re.M)

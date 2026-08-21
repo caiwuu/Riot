@@ -106,6 +106,9 @@ mod tests {
         drop(s);
     }
 
+    // debug 行为的说明书：release 里 invariant! 记录不炸，编译出去。
+    // 同 invariants.rs 那批 should_panic 的处理。
+    #[cfg(debug_assertions)]
     #[tokio::test]
     #[should_panic(expected = "从未发出 Done")]
     async fn 自然结束却没有_done_要报警() {

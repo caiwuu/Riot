@@ -82,6 +82,11 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # riot-host 的 build.rs（tauri-build）要求 externalBin 的内核二进制
+      # 已在 src-tauri/binaries/ 就位，缺了直接 panic —— 本地由
+      # pnpm tauri dev/build 顺手 stage，CI 得显式来一遍。
+      # kernel_e2e 也靠这一步产出的 target/debug/riot-kernel。
+      - run: node scripts/stage-kernel.mjs
       - run: cargo clippy -p riot-host --all-targets -- -D warnings
       # 进程生命周期测试是这里最重要的一项：
       # 孤儿进程泄漏在功能测试里完全看不出来

@@ -19,9 +19,13 @@ use tokio_util::sync::CancellationToken;
 
 use riot_core::invariants;
 use riot_core::state::AgentState;
+// Breach / BreachingToolRunner 只被 debug_assertions 门着的两个用例用，
+// 跟着一起门，否则 release 下是 unused import。
+#[cfg(debug_assertions)]
+use riot_core::testing::{Breach, BreachingToolRunner};
 use riot_core::testing::{
-    Breach, BreachingToolRunner, ChaosProvider, FakeCompactor, ScriptedProvider, ScriptedResult,
-    ScriptedToolRunner, mock_deps_with, user_text,
+    ChaosProvider, FakeCompactor, ScriptedProvider, ScriptedResult, ScriptedToolRunner,
+    mock_deps_with, user_text,
 };
 
 fn state(max_turns: u32) -> AgentState {
@@ -64,6 +68,9 @@ fn transcript(events: &[AgentEvent]) -> Vec<Message> {
 ///
 /// 这不是假想 —— 真实实现里只要有一条 early return 忘了发 Done 就会这样。
 /// 主循环不能傻等，也不能让悬空的 tool_use 留在 transcript 里。
+// debug 行为的说明书：release 里 invariant! 记录不炸，编译出去
+// （同 invariants.rs 那批 should_panic 的处理）。
+#[cfg(debug_assertions)]
 #[tokio::test]
 #[should_panic(expected = "没有 BatchEvent::Done")]
 async fn 工具批次不返回_done_时不变量报警() {
@@ -87,6 +94,7 @@ async fn 工具批次不返回_done_时不变量报警() {
 ///
 /// 主循环的配对检查必须抓到它。放过去的话，下一次 API 请求会 400，
 /// 而错误信息不会告诉你缺哪个 tool_use_id。
+#[cfg(debug_assertions)]
 #[tokio::test]
 #[should_panic(expected = "配对缺失")]
 async fn 工具结果缺失时不变量报警() {
