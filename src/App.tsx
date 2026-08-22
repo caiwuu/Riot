@@ -95,7 +95,7 @@ const LS = {
   term: "riot.layout.term",
 };
 
-const SIDEBAR = { def: 230, min: 180, max: 420 };
+const SIDEBAR = { def: 280, min: 180, max: 420 };
 /** 抽屉窄过这个值页面就没法看了，浏览器面板自己也有同样的下限。 */
 const DRAWER_MIN = 320;
 const TERM = { def: 260, min: 110 };

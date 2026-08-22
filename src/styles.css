@@ -39,18 +39,35 @@
 }
 
 :root {
-  --bg: #1b1b1e;
-  --bg-side: #141416;
-  --bg-card: #232327;
-  --bg-hover: #2a2a2f;
-  --border: #303036;
-  --border-strong: #3d3d45;
+  /* 灰阶照 Codex 桌面端取色，纯中性（R=G=B），不带蓝紫倾向。
+     两条关系必须记住，它和一般深色 App 是反的：
+     ① 菜单区（侧栏）比正文区**浅**——正文 --bg 是全屏最深的一层；
+     ② 浮起来的东西（卡片、hover、输入条）逐级变浅，沉进去的东西
+        （--bg-side：代码块、工具输出、终端）比正文更深。 */
+  --bg: #181818;
+  --bg-side: #121212;
+  --bg-card: #212121;
+  --bg-hover: #2b2b2b;
+  /* 菜单区专用一档。侧栏/设置导航底色比正文浅 —— hover 和选中态
+     也得整体抬高才看得出来，所以配了自己的 hover/active，
+     并在 .sidebar / .settings-nav 里就地覆盖 --bg-hover。 */
+  --bg-nav: #252525;
+  --bg-nav-hover: #303030;
+  --bg-nav-active: #373737;
+  /* 输入条：全屏浮得最高的一层，比卡片再亮一档（Codex 的 composer 同色）。
+     底色一抬，里面那排 pill 和图标键的 hover 就得跟着抬，见 .composer。 */
+  --bg-input: #2b2b2b;
+  --bg-input-hover: #363636;
+  --border: #303030;
+  --border-strong: #3d3d3d;
   --text: #ececf1;
   --text-dim: #a2a2ad;
-  /* 最淡一级也要够得着 WCAG AA 的正文线（在 --bg 上 ≈4.6:1）——
-     它大量用在 11–13px 的必读小字上（标签标题、placeholder、说明），
-     不是纯装饰。想再淡的装饰性符号请用透明度，别再加灰阶。 */
-  --text-faint: #8a8a96;
+  /* 最淡一级也要够得着 WCAG AA 的正文线 —— 它大量用在 11–13px 的
+     必读小字上（标签标题、placeholder、说明），不是纯装饰。想再淡的
+     装饰性符号请用透明度，别再加灰阶。
+     对比度按最浅的底算，不是 --bg：现在最浅的是输入条 --bg-input
+     （≈4.7:1，输入框的 placeholder 就压在上面），其次是菜单 --bg-nav。 */
+  --text-faint: #94949f;
   /* 语义色：每个语义一个基色 + 深底配套（-soft 文字 / -bg 底 / -border 描边）。
      Tailwind 色和 Apple 系统色以前混着用，同屏三种绿 —— 已收敛到这一组，
      新代码不要再引进别的绿/黄/红。 */
@@ -145,6 +162,35 @@ body {
   line-height: 1.65;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
+}
+
+/* ── 磨砂侧栏（仅 macOS）────────────────────────
+ *
+ * 窗口底下垫了一层 sidebar 材质（tauri.conf.json 的 windowEffects），
+ * 侧栏要透出它，整页就得先把背景让开 —— 于是正文区自己补一层不透明底，
+ * 不然半透明会一路铺到对话上，背后的窗口把正文的字衬得晃眼。
+ *
+ * `[约束]` 这一组必须整体挂在 [data-vibrancy] 下，那个属性只在 macOS
+ * 挂得上（见 main.tsx）。别的平台没有材质层，把背景透掉只会露出
+ * webview 的白底 —— 一整块白，不是"没效果"而已。
+ *
+ * html 也要一起透：index.html 里有一条防白闪的兜底底色，它在 body
+ * 底下，不透就把材质整个挡住了。
+ */
+html[data-vibrancy],
+html[data-vibrancy] body {
+  background: transparent;
+}
+
+html[data-vibrancy] .main {
+  background: var(--bg);
+}
+
+/* 透明度是权衡出来的：太透，背后窗口的字会从侧栏里浮出来跟会话标题
+   打架；太实就只是一块灰。65% 下背后是隐约可辨的形状和明暗，侧栏
+   自己的色调还认得出。 */
+html[data-vibrancy] .sidebar {
+  background: color-mix(in srgb, var(--bg-nav) 65%, transparent);
 }
 
 button {
@@ -388,16 +434,22 @@ pre {
 /* ── 拖拽分隔线 ─────────────────────────────── */
 
 /* 7px 的命中区，负 margin 骑在相邻面板的 1px 边框上 —— 线本身不占布局。
-   平时用比边框略亮的 1px 标出"这里能拖"；悬停/拖动再换成强调色。 */
+   平时**不画线**：面板之间的界靠底色差就够了，一条常显的亮线横贯整个
+   窗口高度，比它分隔的两块底色差还抢眼。悬停/拖动才显形（配上
+   col-resize 光标），"这里能拖"的提示留在鼠标靠近的那一刻。 */
 .rz {
   flex-shrink: 0;
   position: relative;
   z-index: var(--z-panel);
 }
 
+/* 负 margin 吃掉整个宽度 —— 命中区完全骑在两侧面板上，自己不占一列。
+   `[约束]` 留一列的话，侧栏和主区之间就有 1px 谁都没画的空隙：透明
+   窗口下那是一条磨砂亮缝（比它取代的分界线还显眼），而且只在 macOS
+   出现，别的平台跟正文同色看不出来。 */
 .rz-x {
   width: 7px;
-  margin: 0 -3px;
+  margin: 0 -3px 0 -4px;
   cursor: col-resize;
 }
 
@@ -410,7 +462,7 @@ pre {
 .rz::after {
   content: '';
   position: absolute;
-  background: var(--border-strong);
+  background: transparent;
   /* 延迟一拍再亮，鼠标扫过时不闪 */
   transition: background 0.1s 0.15s;
 }
@@ -485,11 +537,13 @@ pre {
 
 /* ── 侧边栏 ─────────────────────────────────── */
 
-/* 宽度由内联样式给（用户拖出来的值），这里只管别被压扁。 */
+/* 宽度由内联样式给（用户拖出来的值），这里只管别被压扁。
+   底色比正文区浅一档（--bg-nav），所以就地把 --bg-hover 抬到菜单档 ——
+   侧栏里的会话行、脚部项、行内小键都走同一个变量，各自不用再覆盖。 */
 .sidebar {
   flex-shrink: 0;
-  background: var(--bg-side);
-  border-right: 1px solid var(--border);
+  background: var(--bg-nav);
+  --bg-hover: var(--bg-nav-hover);
   display: flex;
   flex-direction: column;
   padding: 0 10px 10px;
@@ -610,8 +664,10 @@ pre {
   background: var(--bg-hover);
 }
 
+/* 选中比 hover 再亮一档：菜单底本身就浅，两个态同色的话
+   鼠标一移上去就分不清「我在哪个会话」。 */
 .thread.active {
-  background: var(--bg-hover);
+  background: var(--bg-nav-active);
 }
 
 .thread-label {
@@ -2171,8 +2227,14 @@ pre {
   color: var(--text);
 }
 
+/* 全屏最浅的一块，靠底色差自己浮起来。代价是两样东西会溶进新底色，
+   所以就地各抬一档：hover 反馈（图标键、pill、停止键都走 --bg-hover），
+   以及 pill 的轮廓（--border 对 #2b2b2b 只差 5 级，等于没有）。
+   pill 的 hover 因此和常态描边同色 —— 反馈由抬亮的底色承担。 */
 .composer {
-  background: var(--bg-card);
+  background: var(--bg-input);
+  --bg-hover: var(--bg-input-hover);
+  --border: var(--border-strong);
   border: 1px solid var(--border);
   border-radius: 16px;
   padding: 10px 12px 8px;
@@ -2708,10 +2770,12 @@ pre {
   min-width: 0;
 }
 
+/* 设置左侧的分类列表也是菜单，跟侧栏同一档底色和 hover。 */
 .settings-nav {
   width: 148px;
   flex-shrink: 0;
-  background: var(--bg-side);
+  background: var(--bg-nav);
+  --bg-hover: var(--bg-nav-hover);
   border-right: 1px solid var(--border);
   padding: 10px 8px;
   display: flex;
@@ -2739,7 +2803,7 @@ pre {
 }
 
 .settings-tab.active {
-  background: var(--bg-hover);
+  background: var(--bg-nav-active);
   color: var(--text);
 }
 

@@ -572,12 +572,12 @@ function b64ToBytes(b64: string): Uint8Array {
  * 透明度 —— 深底上是一条很亮的灰。
  */
 const THEME = {
-  background: "#141416",
+  background: "#121212",
   foreground: "#ececf1",
   cursor: "#ececf1",
-  cursorAccent: "#141416",
-  selectionBackground: "#3d3d45",
-  black: "#1b1b1e",
+  cursorAccent: "#121212",
+  selectionBackground: "#3d3d3d",
+  black: "#181818",
   red: "#f87171",
   green: "#4ade80",
   yellow: "#fbbf24",

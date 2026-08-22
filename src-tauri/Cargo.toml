@@ -33,7 +33,7 @@ riot-runtime.workspace = true
 riot-store.workspace = true
 riot-tools.workspace = true
 
-tauri = { version = "2.11", features = [] }
+tauri = { version = "2.11", features = ["macos-private-api"] }
 tauri-plugin-dialog = "2.7"
 tauri-plugin-opener = "2.5"
 

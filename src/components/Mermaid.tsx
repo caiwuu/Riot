@@ -31,13 +31,13 @@ function load(): Promise<MermaidApi> {
       theme: "dark",
       themeVariables: {
         darkMode: true,
-        background: "#141416",
+        background: "#121212",
         primaryColor: "#2a3d5c",
         primaryTextColor: "#ececf1",
         primaryBorderColor: "#5a8dd6",
         lineColor: "#a2a2ad",
-        secondaryColor: "#232327",
-        tertiaryColor: "#1b1b1e",
+        secondaryColor: "#212121",
+        tertiaryColor: "#181818",
         fontFamily:
           "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif",
       },
