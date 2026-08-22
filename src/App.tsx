@@ -98,6 +98,10 @@ const LS = {
 };
 
 const SIDEBAR = { def: 280, min: 180, max: 420 };
+/** Overlay 标题栏的红绿灯只在 macOS 占左上角。Windows / Linux 的窗口
+ *  按钮在系统标题栏右侧，不进 webview。平台判断跟 main.tsx 的
+ *  data-vibrancy、以及下面 padTraffic 用同一条 UA。 */
+const IS_MAC = navigator.userAgent.includes("Mac");
 /** 抽屉窄过这个值页面就没法看了，浏览器面板自己也有同样的下限。 */
 const DRAWER_MIN = 320;
 const TERM = { def: 260, min: 110 };
@@ -707,7 +711,7 @@ function TopBar({
   // 侧栏收起后 macOS 的红绿灯悬在主区左上角，工具栏给它们让位。
   // 全屏没有红绿灯（见 shell[data-fullscreen]），Windows/Linux 的窗口
   // 按钮在右上且不在 webview 里，都不用让。
-  const padTraffic = !sidebarOpen && navigator.userAgent.includes("Mac");
+  const padTraffic = !sidebarOpen && IS_MAC;
   return (
     <header className={padTraffic ? "topbar pad-traffic" : "topbar"} data-tauri-drag-region>
       <button
@@ -995,8 +999,12 @@ function Sidebar(props: SidebarProps) {
 
   return (
     <aside className="sidebar" style={{ width }}>
-      {/* macOS 红绿灯占左上角，这块留空且可拖动 */}
-      <div className="traffic-space" data-tauri-drag-region />
+      {/* macOS 红绿灯占左上角，这块留空且可拖动。Windows / Linux
+          没有这块控件，只留一点顶距，免得「打开目录」贴顶。 */}
+      <div
+        className={IS_MAC ? "traffic-space" : "traffic-space compact"}
+        data-tauri-drag-region
+      />
 
       <button className="new-thread" onClick={onOpenProject}>
         <PlusIcon />

@@ -3,6 +3,7 @@ import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 
+import { openInBrowser, openPath } from "../bridge";
 import { MermaidBlock } from "./Mermaid";
 
 import "highlight.js/styles/github-dark-dimmed.css";
@@ -114,12 +115,7 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
         rehypePlugins={[[rehypeHighlight, { ignoreMissing: true, detect: false }]]}
         components={{
           pre: CodeBlock,
-          // 裸链接一律新窗口，别把应用本身导航走 —— webview 里没有后退按钮
-          a: ({ children, href }) => (
-            <a href={href} target="_blank" rel="noreferrer">
-              {children}
-            </a>
-          ),
+          a: MdLink,
         }}
       >
         {text}
@@ -127,6 +123,119 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
     </div>
   );
 });
+
+/**
+ * Markdown 链接。
+ *
+ * 不能把 href 原样丢给 `<a>`：相对路径和空地址会被浏览器解析成
+ * `http://localhost:1420/…`（开发时的 Vite 页，打包后是 webview 自己的
+ * origin）。点下去不是打开文件，而是把应用导航走 —— 而且没有后退按钮。
+ *
+ * 本地路径（含模型误写成应用 origin 的假网址）走系统默认应用；真正的
+ * http(s) 走系统浏览器。
+ */
+function MdLink({
+  href,
+  children,
+}: {
+  href?: string | undefined;
+  children?: React.ReactNode;
+}) {
+  const root = useContext(ProjectRootContext);
+  const [err, setErr] = useState(false);
+  const label = extractText(children);
+  const target = resolveMdLink(href, label, root);
+
+  if (!target) return <>{children}</>;
+
+  const onClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
+    e.preventDefault();
+    const go =
+      target.kind === "url" ? openInBrowser(target.value) : openPath(target.value);
+    go.catch(() => {
+      setErr(true);
+      setTimeout(() => setErr(false), 2000);
+    });
+  };
+
+  return (
+    <a href={target.href} title={err ? "打不开" : target.title} onClick={onClick}>
+      {children}
+    </a>
+  );
+}
+
+type MdLinkTarget = {
+  kind: "url" | "file";
+  value: string;
+  href: string;
+  title: string;
+};
+
+/** 把模型写的 href 收成"打开网址"或"打开本地文件"。 */
+function resolveMdLink(href: string | undefined, label: string, root: string): MdLinkTarget | null {
+  const raw = (href ?? "").trim();
+
+  if (raw.startsWith("file://")) {
+    const path = fileUrlToPath(raw);
+    return path ? fileTarget(path) : null;
+  }
+
+  if (/^https?:\/\//i.test(raw)) {
+    try {
+      const u = new URL(raw);
+      if (u.origin === window.location.origin) {
+        const rel = decodeURIComponent(u.pathname).replace(/^\/+/, "");
+        const name = rel || label.trim();
+        if (!name) return null;
+        return fileTarget(looksAbsPath(name) ? name : joinRoot(root, name));
+      }
+      return { kind: "url", value: u.href, href: u.href, title: u.href };
+    } catch {
+      return null;
+    }
+  }
+
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) {
+    return { kind: "url", value: raw, href: raw, title: raw };
+  }
+
+  const pathish = raw || label.trim();
+  if (!pathish || pathish.startsWith("#")) return null;
+  return fileTarget(looksAbsPath(pathish) ? pathish : joinRoot(root, pathish));
+}
+
+function fileTarget(path: string): MdLinkTarget {
+  return { kind: "file", value: path, href: toFileHref(path), title: path };
+}
+
+function looksAbsPath(s: string): boolean {
+  return s.startsWith("/") || s.startsWith("\\\\") || /^[A-Za-z]:[\\/]/.test(s);
+}
+
+function joinRoot(root: string, rel: string): string {
+  const cleaned = rel.replace(/^\.[\\/]+/, "");
+  if (!root) return cleaned;
+  const sep = root.includes("\\") ? "\\" : "/";
+  return `${root.replace(/[\\/]+$/, "")}${sep}${cleaned.replace(/[\\/]+/g, sep)}`;
+}
+
+function toFileHref(absPath: string): string {
+  const unified = absPath.replace(/\\/g, "/");
+  if (/^[A-Za-z]:/.test(unified)) return `file:///${unified}`;
+  if (unified.startsWith("/")) return `file://${unified}`;
+  return `file:///${unified}`;
+}
+
+function fileUrlToPath(url: string): string | null {
+  try {
+    let p = decodeURIComponent(new URL(url).pathname);
+    if (/^\/[A-Za-z]:/.test(p)) p = p.slice(1);
+    return p || null;
+  } catch {
+    return null;
+  }
+}
 
 /** 代码块：语言标签（或代码引用的路径）+ 复制按钮。 */
 function CodeBlock(props: React.HTMLAttributes<HTMLPreElement>) {
@@ -166,12 +275,10 @@ function CodeBlock(props: React.HTMLAttributes<HTMLPreElement>) {
   // 场景用的），这里要拿到失败才能在界面上说"打不开"。
   const openRef = () => {
     const full = refPath.startsWith("/") || !root ? refPath : `${root}/${refPath}`;
-    import("@tauri-apps/plugin-opener")
-      .then(({ openPath }) => openPath(full))
-      .catch(() => {
-        setRefErr(true);
-        setTimeout(() => setRefErr(false), 2000);
-      });
+    openPath(full).catch(() => {
+      setRefErr(true);
+      setTimeout(() => setRefErr(false), 2000);
+    });
   };
 
   const lines = refStart === refEnd ? `${refStart}` : `${refStart}-${refEnd}`;

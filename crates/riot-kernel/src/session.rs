@@ -3194,6 +3194,14 @@ fn system_prompt(
          界面会把它画成图。不要为了给人看图去写 HTML、引 mermaid.js、再打开浏览器 —— \
          浏览器是用来核对自己改过的页面，不是当画板。\n\
          \n\
+         指向本地文件（刚写的文档、报告、脚本）时，Markdown 链接的地址写文件路径，\
+         相对工作目录或绝对路径都可以：\n\
+         \n\
+         [报告.docx](报告.docx)\n\
+         \n\
+         界面会用系统默认应用打开。不要编一个 http:// 网址 —— 这个应用不是网页，\
+         没有用来下载文件的本地服务器。http(s) 只用来指向网上真实存在的页面。\n\
+         \n\
          回答用中文。代码和标识符保持原文。",
         cwd.display(),
         std::env::consts::OS,
@@ -3841,6 +3849,21 @@ mod tests {
         );
         assert!(p.contains("```mermaid"), "要给出围栏写法");
         assert!(p.contains("不要为了给人看图"), "要禁止借浏览器当画板");
+    }
+
+    /// 本地文件必须写成路径链接。不写进提示词的话，模型会编一个
+    /// `http://localhost:…` 假下载地址 —— 那是 webview 自己的页，点开不是文件。
+    #[test]
+    fn 提示词里有本地文件链接的写法() {
+        let p = system_prompt(
+            std::path::Path::new("/tmp/proj"),
+            None,
+            None,
+            PermissionMode::Default,
+            false,
+        );
+        assert!(p.contains("[报告.docx](报告.docx)"), "要给一个路径链接例子");
+        assert!(p.contains("不要编一个 http://"), "要禁止假下载网址");
     }
 
     #[test]

@@ -30,6 +30,8 @@ pub mod persist;
 pub mod state;
 pub mod term;
 pub mod term_access;
+#[cfg(windows)]
+mod vibrancy;
 
 use tauri::Manager;
 use tauri::ipc::Channel;
@@ -964,6 +966,13 @@ pub fn run() {
         // 启动时把 MCP 连接对齐配置。放 setup 里而不是 restore：
         // spawn 连接任务要求 runtime 已经起来，restore 跑在那之前。
         .setup(|app| {
+            // 侧栏的磨砂底在 Windows 上要等窗口建好再补几步，见 vibrancy 模块。
+            // 放在最前面：越早越不容易被用户看见中间态。
+            #[cfg(windows)]
+            if let Some(main) = app.get_webview_window("main") {
+                vibrancy::apply(&main);
+            }
+
             // 接上内核事件里宿主要消费的那几件(busy / mode 回流)。
             app.state::<AppState>().inner().spawn_host_bridge();
             let state = app.state::<AppState>().inner().clone();

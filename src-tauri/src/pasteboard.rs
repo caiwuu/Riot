@@ -93,7 +93,11 @@ mod imp {
                 }
                 let mut buf = vec![0u16; len + 1]; // +1 给结尾的 NUL
                 unsafe { DragQueryFileW(hdrop, i, Some(&mut buf)) };
-                Some(OsString::from_wide(&buf[..len]).to_string_lossy().into_owned())
+                Some(
+                    OsString::from_wide(&buf[..len])
+                        .to_string_lossy()
+                        .into_owned(),
+                )
             })
             .collect()
     }

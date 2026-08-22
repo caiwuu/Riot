@@ -940,11 +940,22 @@ export async function revealInFinder(path: string): Promise<void> {
  */
 export async function openInDefaultApp(path: string): Promise<void> {
   try {
-    const { openPath } = await import("@tauri-apps/plugin-opener");
     await openPath(path);
   } catch (e) {
     console.warn("打不开这个文件", path, e);
   }
+}
+
+/** 用系统默认应用打开路径。失败会抛，调用方自己决定怎么告诉用户。 */
+export async function openPath(path: string): Promise<void> {
+  const { openPath: open } = await import("@tauri-apps/plugin-opener");
+  await open(path);
+}
+
+/** 用系统浏览器打开网址。失败会抛。 */
+export async function openInBrowser(url: string): Promise<void> {
+  const { openUrl } = await import("@tauri-apps/plugin-opener");
+  await openUrl(url);
 }
 
 /** 弹系统的目录选择框。`defaultPath` 指定起始目录（如会话根）。 */

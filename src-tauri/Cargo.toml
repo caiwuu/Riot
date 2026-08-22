@@ -65,10 +65,17 @@ tauri-plugin-notification = "2.3.3"
 
 [target.'cfg(windows)'.dependencies]
 # DataExchange/Ole/Shell 三个是读剪贴板里的 CF_HDROP 用的（见 src/pasteboard.rs）。
+# Dwm/Gdi/Controls/WindowsAndMessaging 是侧栏的系统材质（见 src/vibrancy.rs）：
+# Gdi 只为了 DWM_BLURBEHIND 里的 HRGN，Controls 只为了 MARGINS，
+# WindowsAndMessaging 只为了 SWP_FRAMECHANGED 那一脚 SetWindowPos。
 windows = { workspace = true, features = [
   "Win32_System_DataExchange",
   "Win32_System_Ole",
   "Win32_UI_Shell",
+  "Win32_Graphics_Dwm",
+  "Win32_Graphics_Gdi",
+  "Win32_UI_Controls",
+  "Win32_UI_WindowsAndMessaging",
 ] }
 
 # 读系统粘贴板里的文件路径（见 src/pasteboard.rs）。版本跟着 wry 走，

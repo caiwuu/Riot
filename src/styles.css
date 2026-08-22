@@ -165,15 +165,16 @@ body {
   overflow: hidden;
 }
 
-/* ── 磨砂侧栏（仅 macOS）────────────────────────
+/* ── 磨砂侧栏（macOS / Windows）──────────────────
  *
- * 窗口底下垫了一层 sidebar 材质（tauri.conf.json 的 windowEffects），
+ * 窗口底下垫了一层系统材质（macOS 是 tauri.conf.json 里 windowEffects 的
+ * sidebar；Windows 是 DWM 的 acrylic，宿主设的，见 src-tauri/src/vibrancy.rs），
  * 侧栏要透出它，整页就得先把背景让开 —— 于是正文区自己补一层不透明底，
  * 不然半透明会一路铺到对话上，背后的窗口把正文的字衬得晃眼。
  *
- * `[约束]` 这一组必须整体挂在 [data-vibrancy] 下，那个属性只在 macOS
- * 挂得上（见 main.tsx）。别的平台没有材质层，把背景透掉只会露出
- * webview 的白底 —— 一整块白，不是"没效果"而已。
+ * `[约束]` 这一组必须整体挂在 [data-vibrancy] 下，那个属性只在真有材质的
+ * 平台挂得上（见 main.tsx）。Linux 没有材质层，把背景透掉只会露出窗口
+ * 底下的桌面 —— 一整片，不是"没效果"而已。
  *
  * html 也要一起透：index.html 里有一条防白闪的兜底底色，它在 body
  * 底下，不透就把材质整个挡住了。
@@ -192,6 +193,19 @@ html[data-vibrancy] .main {
    自己的色调还认得出。 */
 html[data-vibrancy] .sidebar {
   background: color-mix(in srgb, var(--bg-nav) 65%, transparent);
+  /* hover / 选中也得让材质透过去：实心灰会在磨砂上抠出一块不透明的
+     补丁，材质的色相进不来。白透明叠在任何底上都是「抬一档」。 */
+  --bg-nav-hover: #ffffff0d;
+  --bg-nav-active: #ffffff17;
+}
+
+/* Windows 的 mica 采样的是壁纸而不是背后的窗口，本身近乎不透明，罩层
+   只是把它的色调压向菜单灰 —— 留太实壁纸那点色相就全没了。旧系统上
+   材质压根设不上（要 Win11 22523+，见 src-tauri/src/vibrancy.rs），那时
+   这条是侧栏唯一的底，好在 mica 挂不上时逐像素 alpha 也关了，退化成
+   纯色而不是透窗。 */
+html[data-vibrancy='win'] .sidebar {
+  background: color-mix(in srgb, var(--bg-nav) 30%, transparent);
 }
 
 button {
@@ -446,8 +460,8 @@ pre {
 
 /* 负 margin 吃掉整个宽度 —— 命中区完全骑在两侧面板上，自己不占一列。
    `[约束]` 留一列的话，侧栏和主区之间就有 1px 谁都没画的空隙：透明
-   窗口下那是一条磨砂亮缝（比它取代的分界线还显眼），而且只在 macOS
-   出现，别的平台跟正文同色看不出来。 */
+   窗口下那是一条磨砂亮缝（比它取代的分界线还显眼），而且只在开了材质的
+   平台出现（macOS / Windows），Linux 上跟正文同色看不出来。 */
 .rz-x {
   width: 7px;
   margin: 0 -3px 0 -4px;
@@ -556,7 +570,9 @@ pre {
   flex-shrink: 0;
 }
 
-/* 全屏没有红绿灯，44px 留白就浪费了；但一点不留会让「打开目录」贴顶。 */
+/* Windows / Linux 没有左上角红绿灯；全屏时 macOS 红绿灯也消失。
+   44px 留白就浪费了；但一点不留会让「打开目录」贴顶。 */
+.traffic-space.compact,
 .shell[data-fullscreen] .traffic-space {
   height: 12px;
 }
