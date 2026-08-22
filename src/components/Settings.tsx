@@ -23,7 +23,6 @@ import {
   mcpImportJson,
   mcpRestart,
   mcpStatus,
-  packsInstall,
   packsStatus,
   packsUninstall,
   revealInFinder,
@@ -34,6 +33,13 @@ import {
   testConnection,
   testSearchBackend,
 } from "../bridge";
+import {
+  clearDonePackProgress,
+  clearPackProgress,
+  reportPackFailure,
+  startPackInstall,
+  usePackInstalls,
+} from "../hooks/usePackInstalls";
 import { FieldNumber } from "./FieldNumber";
 import { FieldSelect } from "./FieldSelect";
 import { HintTip } from "./HintTip";
@@ -1959,9 +1965,10 @@ function progressText(p: PackProgress): string {
 function PacksPane({ askConfirm }: { askConfirm: AskConfirm }) {
   const [packs, setPacks] = useState<PackStatus[] | null>(null);
   const [loadError, setLoadError] = useState("");
-  /** 正在装的包 → 最近一条进度。装完/失败后留在原地，作为结果行。 */
-  const [progress, setProgress] = useState<Record<string, PackProgress>>({});
-  const [busy, setBusy] = useState<string | null>(null);
+  /** 安装的进度和"正在装"标记在模块级 —— 关掉设置面板不该把它们连同组件一起丢掉。 */
+  const installs = usePackInstalls();
+  /** 卸载只是删本地目录，秒回，不值得也挪出去。 */
+  const [uninstalling, setUninstalling] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -1973,22 +1980,11 @@ function PacksPane({ askConfirm }: { askConfirm: AskConfirm }) {
     }
   }, []);
 
+  // completed 变了 = 有安装刚跑完，清单得重拉。它可能是在面板关着的时候
+  // 完成的，所以这里既管首次挂载，也管"装完了但没人看着"。
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  const install = async (p: PackStatus) => {
-    setBusy(p.id);
-    setProgress((m) => ({ ...m, [p.id]: { kind: "downloading", received: 0, total: 0 } }));
-    try {
-      await packsInstall(p.id, (ev) => setProgress((m) => ({ ...m, [p.id]: ev })));
-      await refresh();
-    } catch (e) {
-      setProgress((m) => ({ ...m, [p.id]: { kind: "failed", error: String(e) } }));
-    } finally {
-      setBusy(null);
-    }
-  };
+    void refresh().then(clearDonePackProgress);
+  }, [refresh, installs.completed]);
 
   const uninstall = (p: PackStatus) => {
     askConfirm({
@@ -1996,20 +1992,16 @@ function PacksPane({ askConfirm }: { askConfirm: AskConfirm }) {
       body: "会删掉整个包，连带摘掉它注册的 MCP 服务器和技能。可以随时重新下载。",
       confirmLabel: "卸载",
       action: () => {
-        setBusy(p.id);
+        setUninstalling(p.id);
         void (async () => {
           try {
             await packsUninstall(p.id);
-            setProgress((m) => {
-              const next = { ...m };
-              delete next[p.id];
-              return next;
-            });
+            clearPackProgress(p.id);
             await refresh();
           } catch (e) {
-            setProgress((m) => ({ ...m, [p.id]: { kind: "failed", error: String(e) } }));
+            reportPackFailure(p.id, String(e));
           } finally {
-            setBusy(null);
+            setUninstalling(null);
           }
         })();
       },
@@ -2022,8 +2014,8 @@ function PacksPane({ askConfirm }: { askConfirm: AskConfirm }) {
         能力包
         <HintTip>
           可选下载的运行时。装上之后模型自己会用 —— 相关技能和工具自动注册，
-          不需要你在别处再配一遍。包体较大，建议在网络稳定时装；下载中断可以重来，
-          已下好的部分会接着传。
+          不需要你在别处再配一遍。包体较大，建议在网络稳定时装；装的过程中可以关掉
+          设置去干别的，回来还能看到进度。下载中断可以重来，已下好的部分会接着传。
         </HintTip>
       </h2>
 
@@ -2041,8 +2033,9 @@ function PacksPane({ askConfirm }: { askConfirm: AskConfirm }) {
       ) : (
         <ul className="pack-list">
           {packs.map((p) => {
-            const prog = progress[p.id];
-            const installing = busy === p.id;
+            const prog = installs.progress[p.id];
+            const installing = Boolean(installs.running[p.id]);
+            const busy = installing || uninstalling === p.id;
             const upgradable =
               p.installedVersion !== null &&
               p.availableVersion !== null &&
@@ -2096,13 +2089,16 @@ function PacksPane({ askConfirm }: { askConfirm: AskConfirm }) {
 
                 <div className="pack-actions">
                   {p.availableVersion && (!p.installedVersion || upgradable) ? (
-                    <button disabled={installing || !p.supported} onClick={() => void install(p)}>
+                    <button
+                      disabled={busy || !p.supported}
+                      onClick={() => startPackInstall(p.id)}
+                    >
                       {p.installedVersion ? "升级" : "下载安装"}
                       {p.downloadSize > 0 ? `（${humanSize(p.downloadSize)}）` : null}
                     </button>
                   ) : null}
                   {p.installedVersion ? (
-                    <button className="ghost" disabled={installing} onClick={() => uninstall(p)}>
+                    <button className="ghost" disabled={busy} onClick={() => uninstall(p)}>
                       卸载
                     </button>
                   ) : null}
