@@ -59,7 +59,11 @@
     },
     "windows": {
       "webviewInstallMode": { "type": "downloadBootstrapper" },
-      "nsis": { "installMode": "both" }
+      "nsis": {
+        "installMode": "both",
+        "languages": ["SimpChinese"],
+        "installerIcon": "icons/icon.ico"
+      }
     }
   }
 }
