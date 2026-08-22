@@ -76,7 +76,8 @@ pub fn merge(mut a: Vec<Mention>, b: Vec<Mention>) -> Vec<Mention> {
 /// 从用户消息里挑出 `@` 引用。
 ///
 /// 规则（和 [`crate::memory`] 的行内引用一致，用户在两处的直觉该相同）：
-/// - `@` 前面必须是行首或空白 —— `user@host`、邮箱不是引用；
+/// - `@` 前面得是边界 —— 挡的是 `user@host` 和邮箱，中文正文里的
+///   `读下@src/a.rs` 算（见 [`is_mention_boundary`]）；
 /// - 反引号包住的内容不扫 —— 用户在讲 `` `@types/node` `` 这个包名；
 /// - `@"带 空格 的/路径"` 用引号括起来；
 /// - 裸路径到下一个空白为止，且要长得像路径（含 `/`，或 `.` / `~` 开头，
@@ -112,8 +113,7 @@ fn extract(line: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 0;
     let mut in_tick = false;
-    // `@` 前面得是"边界"才算引用：行首、空白，或中文标点
-    //（`@a.rs、@b.rs` 这种并列，顿号后面那个也是引用）。
+    // `@` 前面得是"边界"才算引用。行首默认是。
     let mut prev_is_boundary = true;
 
     while i < chars.len() {
@@ -125,7 +125,7 @@ fn extract(line: &str) -> Vec<String> {
             continue;
         }
         if in_tick || c != '@' || !prev_is_boundary {
-            prev_is_boundary = c.is_whitespace() || is_stop_punct(c);
+            prev_is_boundary = is_mention_boundary(c);
             i += 1;
             continue;
         }
@@ -156,6 +156,19 @@ fn extract(line: &str) -> Vec<String> {
         prev_is_boundary = false;
     }
     out
+}
+
+/// `@` 前面这个字符算不算边界。
+///
+/// 反着定义：只有 ASCII 标识符字符（外加邮箱本地部分能出现的那几个）
+/// 才**不是**边界 —— 那正是 `me@example.com`、`user@host` 的形状，也是
+/// 这条规则唯一要挡的东西。
+///
+/// `[约束]` 中文不写空格。"读下@src/a.rs" 里 `下` 必须算边界，否则中文
+/// 用户不在 `@` 前面敲个空格就引用不了文件 —— 而输入框里的引用块发出去
+/// 就是这个形状，块紧贴着前一个字是常态。
+fn is_mention_boundary(c: char) -> bool {
+    !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-'))
 }
 
 /// 中文标点不是空白，`@src/main.rs，还有` 会把半句话吞进路径 —— 这些
@@ -258,10 +271,15 @@ pub fn expand(mentions: &[Mention], file_state: Option<&dyn FileStateCache>) -> 
         let content = match std::fs::read_to_string(&m.path) {
             Ok(c) => c,
             Err(e) => {
-                out.push(note(format!(
-                    "用户引用了 {}，但它读不成文本（{e}）—— 可能是二进制文件。",
-                    m.path.display()
-                )));
+                // 二进制（xlsx 等）也要落成 UserFile：界面靠 `kind: user_file`
+                // 在气泡里画出引用块。只发 SystemReminder 的话，切回会话
+                // 就只剩正文里一串 `@路径` 纯文字。
+                out.push(Attachment::UserFile {
+                    path: m.path.clone(),
+                    content: format!(
+                        "读不成文本（{e}）—— 可能是二进制文件。需要的话用 Read 读它。"
+                    ),
+                });
                 continue;
             }
         };
@@ -570,11 +588,28 @@ mod tests {
     }
 
     #[test]
+    fn 中文不打空格也认() {
+        // 中文正文里没有空格的习惯，而输入框里的引用块紧贴着前一个字
+        // 发出去就是这个形状 —— 不认的话气泡里剩一串裸路径。
+        assert_eq!(raws("读下@src/main.rs"), vec!["src/main.rs"]);
+        assert_eq!(
+            raws("读下@\"/tmp/报表 (1).xlsx\""),
+            vec!["/tmp/报表 (1).xlsx"],
+            "引号形式同理"
+        );
+        // 后面紧贴着中文是另一回事：路径里本来就可能有中文
+        //（`@docs/设计.md`），断不了。界面发出去的块因此会加引号，
+        // 见 App.tsx 的 `mentionToken`。
+        assert_eq!(raws("看@\"docs/设计.md\"再说"), vec!["docs/设计.md"]);
+    }
+
+    #[test]
     fn 不该被误当引用的() {
         assert!(
             raws("联系 me@example.com").is_empty(),
-            "@ 前面不是空白就不算"
+            "邮箱不算 —— @ 紧跟在 ASCII 标识符后面"
         );
+        assert!(raws("ssh user@host").is_empty(), "user@host 同理");
         assert!(
             raws("装 `@types/node` 这个包").is_empty(),
             "行内代码里的不算"
@@ -685,6 +720,29 @@ mod tests {
         match &got[..] {
             [Attachment::SystemReminder { text }] => assert!(text.contains("nope.txt")),
             other => panic!("该有一条说明：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn 二进制引用也落成_user_file() {
+        // 只发 SystemReminder 的话，切回会话前端找不到 user_file，
+        // 气泡里的引用块会退回一串 `@路径` 纯文字。
+        let t = tempfile::tempdir().expect("目录");
+        let f = t.path().join("a.xlsx");
+        std::fs::write(&f, [0xff, 0xfe, 0x00, 0x01]).expect("写");
+        let got = expand(
+            &[Mention {
+                raw: "a.xlsx".into(),
+                path: f.clone(),
+            }],
+            None,
+        );
+        match &got[..] {
+            [Attachment::UserFile { path, content }] => {
+                assert_eq!(path, &f);
+                assert!(content.contains("读不成文本"), "{content}");
+            }
+            other => panic!("该是一个 UserFile：{other:?}"),
         }
     }
 

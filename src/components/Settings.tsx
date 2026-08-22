@@ -7,6 +7,8 @@ import {
   type HookInfo,
   type McpServerConfig,
   type McpServerStatus,
+  type PackProgress,
+  type PackStatus,
   type PermissionMode,
   type Protocol,
   type ProviderConfig,
@@ -21,6 +23,9 @@ import {
   mcpImportJson,
   mcpRestart,
   mcpStatus,
+  packsInstall,
+  packsStatus,
+  packsUninstall,
   revealInFinder,
   setApiKey,
   setConfig,
@@ -53,13 +58,23 @@ type AskConfirm = (req: ConfirmRequest) => void;
  */
 type LeaveGuard = () => Omit<ConfirmRequest, "action"> | null;
 
-type Tab = "provider" | "web" | "permission" | "mcp" | "skills" | "commands" | "hooks" | "about";
+type Tab =
+  | "provider"
+  | "web"
+  | "permission"
+  | "mcp"
+  | "packs"
+  | "skills"
+  | "commands"
+  | "hooks"
+  | "about";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "provider", label: "Provider" },
   { id: "web", label: "联网" },
   { id: "permission", label: "权限" },
   { id: "mcp", label: "MCP" },
+  { id: "packs", label: "能力包" },
   { id: "skills", label: "Skills" },
   { id: "commands", label: "命令" },
   { id: "hooks", label: "Hooks" },
@@ -198,6 +213,7 @@ export function Settings({ status, onStatus, onClose, activeRoot }: Props) {
                 onSaved={flashSaved}
               />
             ) : null}
+            {tab === "packs" ? <PacksPane askConfirm={setConfirm} /> : null}
             {tab === "skills" ? (
               <SkillsPane status={status} activeRoot={activeRoot ?? null} />
             ) : null}
@@ -410,6 +426,10 @@ function joinUrl(base: string, path: string): string {
  *
  * 放在服务方这一页而不是联网页:它和「支持图片」那个开关是一对，两者分开
  * 摆的话，用户勾了开关却不知道还有个兜底可以配。
+ *
+ * `[约束]` 常驻显示，不跟当前激活模型联动。早先当前模型能看图时把选择器
+ * 藏起来，结果"全局配置随着切换模型时隐时现"更像 bug —— 生效与否由内核
+ * 判（`vision_target`），界面只负责说明"只对没勾「看图」的模型生效"。
  */
 function VisionFallback({
   cfg,
@@ -428,9 +448,6 @@ function VisionFallback({
         label: `${p.name} · ${m.name?.trim() || m.id}`,
       })),
   );
-  const active = cfg.providers.find((p) => p.id === cfg.activeProvider);
-  const activeModel = active?.models.find((m) => m.id === cfg.activeModel);
-  const activeSeesImages = Boolean(activeModel?.vision);
   const known = options.some((o) => o.value === cfg.visionModel);
 
   return (
@@ -438,38 +455,33 @@ function VisionFallback({
       <h2>
         视觉兼容（全局）
         <HintTip>
-          {activeSeesImages
-            ? `当前模型「${activeModel?.name?.trim() || cfg.activeModel}」自己能收图片，截图会直接给它，不需要兼容模型。`
-            : "没勾「视觉」的模型走这里：先让这个模型看图、转成文字，再交给主模型。转述有损，精确像素判断不要依赖它。"}
+          只对没勾「看图」的模型生效：先让这里配的模型看图、转成文字，再交给主模型。
+          主模型自己能收图时不走这条路，直接发原图。转述有损，精确像素判断不要依赖它。
         </HintTip>
       </h2>
-      {activeSeesImages ? null : (
-        <>
-          <div className="field-row">
-            <label>兼容模型</label>
-            <FieldSelect
-              value={known ? cfg.visionModel : ""}
-              onChange={(v) => void onCommit({ ...cfg, visionModel: v })}
-              disabled={options.length === 0}
-              options={[
-                { value: "", label: "不转（截图工具会说用不了）" },
-                ...options,
-              ]}
-            />
-          </div>
-          {options.length === 0 ? (
-            <p className="hint">
-              还没有标记为能看图的模型。先在上面的模型列表里给一个视觉模型点上「看图」。
-            </p>
-          ) : null}
-          {cfg.visionModel && !known ? (
-            <p className="key-state warn">
-              <code>{cfg.visionModel}</code> 已不可用（模型被删了，或者它的「看图」被
-              取消了），当前不会转述。
-            </p>
-          ) : null}
-        </>
-      )}
+      <div className="field-row">
+        <label>兼容模型</label>
+        <FieldSelect
+          value={known ? cfg.visionModel : ""}
+          onChange={(v) => void onCommit({ ...cfg, visionModel: v })}
+          disabled={options.length === 0}
+          options={[
+            { value: "", label: "不转（截图工具会说用不了）" },
+            ...options,
+          ]}
+        />
+      </div>
+      {options.length === 0 ? (
+        <p className="hint">
+          还没有标记为能看图的模型。先在上面的模型列表里给一个视觉模型点上「看图」。
+        </p>
+      ) : null}
+      {cfg.visionModel && !known ? (
+        <p className="key-state warn">
+          <code>{cfg.visionModel}</code> 已不可用（模型被删了，或者它的「看图」被
+          取消了），当前不会转述。
+        </p>
+      ) : null}
     </section>
   );
 }
@@ -1912,6 +1924,198 @@ function McpServerEditor({
   );
 }
 
+/* ---------- 能力包分区 ---------- */
+
+/** 字节数写成人话。包是几百 MB 量级，一位小数够用。 */
+function humanSize(bytes: number): string {
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  if (bytes >= 1024 * 1024) return `${Math.round(bytes / 1024 / 1024)} MB`;
+  return `${Math.round(bytes / 1024)} KB`;
+}
+
+/**
+ * 安装进度的一句话描述。下载有百分比，后面三步没有 —— 它们相对下载
+ * 短得多，硬凑一个总进度只会让进度条在末尾诡异地卡住。
+ */
+function progressText(p: PackProgress): string {
+  switch (p.kind) {
+    case "downloading":
+      return p.total > 0
+        ? `下载中 ${humanSize(p.received)} / ${humanSize(p.total)}`
+        : `下载中 ${humanSize(p.received)}`;
+    case "verifying":
+      return "校验中…";
+    case "extracting":
+      return "解压中…";
+    case "selfCheck":
+      return "自检中…";
+    case "done":
+      return "完成";
+    case "failed":
+      return p.error;
+  }
+}
+
+function PacksPane({ askConfirm }: { askConfirm: AskConfirm }) {
+  const [packs, setPacks] = useState<PackStatus[] | null>(null);
+  const [loadError, setLoadError] = useState("");
+  /** 正在装的包 → 最近一条进度。装完/失败后留在原地，作为结果行。 */
+  const [progress, setProgress] = useState<Record<string, PackProgress>>({});
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      setPacks(await packsStatus());
+      setLoadError("");
+    } catch (e) {
+      setPacks(null);
+      setLoadError(String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const install = async (p: PackStatus) => {
+    setBusy(p.id);
+    setProgress((m) => ({ ...m, [p.id]: { kind: "downloading", received: 0, total: 0 } }));
+    try {
+      await packsInstall(p.id, (ev) => setProgress((m) => ({ ...m, [p.id]: ev })));
+      await refresh();
+    } catch (e) {
+      setProgress((m) => ({ ...m, [p.id]: { kind: "failed", error: String(e) } }));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const uninstall = (p: PackStatus) => {
+    askConfirm({
+      title: `卸载「${p.name}」？`,
+      body: "会删掉整个包，连带摘掉它注册的 MCP 服务器和技能。可以随时重新下载。",
+      confirmLabel: "卸载",
+      action: () => {
+        setBusy(p.id);
+        void (async () => {
+          try {
+            await packsUninstall(p.id);
+            setProgress((m) => {
+              const next = { ...m };
+              delete next[p.id];
+              return next;
+            });
+            await refresh();
+          } catch (e) {
+            setProgress((m) => ({ ...m, [p.id]: { kind: "failed", error: String(e) } }));
+          } finally {
+            setBusy(null);
+          }
+        })();
+      },
+    });
+  };
+
+  return (
+    <section>
+      <h2>
+        能力包
+        <HintTip>
+          可选下载的运行时。装上之后模型自己会用 —— 相关技能和工具自动注册，
+          不需要你在别处再配一遍。包体较大，建议在网络稳定时装；下载中断可以重来，
+          已下好的部分会接着传。
+        </HintTip>
+      </h2>
+
+      {loadError ? (
+        <div className="empty-state">
+          <p className="form-error" style={{ margin: 0 }}>
+            读取失败：{loadError}
+          </p>
+          <button onClick={() => void refresh()}>重试</button>
+        </div>
+      ) : packs === null ? (
+        <p className="hint">读取中…</p>
+      ) : packs.length === 0 ? (
+        <p className="hint">当前没有可用的能力包。</p>
+      ) : (
+        <ul className="pack-list">
+          {packs.map((p) => {
+            const prog = progress[p.id];
+            const installing = busy === p.id;
+            const upgradable =
+              p.installedVersion !== null &&
+              p.availableVersion !== null &&
+              p.installedVersion !== p.availableVersion;
+            return (
+              <li key={p.id} className="pack-item">
+                <div className="pack-head">
+                  <span className="pack-name">{p.name}</span>
+                  {p.installedVersion ? (
+                    <span className="pack-badge on">已装 {p.installedVersion}</span>
+                  ) : null}
+                  {upgradable ? (
+                    <span className="pack-badge">可升级到 {p.availableVersion}</span>
+                  ) : null}
+                </div>
+                <p className="hint" style={{ margin: "2px 0 0" }}>
+                  {p.description}
+                </p>
+
+                {!p.supported ? (
+                  <p className="hint" style={{ margin: "6px 0 0" }}>
+                    这个包没有适配当前系统的版本。
+                  </p>
+                ) : p.manifestError && !p.installedVersion ? (
+                  <p className="form-error" style={{ margin: "6px 0 0" }}>
+                    拉不到清单：{p.manifestError}
+                  </p>
+                ) : !p.availableVersion && !p.installedVersion ? (
+                  // 清单拉到了、但里面还没有这个包。不说话的话这一行就只剩名字和
+                  // 描述、没有任何按钮，用户分不清是在加载、坏了、还是没发布。
+                  <p className="hint" style={{ margin: "6px 0 0" }}>
+                    还没有发布可下载的版本。
+                  </p>
+                ) : null}
+
+                {prog ? (
+                  <div className="pack-progress">
+                    {prog.kind === "downloading" && prog.total > 0 ? (
+                      <div className="pack-bar">
+                        <div
+                          className="pack-bar-fill"
+                          style={{ width: `${Math.round((prog.received / prog.total) * 100)}%` }}
+                        />
+                      </div>
+                    ) : null}
+                    <span className={prog.kind === "failed" ? "form-error" : "hint"}>
+                      {progressText(prog)}
+                    </span>
+                  </div>
+                ) : null}
+
+                <div className="pack-actions">
+                  {p.availableVersion && (!p.installedVersion || upgradable) ? (
+                    <button disabled={installing || !p.supported} onClick={() => void install(p)}>
+                      {p.installedVersion ? "升级" : "下载安装"}
+                      {p.downloadSize > 0 ? `（${humanSize(p.downloadSize)}）` : null}
+                    </button>
+                  ) : null}
+                  {p.installedVersion ? (
+                    <button className="ghost" disabled={installing} onClick={() => uninstall(p)}>
+                      卸载
+                    </button>
+                  ) : null}
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 /* ---------- Skills 分区 ---------- */
 
 /**
@@ -2008,7 +2212,9 @@ description: 发布新版本时用。跑测试、打 tag、更新 changelog。
                       ? "内置"
                       : s.source === "project"
                         ? "项目"
-                        : "全局"}
+                        : s.source === "pack"
+                          ? "能力包"
+                          : "全局"}
                   </span>
                 </div>
                 <p className={s.error ? "form-error" : "hint"} style={{ margin: "2px 0 0" }}>
@@ -2028,6 +2234,7 @@ description: 发布新版本时用。跑测试、打 tag、更新 changelog。
 /** 技能在命令页的层级前缀。和 Skills 页用同一套词。 */
 const SKILL_TIER: Record<string, string> = {
   builtin: "内置",
+  pack: "能力包",
   global: "全局",
   project: "项目",
 };

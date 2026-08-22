@@ -970,6 +970,20 @@ pub fn profiles_dir(config_path: &Path) -> PathBuf {
         .join("browser-profiles")
 }
 
+/// 可下载能力包的根目录，一个包一个子目录。
+///
+/// `[约束]` 推导规则只能有这一份。安装、卸载、技能扫描、PATH 注入四处都要
+/// 按它定位 —— 各写各的话，改一处就会出现"设置页说没装、模型却能用"这种
+/// 谁也说不清的状态，而每个包是几百 MB。
+///
+/// 参数化 `config_path` 的理由同 [`profiles_dir`]。
+pub fn packs_dir(config_path: &Path) -> PathBuf {
+    config_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("packs")
+}
+
 /// 密钥文件。和 `config.json` 同目录但分开存 —— 分享配置时不至于连密钥一起分享。
 pub fn auth_path() -> PathBuf {
     dirs_config()

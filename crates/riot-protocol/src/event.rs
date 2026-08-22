@@ -93,6 +93,28 @@ pub enum AgentEvent {
         mode: crate::permission::PermissionMode,
     },
 
+    /// 本轮的用户消息被撤回了：模型一个字都还没给出，用户就按了停止。
+    ///
+    /// 消息已经从内存历史和 transcript 里移除。界面要把气泡撤掉、把原文
+    /// 放回输入框 —— 一句**没有被回答**的话留在对话里是有害的：它下一轮
+    /// 会原样再发给模型一次，而用户以为自己已经取消了它。
+    ///
+    /// `[约束]` 必须排在同一轮的 [`Self::Done`] **之前**（Done 是流的最后
+    /// 一个事件）。
+    ///
+    /// 只有"什么都没产出"的中断才有这条。模型已经开口（哪怕只有半句）
+    /// 之后停止，用户看到的是一段真实发生过的对话，撤掉提问会让剩下的
+    /// 回答无从解释。
+    PromptWithdrawn {
+        message_id: MessageId,
+        /// 撤回之后这个会话一条消息都不剩了。
+        ///
+        /// 宿主据此把自动标题一并撤掉：标题正是从这条消息取的，留着就是
+        /// 一个空会话顶着一句从没发出去的话，而且之后真正的第一句话
+        /// 再也改不动它了。
+        session_empty: bool,
+    },
+
     /// 终止。
     ///
     /// **必须是流的最后一个事件，且必须出现。** 即使内核 panic 被捕获，
@@ -369,6 +391,10 @@ mod tests {
                 before_tokens: 100,
                 after_tokens: 10,
                 strategy: CompactStrategy::MicroCompact,
+            },
+            AgentEvent::PromptWithdrawn {
+                message_id: MessageId::from_raw("m1"),
+                session_empty: true,
             },
             AgentEvent::Done {
                 reason: TerminalReason::Completed,

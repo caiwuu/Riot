@@ -135,7 +135,7 @@ pub struct SkillInfo {
     pub description: String,
     /// SKILL.md 的完整路径。内置技能没有路径（编进了二进制），给空串。
     pub path: String,
-    /// `builtin` / `global` / `project`。
+    /// `builtin` / `pack` / `global` / `project`。
     pub source: String,
     /// 解析失败的原因。None = 这个技能可用。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -155,7 +155,41 @@ pub fn project_dir(root: &Path) -> PathBuf {
     root.join(".riot").join("skills")
 }
 
-/// 扫描一个项目的可用技能：项目级 > 全局 > 内置（同名先到先得）。
+/// 已安装能力包各自带的技能目录。
+///
+/// 直接扫能力包而不是安装时把技能拷贝（或软链）到全局目录：拷贝要在卸载时
+/// 记得清，软链在 Windows 上还要开开发者模式，而两者都会让"包里有什么技能"
+/// 和"全局目录里有什么"漂移。就地扫的话，装上即出现、卸掉即消失。
+pub fn pack_dirs() -> Vec<PathBuf> {
+    pack_dirs_in(&crate::config::packs_dir(&crate::config::config_path()))
+}
+
+/// 参数化版本，给测试用（同 [`discover_dirs`] 的理由）。
+fn pack_dirs_in(root: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return vec![]; // 一个包都没装
+    };
+    let mut dirs: Vec<PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        // 安装中途的临时目录和下载缓存都以点开头，跳过 —— 扫到半成品会把
+        // 一个残缺的 SKILL.md 当成可用技能列出来。
+        .filter(|p| {
+            !p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with('.'))
+        })
+        .map(|p| p.join("skills"))
+        .filter(|p| p.is_dir())
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+/// 扫描一个项目的可用技能：项目级 > 全局 > 能力包 > 内置（同名先到先得）。
+///
+/// 能力包排在全局后面，这样用户想改包里带的技能时，在全局目录放一个同名的
+/// 就能盖掉 —— 而不必去改包内容（那会在下次升级时被覆盖）。
 pub fn discover(project_root: &Path) -> Discovered {
     discover_in(&project_dir(project_root), &global_dir())
 }
@@ -172,6 +206,9 @@ pub fn discover_opt(project_root: Option<&Path>) -> Discovered {
 
 fn discover_in(project: &Path, global: &Path) -> Discovered {
     let mut out = discover_dirs(project, global);
+    for dir in pack_dirs() {
+        scan_dir(&dir, &mut out);
+    }
     // 内置**最后**扫：同名先到先得，所以用户写的那份赢。
     scan_builtin(&mut out);
     out
@@ -324,6 +361,7 @@ fn parse_skill(raw: &str, fallback_name: &str, dir: &Path) -> Result<(SkillCard,
 /// 设置页的技能清单：可用的和有问题的都列出来。
 pub fn list(project_root: Option<&Path>) -> Vec<SkillInfo> {
     let global = global_dir();
+    let packs = crate::config::packs_dir(&crate::config::config_path());
     let d = discover_opt(project_root);
 
     let mut out: Vec<SkillInfo> = d
@@ -337,6 +375,8 @@ pub fn list(project_root: Option<&Path>) -> Vec<SkillInfo> {
                 "builtin"
             } else if c.dir.starts_with(&global) {
                 "global"
+            } else if c.dir.starts_with(&packs) {
+                "pack"
             } else {
                 "project"
             };
@@ -394,6 +434,25 @@ mod tests {
         std::fs::create_dir_all(&project).expect("建目录");
         std::fs::create_dir_all(&global).expect("建目录");
         (t, project, global)
+    }
+
+    #[test]
+    fn 能力包目录跳过安装中途的临时目录() {
+        let t = tempfile::tempdir().expect("临时目录");
+        let root = t.path();
+        for name in ["doc-runtime", ".staging-doc-runtime-123", ".cache"] {
+            std::fs::create_dir_all(root.join(name).join("skills")).expect("建目录");
+        }
+        // 没有 skills 子目录的包不该被列出来
+        std::fs::create_dir_all(root.join("empty-pack")).expect("建目录");
+
+        let dirs = pack_dirs_in(root);
+
+        assert_eq!(
+            dirs,
+            vec![root.join("doc-runtime").join("skills")],
+            "点开头的是解压临时目录和下载缓存，扫进去会把半成品当成可用技能"
+        );
     }
 
     #[test]

@@ -37,6 +37,7 @@ pub mod hooks;
 pub mod manager;
 pub mod memory;
 pub mod mentions;
+pub mod packs;
 pub mod session;
 pub mod skills;
 pub mod slash;

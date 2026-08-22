@@ -74,6 +74,13 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
+# 能力包的完整性校验。下载的是几百 MB 的可执行文件,断点续传拼出来的东西
+# 必须能证明和发布时是同一份。
+sha2 = "0.10"
+# 能力包的解包。用库而不是 shell 出去调 tar/zstd:macOS 基础系统里没有
+# zstd 命令,而这段代码跑在用户机器上,不能假设有。
+tar = "0.4"
+zstd = "0.13"
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "fs", "io-util"] }

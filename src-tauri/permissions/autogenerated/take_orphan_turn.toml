@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-take-orphan-turn"
+description = "Enables the take_orphan_turn command without any pre-configured scope."
+commands.allow = ["take_orphan_turn"]
+
+[[permission]]
+identifier = "deny-take-orphan-turn"
+description = "Denies the take_orphan_turn command without any pre-configured scope."
+commands.deny = ["take_orphan_turn"]

@@ -24,6 +24,7 @@ pub use gui_env::print_process_env;
 
 pub mod env_probe;
 pub mod kernel;
+pub mod packs;
 pub mod persist;
 pub mod state;
 pub mod term;
@@ -56,6 +57,8 @@ pub enum HostError {
     /// UserPromptSubmit hook 拦下了这条消息。
     #[error("{0}")]
     Hook(String),
+    #[error("{0}")]
+    Pack(String),
 }
 
 // Tauri 要求错误类型可序列化。thiserror 不给 Serialize，手写一层。
@@ -382,6 +385,70 @@ async fn mcp_import_json(
     state.set_config(config.clone()).await;
     state.reconcile_mcp().await;
     Ok(config::ConfigStatus::of(config))
+}
+
+// ── 能力包 ────────────────────────────────────────────
+
+/// 能力包清单：装了什么、有什么可装。设置页轮询它。
+#[tauri::command]
+async fn packs_status() -> HostResult<Vec<packs::PackStatus>> {
+    Ok(packs::status().await)
+}
+
+/// 下载并安装一个能力包，进度通过 `on_progress` 推给前端。
+///
+/// 装完立刻接线，不要求重启：MCP 服务器现连，技能目录每轮重扫，PATH 注入
+/// 每轮现装。让用户重启一次应用才能用刚下好的东西，是很容易被当成"没装上"的。
+#[tauri::command]
+async fn packs_install(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    on_progress: Channel<packs::PackProgress>,
+) -> HostResult<()> {
+    let sink = on_progress.clone();
+    let result = packs::install(&id, move |p| {
+        // 前端不听了就没必要嚷嚷，但安装本身要继续走完。
+        let _ = sink.send(p);
+    })
+    .await;
+
+    match result {
+        Ok(_) => {
+            sync_packs_into_config(&state).await;
+            Ok(())
+        }
+        Err(e) => {
+            // 失败也要推一条终态。只靠命令的 Err 返回的话，进度条会永远停在
+            // 最后一个百分比上，用户不知道是卡住了还是失败了。
+            let _ = on_progress.send(packs::PackProgress::Failed {
+                error: e.to_string(),
+            });
+            Err(HostError::Pack(e.to_string()))
+        }
+    }
+}
+
+/// 卸载一个能力包，连带摘掉它注册的 MCP 服务器。
+#[tauri::command]
+async fn packs_uninstall(state: tauri::State<'_, AppState>, id: String) -> HostResult<()> {
+    packs::uninstall(&id).map_err(|e| HostError::Pack(e.to_string()))?;
+    sync_packs_into_config(&state).await;
+    Ok(())
+}
+
+/// 把"当前装了哪些包"落进配置并重连 MCP。装、卸、启动三处共用。
+async fn sync_packs_into_config(state: &AppState) {
+    let mut config = state.config().await;
+    if !packs::sync_mcp(&mut config) {
+        return;
+    }
+    // 存不下也要让本次生效 —— 配置文件写不进去是另一个问题，不该顺带
+    // 把刚装好的能力包也变成不可用。
+    if let Err(e) = config::save(&config) {
+        tracing::warn!(error = %e, "能力包的 MCP 配置没能落盘");
+    }
+    state.set_config(config).await;
+    state.reconcile_mcp().await;
 }
 
 /// 保存某个 provider 的 API key 到 auth.json（0600）。空字符串表示删除。
@@ -875,6 +942,9 @@ pub fn run() {
             mcp_export_json,
             mcp_import_json,
             skills_list,
+            packs_status,
+            packs_install,
+            packs_uninstall,
             add_project,
             create_session,
             list_sessions,
@@ -893,6 +963,10 @@ pub fn run() {
             app.state::<AppState>().inner().spawn_host_bridge();
             let state = app.state::<AppState>().inner().clone();
             tauri::async_runtime::spawn(async move {
+                // 先按已装的能力包对齐 MCP 配置，再连。分两步的话，包里的
+                // 服务器要等到用户下次进设置页才会起来。用户手工删过配置、
+                // 或者直接拷贝了一份包目录进来，都靠这一步兜住。
+                sync_packs_into_config(&state).await;
                 state.reconcile_mcp().await;
             });
             // 顺手收掉没人认领的浏览器 profile。同样放 setup：它要在会话表

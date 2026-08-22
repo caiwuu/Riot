@@ -290,6 +290,26 @@ impl AppState {
                         // 持久化:不记的话下一轮 TurnConfig 又把旧模式传回去。
                         state.persist_index().await;
                     }
+                    HostNotice::PromptWithdrawn {
+                        session_id,
+                        session_empty,
+                    } => {
+                        if !session_empty {
+                            continue;
+                        }
+                        // 自动标题是从这句话取的(send_turn 里定的),而它现在
+                        // 回到输入框了。不撤的话侧边栏留着一句从没发出去的
+                        // 话当名字,之后真正的第一句也改不动它 —— 标题只定
+                        // 一次。手动改过名的不动:那是用户自己起的。
+                        {
+                            let mut g = state.0.sessions.lock().await;
+                            match g.get_mut(&session_id) {
+                                Some(m) if m.auto_title.is_some() => m.auto_title = None,
+                                _ => continue,
+                            }
+                        }
+                        state.persist_index().await;
+                    }
                     HostNotice::KernelGone => {
                         // 重启后的内核是一张白纸:所有会话都要重新水合,
                         // 也没有任何轮子还在跑。

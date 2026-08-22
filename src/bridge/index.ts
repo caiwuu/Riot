@@ -567,8 +567,8 @@ export interface SkillInfo {
   description: string;
   /** SKILL.md 的完整路径。内置技能编在二进制里，没有路径，给空串。 */
   path: string;
-  /** `builtin` 随应用分发；`global` / `project` 是用户写的。 */
-  source: "builtin" | "global" | "project";
+  /** `builtin` 随应用分发；`pack` 来自能力包；`global` / `project` 是用户写的。 */
+  source: "builtin" | "pack" | "global" | "project";
   /** 解析失败的原因。没有 = 可用。 */
   error?: string | null;
 }
@@ -576,6 +576,53 @@ export interface SkillInfo {
 /** 当前可用的技能清单。`root` 传当前会话的项目根；null 只列全局。 */
 export function skillsList(root: string | null): Promise<SkillInfo[]> {
   return invoke<SkillInfo[]>("skills_list", { root });
+}
+
+/** 一个可下载的能力包。 */
+export interface PackStatus {
+  id: string;
+  name: string;
+  description: string;
+  /** 已装版本。null = 没装。 */
+  installedVersion: string | null;
+  /** 远端可装版本。null = 清单没拉到，或这个平台没有包。 */
+  availableVersion: string | null;
+  /** 下载体积，字节。 */
+  downloadSize: number;
+  /** 解压后体积，字节。 */
+  installedSize: number;
+  supported: boolean;
+  /** 清单拉取失败的原因。有值时显示"离线"，而不是"没有可用更新"。 */
+  manifestError: string | null;
+}
+
+/** 安装进度。各阶段耗时差着数量级，所以分开报而不是合成一个百分比。 */
+export type PackProgress =
+  | { kind: "downloading"; received: number; total: number }
+  | { kind: "verifying" }
+  | { kind: "extracting" }
+  | { kind: "selfCheck" }
+  | { kind: "done"; version: string }
+  | { kind: "failed"; error: string };
+
+/** 能力包清单：装了什么、有什么可装。 */
+export function packsStatus(): Promise<PackStatus[]> {
+  return invoke<PackStatus[]>("packs_status");
+}
+
+/** 下载并安装一个能力包。装完即可用，不需要重启。 */
+export function packsInstall(
+  id: string,
+  onProgress: (p: PackProgress) => void,
+): Promise<void> {
+  const channel = new Channel<PackProgress>();
+  channel.onmessage = onProgress;
+  return invoke("packs_install", { id, onProgress: channel });
+}
+
+/** 卸载一个能力包，连带摘掉它注册的 MCP 服务器。 */
+export function packsUninstall(id: string): Promise<void> {
+  return invoke("packs_uninstall", { id });
 }
 
 /** 登记一个项目目录（验证并规范化），返回 canonical 根。不创建会话。 */

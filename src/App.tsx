@@ -60,7 +60,13 @@ import { useEscLayer } from "./components/Modal";
 import { TerminalPanel } from "./components/TerminalPanel";
 import { hasActiveTodos, TodoPanel } from "./components/TodoPanel";
 import { ToolCard } from "./components/ToolCard";
-import { type Item, type QueuedItem, useSession, waitStartedAt } from "./hooks/useSession";
+import {
+  type Item,
+  type QueuedItem,
+  type WithdrawnPrompt,
+  useSession,
+  waitStartedAt,
+} from "./hooks/useSession";
 import { basename, parentOf, tildify } from "./pathDisplay";
 
 /**
@@ -214,6 +220,17 @@ export function App() {
         s.id === sessionId && !s.title ? { ...s, title: text.slice(0, 40) } : s,
       ),
     );
+  }, []);
+
+  /**
+   * 唯一那条提问被撤回了（模型没开口就停了），会话空了。
+   *
+   * 标题正是从那句话取的，得跟着撤 —— 宿主同步在做同一件事（见
+   * `HostNotice::PromptWithdrawn`），这里只是让侧栏当场跟上，不然要
+   * 等下一次拉列表才对。
+   */
+  const onSessionEmptied = useCallback((sessionId: string) => {
+    setSessions((prev) => prev.map((s) => (s.id === sessionId ? { ...s, title: null } : s)));
   }, []);
 
   /** 会话设置提交成功后回写列表。listSessions 只在启动时拉一次，
@@ -503,6 +520,7 @@ export function App() {
                 onConfig={setConfig}
                 onOpenSettings={() => setShowSettings(true)}
                 onFirstMessage={onFirstMessage}
+                onSessionEmptied={onSessionEmptied}
                 onAgentBrowser={() => {
                   if (browserDismissed.current.has(activeSession.id)) return;
                   setDrawer("browser");
@@ -1201,6 +1219,7 @@ function Chat({
   onConfig,
   onOpenSettings,
   onFirstMessage,
+  onSessionEmptied,
   onAgentBrowser,
   onTurnEnd,
   onBusy,
@@ -1214,6 +1233,8 @@ function Chat({
   onConfig: (s: ConfigStatus) => void;
   onOpenSettings: () => void;
   onFirstMessage: (sessionId: string, text: string) => void;
+  /** 撤回把会话清空了。侧栏那句自动标题该跟着撤。 */
+  onSessionEmptied?: (sessionId: string) => void;
   /** 模型调用浏览器工具时打开右侧抽屉，让用户看见同一页。 */
   onAgentBrowser?: () => void;
   /** 一轮跑完。改动面板据此重新比对 —— 抽屉是常驻的，模型改完文件
@@ -1250,6 +1271,15 @@ function Chat({
   }, [busy]);
   const empty =
     session.items.length === 0 && !session.streaming && !session.thinking;
+
+  // 撤回把会话清空了：那句话回到了输入框，侧栏不该再拿它当名字。
+  // 只报一次 —— 输入框消费掉之后 withdrawn 就置回 null 了。
+  const emptiedRef = useRef(onSessionEmptied);
+  emptiedRef.current = onSessionEmptied;
+  const withdrawn = session.withdrawn;
+  useEffect(() => {
+    if (withdrawn?.sessionEmpty) emptiedRef.current?.(sessionId);
+  }, [withdrawn, sessionId]);
 
   // 每有一次编辑工具落盘就递增,改动条跟着重新比对 —— 跑轮当中改动
   // 也要实时长出来,不能等轮子结束才一次性冒出一排文件。
@@ -1303,6 +1333,8 @@ function Chat({
       onQueueSendNow={session.queueSendNow}
       onSend={send}
       onStop={session.stop}
+      withdrawn={session.withdrawn}
+      onWithdrawnRestored={session.clearWithdrawn}
       onOpenSettings={onOpenSettings}
       insertText={insertText ?? null}
       {...(onInserted ? { onInserted } : {})}
@@ -1764,6 +1796,9 @@ const Row = memo(function Row({
       return (
         <div className="msg assistant">
           <Markdown text={item.text} />
+          {/* 半截话得说明白它为什么半截 —— 不标的话，用户过一会儿回来
+              看到的是一句戛然而止的回答，分不清是自己停的还是模型崩了。 */}
+          {item.stopped ? <div className="msg-stopped">已停止生成</div> : null}
           <MsgActions
             text={item.text}
             regenEnabled={!!regenEnabled && !!onRegenerate}
@@ -2231,10 +2266,11 @@ function segsText(segs: Seg[]): string {
  */
 function segsToPrompt(segs: Seg[]): string {
   return segs
-    .map((s) => {
+    .map((s, i) => {
       if (s.kind === "text") return s.value;
-      if (s.kind === "ref") return mentionToken(s.value);
-      return `/${s.value}`;
+      if (s.kind === "cmd") return `/${s.value}`;
+      const next = segs[i + 1];
+      return mentionToken(s.value, next?.kind === "text" ? next.value : "");
     })
     .join("");
 }
@@ -2251,9 +2287,18 @@ function promoteLeadingCmd(segs: Seg[], known: Set<string>): Seg[] | null {
   return [{ kind: "cmd", value: name }, { kind: "text", value: gap + rest }, ...segs.slice(1)];
 }
 
-/** 路径带空格时要加引号，否则解析器会在空格处断开。 */
-function mentionToken(path: string): string {
-  return /\s/.test(path) ? `@"${path}"` : `@${path}`;
+/**
+ * 引用块 → 正文里的 `@路径`。裸写法认不回来就加引号。
+ *
+ * 断在哪里由解析器说了算，所以这里直接**拿解析器试一遍**：路径带空格
+ * （`@/tmp/报表 (1).xlsx`）、或者后面紧跟着别的字（`@src/a.rs然后改` ——
+ * 中文不写空格，这很常见）都会被吞掉半截，只有引号形式才回得来。
+ */
+function mentionToken(path: string, after = ""): string {
+  const bare = `@${path}`;
+  const [span] = extractMentionSpans(bare + after);
+  const intact = span?.path === path && span.index === 0 && span.length === bare.length;
+  return intact ? bare : `@"${path}"`;
 }
 
 /** 把光标放到编辑区末尾。 */
@@ -2276,7 +2321,9 @@ function queryAtCaret(el: HTMLElement): string | undefined {
     return undefined;
   }
   const before = (r.startContainer.nodeValue ?? "").slice(0, r.startOffset);
-  return /(?:^|\s)@([^\s@]*)$/.exec(before)?.[1];
+  // 边界规则与内核一致：中文后面直接敲 `@` 也要出菜单（"读下@" 是中文
+  // 用户的常态写法，要求先打个空格等于让他们用不了这个菜单）。
+  return /(?:^|[^A-Za-z0-9._%+-])@([^\s@]*)$/.exec(before)?.[1];
 }
 
 /**
@@ -2297,7 +2344,7 @@ function insertChipAtCaret(el: HTMLElement, path: string) {
   const node = range.startContainer;
   if (node.nodeType === Node.TEXT_NODE) {
     const before = (node.nodeValue ?? "").slice(0, range.startOffset);
-    const m = /(^|\s)@[^\s@]*$/.exec(before);
+    const m = /(^|[^A-Za-z0-9._%+-])@[^\s@]*$/.exec(before);
     if (m) {
       const cut = before.length - (m[0].length - (m[1]?.length ?? 0));
       (node as Text).deleteData(cut, range.startOffset - cut);
@@ -2432,6 +2479,143 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+/** 与 `mentions.rs` 的 `is_stop_punct` 对齐：这些字符在路径里几乎不会出现。 */
+const MENTION_STOP = new Set("，。；：、！？）（「」《》“”");
+
+/**
+ * `@` 前面这个字符算不算边界（与 `mentions.rs` 的 `is_mention_boundary`
+ * 对齐 —— 内核认不认和界面画不画必须是同一条规则）。
+ *
+ * 反着定义：只有 ASCII 标识符字符才**不是**边界，那正是 `me@example.com`
+ * 的形状。中文不写空格，"读下@src/a.rs" 里的 `下` 必须算边界。
+ */
+const MENTION_GLUE = /[A-Za-z0-9._%+-]/;
+
+/**
+ * 正文里一段 `@路径` 标记。`index`/`length` 覆盖整段 token（含 `@` 和引号）。
+ *
+ * 规则跟内核 `mentions::extract` 对齐：邮箱、行内代码、中文口语不当引用。
+ */
+interface MentionSpan {
+  path: string;
+  index: number;
+  length: number;
+}
+
+/** 长得像路径才画成块 —— `@这里` 这种口语必须留在原文里。 */
+function mentionLooksLikePath(s: string): boolean {
+  if (!s) return false;
+  if (s.includes("/") || s.includes("\\") || s.startsWith(".") || s.startsWith("~")) return true;
+  return /^[A-Za-z0-9_.-]+$/.test(s);
+}
+
+function mentionTrimPunct(s: string): string {
+  return s.replace(/[.,;:!?)"']+$/, "");
+}
+
+/**
+ * 从用户气泡正文里挑出 `@路径` 标记，好把块画回原位。
+ *
+ * 发送时乐观气泡带着 `files`；切会话后界面按历史重画。二进制、目录、
+ * 读失败的引用不会落成 `user_file` 附件，`files` 就是空的 —— 但标记还
+ * 在正文里（见 segsToPrompt），靠它重建，不能只拿附件当白名单。
+ */
+function extractMentionSpans(text: string): MentionSpan[] {
+  const spans: MentionSpan[] = [];
+  let inFence = false;
+  let offset = 0;
+  const lines = text.split("\n");
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li] ?? "";
+    if (line.trimStart().startsWith("```")) {
+      inFence = !inFence;
+    } else if (!inFence) {
+      let i = 0;
+      let inTick = false;
+      let prevBoundary = true;
+      while (i < line.length) {
+        const c = line[i] ?? "";
+        if (c === "`") {
+          inTick = !inTick;
+          prevBoundary = true;
+          i += 1;
+          continue;
+        }
+        if (inTick || c !== "@" || !prevBoundary) {
+          prevBoundary = !MENTION_GLUE.test(c);
+          i += 1;
+          continue;
+        }
+        if (line[i + 1] === '"') {
+          const start = i + 2;
+          const end = line.indexOf('"', start);
+          if (end >= 0) {
+            const raw = line.slice(start, end);
+            if (raw.trim()) {
+              spans.push({ path: raw, index: offset + i, length: end + 1 - i });
+            }
+            i = end + 1;
+            prevBoundary = false;
+            continue;
+          }
+        }
+        let j = i + 1;
+        while (j < line.length) {
+          const ch = line[j] ?? "";
+          if (/\s/u.test(ch) || MENTION_STOP.has(ch)) break;
+          j += 1;
+        }
+        const raw = line.slice(i + 1, j);
+        const cleaned = mentionTrimPunct(raw);
+        if (mentionLooksLikePath(cleaned)) {
+          spans.push({ path: cleaned, index: offset + i, length: 1 + cleaned.length });
+        }
+        i += 1 + raw.length;
+        prevBoundary = false;
+      }
+    }
+    offset += line.length + 1;
+  }
+  return spans;
+}
+
+/**
+ * 发出去的正文 → 输入框里的段落：`@路径` 标记原位还原成引用块。
+ *
+ * 放回输入框的是**发出去的那一份文本**，块在原位留下了 `@路径`（见
+ * `segsToPrompt`）。不还原的话，用户看到的是一句夹着裸路径的话，而且
+ * 再发一次会连块带标记发出两份同样的引用。
+ */
+function promptToSegs(text: string, refs: string[] = [], skip: string[] = []): Seg[] {
+  const segs: Seg[] = [];
+  const seen = new Set<string>();
+  let last = 0;
+  for (const s of extractMentionSpans(text)) {
+    if (s.index > last) segs.push({ kind: "text", value: text.slice(last, s.index) });
+    segs.push({ kind: "ref", value: s.path });
+    seen.add(s.path);
+    last = s.index + s.length;
+  }
+  if (last < text.length) segs.push({ kind: "text", value: text.slice(last) });
+  // 正文里没留下标记的引用（老消息、用户把标记删了）补在末尾 ——
+  // 丢掉的话模型就看不到那个文件了。
+  for (const r of refs) {
+    if (!mentionCovers(seen, r) && !skip.includes(r)) segs.push({ kind: "ref", value: r });
+  }
+  return segs;
+}
+
+/** 历史附件里的绝对路径，和正文里的相对 `@src/a.rs` 算同一个文件。 */
+function mentionCovers(seen: Set<string>, file: string): boolean {
+  if (seen.has(file)) return true;
+  for (const p of seen) {
+    if (file.endsWith(`/${p}`) || file.endsWith(`\\${p}`) || p.endsWith(`/${file}`) || p.endsWith(`\\${file}`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * 用户消息的正文：把 `@路径` 标记画成引用块，其余原样。
  *
@@ -2444,21 +2628,19 @@ function UserText({ text, files = [] }: { text: string; files?: string[] }) {
   const body = lead ? text.slice(lead[0].length).replace(/^\s/, "") : text;
 
   const fileNodes = (src: string): ReactNode => {
-    if (files.length === 0) return src;
-    const escaped = files.map((f) => f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-    const re = new RegExp(`@"(?:${escaped.join("|")})"|@(?:${escaped.join("|")})`, "g");
+    const spans = extractMentionSpans(src);
+    if (spans.length === 0 && files.length === 0) return src;
     const out: React.ReactNode[] = [];
     const seen = new Set<string>();
     let last = 0;
-    for (const m of src.matchAll(re)) {
-      const path = m[0].replace(/^@"?/, "").replace(/"$/, "");
-      if (m.index > last) out.push(src.slice(last, m.index));
-      out.push(<FileChip key={`${path}-${m.index}`} path={path} />);
-      seen.add(path);
-      last = m.index + m[0].length;
+    for (const s of spans) {
+      if (s.index > last) out.push(src.slice(last, s.index));
+      out.push(<FileChip key={`${s.path}-${s.index}`} path={s.path} />);
+      seen.add(s.path);
+      last = s.index + s.length;
     }
     if (last < src.length) out.push(src.slice(last));
-    const orphans = files.filter((f) => !seen.has(f));
+    const orphans = files.filter((f) => !mentionCovers(seen, f));
     return (
       <>
         {out}
@@ -2470,14 +2652,13 @@ function UserText({ text, files = [] }: { text: string; files?: string[] }) {
   };
 
   if (!cmdName) {
-    if (files.length === 0) return <>{text}</>;
     return <>{fileNodes(body)}</>;
   }
 
   return (
     <>
       <CmdChip name={cmdName} />
-      {body ? <> {fileNodes(body)}</> : files.length > 0 ? fileNodes("") : null}
+      {body || files.length > 0 ? <> {fileNodes(body)}</> : null}
     </>
   );
 }
@@ -2594,6 +2775,8 @@ function Composer({
   onQueueSendNow,
   onSend,
   onStop,
+  withdrawn,
+  onWithdrawnRestored,
   onOpenSettings,
   insertText,
   onInserted,
@@ -2619,6 +2802,9 @@ function Composer({
   /** 返回 false = 没发出去（hook 拦了、模型没配好），输入要放回输入框。 */
   onSend: (t: string, images: ImageInput[], refs: string[]) => Promise<boolean>;
   onStop: () => void;
+  /** 被撤回的提问（模型没开口就停了）。放回输入框，然后 `onWithdrawnRestored`。 */
+  withdrawn: WithdrawnPrompt | null;
+  onWithdrawnRestored: () => void;
   onOpenSettings: () => void;
   /** 外部要塞进来的一段文字（终端选中的输出）。null = 没有。 */
   insertText?: string | null;
@@ -2981,25 +3167,24 @@ function Composer({
     }
   };
 
-  /** 把一条排队插话撤回输入框改。原有草稿接在它后面，谁都不丢。 */
-  const editQueued = async (id: string) => {
-    const input = await onQueueEdit(id);
-    if (!input) return;
+  /**
+   * 把一条已经离开输入框的消息放回来（撤回的提问、撤回来改的排队插话）。
+   * 原有草稿接在它后面，谁都不丢。
+   */
+  const putBack = (
+    input: { text: string; images: ImageInput[]; refs: string[] },
+    imageLabel: string,
+  ) => {
     const cur = ref.current ? readEditor(ref.current) : [];
-    const back: Seg[] = input.refs
-      .filter((r) => !cur.some((s) => s.kind === "ref" && s.value === r))
-      .map((value) => ({ kind: "ref", value }));
-    setContent([
-      ...back,
-      { kind: "text", value: segsText(cur).trim() ? `${input.text}\n` : input.text },
-      ...cur,
-    ]);
+    const held = cur.flatMap((s) => (s.kind === "ref" ? [s.value] : []));
+    const gap: Seg[] = segsText(cur).trim() ? [{ kind: "text", value: "\n" }] : [];
+    setContent([...promptToSegs(input.text, input.refs, held), ...gap, ...cur]);
     if (input.images.length > 0) {
       setShots((prev) => [
         ...prev,
         ...input.images.map((img, i) => ({
-          id: `q-${Date.now()}-${i}`,
-          name: `排队图片 ${i + 1}`,
+          id: `back-${Date.now()}-${i}`,
+          name: `${imageLabel} ${i + 1}`,
           mediaType: img.mediaType,
           data: img.data,
         })),
@@ -3007,6 +3192,30 @@ function Composer({
     }
     ref.current?.focus();
   };
+
+  /** 把一条排队插话撤回输入框改。 */
+  const editQueued = async (id: string) => {
+    const input = await onQueueEdit(id);
+    if (!input) return;
+    putBack(input, "排队图片");
+  };
+
+  // 撤回的提问回到输入框：模型一个字都没给出就被停了，那句话从没被
+  // 回答过 —— 用户按停止的意思是"我重说一遍"，而不是"扔掉我刚打的字"。
+  //
+  // `[约束]` 按 id 记账防重入。撤回往往正好把会话清空，输入框那一刻
+  // 从对话区挪回首屏 —— 那是一次**重挂载**，StrictMode 会把挂载时的
+  // effect 跑两遍，不挡的话用户看到自己那句话被放回来两份。
+  const restoredRef = useRef(onWithdrawnRestored);
+  restoredRef.current = onWithdrawnRestored;
+  const restoredId = useRef<string | null>(null);
+  useEffect(() => {
+    if (!withdrawn || restoredId.current === withdrawn.id) return;
+    restoredId.current = withdrawn.id;
+    putBack(withdrawn, "撤回图片");
+    restoredRef.current();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [withdrawn]);
 
   /**
    * 收下一批图。

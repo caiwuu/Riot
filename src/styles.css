@@ -1599,6 +1599,25 @@ pre {
   font-size: 13px;
 }
 
+/* 被用户按停止截断的回答。做得很轻 —— 它是一句注脚，不是一条告警：
+   内容本身是有效的，只是没说完。 */
+.msg-stopped {
+  margin-top: 6px;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.msg-stopped::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: 1px;
+  background: var(--text-faint);
+  vertical-align: 1px;
+}
+
 /* 压缩边界。虚线盒子会把上面的记录衬成"没了"，一条线更像章节分隔。 */
 .compact-rule {
   display: flex;
@@ -3383,6 +3402,73 @@ pre {
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 3px 7px;
+}
+
+/* ── 能力包分区 ──────────────────────────── */
+
+.pack-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pack-item {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.pack-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pack-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.pack-badge {
+  font-size: 11px;
+  color: var(--text-dim);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  border-radius: 999px;
+  padding: 0 6px;
+}
+
+.pack-badge.on {
+  color: var(--ok, #30d158);
+  border-color: rgba(48, 209, 88, 0.35);
+}
+
+.pack-progress {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pack-bar {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+
+.pack-bar-fill {
+  height: 100%;
+  background: var(--accent, #0a84ff);
+  transition: width 0.2s ease;
+}
+
+.pack-actions {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
 }
 
 /* ── Skills 分区 ──────────────────────────── */

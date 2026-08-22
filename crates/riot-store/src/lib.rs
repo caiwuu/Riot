@@ -63,6 +63,13 @@ pub enum Record {
     /// 旧加载器不认识这个类型会当坏行跳过 —— 那会把本该丢掉的回复
     /// 读回来，所以新版本必须处理它，不能靠"坏行跳过"凑合。
     Rewind { keep_until: String },
+    /// 撤回：丢掉 `id` 这条消息**及其之后**的一切。
+    ///
+    /// 用户在模型开口之前按了停止，那句话回到了输入框，不该留在记录里。
+    /// 和 [`Self::Rewind`] 的差别只在边界含不含自己 —— 分成两个记录而不是
+    /// 复用一个，是因为被撤的可能是会话的**第一条**消息，那时没有任何
+    /// "保留到这里"的锚点可用。
+    Withdraw { id: String },
 }
 
 /// 会话的不变事实，写在 transcript 首行。
@@ -184,6 +191,9 @@ impl Transcripts {
                 Ok(Record::Rewind { keep_until }) => {
                     apply_rewind(&mut live, &mut archived, &keep_until);
                 }
+                Ok(Record::Withdraw { id }) => {
+                    apply_withdraw(&mut live, &mut archived, &id);
+                }
                 Err(e) => {
                     skipped += 1;
                     tracing::debug!(line = i + 1, error = %e, "transcript 有读不懂的行");
@@ -257,6 +267,18 @@ fn apply_rewind(live: &mut Vec<Message>, archived: &mut Vec<Message>, keep_until
     }
 }
 
+/// 加载时应用一条撤回：连这条消息一起丢掉。找不到就不动。
+fn apply_withdraw(live: &mut Vec<Message>, archived: &mut Vec<Message>, id: &str) {
+    if let Some(i) = live.iter().position(|m| m.id().as_str() == id) {
+        live.truncate(i);
+        return;
+    }
+    if let Some(i) = archived.iter().position(|m| m.id().as_str() == id) {
+        archived.truncate(i);
+        live.clear();
+    }
+}
+
 fn scan_one(path: &Path) -> Option<ScannedTranscript> {
     let f = std::fs::File::open(path).ok()?;
     let mut lines = std::io::BufReader::new(f).lines();
@@ -297,6 +319,10 @@ enum Cmd {
     /// 重新生成：截断到这条消息。
     Rewind {
         keep_until: String,
+    },
+    /// 撤回：连这条消息一起丢掉。
+    Withdraw {
+        id: String,
     },
     /// 等所有已提交的追加真正写进文件。
     Flush(oneshot::Sender<()>),
@@ -369,6 +395,18 @@ impl SessionLog {
         }
     }
 
+    /// 记下一次撤回：这条消息（及其之后）不再属于这个会话。
+    /// 必须在内存历史已经去掉它之后调用。
+    pub fn append_withdraw(&self, id: &str) {
+        if self
+            .sender()
+            .send(Cmd::Withdraw { id: id.to_owned() })
+            .is_err()
+        {
+            tracing::debug!(path = %self.path.display(), "写入任务已关闭，丢弃撤回记录");
+        }
+    }
+
     /// 等所有已提交的追加落盘。退出钩子用；从没写过东西时是空操作。
     pub async fn flush(&self) {
         self.ack(Cmd::Flush).await;
@@ -415,6 +453,7 @@ async fn write_loop(path: PathBuf, meta: TranscriptMeta, mut rx: mpsc::Unbounded
                     after_tokens,
                 }),
                 Cmd::Rewind { keep_until } => Some(Record::Rewind { keep_until }),
+                Cmd::Withdraw { id } => Some(Record::Withdraw { id }),
                 Cmd::Flush(ack) => {
                     acks.push(ack);
                     None
@@ -849,6 +888,23 @@ mod tests {
         let parts = store.load_parts(&SessionId::from_raw("s1")).await;
         assert_eq!(parts.archived, vec![user("m1", "压缩前")]);
         assert!(parts.live.is_empty(), "截回归档之后活历史应清空");
+    }
+
+    #[tokio::test]
+    async fn 撤回的消息重启后不会回来() {
+        // 被撤回的是**会话的第一条**消息 —— 没有任何"保留到这里"的锚点，
+        // rewind 那条路在这里是走不通的。
+        let d = dir();
+        let store = Transcripts::new(d.path());
+        let log = store.open(meta("s1"));
+        log.append(&user("m1", "发出去又后悔了"));
+        log.append_withdraw("m1");
+        log.append(&user("m2", "改好之后重新发的"));
+        log.flush().await;
+
+        let parts = store.load_parts(&SessionId::from_raw("s1")).await;
+        assert_eq!(parts.live, vec![user("m2", "改好之后重新发的")]);
+        assert!(parts.archived.is_empty());
     }
 
     #[tokio::test]

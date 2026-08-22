@@ -38,6 +38,18 @@ export type AgentEvent =
       type: "mode_changed";
     }
   | {
+      message_id: string;
+      /**
+       * 撤回之后这个会话一条消息都不剩了。
+       *
+       * 宿主据此把自动标题一并撤掉：标题正是从这条消息取的，留着就是
+       * 一个空会话顶着一句从没发出去的话，而且之后真正的第一句话
+       * 再也改不动它了。
+       */
+      session_empty: boolean;
+      type: "prompt_withdrawn";
+    }
+  | {
       reason: TerminalReason;
       type: "done";
     };
@@ -884,6 +896,13 @@ export interface MessageMeta {
    * 该消息由哪个 agent 产生。None = 主 agent。
    */
   agent_id?: string | null;
+  /**
+   * 这条回答是被用户按停止**截断**的，不是模型自己说完的。
+   *
+   * 只给界面标注用。模型那边不需要额外说明 —— 它看到的就是一句
+   * 半截话后面紧跟着用户的下一条消息，而 meta 从来不进 wire 格式。
+   */
+  interrupted?: boolean;
   /**
    * API 错误产生的消息。**这类消息上绝不能跑 stop hooks**，
    * 否则会形成 error → hook 注入 → 重试 → error 的死循环。

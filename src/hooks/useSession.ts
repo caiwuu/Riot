@@ -34,7 +34,8 @@ export type Item =
    * `files` 是消息里 `@` 引用过的文件路径（内容进了模型，界面只列路径）。
    */
   | { kind: "user"; id: string; text: string; images?: string[]; files?: string[] }
-  | { kind: "assistant"; id: string; text: string }
+  /** `stopped` = 用户按停止截断的半截回答（内核定稿的，见 finalize_partial）。 */
+  | { kind: "assistant"; id: string; text: string; stopped?: boolean }
   | { kind: "thinking"; id: string; text: string }
   | {
       kind: "tool";
@@ -73,6 +74,22 @@ export interface QueuedItem {
   images: ImageInput[];
   /** `@` 引用的文件路径（输入框里的那些块）。 */
   refs: string[];
+}
+
+/**
+ * 一条被撤回的提问：用户在模型开口之前按了停止，内核把它从历史里删了。
+ *
+ * 界面要把它放回输入框 —— 那句话从没被回答过，用户按停止的意思是
+ * "重说一遍"，而不是"扔掉我刚打的字"。
+ */
+export interface WithdrawnPrompt {
+  /** 内核那条消息的 id。对账/排查用，界面按位置认气泡。 */
+  id: string;
+  text: string;
+  images: ImageInput[];
+  refs: string[];
+  /** 撤完这个会话一条消息都不剩了。侧栏那句自动标题也该跟着撤。 */
+  sessionEmpty: boolean;
 }
 
 export interface SessionState {
@@ -120,6 +137,11 @@ export interface SessionState {
   hostMode: PermissionMode | null;
   /** 排队面板：模型跑动中发的、还没注入对话的插话。 */
   queued: QueuedItem[];
+  /**
+   * 刚被撤回、等着放回输入框的那条提问。输入框消费掉之后置回 null
+   * （见 `clearWithdrawn`）。
+   */
+  withdrawn: WithdrawnPrompt | null;
 }
 
 const MAX_TOOL_LINES = 200;
@@ -190,6 +212,7 @@ export function useSession(
     tokens: { input: 0, output: 0 },
     hostMode: null,
     queued: [],
+    withdrawn: null,
   });
 
   // delta 先攒在 ref，由 rAF 决定何时 setState。逐条 setState 会让 React
@@ -467,6 +490,13 @@ export function useSession(
             compacting: false,
             items: [...s.items, { kind: "compact", id: `compact-${Date.now()}` }],
           }));
+          break;
+
+        case "prompt_withdrawn":
+          // 模型一个字都没给出就被停了，内核把这条提问从历史里删了。
+          // 界面跟着撤气泡，并把原文交给输入框（Composer 消费 withdrawn）。
+          flush();
+          setState((s) => applyWithdrawn(s, event.message_id, event.session_empty));
           break;
 
         case "done": {
@@ -966,6 +996,11 @@ export function useSession(
     });
   }, [sessionId]);
 
+  /** 输入框收下了撤回的那条提问。不清的话切走再回来它会被再放一次。 */
+  const clearWithdrawn = useCallback(() => {
+    setState((s) => (s.withdrawn ? { ...s, withdrawn: null } : s));
+  }, []);
+
   const answer = useCallback(
     async (response: PermissionResponse, requestId?: string) => {
       // 计划卡、选择题卡和权限弹窗可能同时在场（并发工具各自征求授权），
@@ -987,7 +1022,17 @@ export function useSession(
     [sessionId, state.asks],
   );
 
-  return { ...state, send, stop, answer, regenerate, queueDelete, queueEdit, queueSendNow };
+  return {
+    ...state,
+    send,
+    stop,
+    answer,
+    regenerate,
+    queueDelete,
+    queueEdit,
+    queueSendNow,
+    clearWithdrawn,
+  };
 }
 
 /** 活历史 + 压缩前归档 → 界面条目。归档画在分割线上面。 */
@@ -1265,7 +1310,12 @@ function messagesToItems(msgs: Message[], skipSynthetic = false): Item[] {
     } else if (msg.role === "assistant") {
       for (const c of msg.content) {
         if (c.type === "text" && c.text.trim()) {
-          items.push({ kind: "assistant", id: `${msg.id}-t${items.length}`, text: c.text });
+          items.push({
+            kind: "assistant",
+            id: `${msg.id}-t${items.length}`,
+            text: c.text,
+            ...(msg.meta?.interrupted ? { stopped: true as const } : {}),
+          });
         } else if (c.type === "thinking" && c.text.trim()) {
           items.push({ kind: "thinking", id: `${msg.id}-k${items.length}`, text: c.text });
         } else if (c.type === "tool_use") {
@@ -1358,9 +1408,10 @@ function applyMessage(s: SessionState, event: Extract<AgentEvent, { type: "messa
   }
 
   if (msg.role === "assistant") {
+    const stopped = msg.meta?.interrupted ? { stopped: true as const } : {};
     for (const c of msg.content) {
       if (c.type === "text" && c.text.trim()) {
-        items.push({ kind: "assistant", id: `${msg.id}-t`, text: c.text });
+        items.push({ kind: "assistant", id: `${msg.id}-t`, text: c.text, ...stopped });
       } else if (c.type === "thinking" && c.text.trim()) {
         items.push({ kind: "thinking", id: `${msg.id}-k`, text: c.text });
       } else if (c.type === "tool_use") {
@@ -1455,6 +1506,51 @@ function applyDone(s: SessionState, event: Extract<AgentEvent, { type: "done" }>
     streamingPlan: null,
     asks: [],
   };
+}
+
+/**
+ * 撤掉最后那条用户气泡，把内容交给输入框。
+ *
+ * 按位置找而不是按 id：气泡通常还是发送时的乐观条目（`local-*`），内核
+ * 的消息 id 从没到过界面这一侧。撤回只发生在"这一轮什么都没产出"的时候，
+ * 所以往回数第一条用户消息必然就是它 —— 但它不一定是**最后一条条目**：
+ * 主动压缩的分割线会排在它后面。
+ */
+function applyWithdrawn(s: SessionState, id: string, sessionEmpty: boolean): SessionState {
+  let at = -1;
+  for (let i = s.items.length - 1; i >= 0; i--) {
+    if (s.items[i]?.kind === "user") {
+      at = i;
+      break;
+    }
+  }
+  const bubble = at < 0 ? undefined : s.items[at];
+  // 没有气泡可撤（历史刚被别的路径重建过）：内核那边已经删了，界面
+  // 保持现状就行，下一次快照会对齐。
+  if (!bubble || bubble.kind !== "user") return s;
+
+  const items = [...s.items];
+  items.splice(at, 1);
+  return {
+    ...s,
+    items,
+    withdrawn: {
+      id,
+      text: bubble.text,
+      images: (bubble.images ?? []).flatMap((u) => {
+        const img = imageFromDataUrl(u);
+        return img ? [img] : [];
+      }),
+      refs: bubble.files ?? [],
+      sessionEmpty,
+    },
+  };
+}
+
+/** `data:image/png;base64,……` → 重新发送时要的图片输入。认不出就丢掉。 */
+function imageFromDataUrl(url: string): ImageInput | null {
+  const m = /^data:([^;,]+);base64,([\s\S]*)$/.exec(url);
+  return m?.[1] && m[2] ? { mediaType: m[1], data: m[2] } : null;
 }
 
 /**

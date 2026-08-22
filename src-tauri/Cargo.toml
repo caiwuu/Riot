@@ -56,6 +56,10 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 portable-pty = "0.9.0"
 ignore = "0.4.33"
+# 能力包的下载校验与解包。见 src/packs/。
+sha2.workspace = true
+tar.workspace = true
+zstd.workspace = true
 similar = { version = "3.1.2", default-features = false, features = ["text", "inline"] }
 tauri-plugin-notification = "2.3.3"
 

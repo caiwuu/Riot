@@ -216,7 +216,7 @@ impl SessionManager {
 
     pub async fn delete(&self, session_id: &str) {
         if let Some(s) = self.sessions.lock().await.remove(session_id) {
-            s.interrupt().await;
+            s.abort_turn().await;
             s.close_log().await;
             if let Err(e) = self.transcripts.remove(&s.id).await {
                 tracing::warn!(error = %e, "transcript 删除失败");
@@ -498,7 +498,7 @@ impl SessionManager {
             .map(Arc::clone)
             .collect();
         for s in &sessions {
-            s.interrupt().await;
+            s.abort_turn().await;
         }
         for s in &sessions {
             s.flush_log().await;

@@ -252,6 +252,12 @@ pub struct MessageMeta {
     /// 由 INV-9 断言保证。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_origin: Option<String>,
+    /// 这条回答是被用户按停止**截断**的，不是模型自己说完的。
+    ///
+    /// 只给界面标注用。模型那边不需要额外说明 —— 它看到的就是一句
+    /// 半截话后面紧跟着用户的下一条消息，而 meta 从来不进 wire 格式。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
 }
 
 impl MessageMeta {

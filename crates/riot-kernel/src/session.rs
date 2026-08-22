@@ -387,6 +387,12 @@ pub struct Session {
     history: Mutex<Vec<Message>>,
     /// 当前这一轮的取消令牌。没有正在跑的轮次时是 None。
     running: Mutex<Option<CancellationToken>>,
+    /// 本轮的取消是**用户按的停止**，不是关会话/退应用顺手带走的。
+    ///
+    /// 两者的收场不一样：用户按停止而模型还没开口时，那句话要退回输入框
+    /// （见 [`AgentEvent::PromptWithdrawn`]）；关应用则什么都不该动 ——
+    /// 用户下次打开必须还看得见自己发过什么。每轮起跑时清零。
+    stopped_by_user: AtomicBool,
     /// 跑轮中用户插话的队列。入队与否的判定必须在 `running` 锁下做
     /// （见 [`Self::try_enqueue`]），否则消息会卡在一个没人 drain 的队列里。
     queue: Arc<HostInputQueue>,
@@ -714,7 +720,7 @@ fn prompt_text(text: &str) -> String {
     }
 }
 
-/// 用户这一轮输入的**占位形态**：只有他真正打的字和附的图。
+/// 用户这一轮输入的**占位形态**：只有他真正打的字、附的图和点名的文件。
 ///
 /// [`user_content`] 要调模型（图片转述）、读磁盘（`@` 展开）才能定稿，
 /// 期间界面得先有东西可画（见 `Session::pending_user`）。缺的是那些
@@ -723,6 +729,10 @@ fn prompt_text(text: &str) -> String {
 /// `[约束]` 图片一律进 `DescribedImage`。这份内容按设计不会发给模型
 /// （定稿版会整条顶掉它），但万一漏出去，这个变体只会渲染成一段文字 ——
 /// 而 `Image` 会让收不了图的模型 400，正是 [`user_content`] 要避免的那个。
+///
+/// `[约束]` `@` 引用块也要占位。展开要读盘，切会话再回来如果只有正文、
+/// 没有 `UserFile`，前端曾经只能画出一串 `@路径` 纯文字（实时路径靠乐观
+/// 回显还看得见）。内容先空着 —— 定稿版会整条顶掉。
 fn pending_user_content(input: &TurnInput) -> Vec<UserContent> {
     let mut content: Vec<UserContent> = input
         .images
@@ -742,6 +752,15 @@ fn pending_user_content(input: &TurnInput) -> Vec<UserContent> {
     content.push(UserContent::Text {
         text: prompt_text(&input.text),
     });
+    for p in &input.refs {
+        if p.trim().is_empty() {
+            continue;
+        }
+        content.push(UserContent::Attachment(Attachment::UserFile {
+            path: std::path::PathBuf::from(p),
+            content: String::new(),
+        }));
+    }
     content
 }
 
@@ -776,6 +795,7 @@ impl Session {
             browser: std::sync::OnceLock::new(),
             history: Mutex::new(Vec::new()),
             running: Mutex::new(None),
+            stopped_by_user: AtomicBool::new(false),
             queue: Arc::new(HostInputQueue::default()),
             sink: SessionSink::default(),
             pending_asks: Arc::new(PendingAsks::default()),
@@ -821,6 +841,7 @@ impl Session {
             browser: std::sync::OnceLock::new(),
             history: Mutex::new(Vec::new()),
             running: Mutex::new(None),
+            stopped_by_user: AtomicBool::new(false),
             queue: Arc::new(HostInputQueue::default()),
             sink: SessionSink::default(),
             pending_asks: Arc::new(PendingAsks::default()),
@@ -1018,17 +1039,34 @@ impl Session {
         self.system_prompt_extra.lock().await.clone()
     }
 
-    /// 中断本轮。返回是否真的有轮子在跑。
+    /// 用户按了停止。返回是否真的有轮子在跑。
     ///
     /// `false` 给前端一个明确信号：宿主已经闲着，该把残留的停止键收掉。
     /// 只记日志的话，界面还转圈，用户连点停止也毫无反应。
     pub async fn interrupt(&self) -> bool {
+        self.cancel_turn(true).await
+    }
+
+    /// 关会话 / 退应用时取消本轮。
+    ///
+    /// 和 [`Self::interrupt`] 的唯一差别是**不算用户按停止**：这条路上
+    /// 不撤回任何已经发出的消息 —— 用户下次打开必须还看得见自己说过什么。
+    pub async fn abort_turn(&self) -> bool {
+        self.cancel_turn(false).await
+    }
+
+    async fn cancel_turn(&self, by_user: bool) -> bool {
         // 这条日志是"按了停止没反应"唯一能自证的地方：要么没到这里
         //（前端/命令层断了），要么到了但没有正在跑的轮子（界面 busy
         // 是假的），要么取消发出去了而下游没理它。三种病因三种药。
         match self.running.lock().await.as_ref() {
             Some(t) => {
-                tracing::info!(session = %self.id.as_str(), "中断：向本轮发出取消");
+                tracing::info!(session = %self.id.as_str(), by_user, "中断：向本轮发出取消");
+                // 置位在 cancel 之前：轮子看到取消之后马上就会读这个标志，
+                // 反过来写会让"刚好那一瞬"的停止被当成关应用。
+                if by_user {
+                    self.stopped_by_user.store(true, Ordering::Relaxed);
+                }
                 t.cancel();
                 true
             }
@@ -1367,6 +1405,73 @@ impl Session {
         Ok(keep_id)
     }
 
+    /// 把半截流里已经吐出来的正文定稿成一条助手消息（历史 + transcript）。
+    ///
+    /// 用户按停止常常是"够了，别说了"，不是"当你没说过" —— 而取消时
+    /// provider 直接结束流，不会再有定稿消息：不接这一手的话，屏幕上
+    /// 读了一半的回答会在 `Done` 到达的瞬间整段消失。
+    ///
+    /// 思考不定稿。它没有签名，回喂给模型是错的（见 INV-9 与降级剥离
+    /// 签名那条规矩），而单独留一段没有结论的推理对用户也没有价值。
+    ///
+    /// 返回 `None` = 没有半截正文可留（模型还没开口，或这一轮正常收尾时
+    /// 缓冲已经被 [`fold_live`] 清空了）。
+    async fn finalize_partial(&self, model: &str) -> Option<Message> {
+        let text = {
+            let mut live = self.live_stream.lock().await;
+            live.thinking.clear();
+            std::mem::take(&mut live.text)
+        };
+        if text.trim().is_empty() {
+            return None;
+        }
+        let msg = Message::Assistant {
+            id: MessageId::from_raw(self.ids.next_id("msg")),
+            content: vec![riot_protocol::message::AssistantContent::Text { text }],
+            // 用量随被取消的那次请求一起丢了。报 0 好过报一个编出来的数。
+            usage: Default::default(),
+            meta: MessageMeta {
+                interrupted: true,
+                model_origin: Some(model.to_owned()),
+                ..Default::default()
+            },
+        };
+        // 这条消息不经过事件循环那段 `AgentEvent::Message` 的追加逻辑
+        //（它是本地合成的，不来自 stream），所以历史和 transcript 在
+        // 这里自己写。
+        self.history.lock().await.push(msg.clone());
+        if let Some(p) = &self.persist {
+            p.log.append(&msg);
+        }
+        Some(msg)
+    }
+
+    /// 撤回本轮那条用户消息：内存历史和 transcript 都不再有它。
+    ///
+    /// 只在它还是历史末尾时动手。`None` = 没撤（末尾已经不是它了，说明
+    /// 这一轮其实产出过东西，撤掉会在上下文里留下一个悬空的回答）。
+    /// `Some(true)` = 撤完这个会话一条消息都不剩。
+    async fn withdraw_prompt(&self, id: &MessageId) -> Option<bool> {
+        let mut live = self.history.lock().await;
+        if live.last().map(|m| m.id()) != Some(id) {
+            tracing::warn!(session = %self.id.as_str(), "撤回落空：历史末尾已经不是这条提问");
+            return None;
+        }
+        live.pop();
+        let empty = live.is_empty() && self.ui_archive.lock().await.is_empty();
+        drop(live);
+
+        if let Some(p) = &self.persist {
+            p.log.append_withdraw(id.as_str());
+        }
+        // 环境指纹归零，理由同 rewind_to_prompt：被撤的那条消息可能捎带了
+        // 最近一份环境快照，指纹还记着"已发过"的话，下一轮差分判定
+        // "没变化"，模型对着一段自己从没见过的上下文失明。
+        *self.env_seen.lock().await = None;
+        *self.env_band.lock().await = 0;
+        Some(empty)
+    }
+
     /// 跑一轮的主体。调用方必须已经把 `running` 置成本轮的令牌 ——
     /// 这里负责跑完、清 `running`、清残留插话。
     ///
@@ -1380,6 +1485,9 @@ impl Session {
         cancel: CancellationToken,
         limits: TurnLimits,
     ) -> Result<(), String> {
+        // 上一轮的停止不能算到这一轮头上。清在这里而不是置 `running` 那几处：
+        // 那是三个入口，漏一个的表现是"上次按过停止，这次没按也把话撤了"。
+        self.stopped_by_user.store(false, Ordering::Relaxed);
         // 水合在 running 置位之后：并发的第二轮已经被挡在排队那条路上，
         // 这里的加载不会和另一轮的写历史交错。
         self.hydrate().await;
@@ -1515,11 +1623,19 @@ impl Session {
         python_venv: Option<&str>,
         sandbox: Option<riot_runtime::ActiveSandbox>,
     ) -> Scheduler {
-        // venv 每轮现装（和 caps 一个道理）：用户中途在会话设置里换环境，
-        // 下一轮就生效。
+        // venv 和能力包都每轮现装（和 caps 一个道理）：用户中途在设置里换
+        // 环境、或者刚装完文档能力包，下一轮就生效，不用重启。
+        let proc: Arc<dyn riot_protocol::tool::ProcessRunner> =
+            Arc::new(SystemProcessRunner::default());
+        // 能力包套在里层、venv 在外层，所以 venv 的 bin 排在能力包前面：
+        // 用户显式选的环境优先级最高。
+        let proc: Arc<dyn riot_protocol::tool::ProcessRunner> = match crate::packs::doc_runtime() {
+            Some(pack) => Arc::new(DocPackRunner::new(&pack, proc)),
+            None => proc,
+        };
         let proc: Arc<dyn riot_protocol::tool::ProcessRunner> = match python_venv {
-            Some(v) => Arc::new(VenvRunner::new(v)),
-            None => Arc::new(SystemProcessRunner::default()),
+            Some(v) => Arc::new(VenvRunner::new(v, proc)),
+            None => proc,
         };
         // 沙箱套在最外层：它改写的是"跑什么"（前面垫一个 sandbox-exec），
         // venv 改的是环境变量，两件事互不干涉。
@@ -1885,6 +2001,10 @@ impl Session {
 
         let mut history = self.history.lock().await.clone();
 
+        // 本轮追加的那条用户消息。模型一个字都没给出就被停止时，它要被
+        // 撤回（见 AgentEvent::PromptWithdrawn）。重新生成这一路没有它。
+        let mut submitted: Option<MessageId> = None;
+
         if let Some(input) = input {
             // 这条消息的 id 先定下来：占位版和定稿版用同一个，前端认 id。
             let user_id = MessageId::from_raw(self.ids.next_id("msg"));
@@ -1944,7 +2064,7 @@ impl Session {
                 content = prelude;
             }
             let user_msg = Message::User {
-                id: user_id,
+                id: user_id.clone(),
                 content,
                 meta: MessageMeta::default(),
             };
@@ -1954,6 +2074,7 @@ impl Session {
                 p.log.append(&user_msg);
             }
             history.push(user_msg);
+            submitted = Some(user_id);
         } else if history.is_empty() {
             return Err("没有可重新生成的用户消息".into());
         }
@@ -2002,13 +2123,42 @@ impl Session {
         let stream = run_agent(state, deps, cancel.clone());
         futures::pin_mut!(stream);
 
+        // 这一轮有没有留下东西。决定被停止时那句提问是撤回还是留下。
+        let mut produced = false;
+
         use futures::StreamExt;
         while let Some(ev) = stream.next().await {
+            if leaves_a_trace(&ev) {
+                produced = true;
+            }
             // 每轮怎么收场都记一笔。"按了停止没反应"的排查里，这条能
             // 区分"内核没收到取消"和"收到了但界面没更新"。
             if let AgentEvent::Done { reason } = &ev {
                 tracing::info!(session = %self.id.as_str(), ?reason, "本轮结束");
                 self.compacting.store(false, Ordering::Relaxed);
+                // 已经说出口的半截话先定稿。排在撤回判定**之前**：它一旦
+                // 落地，这一轮就算有产出，提问不能再撤（撤了那半截回答
+                // 就悬空了）。
+                if let Some(m) = self.finalize_partial(&model.model).await {
+                    produced = true;
+                    let _ = sink.send(AgentEvent::Message(m));
+                }
+                // 用户按了停止，而这一轮什么都没留下 —— 那句提问从没被
+                // 回答过，留在历史里只会在下一轮原样再发一次。撤回它，
+                // 界面把原文放回输入框。
+                //
+                // 排在 Done **之前**发：Done 是流的最后一个事件（INV-4），
+                // 而且前端收到 Done 就会去接力排队的插话。
+                if !produced
+                    && self.stopped_by_user.load(Ordering::Relaxed)
+                    && let Some(id) = submitted.take()
+                    && let Some(empty) = self.withdraw_prompt(&id).await
+                {
+                    let _ = sink.send(AgentEvent::PromptWithdrawn {
+                        message_id: id,
+                        session_empty: empty,
+                    });
+                }
             }
             if let AgentEvent::Compacting = &ev {
                 self.compacting.store(true, Ordering::Relaxed);
@@ -2063,31 +2213,55 @@ fn restored_files(file_state: &dyn riot_protocol::tool::FileStateCache) -> Vec<A
     out
 }
 
-/// 给工具子进程注入 Python 虚拟环境的 ProcessRunner。
+/// 往 `spec` 的 PATH 前面接上几个目录。
 ///
 /// `ProcessSpec.env` 的语义是"覆盖这几个、其余继承"（见
-/// `SystemProcessRunner`），所以 PATH 必须在这里拼完整：宿主当前的
-/// PATH 前面接上 `<venv>/bin`。只补 spec 里没有的变量 —— 工具自己
-/// 显式设置的同名 env 优先。
+/// `SystemProcessRunner`），所以 PATH 必须拼完整：已经有人设过就在那份前面
+/// 接，没有就从宿主当前的 PATH 接。
+///
+/// `[约束]` 必须是"接"而不是"没有才设"。venv 和能力包两层装饰器都要改
+/// PATH，谁先跑取决于装配顺序 —— 用"没有才设"的话，先跑的那层会把后跑的
+/// 那层整个吞掉，表现是设了 venv 就找不到 soffice（或者反过来）。
+fn prepend_path(spec: &mut riot_protocol::tool::ProcessSpec, dirs: &[std::path::PathBuf]) {
+    if dirs.is_empty() {
+        return;
+    }
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    let mut head = dirs
+        .iter()
+        .map(|d| d.display().to_string())
+        .collect::<Vec<_>>()
+        .join(&sep.to_string());
+
+    match spec.env.iter_mut().find(|(k, _)| k == "PATH") {
+        Some((_, existing)) => {
+            head.push(sep);
+            head.push_str(existing);
+            *existing = head;
+        }
+        None => {
+            if let Ok(host) = std::env::var("PATH") {
+                head.push(sep);
+                head.push_str(&host);
+            }
+            spec.env.push(("PATH".to_owned(), head));
+        }
+    }
+}
+
+/// 给工具子进程注入 Python 虚拟环境的 ProcessRunner。
 struct VenvRunner {
-    inner: SystemProcessRunner,
-    env: Vec<(String, String)>,
+    inner: Arc<dyn riot_protocol::tool::ProcessRunner>,
+    bin: std::path::PathBuf,
+    venv: String,
 }
 
 impl VenvRunner {
-    fn new(venv: &str) -> Self {
-        let bin = std::path::Path::new(venv).join(if cfg!(windows) { "Scripts" } else { "bin" });
-        let sep = if cfg!(windows) { ';' } else { ':' };
-        let path = match std::env::var("PATH") {
-            Ok(p) => format!("{}{sep}{p}", bin.display()),
-            Err(_) => bin.display().to_string(),
-        };
+    fn new(venv: &str, inner: Arc<dyn riot_protocol::tool::ProcessRunner>) -> Self {
         Self {
-            inner: SystemProcessRunner::default(),
-            env: vec![
-                ("VIRTUAL_ENV".to_owned(), venv.to_owned()),
-                ("PATH".to_owned(), path),
-            ],
+            inner,
+            bin: std::path::Path::new(venv).join(if cfg!(windows) { "Scripts" } else { "bin" }),
+            venv: venv.to_owned(),
         }
     }
 }
@@ -2099,13 +2273,75 @@ impl riot_protocol::tool::ProcessRunner for VenvRunner {
         mut spec: riot_protocol::tool::ProcessSpec,
         cancel: CancellationToken,
     ) -> std::io::Result<riot_protocol::tool::ProcessOutput> {
+        // 工具自己显式设的同名变量优先。
+        if !spec.env.iter().any(|(k, _)| k == "VIRTUAL_ENV") {
+            spec.env
+                .push(("VIRTUAL_ENV".to_owned(), self.venv.clone()));
+        }
+        prepend_path(&mut spec, std::slice::from_ref(&self.bin));
+        self.inner.run(spec, cancel).await
+    }
+}
+
+/// 给工具子进程接上已安装的能力包（目前是文档运行时）。
+///
+/// 做成装饰器而不是在 `SystemProcessRunner` 里判断：和 venv、沙箱是同一类
+/// 正交关注点，而"没装能力包"这条路径上一行相关代码都不会跑到。
+///
+/// `[约束]` 进 PATH 的只有 `pack.json` 里 `pathPrepend` 声明的那些目录 ——
+/// 文档包故意把 `python3` 和 `node` 排除在外。放进去的话，用户给会话设了
+/// venv 时一句 `python3 manage.py` 会拿到包里那份、找不到项目依赖；为了
+/// 文档功能弄坏用户原本的 Python 工作流是不划算的。skill 正文里已经改成
+/// 显式写 `$RUNTIME_BIN_DIR/python3`。
+struct DocPackRunner {
+    inner: Arc<dyn riot_protocol::tool::ProcessRunner>,
+    env: Vec<(String, String)>,
+    path_dirs: Vec<std::path::PathBuf>,
+}
+
+impl DocPackRunner {
+    fn new(
+        pack: &crate::packs::InstalledPack,
+        inner: Arc<dyn riot_protocol::tool::ProcessRunner>,
+    ) -> Self {
+        Self {
+            inner,
+            env: pack.env(),
+            path_dirs: pack.path_dirs(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl riot_protocol::tool::ProcessRunner for DocPackRunner {
+    async fn run(
+        &self,
+        mut spec: riot_protocol::tool::ProcessSpec,
+        cancel: CancellationToken,
+    ) -> std::io::Result<riot_protocol::tool::ProcessOutput> {
         for (k, v) in &self.env {
             if !spec.env.iter().any(|(ek, _)| ek == k) {
                 spec.env.push((k.clone(), v.clone()));
             }
         }
+        prepend_path(&mut spec, &self.path_dirs);
         self.inner.run(spec, cancel).await
     }
+}
+
+/// 这个事件算不算"这一轮在对话里留下了东西"（决定按停止时撤不撤提问）。
+///
+/// `[约束]` 只有 [`AgentEvent::Message`] 算，Delta 不算 —— 包括思考和
+/// 已经吐出来的半截正文。理由是它们**哪里都没留下**：取消时 provider
+/// 直接 return，不会有定稿消息，历史和 transcript 里一个字都没有；界面
+/// 收到 Done 也把 streaming/thinking 清空。拿一个转瞬即逝的东西当"有
+/// 产出"的凭据，用户按下停止看到的就是：思考没了，而自己那句提问孤零零
+/// 留在对话里等一个永远不会来的回答。
+///
+/// 反过来，只要有一条 Message 落了地（哪怕是被取消的工具的结果），
+/// 提问就必须留下 —— 撤了会在上下文里留下一个悬空的回答。
+fn leaves_a_trace(ev: &AgentEvent) -> bool {
+    matches!(ev, AgentEvent::Message(_))
 }
 
 /// 按配置构建 provider。会话和"测试连接"共用 —— 两处各写一遍的话，
@@ -3689,33 +3925,86 @@ mod tests {
         );
     }
 
-    #[test]
-    fn venv_runner_拼出完整的环境() {
-        // PATH 必须完整拼出来：ProcessSpec.env 是"覆盖这几个、其余继承"，
-        // 只放 <venv>/bin 的话子进程连 bash 都找不到。
-        let r = VenvRunner::new("/tmp/venv");
-        let path = r
-            .env
+    fn empty_spec() -> riot_protocol::tool::ProcessSpec {
+        riot_protocol::tool::ProcessSpec {
+            program: "true".to_owned(),
+            args: vec![],
+            cwd: std::path::PathBuf::from("/tmp"),
+            env: vec![],
+            timeout_ms: None,
+        }
+    }
+
+    fn path_of(spec: &riot_protocol::tool::ProcessSpec) -> String {
+        spec.env
             .iter()
             .find(|(k, _)| k == "PATH")
             .map(|(_, v)| v.clone())
-            .expect("有 PATH");
-        // venv 的可执行目录两个平台叫法不同：unix 是 bin，Windows 是 Scripts。
-        #[cfg(not(windows))]
+            .expect("有 PATH")
+    }
+
+    #[test]
+    fn prepend_path_从宿主环境拼出完整的_path() {
+        // ProcessSpec.env 是"覆盖这几个、其余继承"，只放新目录的话
+        // 子进程连 bash 都找不到。
+        let mut spec = empty_spec();
+        prepend_path(&mut spec, &[std::path::PathBuf::from("/tmp/venv/bin")]);
+        let path = path_of(&spec);
+        assert!(path.starts_with("/tmp/venv/bin"), "新目录要排最前：{path}");
         assert!(
-            path.starts_with("/tmp/venv/bin"),
-            "venv 的 bin 要排最前：{path}"
+            path.len() > "/tmp/venv/bin".len(),
+            "后面要接着宿主原有的 PATH：{path}"
         );
-        #[cfg(windows)]
+    }
+
+    /// venv 和能力包两层都要改 PATH。用"没有才设"的语义时，先跑的那层会把
+    /// 后跑的整个吞掉 —— 表现是设了 venv 就找不到 soffice。
+    #[test]
+    fn 两层装饰器的_path_叠加而不是互相覆盖() {
+        let mut spec = empty_spec();
+        prepend_path(&mut spec, &[std::path::PathBuf::from("/packs/doc/path")]);
+        prepend_path(&mut spec, &[std::path::PathBuf::from("/proj/.venv/bin")]);
+
+        let path = path_of(&spec);
+        let venv = path.find("/proj/.venv/bin").expect("venv 要在");
+        let pack = path.find("/packs/doc/path").expect("能力包要在");
         assert!(
-            path.starts_with(r"/tmp/venv\Scripts"),
-            "venv 的 Scripts 要排最前：{path}"
+            venv < pack,
+            "用户显式选的 venv 要排在能力包前面，实际：{path}"
         );
-        assert!(
-            r.env
-                .iter()
-                .any(|(k, v)| k == "VIRTUAL_ENV" && v == "/tmp/venv"),
-            "要带 VIRTUAL_ENV"
+    }
+
+    #[test]
+    fn 能力包注入_runtime_变量并把工具目录放进_path() {
+        let pack = crate::packs::InstalledPack {
+            root: std::path::PathBuf::from("/packs/doc-runtime"),
+            manifest: crate::packs::PackManifest {
+                name: "doc-runtime".into(),
+                version: "0.1.0".into(),
+                platform: "darwin-arm64".into(),
+                source_runtime: None,
+                env: [("RUNTIME_NODE".to_owned(), "bin/node".to_owned())]
+                    .into_iter()
+                    .collect(),
+                path_prepend: vec!["path".to_owned()],
+                mcp_servers: vec![],
+                skills: vec![],
+            },
+        };
+        let runner = DocPackRunner::new(&pack, Arc::new(SystemProcessRunner::default()));
+
+        assert_eq!(
+            runner.env,
+            vec![(
+                "RUNTIME_NODE".to_owned(),
+                "/packs/doc-runtime/bin/node".to_owned()
+            )],
+            "RUNTIME_* 要解析成绝对路径 —— skill 自带脚本直接读它们"
+        );
+        assert_eq!(
+            runner.path_dirs,
+            vec![std::path::PathBuf::from("/packs/doc-runtime/path")],
+            "进 PATH 的只能是 path/，bin/ 里的 python3 会盖掉用户的解释器"
         );
     }
 
@@ -4284,7 +4573,7 @@ mod tests {
         );
     }
 
-    /// 占位内容 = 用户真正打的字 + 他附的图，仅此而已。
+    /// 占位内容 = 用户真正打的字 + 他附的图 + 点名的文件。
     #[tokio::test]
     async fn 占位带上正文和图片但跳过超限的图() {
         let content = pending_user_content(&TurnInput {
@@ -4320,6 +4609,26 @@ mod tests {
             )),
             "正文要原样带上：{content:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn 占位带上引用文件以免切会话丢块() {
+        let content = pending_user_content(&TurnInput {
+            text: "读下内容".into(),
+            refs: vec!["/tmp/a.xlsx".into(), "  ".into()],
+            ..Default::default()
+        });
+        let paths: Vec<String> = content
+            .iter()
+            .filter_map(|c| match c {
+                UserContent::Attachment(Attachment::UserFile { path, content }) => {
+                    assert!(content.is_empty(), "占位不读盘，内容该空：{content}");
+                    Some(path.to_string_lossy().into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(paths, ["/tmp/a.xlsx"], "空路径不该占一条：{content:?}");
     }
 
     /// 只丢了一张图什么都没说时，占位的正文和定稿版保持一致。
@@ -4614,6 +4923,176 @@ mod tests {
         s.rewind_to_prompt("a1").await.expect("能截回归档");
         assert_eq!(s.ui_archive().await.len(), 1);
         assert!(s.history().await.is_empty(), "截回归档后活历史应清空");
+    }
+
+    /// 模型还没开口就被停止：那句提问从历史和 transcript 里一并消失。
+    ///
+    /// 只从内存里删不够 —— 重启水合会把它读回来，用户会看到一条自己
+    /// 明明取消过、还带回了输入框的消息又躺在对话里。
+    #[tokio::test]
+    async fn 撤回的提问历史和记录里都不留() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let store = Arc::new(riot_store::Transcripts::new(dir.path()));
+        let id = SessionId::from_raw("s1");
+        let log = store.open(riot_store::TranscriptMeta {
+            id: id.clone(),
+            root: dir.path().to_path_buf(),
+            created_at_ms: 0,
+        });
+        let s = Session::new(
+            id.clone(),
+            dir.path().to_path_buf(),
+            Some(SessionPersist {
+                store: Arc::clone(&store),
+                log,
+            }),
+        );
+
+        let msg = hist_user("m1", "发出去又后悔了");
+        s.history.lock().await.push(msg.clone());
+        if let Some(p) = &s.persist {
+            p.log.append(&msg);
+        }
+
+        assert_eq!(
+            s.withdraw_prompt(&MessageId::from_raw("m1")).await,
+            Some(true),
+            "撤完这个会话就空了"
+        );
+        assert!(s.history().await.is_empty());
+
+        s.flush_log().await;
+        let parts = store.load_parts(&id).await;
+        assert!(parts.live.is_empty(), "重启后不该再读回来：{parts:?}");
+    }
+
+    /// 已经说出口的半截回答要留下，而且要留得住（重启还在）。
+    ///
+    /// 按停止常常是"够了，别说了"—— 用户读到一半的东西不该在 Done
+    /// 到达的那一瞬间整段消失。
+    #[tokio::test]
+    async fn 被打断的半截回答定稿进历史() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let store = Arc::new(riot_store::Transcripts::new(dir.path()));
+        let id = SessionId::from_raw("s1");
+        let log = store.open(riot_store::TranscriptMeta {
+            id: id.clone(),
+            root: dir.path().to_path_buf(),
+            created_at_ms: 0,
+        });
+        let s = Session::new(
+            id.clone(),
+            dir.path().to_path_buf(),
+            Some(SessionPersist {
+                store: Arc::clone(&store),
+                log,
+            }),
+        );
+
+        {
+            let mut live = s.live_stream.lock().await;
+            live.text.push_str("先说一半");
+            live.thinking.push_str("想了很久");
+        }
+        let msg = s
+            .finalize_partial("deepseek-chat")
+            .await
+            .expect("有半截正文就该定稿");
+        match &msg {
+            Message::Assistant { content, meta, .. } => {
+                assert_eq!(content.len(), 1, "思考不定稿：没有签名，回喂给模型是错的");
+                assert!(meta.interrupted, "界面靠它标注'已中断'");
+            }
+            other => panic!("该是一条助手消息：{other:?}"),
+        }
+        assert_eq!(s.history().await.len(), 1);
+        assert!(
+            s.live_stream.lock().await.text.is_empty(),
+            "缓冲要清空，否则下一轮会把这段再定稿一遍"
+        );
+
+        s.flush_log().await;
+        let parts = store.load_parts(&id).await;
+        assert_eq!(parts.live.len(), 1, "重启后还得在：{parts:?}");
+
+        // 没说过话的那一轮不该凭空长出一条空消息。
+        assert!(s.finalize_partial("deepseek-chat").await.is_none());
+    }
+
+    /// 思考不算产出：模型转了几秒圈就被停，那句提问照样回输入框。
+    ///
+    /// 这条用例来自一次实测 —— 之前只要模型开始思考就算"有产出"，用户
+    /// 按停止之后思考被丢弃（不落盘），提问却留在了对话里：屏幕上是一条
+    /// 没人应答的消息，而输入框是空的。
+    #[test]
+    fn 思考和半截正文都不算产出() {
+        use riot_protocol::event::StreamDelta;
+
+        let m = MessageId::from_raw("m1");
+        assert!(!leaves_a_trace(&AgentEvent::Delta(StreamDelta::Thinking {
+            message_id: m.clone(),
+            text: "让我想想".into(),
+        })));
+        assert!(
+            !leaves_a_trace(&AgentEvent::Delta(StreamDelta::Text {
+                message_id: m.clone(),
+                text: "好的".into(),
+            })),
+            "半截正文同样不落盘，取消之后界面也会清掉"
+        );
+        assert!(leaves_a_trace(&AgentEvent::Message(hist_assistant(
+            "a1",
+            "答完了"
+        ))));
+    }
+
+    /// 模型已经答过话就不能撤：撤了会在上下文里留下一个悬空的回答。
+    #[tokio::test]
+    async fn 产出过的那一轮不撤回提问() {
+        let s = Session::new(
+            SessionId::from_raw("s1"),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        );
+        s.history
+            .lock()
+            .await
+            .extend([hist_user("m1", "问题"), hist_assistant("a1", "半句答")]);
+
+        assert_eq!(
+            s.withdraw_prompt(&MessageId::from_raw("m1")).await,
+            None,
+            "末尾已经不是那条提问了"
+        );
+        assert_eq!(s.history().await.len(), 2, "什么都不该动");
+    }
+
+    /// 关会话 / 退应用的取消不是"用户按了停止"。
+    ///
+    /// 混为一谈的话，退出时正等着首字的那一轮会把用户的提问撤掉 ——
+    /// 下次打开，他发过的话没了，而且没有任何地方能解释去哪了。
+    #[tokio::test]
+    async fn 关会话的取消不算用户按停止() {
+        let s = Session::new(
+            SessionId::from_raw("s1"),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        );
+        *s.running.lock().await = Some(CancellationToken::new());
+        assert!(s.abort_turn().await);
+        assert!(!s.stopped_by_user.load(Ordering::Relaxed));
+
+        assert!(s.interrupt().await);
+        assert!(s.stopped_by_user.load(Ordering::Relaxed));
+
+        // 没有轮子在跑时按停止不留痕 —— 否则这个标志会跨到下一轮去。
+        let idle = Session::new(
+            SessionId::from_raw("s2"),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        );
+        assert!(!idle.interrupt().await);
+        assert!(!idle.stopped_by_user.load(Ordering::Relaxed));
     }
 
     #[tokio::test]

@@ -342,6 +342,28 @@
           ]
         },
         {
+          "description": "本轮的用户消息被撤回了：模型一个字都还没给出，用户就按了停止。\n\n消息已经从内存历史和 transcript 里移除。界面要把气泡撤掉、把原文\n放回输入框 —— 一句**没有被回答**的话留在对话里是有害的：它下一轮\n会原样再发给模型一次，而用户以为自己已经取消了它。\n\n`[约束]` 必须排在同一轮的 [`Self::Done`] **之前**（Done 是流的最后\n一个事件）。\n\n只有\"什么都没产出\"的中断才有这条。模型已经开口（哪怕只有半句）\n之后停止，用户看到的是一段真实发生过的对话，撤掉提问会让剩下的\n回答无从解释。",
+          "type": "object",
+          "properties": {
+            "message_id": {
+              "type": "string"
+            },
+            "session_empty": {
+              "description": "撤回之后这个会话一条消息都不剩了。\n\n宿主据此把自动标题一并撤掉：标题正是从这条消息取的，留着就是\n一个空会话顶着一句从没发出去的话，而且之后真正的第一句话\n再也改不动它了。",
+              "type": "boolean"
+            },
+            "type": {
+              "type": "string",
+              "const": "prompt_withdrawn"
+            }
+          },
+          "required": [
+            "type",
+            "message_id",
+            "session_empty"
+          ]
+        },
+        {
           "description": "终止。\n\n**必须是流的最后一个事件，且必须出现。** 即使内核 panic 被捕获，\n也要合成一条 `Done { reason: Error }`。消费者依赖这一点做资源清理；\n缺失会导致 UI 永远转圈。由 INV-4 断言保证。",
           "type": "object",
           "properties": {
@@ -1340,6 +1362,10 @@
             "string",
             "null"
           ]
+        },
+        "interrupted": {
+          "description": "这条回答是被用户按停止**截断**的，不是模型自己说完的。\n\n只给界面标注用。模型那边不需要额外说明 —— 它看到的就是一句\n半截话后面紧跟着用户的下一条消息，而 meta 从来不进 wire 格式。",
+          "type": "boolean"
         },
         "is_api_error": {
           "description": "API 错误产生的消息。**这类消息上绝不能跑 stop hooks**，\n否则会形成 error → hook 注入 → 重试 → error 的死循环。\n由 INV-6 断言保证。",

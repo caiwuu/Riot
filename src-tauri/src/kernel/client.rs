@@ -48,6 +48,15 @@ pub enum HostNotice {
         session_id: String,
         mode: riot_protocol::permission::PermissionMode,
     },
+    /// 内核撤回了一条还没被回答的提问(用户在模型开口前按了停止)。
+    ///
+    /// 撤完会话空了的话,自动标题也要跟着撤 —— 它正是从那句话取的,
+    /// 留着就是一个空会话顶着一句从没发出去的话,而且之后真正的第一句
+    /// 再也改不动它了(标题只定一次)。
+    PromptWithdrawn {
+        session_id: String,
+        session_empty: bool,
+    },
     /// 内核进程没了(崩溃或退出)。宿主要把所有会话的"已水合"标记清掉 ——
     /// 重启后的内核是一张白纸,带着旧标记会把 turn.submit 发到一个
     /// 不存在的会话上。
@@ -265,6 +274,12 @@ fn spawn_dispatch(
                                     let _ = host_tx.send(HostNotice::ModeChanged {
                                         session_id: sid.clone(),
                                         mode: *mode,
+                                    });
+                                }
+                                AgentEvent::PromptWithdrawn { session_empty, .. } => {
+                                    let _ = host_tx.send(HostNotice::PromptWithdrawn {
+                                        session_id: sid.clone(),
+                                        session_empty: *session_empty,
                                     });
                                 }
                                 _ => {}
