@@ -704,14 +704,31 @@ pub(crate) mod testing {
     }
 
     /// 轮询等一个条件成立。PTY 是真进程真 I/O，只能等。
+    ///
+    /// 上限给得宽：条件一成立就立刻返回，放宽只延长真正失败的用例的耗时，
+    /// 通过的用例一分钱不多花。反过来卡得紧的代价是假红 —— 而假红会让人
+    /// 习惯性重跑 CI，那比慢几秒危险得多。
+    ///
+    /// Windows 再宽一档。那边的默认 shell 是 PowerShell，冷启动比 zsh 慢
+    /// 一个量级；退出路径还要等 conhost 缓冲静默（见 `Terminals::start` 里
+    /// 的监视线程），本身就封顶两秒。CI runner 上几个用例并行各起一个
+    /// PowerShell 时，5 秒连第一个字节都等不到。
     pub(crate) fn wait_until(mut done: impl FnMut() -> bool) -> bool {
-        for _ in 0..200 {
+        let budget = if cfg!(windows) {
+            std::time::Duration::from_secs(60)
+        } else {
+            std::time::Duration::from_secs(10)
+        };
+        let deadline = std::time::Instant::now() + budget;
+        loop {
             if done() {
                 return true;
             }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
-        false
     }
 }
 
@@ -807,6 +824,16 @@ mod tests {
         String::from_utf8_lossy(&all).into_owned()
     }
 
+    /// PowerShell 的提示符出来了没有。
+    ///
+    /// 判据不能是"有没有字节"：ConPTY 一起来就先吐一串转义序列，那时候
+    /// PowerShell 还在冷启动，写进去的命令要等它读到才生效。等到提示符才
+    /// 是"shell 真的在读输入了"。
+    #[cfg(windows)]
+    fn prompt_shown(got: &Arc<Mutex<Vec<TermEvent>>>) -> bool {
+        decoded(got).contains("PS ")
+    }
+
     #[test]
     fn 终端能跑命令并回显输出() {
         let terms = Terminals::default();
@@ -818,7 +845,7 @@ mod tests {
         // Windows 上 ConPTY 的光标查询由宿主应答（见 DsrFilter），
         // 等提示符出来再敲命令 —— 应答之前 shell 不收输入。
         #[cfg(windows)]
-        assert!(wait_until(|| !decoded(&got).is_empty()), "shell 该出提示符");
+        assert!(wait_until(|| prompt_shown(&got)), "shell 该出提示符");
 
         // 命令按各自 shell 的方言写:unix 是 zsh/bash 的 printf，
         // Windows 是 PowerShell 的 echo。
@@ -858,7 +885,7 @@ mod tests {
 
         // 等提示符:应答光标查询（宿主做，见 DsrFilter）之前 shell 不收输入。
         #[cfg(windows)]
-        assert!(wait_until(|| !decoded(&got).is_empty()), "shell 该出提示符");
+        assert!(wait_until(|| prompt_shown(&got)), "shell 该出提示符");
 
         terms.write(id, "exit\r").expect("写 exit");
 
