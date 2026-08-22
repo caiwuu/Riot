@@ -16,6 +16,14 @@ import { fileURLToPath } from 'node:url';
 
 // —— 文本工具 ——————————————————————————————————————————————
 
+// Windows 版 Codex 分发的 skill 文件是 CRLF,macOS 那份是 LF。下面的改写规则里,
+// 多行字面量和 /^…$/m 正则都是按 LF 写的,不先统一的话它们在 Windows 上会集体
+// 失配 —— 而且失配的表现是"规则没命中",很容易被误读成上游改了措辞。顺带也让
+// 两个平台产出的包同构。
+function readText(file) {
+  return fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+}
+
 // 删掉一整个 markdown 章节(从标题到下一个同级或更高级标题)。
 function dropSection(text, heading, level = 2) {
   const hashes = '#'.repeat(level);
@@ -216,6 +224,12 @@ def _runtime_binary(name: str) -> str:
                 rel = None
             if rel:
                 resolved = os.path.realpath(os.path.join(bin_dir, rel))
+                # 清单里 soffice 只能写 .exe(runtime_helpers.py 无条件校验后缀),可要执行的
+                # 是同目录那个 .com:soffice.exe 属于 GUI 子系统,起完 soffice.bin 就立刻返回,
+                # subprocess 会在 PDF 还没写完时拿到退出码。.com 是控制台包装,会等它结束。
+                console = resolved[:-4] + ".com"
+                if resolved.lower().endswith(".exe") and os.path.isfile(console):
+                    return console
                 if os.path.isfile(resolved):
                     return resolved
         candidate = os.path.join(bin_dir, name)
@@ -237,10 +251,33 @@ def _poppler_dir() -> str | None:
 // 数量对不上说明上游改了渲染流程,宁可构建失败也不要漏改一处。
 const SOFFICE_CALL_SITES = 3;
 
+// UserInstallation 的 URI 构造。上游一度写成 `"file://" + user_profile`:POSIX 路径以
+// / 开头,拼出来恰好是合法的 file:///var/...,所以 macOS 一直没事;Windows 上却会得到
+// file://C:\... 这种非法 URI,soffice 就此挂起,并弹出"bootstrap.ini 已损坏"的假警报
+// (openai/codex#30649)。26.819 起上游自己换成了 as_uri()。
+const PROFILE_URI_OK = 'Path(user_profile).resolve().as_uri()';
+const PROFILE_URI_BAD = '"-env:UserInstallation=file://" + user_profile';
+
 function patchRenderDocx(text) {
   const anchor = 'from pdf2image import convert_from_path, pdfinfo_from_path\n';
   if (!text.includes(anchor)) return null;
+
   let out = text.replace(anchor, anchor + RENDER_DOCX_RESOLVER);
+
+  // 两种已知写法都认:上游修好的直接放行,老写法就地改掉。两种都不是,说明它又换了
+  // 第三种拼法,这时宁可构建失败 —— 悄悄产出一个在 Windows 上必然卡死的包更糟。
+  if (!out.includes(PROFILE_URI_OK)) {
+    if (!out.includes(PROFILE_URI_BAD)) {
+      throw new Error(
+        'render_docx.py 里的 UserInstallation 不是任何一种已知写法,' +
+          '没法确认它在 Windows 上不会把 soffice 挂住(openai/codex#30649)',
+      );
+    }
+    if (!/^from pathlib import Path$/m.test(out)) {
+      out = out.replace(anchor, `from pathlib import Path\n${anchor}`);
+    }
+    out = out.split(PROFILE_URI_BAD).join(`"-env:UserInstallation=" + ${PROFILE_URI_OK}`);
+  }
 
   const sites = out.match(/^(\s*)"soffice",$/gm) ?? [];
   if (sites.length !== SOFFICE_CALL_SITES) {
@@ -313,7 +350,7 @@ export function adaptSkill(skillDir, name, log = () => {}) {
   if (!spec) throw new Error(`没有为 skill "${name}" 定义改写规则`);
 
   const file = path.join(skillDir, 'SKILL.md');
-  let text = fs.readFileSync(file, 'utf8');
+  let text = readText(file);
   const applied = [];
 
   for (const [id, fn] of [...spec.rules, ...COMMON_RULES]) {
@@ -357,7 +394,7 @@ export function adaptSkill(skillDir, name, log = () => {}) {
   for (const [id, rel, fn] of SCRIPT_PATCHES[name] ?? []) {
     const target = path.join(skillDir, rel);
     if (!fs.existsSync(target)) throw new Error(`[${name}] 改写规则 "${id}" 的目标不存在: ${rel}`);
-    const next = fn(fs.readFileSync(target, 'utf8'));
+    const next = fn(readText(target));
     if (next === null || next === undefined) {
       throw new Error(
         `[${name}] 助手脚本改写 "${id}" 没有命中。` +
@@ -384,7 +421,7 @@ function sweepSupportingDocs(skillDir) {
     if (!file.endsWith('.md')) continue;
     if (file.includes('builtin_templates') || file.includes('codex-grid-layout-library')) continue;
     if (path.basename(file) === 'SKILL.md') continue;
-    const before = fs.readFileSync(file, 'utf8');
+    const before = readText(file);
     const after = rewriteInterpreterCalls(before).replace(/\bCodex\b/g, 'Riot');
     if (after !== before) { fs.writeFileSync(file, after); count++; }
   }

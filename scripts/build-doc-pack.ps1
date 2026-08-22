@@ -7,7 +7,7 @@
 必须在 Windows 上跑：artifact-tool 带 skia.node 这样的原生绑定，是按平台编译的，
 没法从 macOS 交叉产出。
 
-与 macOS 版的三处实质差异，都是被 Windows 逼出来的：
+与 macOS 版的四处实质差异，都是被 Windows 逼出来的：
 
 1. shim 仍然是 bash 脚本。Riot 在 Windows 上用的是 Git for Windows 的 bash
    （见 crates/riot-tools/src/tools/bash.rs），所以模型敲的命令由 bash 执行，
@@ -22,8 +22,18 @@
 3. RUNTIME_NODE 指向真的 node.exe 而不是 shim，理由同上：presentations 的脚本
    会用它起子进程。
 
+4. LibreOffice 不来自 Codex 运行时。Windows 版的 bundle 压根不带它：runtime.json
+   里 libreOfficeVersion 是 null，native\ 下只有 poppler、git 那几个，连 Codex 自己
+   的 native-executables.json 都没给 soffice 建映射。macOS 版才有 libreoffice-headless。
+   Codex 在 Windows 上是指望用户自己装官方版、靠 PATH 找到 soffice 的；能力包不能
+   这么赌，所以直接从上游拉官方 MSI，msiexec /a 解包后裁掉用不上的部分再装进来。
+
 .PARAMETER Dependencies
 Codex 主运行时的 dependencies 目录。不传就按常见位置探。
+
+.PARAMETER LibreOffice
+现成的 LibreOffice 目录（内含 program\soffice.exe），用来跳过下载与解包。
+传了就原样取用，不做裁剪。
 
 .PARAMETER Plugins
 Codex 文档插件缓存目录。不传就按常见位置探。
@@ -42,6 +52,7 @@ pwsh scripts/build-doc-pack.ps1 -Out D:\code\riot-pkg
 param(
   [string]$Dependencies,
   [string]$Plugins,
+  [string]$LibreOffice,
   [string]$Out,
   [string]$Version = '0.1.0',
   [switch]$StageOnly,
@@ -58,6 +69,11 @@ $Platform = 'win-x64'
 # 清单直接从仓库文件读。
 $PkgRepoSlug = 'caiwuu/riot-pkg'
 $ReleaseTag = "$PackName-v$Version"
+
+# 上游只发 GPG 签名不发 sha256 文件，所以校验和钉在这儿。换版本时要一起改，
+# 对不上就让构建失败 —— 镜像站是第三方的，静默拿到一份被换过的 MSI 更糟。
+$LibreOfficeVersion = '26.2.5'
+$LibreOfficeSha256 = 'f15ba07bfcb0186986cf3171063506f5d207c11f8cc051ba0d135209e9e915f9'
 
 $Root = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 $Dist = Join-Path $Root 'dist\doc-pack'
@@ -121,6 +137,77 @@ function Get-ComponentRoot([string]$nativeRoot, [string]$exePath) {
   return $cur
 }
 
+# —— 源：上游的 LibreOffice ————————————————————————————————
+
+# 解包后 1.5GB，其中八成跟"把文档渲染成 PDF"没关系。下面几项都是交互式使用
+# 才碰得到的，渲染链路不经过它们。裁完约 600MB。
+$LibreOfficeDrop = @(
+  'share\extensions',   # 各语言的拼写词典，460MB。渲染出的 PDF 里没有波浪线。
+  'program\resource',   # 123 种界面语言的翻译，260MB。headless 不显示界面，英文还是内建的。
+  'share\registry\res', # 同上，配置项的本地化文本。
+  'share\gallery',      # 剪贴画库。
+  'share\wizards',      # Basic 写的交互式向导。
+  'help',
+  'readmes'
+)
+
+function Get-LibreOfficeRoot {
+  if ($LibreOffice) {
+    if (-not (Test-Path -LiteralPath (Join-Path $LibreOffice 'program\soffice.exe'))) {
+      Fail "-LibreOffice 指的目录下没有 program\soffice.exe: $LibreOffice"
+    }
+    return (Resolve-Path -LiteralPath $LibreOffice).Path
+  }
+
+  # 解包一次要一分多钟，裁完打个标记，重跑构建就直接复用。标记放在解包目录外面，
+  # 否则它会跟着一起被复制进包里。
+  $root = Join-Path $Cache "libreoffice-$LibreOfficeVersion"
+  $stamp = "$root.trimmed"
+  if (Test-Path -LiteralPath $stamp) {
+    Log "  复用已解包的 $LibreOfficeVersion"
+    return $root
+  }
+
+  $msiName = "LibreOffice_${LibreOfficeVersion}_Win_x86-64.msi"
+  $msi = Join-Path $Cache $msiName
+  if (-not (Test-Path -LiteralPath $msi)) {
+    Log "  下载 LibreOffice $LibreOfficeVersion（约 356MB，已缓存则跳过）…"
+    # 用 curl.exe 而不是 Invoke-WebRequest：后者在 PS 5.1 上会把整个响应缓进内存，
+    # 几百 MB 慢得离谱。它和下面打包用的 tar.exe 一样，Win10 1803+ 自带。
+    & curl.exe -L --fail --retry 3 -o $msi `
+      "https://download.documentfoundation.org/libreoffice/stable/$LibreOfficeVersion/win/x86_64/$msiName"
+    if ($LASTEXITCODE -ne 0) { Fail "LibreOffice 下载失败 ($LASTEXITCODE)" }
+  }
+  $got = (Get-FileHash -LiteralPath $msi -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($got -ne $LibreOfficeSha256) {
+    Fail ("MSI 校验和不符。`n  期望: $LibreOfficeSha256`n  实际: $got`n" +
+      "删掉 $msi 重跑。若上游确实换了版本，同步更新脚本顶部的 `$LibreOfficeSha256。")
+  }
+
+  if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+  New-Item -ItemType Directory -Path $root -Force | Out-Null
+  Log '  msiexec /a 解包（约一分钟）…'
+  # /a 是"管理员安装"，只把文件按目录树铺开，不写注册表也不要求提权。
+  $msiexec = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+    '/a', "`"$msi`"", '/qn', "TARGETDIR=`"$root`"")
+  if ($msiexec.ExitCode -ne 0) { Fail "msiexec 解包失败 ($($msiexec.ExitCode))" }
+
+  Log '  裁剪…'
+  # /a 会在 TARGETDIR 里留一份精简过的 MSI 副本，包里不需要。
+  Remove-Item -LiteralPath (Join-Path $root $msiName) -Force -ErrorAction SilentlyContinue
+  foreach ($rel in $LibreOfficeDrop) {
+    Remove-Item -LiteralPath (Join-Path $root $rel) -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  # 图标主题每套 3-16MB，headless 一套都用不上；但全删了 soffice 起来会抱怨找不到
+  # 默认主题，留下 colibre 那套。
+  Get-ChildItem -LiteralPath (Join-Path $root 'share\config') -Filter 'images_*.zip' -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -ne 'images_colibre.zip' } |
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+
+  New-Item -ItemType File -Path $stamp -Force | Out-Null
+  return $root
+}
+
 # —— 铺出 ————————————————————————————————————————————————
 
 $Stage = Join-Path $Dist "$PackName-$Version-$Platform"
@@ -176,28 +263,35 @@ Copy-Tree (Join-Path $Dependencies 'node\node_modules\@oai\artifact-tool') `
 $NodeExe = Join-Path $Stage 'node\node.exe'
 Report 'node'
 
-# 3. LibreOffice 与 Poppler ————————————————————————————————
+# 3. Poppler 与 LibreOffice ————————————————————————————————
 # 两个都整棵搬进 native\：Windows 按 exe 所在目录搜 DLL，把 exe 单独拎出来会
 # 少一堆动态库。之所以不像 macOS 那样各占一个顶层目录，是因为 runtime_helpers.py
 # 在 Windows 分支上硬性要求原生 exe 位于 <RUNTIME_BIN_DIR>\..\..\native 之下。
-Step 'LibreOffice 与 Poppler'
+Step 'Poppler'
 $nativeSrc = Join-Path $Dependencies 'native'
-$LibreRoot = $null
-$PopplerRoot = $null
-foreach ($pair in @(@('soffice.exe', 'Libre'), @('pdftoppm.exe', 'Poppler'))) {
-  $src = Get-ComponentRoot $nativeSrc (Find-Exe $nativeSrc $pair[0])
-  $dest = Join-Path $Stage "native\$(Split-Path -Leaf $src)"
-  Copy-Tree $src $dest
-  if ($pair[1] -eq 'Libre') { $LibreRoot = $dest } else { $PopplerRoot = $dest }
-}
-$SofficeExe = Find-Exe $LibreRoot 'soffice.exe'
+$PopplerSrc = Get-ComponentRoot $nativeSrc (Find-Exe $nativeSrc 'pdftoppm.exe')
+$PopplerRoot = Join-Path $Stage "native\$(Split-Path -Leaf $PopplerSrc)"
+Copy-Tree $PopplerSrc $PopplerRoot
 $PopplerBin = Split-Path -Parent (Find-Exe $PopplerRoot 'pdftoppm.exe')
+
+# LibreOffice 得自己去上游拿，Codex 的 Windows 运行时不带（见文件头第 4 条）。
+Step 'LibreOffice'
+$LibreRoot = Join-Path $Stage 'native\libreoffice'
+Copy-Tree (Get-LibreOfficeRoot) $LibreRoot
+$SofficeExe = Find-Exe $LibreRoot 'soffice.exe'
+# 真正要执行的是 soffice.com。soffice.exe 属于 GUI 子系统，起完 soffice.bin 就
+# 立刻返回，subprocess 会在转换完成前拿到退出码，然后读到一个还没写完的 PDF。
+# .com 是控制台包装，会等子进程结束并转发退出码。上游走 PATH 时是靠 PATHEXT 里
+# .COM 排在 .EXE 前面隐式拿到它的，改成绝对路径后这个便宜就没了，得自己指明。
+$SofficeCom = Join-Path (Split-Path -Parent $SofficeExe) 'soffice.com'
+if (-not (Test-Path -LiteralPath $SofficeCom)) { Fail "soffice.exe 旁边没有 soffice.com: $SofficeExe" }
 Report 'native'
 
 # 4. CJK 字体 ——————————————————————————————————————————————
-# 打包的 LibreOffice 自带一百多个字体但一个 CJK 都没有，而且构建成看不见系统字体。
-# 不补这一步，中文文档会整片渲染成空白 —— 比不渲染更糟，因为模型看到空白会以为
-# 是自己排版写错了，然后开始瞎改。
+# LibreOffice 自带一百多个字体，一个 CJK 都没有。它在 Windows 上确实看得见系统字体，
+# 但英文版 Windows 未必装了中文字体，赌不起：缺字的下场是中文整片渲染成空白 ——
+# 比不渲染更糟，因为模型看到空白会以为是自己排版写错了，然后开始瞎改。自带一份，
+# 渲染结果就跟机器无关了。
 Step 'CJK 字体'
 $zip = Join-Path $Cache 'NotoSansCJKsc.zip'
 if (-not (Test-Path -LiteralPath $zip) -or (Get-Item -LiteralPath $zip).Length -lt 1MB) {
@@ -209,13 +303,16 @@ $notoDir = Join-Path $Cache 'noto'
 if (Test-Path -LiteralPath $notoDir) { Remove-Item -LiteralPath $notoDir -Recurse -Force }
 Expand-Archive -LiteralPath $zip -DestinationPath $notoDir -Force
 
-# 字体目录在不同打包版本里位置不一样，与其猜路径，不如找它自带的字体在哪 ——
-# 那个目录一定是它会扫的。
-$anyFont = Get-ChildItem -LiteralPath $LibreRoot -Include '*.ttf', '*.otf', '*.ttc' -Recurse -File -ErrorAction SilentlyContinue |
-  Select-Object -First 1
-if (-not $anyFont) { Fail "在 $LibreRoot 下找不到任何字体文件，无法确定字体目录。" }
-$fontDir = $anyFont.Directory.FullName
-Log "  字体目录: $fontDir"
+# 字体目录在不同打包版本里位置不一样，与其猜路径，不如找它自带的字体扎堆在哪 ——
+# 那个目录一定是它会扫的。取数量最多的那个，别被散落在别处的个别字体带偏。
+# （注意别用 -Include：它和 -LiteralPath 搭配时不生效，会把整棵树的文件都放过来，
+# 于是"第一个文件"落在根目录，字体就装到了一个 LibreOffice 根本不扫的地方。）
+$fontGroup = Get-ChildItem -LiteralPath $LibreRoot -Recurse -File -ErrorAction SilentlyContinue |
+  Where-Object { @('.ttf', '.otf', '.ttc') -contains $_.Extension.ToLowerInvariant() } |
+  Group-Object -Property DirectoryName | Sort-Object Count -Descending | Select-Object -First 1
+if (-not $fontGroup) { Fail "在 $LibreRoot 下找不到任何字体文件，无法确定字体目录。" }
+$fontDir = $fontGroup.Name
+Log "  字体目录: $fontDir（自带 $($fontGroup.Count) 个）"
 foreach ($want in @('NotoSansCJKsc-Regular.otf', 'NotoSansCJKsc-Bold.otf')) {
   $f = Get-ChildItem -LiteralPath $notoDir -Filter $want -Recurse -File | Select-Object -First 1
   if (-not $f) { Fail "字体包里没找到 $want" }
@@ -255,19 +352,26 @@ exec "`${DIR}/$rel" "`$@"
   [IO.File]::WriteAllText((Join-Path $dir $name), ($body -replace "`r`n", "`n"), (New-Object Text.UTF8Encoding $false))
 }
 
-$shims = [ordered]@{
-  soffice    = $SofficeExe
-  pdftoppm   = Join-Path $PopplerBin 'pdftoppm.exe'
-  pdfinfo    = Join-Path $PopplerBin 'pdfinfo.exe'
-  pdftocairo = Join-Path $PopplerBin 'pdftocairo.exe'
-  pdfimages  = Join-Path $PopplerBin 'pdfimages.exe'
-  python3    = $PythonExe
-  python     = $PythonExe
-  node       = $NodeExe
+$shims = [ordered]@{ soffice = $SofficeCom }
+# Codex 的 Windows poppler 只装了 pdftoppm 和 pdfinfo，它自己的 native-executables.json
+# 也只列这两个。pdftocairo / pdfimages 没有任何 skill 引用，所以有就带上、没有就算了，
+# 而不是写死一张名单然后在这儿翻车。
+foreach ($tool in @('pdftoppm', 'pdfinfo', 'pdftocairo', 'pdfimages')) {
+  $exe = Join-Path $PopplerBin "$tool.exe"
+  if (Test-Path -LiteralPath $exe) { $shims[$tool] = $exe }
 }
+# 这两个不一样：pdf skill 的正文里直接写着 `pdftoppm -png`、`pdfinfo`，缺了就是坏的。
+foreach ($required in @('pdftoppm', 'pdfinfo')) {
+  if (-not $shims.Contains($required)) { Fail "poppler 里没有 $required.exe: $PopplerBin" }
+}
+$shims['python3'] = $PythonExe
+$shims['python'] = $PythonExe
+$shims['node'] = $NodeExe
+
 # 别处不提供、放进 PATH 不会遮住用户任何东西的那些。python3 和 node 不进：
 # 用户给会话配了 venv 时，一句 `python manage.py` 不该拿到包里这份。
-$onPath = @('soffice', 'pdftoppm', 'pdfinfo', 'pdftocairo', 'pdfimages')
+$onPath = @('soffice', 'pdftoppm', 'pdfinfo', 'pdftocairo', 'pdfimages') |
+  Where-Object { $shims.Contains($_) }
 
 foreach ($name in $shims.Keys) {
   $target = $shims[$name]
@@ -278,9 +382,12 @@ foreach ($name in $shims.Keys) {
 
 # Python 侧的名字→真实 exe 映射。runtime_helpers.py 要求解析结果落在
 # <pack>\native 之内且以 .exe 结尾，所以这里只放原生二进制，不放解释器。
+# soffice 也因此只能写 .exe：那条后缀断言是无条件的，眼下 presentations 只拿
+# poppler 那几个，但没必要留个将来会炸的坑。真正执行时由 render_docx.py 提升到
+# 同目录的 .com（见 adapt-skills.mjs），所以这里指 .exe 不影响转换。
 $manifest = [ordered]@{}
-foreach ($name in @('soffice', 'pdftoppm', 'pdfinfo', 'pdftocairo', 'pdfimages')) {
-  $manifest[$name] = Rel $binDir $shims[$name]
+foreach ($name in $onPath) {
+  $manifest[$name] = Rel $binDir $(if ($name -eq 'soffice') { $SofficeExe } else { $shims[$name] })
 }
 [IO.File]::WriteAllText((Join-Path $binDir 'native-executables.json'),
   (($manifest | ConvertTo-Json -Depth 3) + "`n"), (New-Object Text.UTF8Encoding $false))
@@ -329,7 +436,8 @@ $packJson = [ordered]@{
   selfCheck     = @(
     [ordered]@{ command = (RelToStage $PythonExe); args = @('-c', 'import docx, pptx, openpyxl, pdfplumber, reportlab') },
     [ordered]@{ command = (RelToStage $NodeExe); args = @('-v') },
-    [ordered]@{ command = (RelToStage $SofficeExe); args = @('--version') },
+    # 走 .com：soffice.exe 是 GUI 子系统，--version 不会往父控制台写东西。
+    [ordered]@{ command = (RelToStage $SofficeCom); args = @('--version') },
     [ordered]@{ command = (RelToStage (Join-Path $PopplerBin 'pdftoppm.exe')); args = @('-v') }
   )
   mcpServers    = @(
