@@ -463,16 +463,17 @@ mod tests {
             .iter()
             .find(|s| s.id == "doc-artifact-tool")
             .expect("要注册上");
+        // 按 Path 比而不是按字符串比。manifest 里的相对路径用的是 `/`，而
+        // `resolve` 只是 join 一次，Windows 上拼出来是 `…\doc-runtime\bin/node`
+        // 这种混合分隔符 —— 作为路径完全有效，两个平台的 spawn 都认。
         assert_eq!(
-            s.command,
-            t.path().join("doc-runtime/bin/node").display().to_string()
+            std::path::Path::new(&s.command),
+            t.path().join("doc-runtime/bin/node")
         );
         assert_eq!(
-            s.args[0],
+            std::path::Path::new(&s.args[0]),
             t.path()
-                .join("doc-runtime/node/node_modules/@oai/artifact-tool/dist/server.mjs")
-                .display()
-                .to_string(),
+                .join("doc-runtime/node/node_modules/@oai/artifact-tool/dist/server.mjs"),
             "相对路径要展开"
         );
         assert_eq!(s.args[1], "--stdio", "非路径参数要原样保留");
