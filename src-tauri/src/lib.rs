@@ -25,6 +25,7 @@ pub use gui_env::print_process_env;
 pub mod env_probe;
 pub mod kernel;
 pub mod packs;
+pub mod pasteboard;
 pub mod persist;
 pub mod state;
 pub mod term;
@@ -32,6 +33,9 @@ pub mod term_access;
 
 use tauri::Manager;
 use tauri::ipc::Channel;
+
+// 命令清单里要写光名字（ACL 测试按名字比对三份清单），所以这里 use 进来。
+use pasteboard::clipboard_paths;
 
 use riot_protocol::event::AgentEvent;
 use state::AppState;
@@ -934,6 +938,7 @@ pub fn run() {
             term_share,
             term_busy,
             read_image,
+            clipboard_paths,
             get_config,
             set_config,
             set_api_key,

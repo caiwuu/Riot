@@ -53,6 +53,12 @@ export function BrowserPanel({
   const [caret, setCaret] = useState({ x: 0, y: 0 });
   const addressRef = useRef<HTMLInputElement>(null);
   /**
+   * 地址栏 IME：确认候选/上屏英文时，keydown(Enter) 常在 compositionend
+   * 之后到达，此时 isComposing 已是 false，会被误当成导航。用 ref 盖住
+   * 这一拍 —— 和对话输入同一套坑。
+   */
+  const addressIme = useRef(false);
+  /**
    * 视口模式。自适应＝页面按面板的实际尺寸渲染（所见即面板）；Web＝按
    * 桌面宽度渲染，再整体缩小塞进面板。
    *
@@ -398,16 +404,31 @@ export function BrowserPanel({
             value={address}
             onChange={(e) => setAddress(e.target.value)}
             onFocus={(e) => e.currentTarget.select()}
+            onCompositionStart={() => {
+              addressIme.current = true;
+            }}
+            onCompositionEnd={() => {
+              // compositionend 与确认用的 Enter 可能跨到下一个宏任务，
+              // microtask 不够，用 setTimeout(0) 盖住这一拍。
+              setTimeout(() => {
+                addressIme.current = false;
+              }, 0);
+            }}
             onKeyDown={(e) => {
-              // 回车之后把焦点交出去。地址栏这才重新开始跟着页面走，而键盘
-              // 也回到页面上 —— 打完地址接着就能在页面里打字。
-              if (e.key === "Enter") {
+              // 229 = IME 处理中的占位 keyCode，部分 WebView 上比 isComposing 更准
+              const composing =
+                e.nativeEvent.isComposing || e.keyCode === 229 || addressIme.current;
+              // 组字中的回车是上屏（拼音/候选），不是导航。
+              if (e.key === "Enter" && !composing) {
+                // 回车之后把焦点交出去。地址栏这才重新开始跟着页面走，而键盘
+                // 也回到页面上 —— 打完地址接着就能在页面里打字。
                 void go();
                 e.currentTarget.blur();
               }
               // Esc 放弃这次编辑：立即把真实地址填回来（不等下一拍轮询），
               // 再失焦 —— 否则这一秒里地址栏显示的是打了一半的"假地址"。
-              if (e.key === "Escape") {
+              // 组字中的 Esc 是取消候选，别连地址一起清掉。
+              if (e.key === "Escape" && !composing) {
                 setAddress(active?.url ?? "");
                 e.currentTarget.blur();
               }

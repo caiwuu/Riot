@@ -60,6 +60,7 @@
     "allow-term-share",
     "allow-term-busy",
     "allow-read-image",
+    "allow-clipboard-paths",
     "allow-mcp-status",
     "allow-mcp-restart",
     "allow-mcp-export-json",

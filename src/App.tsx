@@ -12,6 +12,7 @@ import {
 import {
   addProject,
   browserScopeList,
+  clipboardPaths,
   type ConfigStatus,
   createSession,
   deleteSession,
@@ -38,6 +39,7 @@ import {
   type SessionInfo,
   setPermissionMode,
   setWindowTitle,
+  subscribeDragDrop,
   subscribeFullscreen,
 } from "./bridge";
 import { BrowserPanel } from "./components/BrowserPanel";
@@ -1341,45 +1343,57 @@ function Chat({
     />
   );
 
+  /**
+   * 输入框那一格。空会话和有对话时是**同一个** dock —— 位置、结构、
+   * DOM 顺序都不变，翻转的只是它上面那块（招呼语 ↔ 对话流）。
+   *
+   * `[约束]` 两个分支里 dock 的孩子必须逐位对应。React 按位置复用，
+   * 形状一样才不会在发出第一条消息时把 Composer 整个重挂载 ——
+   * 重挂载会丢掉草稿、待发的图和刚选好的权限模式。
+   */
+  const dock = (
+    <div className="composer-dock">
+      {/* 任务清单和改动条共用输入框上方这一格:跑轮时看进度,
+          其余时间看改动(Cursor 同款)。两个都常驻会叠成两层横条,
+          把输入框越垫越高。空会话时两者都渲染成空,不占位置。 */}
+      {todoActive ? (
+        <TodoPanel items={session.items} />
+      ) : (
+        <SessionChangesBar sessionId={sessionId} refreshKey={editCount} />
+      )}
+      {composer}
+    </div>
+  );
+
   return (
     <div className="chat">
       {empty ? (
         <div className="hero">
+          <span className="hero-logo">
+            <RiotMark />
+          </span>
           <h1 className="hero-title">今天做点什么？</h1>
           <p className="hero-ws" title={workspace}>
             <FolderIcon /> <span className="hero-ws-path">{workspace}</span>
           </p>
-          {composer}
         </div>
       ) : (
-        <>
-          <Transcript
-            items={session.items}
-            streaming={session.streaming}
-            thinking={session.thinking}
-            streamingPlan={session.streamingPlan}
-            busy={session.busy}
-            compacting={session.compacting}
-            waitSince={waitStartedAt(sessionId)}
-            onRegenerate={session.regenerate}
-            {...(planAsk ? { planAsk } : {})}
-            {...(choiceAsk ? { choiceAsk } : {})}
-            onAnswerPlan={(r) => planAsk && void session.answer(r, planAsk.requestId)}
-            onAnswerChoice={(r) => choiceAsk && void session.answer(r, choiceAsk.requestId)}
-          />
-          <div className="composer-dock">
-            {/* 任务清单和改动条共用输入框上方这一格:跑轮时看进度,
-                其余时间看改动(Cursor 同款)。两个都常驻会叠成两层横条,
-                把输入框越垫越高。 */}
-            {todoActive ? (
-              <TodoPanel items={session.items} />
-            ) : (
-              <SessionChangesBar sessionId={sessionId} refreshKey={editCount} />
-            )}
-            {composer}
-          </div>
-        </>
+        <Transcript
+          items={session.items}
+          streaming={session.streaming}
+          thinking={session.thinking}
+          streamingPlan={session.streamingPlan}
+          busy={session.busy}
+          compacting={session.compacting}
+          waitSince={waitStartedAt(sessionId)}
+          onRegenerate={session.regenerate}
+          {...(planAsk ? { planAsk } : {})}
+          {...(choiceAsk ? { choiceAsk } : {})}
+          onAnswerPlan={(r) => planAsk && void session.answer(r, planAsk.requestId)}
+          onAnswerChoice={(r) => choiceAsk && void session.answer(r, choiceAsk.requestId)}
+        />
       )}
+      {dock}
 
       {modalAsk ? (
         // key 让每个请求拿到全新的弹窗实例：并发的两个请求先后弹出时，
@@ -2380,10 +2394,9 @@ function dropQueryAtCaret() {
 /**
  * 权限模式的 UI 缓存，理由同上，但它错了会出安全问题而不只是显示问题。
  *
- * Composer 在同一个会话里就会重挂载一次：发出第一条消息后 `empty` 翻转，
- * 它从 hero 区挪到 composer-dock，React 视作两个不同位置的组件，本地
- * state 全部丢弃。少了这层缓存，模式就退回全局默认值显示，而宿主那边
- * 还是用户选的那个 —— 屏幕上写着「每次询问」，实际每一步都在静默放行。
+ * Chat 按会话 id 重挂载，Composer 的本地 state 跟着一起丢。少了这层
+ * 缓存，模式就退回全局默认值显示，而宿主那边还是用户选的那个 ——
+ * 屏幕上写着「每次询问」，实际每一步都在静默放行。
  */
 const modeCache = new Map<string, PermissionMode>();
 
@@ -2421,6 +2434,42 @@ const MAX_EDGE = 1568;
 
 /** 认得出是图片的扩展名。拖进来的路径靠它分流。 */
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i;
+
+/** 粘贴快捷键在界面上怎么写。 */
+const PASTE_KEY = navigator.userAgent.includes("Mac") ? "⌘V" : "Ctrl+V";
+
+/** 看着像一条绝对路径吗。三种写法:`/a/b`、`file://…`、`C:\a\b` 或 UNC。 */
+function looksAbsolute(line: string): boolean {
+  return (
+    line.startsWith("/") ||
+    line.startsWith("file://") ||
+    line.startsWith("\\\\") ||
+    /^[A-Za-z]:[\\/]/.test(line)
+  );
+}
+
+/**
+ * 这次粘贴带的是附件吗（图、或在文件管理器里复制的文件）。
+ *
+ * 三条判据满足一条就算:
+ * - `files` 有东西 —— 截图这种剪贴板里躺着像素的；
+ * - types 里有 `Files` —— webview 认出了文件；
+ * - 文字整段都是绝对路径 —— 在访达里 ⌘C 一个文件，WebKit 只把**路径当
+ *   文字**递过来，前两条都是空的。真正的路径要再问一次系统粘贴板
+ *   （见 `clipboardPaths`），这里只负责决定"值不值得问"。
+ *
+ * 宁可问多了:一行以 `/` 开头的普通文字（shell 命令、注释）会白问一次
+ * IPC，然后按文本粘贴，用户看不出区别。
+ */
+function hasAttachment(dt: DataTransfer | null): boolean {
+  if (!dt) return false;
+  if (dt.files.length > 0 || dt.types.includes("Files")) return true;
+  const lines = dt
+    .getData("text/plain")
+    .split("\n")
+    .filter((l) => l.trim());
+  return lines.length > 0 && lines.every(looksAbsolute);
+}
 
 /** 把 webview 的 `File` 读成待发的图。 */
 async function toShot(file: File): Promise<Shot> {
@@ -3242,7 +3291,7 @@ function Composer({
     });
   };
 
-  /** 拖进来或粘贴进来的 `File`:图片收下，其它的说清为什么不收。 */
+  /** webview 给的 `File`（剪贴板里只有像素的那种）:图片收下，其它的说清为什么不收。 */
   const takeFiles = async (files: File[]) => {
     const images = files.filter((f) => f.type.startsWith("image/"));
     const rest = files.filter((f) => !f.type.startsWith("image/"));
@@ -3252,11 +3301,11 @@ function Composer({
       await addShots(read);
     }
     if (rest.length) {
-      // webview 拿到的 `File` 没有磁盘路径（拖放数据里就没有），所以这条路
-      // 只能收图片。非图片文件请走「+」按钮 —— 那条走系统对话框，回的是路径。
+      // 走到这里说明系统没给出路径（`File` 对象自己是没有的）。非图片文件
+      // 只能靠路径进对话 —— 引用块认的就是路径。
       setDropError(
-        `${rest[0]?.name ?? "这个文件"} 不是图片。非图片文件请用左下角的「+」选择，` +
-          `或者在输入框里打 @ 找它 —— 那两条能拿到路径。`,
+        `${rest[0]?.name ?? "这个文件"} 不是图片，而系统没给出它的路径。` +
+          `请用左下角的「+」选择，或者在输入框里打 @ 找它。`,
       );
     }
   };
@@ -3285,13 +3334,93 @@ function Composer({
       const el = ref.current;
       if (el) {
         el.focus();
+        // 光标未必在输入框里 —— 拖放和粘贴发生时焦点常在别处，甚至正
+        // 选着对话流里的一段文字。不校正的话块会插到那段选区上去。
+        const sel = window.getSelection();
+        const inside =
+          sel && sel.rangeCount > 0 && el.contains(sel.getRangeAt(0).startContainer);
+        if (!inside) caretToEnd(el);
         for (const p of files) {
-          insertChipAtCaret(el, p.startsWith(`${workspace}/`) ? p.slice(workspace.length + 1) : p);
+          // 两种分隔符都认:Windows 上拖进来的是 `C:\proj\a.md`。
+          const inWs = p.startsWith(`${workspace}/`) || p.startsWith(`${workspace}\\`);
+          insertChipAtCaret(el, inWs ? p.slice(workspace.length + 1) : p);
         }
         sync();
       }
     }
   };
+
+  /**
+   * 收下剪贴板里的附件。返回是否真的收下了。
+   *
+   * 先问宿主要磁盘路径:拿得到就和拖放走同一条路，非图片文件也能变成
+   * 引用块。拿不到（剪贴板里只有像素的截图、或非 macOS）再退回 webview
+   * 给的 `File`。两样都没有就还给调用方按文字处理。
+   */
+  const pasteFiles = async (files: File[]): Promise<boolean> => {
+    const paths = await clipboardPaths().catch(() => []);
+    if (paths.length) {
+      await takePaths(paths);
+      return true;
+    }
+    if (files.length) {
+      await takeFiles(files);
+      return true;
+    }
+    return false;
+  };
+
+  // 拖到窗口任何地方都算数。只认输入框那一小条的话用户得先瞄准，而窗口
+  // 大半面积是对话流 —— 拖偏了什么都不会发生，还以为这个功能没做。
+  //
+  // 处理函数放 ref 里:订阅只在挂载时建一次，而 takePaths 每次渲染都是
+  // 新的闭包，直接进依赖数组会让拖放订阅跟着输入框的每一次输入重建。
+  const dropRef = useRef(takePaths);
+  dropRef.current = takePaths;
+  useEffect(
+    () =>
+      subscribeDragDrop((e) => {
+        if (e.kind === "leave") {
+          setDragging(false);
+          return;
+        }
+        if (e.kind === "enter") {
+          // 没有路径的拖拽（拖一段文字、拖网页里的图）不亮落点提示 ——
+          // 亮了却接不住是更糟的反馈。
+          setDragging(e.paths.length > 0);
+          return;
+        }
+        if (e.kind !== "drop") return;
+        setDragging(false);
+        if (e.paths.length) {
+          void dropRef.current(e.paths);
+        } else {
+          setDropError(
+            "拖进来的东西在磁盘上没有对应文件（多半是从网页里直接拖的图）。" +
+              `复制它，再回到这里 ${PASTE_KEY}。`,
+          );
+        }
+      }),
+    [],
+  );
+
+  // 焦点不在输入框时 ⌘V 也算数 —— 在 Finder 里复制完文件回到窗口，第一
+  // 反应是直接粘，不会先去点一下输入框。
+  //
+  // 别处的可编辑元素（终端、设置里的输入框）不抢:那是人家的内容。
+  const pasteRef = useRef(pasteFiles);
+  pasteRef.current = pasteFiles;
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const t = e.target;
+      if (t instanceof Element && t.closest("input, textarea, [contenteditable='true']")) return;
+      if (!hasAttachment(e.clipboardData)) return;
+      e.preventDefault();
+      void pasteRef.current(Array.from(e.clipboardData?.files ?? []));
+    };
+    document.addEventListener("paste", onPaste);
+    return () => document.removeEventListener("paste", onPaste);
+  }, []);
 
   const applyMode = (m: PermissionMode) => {
     const prev = mode;
@@ -3321,6 +3450,14 @@ function Composer({
 
   return (
     <div className="composer-wrap">
+      {/* 落点提示铺满整个窗口 —— 因为落点确实是整个窗口，提示只圈住输入框
+          会让人以为必须拖到那一条上。 */}
+      {dragging ? (
+        <div className="drop-veil" aria-hidden>
+          <div className="drop-veil-card">松手，加进输入框</div>
+        </div>
+      ) : null}
+
       {/* 三种"还不能发消息"要分开说。都写成"还没有 API key"的话，
           一个服务方都没有的新用户会去找那个根本不存在的 key 输入框。 */}
       {cfg.providers.length === 0 ? (
@@ -3406,19 +3543,6 @@ function Composer({
           e.preventDefault();
           submit();
         }}
-        // 拖拽在 Tauri 里有两条路:窗口级的原生事件（给得到真实路径）和
-        // webview 的 HTML5 事件。这里接后者，因为它能拿到从浏览器里直接拖
-        // 过来的图片数据 —— 那种图在磁盘上没有路径。
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragging(true);
-        }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={(e) => {
-          e.preventDefault();
-          setDragging(false);
-          void takeFiles(Array.from(e.dataTransfer.files));
-        }}
       >
         {shots.length ? (
           <div className="attachments">
@@ -3455,20 +3579,28 @@ function Composer({
           onKeyUp={sync}
           onMouseUp={sync}
           onBlur={sync}
-          // 粘贴板里的图直接收下。这是"看这个截图"最常用的发法 ——
-          // 截完图 ⌘V 就完事，不用先存盘再选文件。
+          // 粘贴板里的图和文件直接收下。这是"看这个截图"最常用的发法 ——
+          // 截完图 ⌘V 就完事，不用先存盘再选文件；在 Finder 里复制的文件
+          // 同理，粘进来就是一个引用块。
           onPaste={(e) => {
             const files = Array.from(e.clipboardData.files);
-            if (files.some((f) => f.type.startsWith("image/"))) {
-              // 只有真拿到图才拦默认行为，否则会把普通的文本粘贴也吃掉。
-              e.preventDefault();
-              void takeFiles(files);
-              return;
-            }
-            // 富文本粘贴要降级成纯文本：contenteditable 默认会把网页的
+            const text = e.clipboardData.getData("text/plain");
+            // 富文本粘贴一律降级成纯文本：contenteditable 默认会把网页的
             // 样式、图片、甚至整个表格结构原样塞进来。
             e.preventDefault();
-            const text = e.clipboardData.getData("text/plain");
+            if (hasAttachment(e.clipboardData)) {
+              // 问宿主要路径是一次 IPC，所以只在"看着像附件"时才走这条 ——
+              // 每敲一次 ⌘V 都异步一下，粘长文本时会看见一帧空白。
+              void pasteFiles(files).then((took) => {
+                // 只是一段以 / 开头的普通文字（比如一行 shell 命令），
+                // 按纯文本粘贴，别把它吃掉。
+                if (took) return;
+                ref.current?.focus();
+                document.execCommand("insertText", false, text);
+                sync();
+              });
+              return;
+            }
             document.execCommand("insertText", false, text);
             sync();
           }}
@@ -3912,6 +4044,28 @@ function PlusIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
       <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/**
+ * 空会话上方的品牌标记：应用图标里那个 R，只留线条。
+ *
+ * 用的不是 icons/ 里那张位图 —— 那是给 Dock 和安装包用的立体图标，
+ * 摆进这块纯色界面里像贴了一张贴纸。这里跟界面其余图标同一套语言：
+ * 描边、圆角端点、颜色跟着 currentColor 走。
+ *
+ * 三笔各自成类，是为了让它动起来：这个 R 拆开看就是个小人 —— 上面
+ * 的半圆是头、竖笔是身子、右下那折是腿，腿要能自己甩（见 .riot-mark）。
+ */
+function RiotMark() {
+  return (
+    <svg className="riot-mark" width="42" height="42" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <g stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+        <path className="riot-mark-body" d="M7.4 4.2v15.6" />
+        <path className="riot-mark-head" d="M7.4 4.2h5A4.2 4.2 0 0 1 12.4 12.6H7.4" />
+        <path className="riot-mark-leg" d="M11.6 12.6l5 4.9-2.7 2.3" />
+      </g>
     </svg>
   );
 }

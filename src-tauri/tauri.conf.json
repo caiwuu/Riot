@@ -25,7 +25,7 @@
         "minHeight": 600,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "dragDropEnabled": false,
+        "dragDropEnabled": true,
         "transparent": true,
         "windowEffects": {
           "effects": ["sidebar"],

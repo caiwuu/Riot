@@ -98,6 +98,7 @@
   --z-modal: 100; /* 弹窗 */
   --z-ctx: 110; /* 右键菜单 */
   --z-viewer: 120; /* 全屏图片查看器 */
+  --z-drop: 130; /* 拖放落点提示：盖住一切，它是瞬时的、且不吃鼠标 */
 
   /* 自带字体在前；Menlo 排在 ui-monospace 前面 —— 后者在打包的
      WKWebView 里会错误解析成非等宽（见文件顶部 @font-face 的注释）。 */
@@ -1457,12 +1458,91 @@ pre {
   flex-direction: column;
 }
 
+/* 空会话的招呼语。只占输入框上面那块空地并在其中居中 —— 输入框自己
+   留在底部的老位置（Codex 同款）。整块跟着输入框一起上移的话，打出
+   第一句话时输入框会从屏幕中间"掉"到底部，是这一步唯一的动静。 */
 .hero {
-  margin: auto;
+  flex: 1;
+  min-height: 0;
+  margin: 0 auto;
   width: min(720px, calc(100% - 48px));
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  justify-content: center;
+  align-items: center;
+  gap: 14px;
+  padding: 24px;
+}
+
+/* 品牌标记。比标题淡一档 —— 它是招呼语的陪衬，不是这一屏的主角。 */
+.hero-logo {
+  display: flex;
+  color: var(--text-faint);
+}
+
+/*
+ * 会踢腿的 R。
+ *
+ * 空会话是全应用最静的一屏 —— 一张不动的图和一块占位符没区别。这个
+ * 标记拆开正好是个小人（头/身子/腿），让它每隔几秒踢一下，静止的开场
+ * 就有了呼吸。
+ *
+ * `[约束]` 幅度和频率都得压住。它就压在标题正上方，一直晃会勾着眼睛 ——
+ * 用户是来打字的，不是来看它的：身子只浮 1.5px，腿六秒才甩一次，其余
+ * 时间完全静止。鼠标扫过来才提速，想逗它的人自己找得到。
+ */
+.riot-mark {
+  animation: mark-bob 3.4s ease-in-out infinite;
+}
+
+/* 绕胯转，不是绕图标中心 —— 后者会把整条腿甩到身子外面去。
+   transform-origin 这两个数是 viewBox 里的坐标，得先把尺子换成 view-box。 */
+.riot-mark-leg {
+  transform-box: view-box;
+  transform-origin: 11.6px 12.6px;
+  animation: mark-kick 6s ease-in-out infinite;
+}
+
+.hero-logo:hover .riot-mark-leg {
+  animation-duration: 1.4s;
+}
+
+@keyframes mark-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-1.5px);
+  }
+}
+
+/* 前四分之三站着不动，最后一小段里连甩两下再收回来。 */
+@keyframes mark-kick {
+  0%,
+  74%,
+  100% {
+    rotate: 0deg;
+  }
+  79% {
+    rotate: -22deg;
+  }
+  84% {
+    rotate: 9deg;
+  }
+  89% {
+    rotate: -13deg;
+  }
+  94% {
+    rotate: 3deg;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .riot-mark,
+  .riot-mark-leg {
+    animation: none;
+  }
 }
 
 .hero-title {
@@ -1482,6 +1562,7 @@ pre {
   font-size: 12px;
   margin: -8px 0 0;
   min-width: 0;
+  max-width: 100%;
 }
 
 /* ellipsis 写在 flex 容器上不生效（截断只对块内文本盒起作用），
@@ -2242,11 +2323,37 @@ pre {
   min-width: 0;
 }
 
-/* 拖着文件悬在上面。给一个明确的落点提示 —— 没有反馈的话用户不知道
-   该松手还是该往别处放。 */
+/* 拖着文件悬在窗口上。输入框自己也亮一下 —— 遮罩说"能接住"，这一下
+   说的是"接住之后东西落在哪"。 */
 .composer.dragging {
   border-color: var(--accent);
   background: var(--bg-active);
+}
+
+/* 整窗的落点提示。落点确实是整个窗口，所以提示也铺满整个窗口。
+   `pointer-events: none` 是必须的：它盖在所有东西上面，吃了鼠标就等于
+   把界面冻住半秒。 */
+.drop-veil {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-drop);
+  pointer-events: none;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.32);
+  border: 2px dashed var(--accent);
+  border-radius: 12px;
+}
+
+.drop-veil-card {
+  padding: 10px 18px;
+  border-radius: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--accent);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  font-size: 13px;
+  color: var(--text);
 }
 
 /* 待发的附件条。缩略图排在输入框上方。 */

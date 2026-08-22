@@ -53,6 +53,7 @@ const COMMANDS: &[&str] = &[
     "term_share",
     "term_busy",
     "read_image",
+    "clipboard_paths",
     "mcp_status",
     "mcp_restart",
     "mcp_export_json",

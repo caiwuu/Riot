@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
 制作 Riot 文档能力包（Windows x64）。
 

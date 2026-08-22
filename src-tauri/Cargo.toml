@@ -64,7 +64,19 @@ similar = { version = "3.1.2", default-features = false, features = ["text", "in
 tauri-plugin-notification = "2.3.3"
 
 [target.'cfg(windows)'.dependencies]
-windows = { workspace = true }
+# DataExchange/Ole/Shell 三个是读剪贴板里的 CF_HDROP 用的（见 src/pasteboard.rs）。
+windows = { workspace = true, features = [
+  "Win32_System_DataExchange",
+  "Win32_System_Ole",
+  "Win32_UI_Shell",
+] }
+
+# 读系统粘贴板里的文件路径（见 src/pasteboard.rs）。版本跟着 wry 走，
+# 免得同一套 objc2 在依赖树里出现两份。
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSPasteboard"] }
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSString", "NSURL"] }
 
 [dev-dependencies]
 pretty_assertions.workspace = true

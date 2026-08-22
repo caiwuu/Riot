@@ -979,6 +979,53 @@ export function testSearchBackend(baseUrl: string): Promise<string> {
   return invoke<string>("test_search_backend", { baseUrl });
 }
 
+/**
+ * 剪贴板上的文件（绝对路径）。没有文件、或不是 macOS 时是空数组。
+ *
+ * 为什么不用 `ClipboardEvent.clipboardData`:那里的 `File` 对象没有磁盘
+ * 路径，webview 出于沙箱安全从不给。而非图片文件要变成 `@引用`,引用认
+ * 的就是路径。
+ */
+export function clipboardPaths(): Promise<string[]> {
+  return invoke<string[]>("clipboard_paths");
+}
+
+/** 拖到窗口上的那一批文件。`paths` 空 = 拖来的东西在磁盘上没有文件。 */
+export interface DragDrop {
+  kind: "enter" | "over" | "leave" | "drop";
+  paths: string[];
+}
+
+/**
+ * 窗口级的文件拖放（整个窗口都是落点，不只是输入框那一条）。
+ *
+ * 走 Tauri 的原生拖放事件而不是 HTML5 的 `ondrop`:后者给的 `File` 没有
+ * 磁盘路径，非图片文件就没法变成引用。代价是 webview 里的 HTML5 拖放事件
+ * 全被原生层吃掉 —— 从浏览器直接拖一张图（磁盘上没有那个文件）这条路
+ * 断了，那种图改用复制粘贴，见 `clipboardPaths`。
+ */
+export function subscribeDragDrop(cb: (e: DragDrop) => void): () => void {
+  let stopped = false;
+  let unlisten: (() => void) | undefined;
+  void (async () => {
+    try {
+      const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+      unlisten = await getCurrentWebview().onDragDropEvent((e) => {
+        if (stopped) return;
+        const p = e.payload;
+        cb({ kind: p.type, paths: p.type === "enter" || p.type === "drop" ? p.paths : [] });
+      });
+      if (stopped) unlisten();
+    } catch {
+      // 不在 Tauri 里（纯浏览器、组件测试）就没有拖放。
+    }
+  })();
+  return () => {
+    stopped = true;
+    unlisten?.();
+  };
+}
+
 /** 窗口标题跟随当前项目 —— 多开窗口时用户靠标题分辨哪个是哪个。 */
 export async function setWindowTitle(title: string): Promise<void> {
   const { getCurrentWindow } = await import("@tauri-apps/api/window");

@@ -64,6 +64,7 @@ pnpm dev
 - Skills 是渐进披露：清单进上下文，正文用到才读。
 - 斜杠命令是提示词模板。输入框敲 `/`。`$ARGUMENTS` 是整段参数，`$1`–`$9` 是第 N 个（引号内算一个）。子目录是命名空间：`commands/git/pr.md` → `/git:pr`。内置 `/compact` 手动压缩历史。
 - 输入框敲 `@` 引用文件，发送时带上内容。单个文件 24 KB、一条消息合计 64 KB，超出截断并告诉模型自己读。
+- 附文件还有两条更顺手的路：拖到窗口**任何位置**松手，或在访达 / 资源管理器里复制文件再粘贴。图片进附件条，其它文件收成 `@` 引用块。从网页里直接拖的图在磁盘上没有文件，改用复制粘贴。
 - MCP 走 stdio，工具和内置工具同一套权限管线。
 
 Hooks 对齐 Claude Code 的四个检查点：`PreToolUse`、`PostToolUse`、`Stop`、`UserPromptSubmit`。脚本从 stdin 收一行事件 JSON。**exit 2 = 拦下**，stderr 是给模型的理由；exit 0 的 stdout 可作为补充上下文。别的退出码只记日志。hook 的 `allow` 压不过安全检查和你自己写的 ask 规则。
