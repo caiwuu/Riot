@@ -2275,8 +2275,7 @@ impl riot_protocol::tool::ProcessRunner for VenvRunner {
     ) -> std::io::Result<riot_protocol::tool::ProcessOutput> {
         // 工具自己显式设的同名变量优先。
         if !spec.env.iter().any(|(k, _)| k == "VIRTUAL_ENV") {
-            spec.env
-                .push(("VIRTUAL_ENV".to_owned(), self.venv.clone()));
+            spec.env.push(("VIRTUAL_ENV".to_owned(), self.venv.clone()));
         }
         prepend_path(&mut spec, std::slice::from_ref(&self.bin));
         self.inner.run(spec, cancel).await

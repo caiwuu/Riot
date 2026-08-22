@@ -394,12 +394,16 @@ mod tests {
             !staging.join("pack/bin/._soffice").exists(),
             "AppleDouble 不能落地"
         );
-        use std::os::unix::fs::PermissionsExt as _;
-        let mode = std::fs::metadata(staging.join("pack/bin/soffice"))
-            .expect("读元信息")
-            .permissions()
-            .mode();
-        assert!(mode & 0o111 != 0, "逐条解压不能丢可执行位，mode={mode:o}");
+        // 可执行位只在 unix 上有意义，Windows 的 Permissions 没有 mode。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(staging.join("pack/bin/soffice"))
+                .expect("读元信息")
+                .permissions()
+                .mode();
+            assert!(mode & 0o111 != 0, "逐条解压不能丢可执行位，mode={mode:o}");
+        }
     }
 
     /// macOS 的 tar 会在顶层多写一个 `._` 开头的 AppleDouble 条目，而它自己

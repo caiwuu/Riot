@@ -1608,7 +1608,7 @@ pre {
 }
 
 .msg-stopped::before {
-  content: "";
+  content: '';
   display: inline-block;
   width: 7px;
   height: 7px;
@@ -2258,7 +2258,9 @@ pre {
 .composer-input {
   position: relative;
   width: 100%;
-  min-height: 22px;
+  /* 两行（14px × 1.6 × 2）。空框只留一行时，随便打一句话就抖一下高度，
+     整条工具栏跟着往下掉；先占住两行，常见的短句都不再触发跳动。 */
+  min-height: 54px;
   max-height: 40vh;
   overflow-y: auto;
   border: none;

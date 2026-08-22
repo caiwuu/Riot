@@ -978,10 +978,7 @@ pub fn profiles_dir(config_path: &Path) -> PathBuf {
 ///
 /// 参数化 `config_path` 的理由同 [`profiles_dir`]。
 pub fn packs_dir(config_path: &Path) -> PathBuf {
-    config_path
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join("packs")
+    config_path.parent().unwrap_or(Path::new(".")).join("packs")
 }
 
 /// 密钥文件。和 `config.json` 同目录但分开存 —— 分享配置时不至于连密钥一起分享。
