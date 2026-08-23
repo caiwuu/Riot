@@ -8,12 +8,12 @@
  */
 const DOWNLOADS = {
   mac: {
-    url: "https://github.com/caiwuu/Riot/releases/latest/download/Riot_0.1.0_aarch64.dmg",
+    url: "https://github.com/caiwuu/Riot/releases/download/Riot_0.1.0/Riot_0.1.0_aarch64.dmg",
     label: "下载 macOS 版",
     meta: ".dmg · 仅 Apple Silicon",
   },
   win: {
-    url: "https://github.com/caiwuu/Riot/releases/latest/download/Riot_0.1.0_x64-setup.exe",
+    url: "https://github.com/caiwuu/Riot/releases/download/Riot_0.1.0/Riot_0.1.0_x64-setup.exe",
     label: "下载 Windows 版",
     meta: "NSIS 安装包 · x64",
   },
