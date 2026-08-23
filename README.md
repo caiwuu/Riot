@@ -65,7 +65,11 @@ BASE_URL=https://api.moonshot.cn MODEL=kimi-k2-turbo-preview \
 打包桌面端（`.app` / `.dmg` / NSIS）：
 
 ```bash
+# mac
 ./scripts/build-browser.sh    # 内置浏览器；没有它时聊天仍可用
+# win
+powershell -ExecutionPolicy Bypass -File .\scripts\build-browser.ps1
+
 pnpm tauri build
 ```
 
