@@ -118,8 +118,15 @@ function saveCollapsedProjects(roots: Set<string>) {
 /** 同时保活的会话树上限。切走不卸 DOM，切回才不是白屏。 */
 const KEEP_CHATS = 4;
 
-/** 对话流滚到哪。切走再切回要自己还 —— 单靠 CSS 在 WebKit 上偶尔仍会丢。 */
-const transcriptScroll = new Map<string, number>();
+/**
+ * 对话流滚到哪、跟不跟随底部。
+ *
+ * 正式包 WKWebView 一给面板加 `visibility:hidden` / 改 `position`，
+ * 会把 scrollTop 清成 0 并冒一次 scroll。dev 的 WebView 常常不这么做，
+ * 所以只有打包后才表现为"切回来跳到顶"。记的必须是用户还看得见时的
+ * 位置，隐藏之后那次假滚动一律丢掉。
+ */
+const transcriptView = new Map<string, { top: number; stick: boolean }>();
 
 const SIDEBAR = { def: 280, min: 180, max: 420 };
 /** Overlay 标题栏的红绿灯只在 macOS 占左上角。Windows / Linux 的窗口
@@ -366,7 +373,7 @@ export function App() {
   const doDeleteSession = async (id: string) => {
     await deleteSession(id);
     forgetSession(id);
-    transcriptScroll.delete(id);
+    transcriptView.delete(id);
     setKept((prev) => prev.filter((x) => x !== id));
     const victim = sessions.find((s) => s.id === id);
     const next = sessions.filter((s) => s.id !== id);
@@ -400,7 +407,7 @@ export function App() {
     ]);
     for (const id of gone) {
       forgetSession(id);
-      transcriptScroll.delete(id);
+      transcriptView.delete(id);
     }
     setKept((prev) => prev.filter((id) => !gone.has(id)));
     setConfig(await getConfig());
@@ -1774,6 +1781,16 @@ function Transcript({
   const stick = useRef(true);
   /** 程序化贴底时挡住 onScroll，免得自己把 stick 打成 false。 */
   const pinning = useRef(false);
+  // 渲染期就写：正式包隐藏面板时 scroll 发生在 commit 里，
+  // effect 还没跑，闭包里的 armed 仍是 true，会把清零后的 0 记进去。
+  const armedRef = useRef(armed);
+  armedRef.current = armed;
+
+  const rememberView = (box: HTMLElement) => {
+    if (!armedRef.current) return;
+    transcriptView.set(sessionId, { top: box.scrollTop, stick: stick.current });
+  };
+
   /** 离底超过一屏时浮现「回到底部」按钮。 */
   const [awayFromBottom, setAwayFromBottom] = useState(false);
   /** ⌘F 查找条。长对话找不到历史内容是真实痛点。 */
@@ -1785,9 +1802,28 @@ function Transcript({
     pinning.current = true;
     box.scrollTop = box.scrollHeight;
     stick.current = true;
+    rememberView(box);
     // 程序化滚动被 pinning 挡掉 onScroll，这里自己收按钮 ——
     // 不收的话点了「回到底部」它还挂着。
     setAwayFromBottom(false);
+    requestAnimationFrame(() => {
+      pinning.current = false;
+    });
+  };
+
+  const restoreView = () => {
+    const box = boxRef.current;
+    const saved = transcriptView.get(sessionId);
+    if (!box || !saved) return;
+    if (saved.stick) {
+      pinBottom();
+      return;
+    }
+    stick.current = false;
+    pinning.current = true;
+    box.scrollTop = saved.top;
+    const gap = box.scrollHeight - box.scrollTop - box.clientHeight;
+    setAwayFromBottom(gap > box.clientHeight);
     requestAnimationFrame(() => {
       pinning.current = false;
     });
@@ -1825,7 +1861,9 @@ function Transcript({
       const delta = top - lastTop;
       // pinning 帧也要记位置，不然下一次用户滚动会拿到跨帧的假 delta。
       lastTop = top;
-      transcriptScroll.set(sessionId, top);
+      // 隐藏那一帧正式包会把 scrollTop 打成 0。armed 在渲染时已是
+      // false，这次滚动不是用户翻的，不能写进缓存、也不能改 stick。
+      if (!armedRef.current) return;
       if (pinning.current) return;
       const gap = box.scrollHeight - top - box.clientHeight;
       if (delta < 0 && gap > 1) {
@@ -1837,23 +1875,20 @@ function Transcript({
         // 几十像素处阅读时，跟随不该被抢回去。
         stick.current = true;
       }
+      rememberView(box);
       setAwayFromBottom(gap > box.clientHeight);
     };
     box.addEventListener("scroll", onScroll, { passive: true });
     return () => box.removeEventListener("scroll", onScroll);
   }, [sessionId]);
 
-  // 切回来：没贴底的要把滚走的位置还回去。display:none 会清掉
-  // scrollTop；即便改成 visibility 隐藏，WebKit 有时也会丢。
+  // 切回来把位置还回去。layout 一次不够：正式包揭开 visibility
+  // 之后还要再排一次，第二帧再写才能压住 WebKit 的清零。
   useLayoutEffect(() => {
     if (!armed) return;
-    const box = boxRef.current;
-    if (!box || stick.current) return;
-    const top = transcriptScroll.get(sessionId);
-    if (top == null) return;
-    box.scrollTop = top;
-    const gap = box.scrollHeight - box.scrollTop - box.clientHeight;
-    setAwayFromBottom(gap > box.clientHeight);
+    restoreView();
+    const again = requestAnimationFrame(() => restoreView());
+    return () => cancelAnimationFrame(again);
   }, [armed, sessionId]);
 
   // 正文晚一拍量完（markdown / 图片）时高度还会涨，贴着就跟上。

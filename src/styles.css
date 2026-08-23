@@ -1039,20 +1039,21 @@ pre {
   container-name: chat;
 }
 
-/* 保活的会话树。切走不能 hidden / display:none —— 浏览器会把
-   滚动容器的 scrollTop 清成 0，往上翻过的会话切回来就跳到顶。
-   看不见、不占 flex，但尺寸还在，滚动位置才能留着。 */
+/* 保活的会话树。一律绝对定位叠在 chat-col 里：切走只改可见性，
+   不在 flex ↔ absolute 之间翻转 —— 正式包 WKWebView 一改 position
+   就会把 scrollTop 清零。高度由父级 flex 撑住，不靠这份文档流。 */
 .chat-pane {
-  flex: 1;
-  min-height: 0;
+  position: absolute;
+  inset: 0;
+  z-index: 1;
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  min-height: 0;
 }
 
 .chat-pane.is-hidden {
   visibility: hidden;
-  position: absolute;
-  inset: 0;
   pointer-events: none;
   z-index: 0;
 }
