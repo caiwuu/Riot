@@ -57,17 +57,23 @@ jobs:
             exit 1
           }
 
-  # 本机是 Mac，跨平台回归全靠 Windows。macOS host 只在 nightly / 手动跑。
+  # 本机是 Mac，跨平台回归全靠 Windows。
+  # job 级 if 读不了 matrix，所以 macOS 拆成单独 job，只在 nightly / 手动跑。
   host:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    if: >
-      matrix.os == 'windows-latest' ||
-      github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/prepare-host
+      - run: cargo clippy -p riot-host --all-targets -- -D warnings
+      - run: cargo test -p riot-host
+
+  host-macos:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

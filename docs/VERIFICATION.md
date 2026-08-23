@@ -695,7 +695,7 @@ host:      Windows 上 cargo test -p riot-host                  # 先 prepare-ho
 
 # nightly / 手动
 extra:         cargo test --workspace --exclude riot-host --release
-host (macOS):  与 Windows 同一套,只在 nightly 跑
+host-macos:    与 host 同一套,只在 nightly 跑
 mutation:      scripts/mutate.py
 chaos:         cargo test -p riot-core --release chaos_soak
 chaos-host:    cargo test -p riot-host --release -- --ignored
