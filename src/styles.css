@@ -1863,6 +1863,9 @@ pre {
   .tool-icon-spin {
     animation: none;
   }
+  .fold-live-icon {
+    animation: none;
+  }
   .todo-panel .todo-item.completed .todo-mark {
     animation: none;
   }
@@ -4830,8 +4833,10 @@ pre {
   flex: none;
 }
 
-/* 直播预览：一行框，右端贴着最新的字，左端渐隐 —— 视觉上文字向左滚过。 */
-.think-peek {
+/* 直播预览：一行框，右端贴着最新的字，左端渐隐 —— 视觉上文字向左滚过。
+   fold-peek 是过程组组头的同款（见 ProcessGroup 的 live 形态）。 */
+.think-peek,
+.fold-peek {
   flex: 1;
   min-width: 0;
   display: flex;
@@ -4844,7 +4849,8 @@ pre {
   -webkit-mask-image: linear-gradient(to right, transparent, #000 56px);
 }
 
-.think-peek-text {
+.think-peek-text,
+.fold-peek-text {
   flex: none;
 }
 
@@ -4917,12 +4923,41 @@ pre {
   flex: none;
 }
 
-/* 折叠不能把"中间有一步炸了"也藏掉，失败数常驻头部。 */
+/* 直播态（组尾还在跑）：组头就是这段过程的"现在"，字色升到 dim、
+   ◐ 转圈 —— 头部恒为一行，步骤完成只换字不增删行，生成期不再弹跳。 */
+.fold-block.live .fold-head {
+  color: var(--text-dim);
+}
+
+/* 转圈节奏复用工具卡的 —— 静止的过程头和卡死没法区分。 */
+.fold-live-icon {
+  font-family: var(--mono);
+  color: var(--warn);
+  display: inline-block;
+  flex: none;
+  animation: tool-spin 1.1s linear infinite;
+}
+
+.fold-live-label {
+  flex: none;
+}
+
+/* 失败数常驻头部但弱化成和步数同级的灰字 —— 探索里的中途失败（grep
+   没命中、试错命令）大多被后续步骤自愈，红色加粗在一排淡字里喧宾
+   夺主。逐条的红色"失败"在展开层，要追查点开就能定位。 */
 .fold-fail {
   font-size: 11px;
-  color: var(--danger);
-  font-weight: 600;
+  color: var(--text-faint);
+  opacity: 0.75;
   flex: none;
+}
+
+/* 以失败收尾的组才配警示色：最后一步都炸了，多半意味着模型接下来
+   要认输，这时失败数是用户真正要看的。用 -soft 不用主 danger ——
+   11px 的小字不需要喊。 */
+.fold-fail-final {
+  color: var(--danger-soft);
+  opacity: 1;
 }
 
 /* 展开体：左侧一道竖线把这段过程括起来，和周围的正式内容分层。 */

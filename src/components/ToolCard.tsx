@@ -93,8 +93,9 @@ function icon(s: Tool["status"]): string {
   return "✕";
 }
 
-/** 一行说清这次调用在做什么。参数原样 dump 没人看得下去。 */
-function summarize(t: Tool): string {
+/** 一行说清这次调用在做什么。参数原样 dump 没人看得下去。
+ *  导出给过程组的直播头复用 —— 组头滚的就是这句。 */
+export function summarize(t: Tool): string {
   const i = t.input as Record<string, unknown>;
   const str = (k: string) => (typeof i?.[k] === "string" ? (i[k] as string) : "");
   const num = (k: string) => (typeof i?.[k] === "number" ? (i[k] as number) : 0);

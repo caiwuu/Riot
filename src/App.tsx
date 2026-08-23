@@ -1638,13 +1638,32 @@ function Transcript({
 
   // 只在用户本来就贴着底部时才自动滚。他往上翻着看历史的时候把他拽回来，
   // 是聊天界面里最招人烦的一件事。
+  //
+  // 解锁看意图，重吸看位置（非对称迟滞，同 ChatGPT / use-stick-to-bottom）：
+  // 任何向上滚动立即交出跟随。早先"离底 < 80px 仍算贴底"是位置阈值，
+  // 流式期间内容每帧都在长、pinBottom 每帧都在追，向上滚没能一口气
+  // 甩出 80px 就会在下一帧被拽回 —— 触控板小幅滚动永远赛不过生成速度，
+  // 夺回控制权要靠大力猛划。方向判断没有这场赛跑：动一下就是想走。
   useEffect(() => {
     const box = boxRef.current;
     if (!box) return;
+    let lastTop = box.scrollTop;
     const onScroll = () => {
+      const top = box.scrollTop;
+      const delta = top - lastTop;
+      // pinning 帧也要记位置，不然下一次用户滚动会拿到跨帧的假 delta。
+      lastTop = top;
       if (pinning.current) return;
-      const gap = box.scrollHeight - box.scrollTop - box.clientHeight;
-      stick.current = gap < 80;
+      const gap = box.scrollHeight - top - box.clientHeight;
+      if (delta < 0 && gap > 1) {
+        // gap > 1 挡掉底部橡皮筋回弹：过冲弹回时 scrollTop 也在变小，
+        // 但那不是"想往上翻"。
+        stick.current = false;
+      } else if (delta > 0 && gap < 24) {
+        // 只有自己滚回贴底才恢复跟随。阈值收窄到约一行 —— 停在离底
+        // 几十像素处阅读时，跟随不该被抢回去。
+        stick.current = true;
+      }
       setAwayFromBottom(gap > box.clientHeight);
     };
     box.addEventListener("scroll", onScroll, { passive: true });
@@ -1657,7 +1676,14 @@ function Transcript({
     const col = box?.querySelector(".thread-col");
     if (!box || !col) return;
     const ro = new ResizeObserver(() => {
-      if (stick.current) pinBottom();
+      if (stick.current) {
+        pinBottom();
+        return;
+      }
+      // 交出跟随后内容还在下面长，gap 变大但不触发 scroll 事件 ——
+      // 「回到底部」得靠这里浮出来，不然用户翻上去就找不到回程。
+      const gap = box.scrollHeight - box.scrollTop - box.clientHeight;
+      setAwayFromBottom(gap > box.clientHeight);
     });
     ro.observe(col);
     return () => ro.disconnect();
@@ -1692,11 +1718,18 @@ function Transcript({
   const waitLabel = runningTool ? `正在执行 ${runningTool}` : "正在生成…";
 
   // 连续的思考 / 工具折成组（学 Cursor）。长探索几十行连排会把回答
-  // 挤出屏幕，折完对话流里剩下的才是内容。生成过程中同样折：已落定
-  // 的步骤随做随折，正在跑的工具被 groupBlocks 排除在组外、单独成行
-  // 直播。useMemo 挂在 items 上：流式期间 Transcript 每帧重渲染，
-  // 分组不该跟着每帧重算。
-  const blocks = useMemo(() => groupBlocks(items), [items]);
+  // 挤出屏幕，折完对话流里剩下的才是内容。生成期间正在跑的工具也在
+  // 组里，组头单行直播（见 ProcessGroup）—— 工具完成只换字不增删行，
+  // 底部不再随每个工具弹跳。正文开始流（streaming 非空）说明尾部那段
+  // 过程已经讲完，live 撤下、单条段落还原成普通行 —— 一行换一行，
+  // 这次落定同样不跳。liveTail 先算成布尔再进 useMemo：流式期间
+  // Transcript 每帧重渲染，分组不该跟着每帧重算。
+  const liveTail = busy && !streaming;
+  const blocks = useMemo(() => groupBlocks(items, liveTail), [items, liveTail]);
+  // 正在流的思考并进尾部直播组（组头滚思考预览、落定进组行数不变），
+  // 没有直播组可挂时才单独成行 —— 那一行随后被组头原地接替，也不跳。
+  const tailBlock = blocks[blocks.length - 1];
+  const liveFold = tailBlock?.kind === "fold" && tailBlock.live ? tailBlock : undefined;
 
   return (
     <main className="transcript" ref={boxRef}>
@@ -1711,11 +1744,16 @@ function Transcript({
               {...(onRegenerate ? { onRegenerate } : {})}
             />
           ) : (
-            <ProcessGroup key={b.id} items={b.items} />
+            <ProcessGroup
+              key={b.id}
+              items={b.items}
+              live={b.live}
+              {...(b === liveFold && thinking ? { thinkingText: thinking } : {})}
+            />
           ),
         )}
 
-        {thinking ? <ThinkingBlock text={thinking} live /> : null}
+        {thinking && !liveFold ? <ThinkingBlock text={thinking} live /> : null}
         {streaming ? (
           <div className="msg assistant">
             <Markdown text={streaming} />
