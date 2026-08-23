@@ -1,25 +1,23 @@
 # Riot
 
-<p align="center">
-  <img src="src/assets/riot-icon.png" width="96" alt="Riot" />
-</p>
-
-<p align="center">
-  <strong>集 Codex、Claude Code、Cursor 三家之长的本地 AI agent</strong><br />
-  模型走你自己的 API，工具在本机执行，写文件和跑命令默认先问再做。
-</p>
+**集 Codex、Claude Code、Cursor 三家之长的本地 AI agent**  
+模型走你自己的 API，工具在本机执行，写文件和跑命令默认先问再做。
 
 Riot 把三家各自做对的部分收进同一个桌面产品：**Codex** 的独立内核与文档产物、**Claude Code** 的权限与扩展体系、**Cursor** 的工作台——对话、终端、浏览器、改动审阅在同一扇窗口里。Agent 读仓库、改代码、写文档、跑命令，全部发生在你的机器上，不把项目交到别人的云端执行环境。
 
 内核是独立的 Rust 进程，界面是 Tauri + React。桌面端以 **macOS** 为首发平台，**Windows** 同步支持。
 
+![alt text](assets/README/image-2.png)
+![alt text](assets/README/image.png)
+![alt text](assets/README/image-1.png)
+
 ## 三家之长
 
-| 取自 | Riot 里对应的部分 |
-| --- | --- |
-| **Codex** | 宿主与内核分进程，崩溃不拖垮窗口；Word / Excel / PPT / PDF 按需装运行时，渲成页面后再交付 |
-| **Claude Code** | Skills、斜杠命令、Hooks、MCP、项目记忆；权限默认询问，规划模式先写计划再动手 |
-| **Cursor** | 侧栏会话、流式对话、内嵌终端、内置浏览器、Git 改动面板；`@` 引用、拖放与粘贴附件 |
+| 取自            | Riot 里对应的部分                                                                         |
+| --------------- | ----------------------------------------------------------------------------------------- |
+| **Codex**       | 宿主与内核分进程，崩溃不拖垮窗口；Word / Excel / PPT / PDF 按需装运行时，渲成页面后再交付 |
+| **Claude Code** | Skills、斜杠命令、Hooks、MCP、项目记忆；权限默认询问，规划模式先写计划再动手              |
+| **Cursor**      | 侧栏会话、流式对话、内嵌终端、内置浏览器、Git 改动面板；`@` 引用、拖放与粘贴附件          |
 
 ## 它做什么
 
@@ -77,14 +75,14 @@ pnpm tauri build
 
 配置目录在设置 → 关于里可以看到。macOS 默认是 `~/Library/Application Support/riot`，Windows 是 `%APPDATA%\riot`。
 
-| 能力 | 全局 | 项目级 |
-| --- | --- | --- |
-| 记忆 | `<配置目录>/AGENTS.md` | `<项目>/AGENTS.md`（没有则读 `CLAUDE.md`） |
-| Skills | `<配置目录>/skills/<名>/SKILL.md` | `<项目>/.riot/skills/` |
-| 斜杠命令 | `<配置目录>/commands/*.md` | `<项目>/.riot/commands/` |
-| Hooks | `<配置目录>/hooks.json` | `<项目>/.riot/hooks.json`（两层都跑） |
-| MCP | 设置 → MCP | — |
-| 能力包 | 设置 → 能力包（文档运行时等） | — |
+| 能力     | 全局                              | 项目级                                     |
+| -------- | --------------------------------- | ------------------------------------------ |
+| 记忆     | `<配置目录>/AGENTS.md`            | `<项目>/AGENTS.md`（没有则读 `CLAUDE.md`） |
+| Skills   | `<配置目录>/skills/<名>/SKILL.md` | `<项目>/.riot/skills/`                     |
+| 斜杠命令 | `<配置目录>/commands/*.md`        | `<项目>/.riot/commands/`                   |
+| Hooks    | `<配置目录>/hooks.json`           | `<项目>/.riot/hooks.json`（两层都跑）      |
+| MCP      | 设置 → MCP                        | —                                          |
+| 能力包   | 设置 → 能力包（文档运行时等）     | —                                          |
 
 - 记忆注入首条消息，支持 `@路径` 引用。
 - Skills 渐进披露：清单进上下文，正文用到才读。
