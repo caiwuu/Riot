@@ -18,7 +18,6 @@
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods)]
 
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use riot_host_lib::packs;
@@ -167,6 +166,98 @@ fn serve_on(listener: tokio::net::TcpListener, routes: Vec<(String, Vec<u8>)>) {
                 }
                 let _ = sock.flush().await;
             });
+        }
+    });
+}
+
+/// 清单正常给,包体第一次只写前 `drop_after` 字节就关连接(Content-Length
+/// 仍是全长,复现线上的 "error decoding response body"),之后认 Range。
+fn serve_flaky(
+    listener: tokio::net::TcpListener,
+    manifest: Vec<u8>,
+    archive: Vec<u8>,
+    drop_after: usize,
+) {
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let mut dropped = false;
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = vec![0u8; 8192];
+            let n = sock.read(&mut buf).await.unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let path = req
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("/")
+                .split('?')
+                .next()
+                .unwrap_or("/")
+                .to_owned();
+            let range_start = req.lines().find_map(|line| {
+                let (k, v) = line.split_once(':')?;
+                if !k.trim().eq_ignore_ascii_case("Range") {
+                    return None;
+                }
+                let rest = v.trim().strip_prefix("bytes=")?;
+                let (s, _) = rest.split_once('-')?;
+                s.trim().parse::<usize>().ok()
+            });
+
+            if path == "/packs.json" {
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    manifest.len()
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(&manifest).await;
+                let _ = sock.shutdown().await;
+                continue;
+            }
+            if path != "/doc-runtime.tar.zst" {
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+                let _ = sock.shutdown().await;
+                continue;
+            }
+
+            let start = range_start.unwrap_or(0).min(archive.len());
+            if !dropped && start == 0 {
+                dropped = true;
+                let n = drop_after.min(archive.len());
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    archive.len()
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(&archive[..n]).await;
+                let _ = sock.shutdown().await;
+                continue;
+            }
+            if start > 0 {
+                let slice = &archive[start..];
+                let end = archive.len().saturating_sub(1);
+                let head = format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    archive.len(),
+                    slice.len()
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(slice).await;
+            } else {
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    archive.len()
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(&archive).await;
+            }
+            let _ = sock.shutdown().await;
         }
     });
 }
@@ -622,28 +713,51 @@ fn 打出来的压缩包宿主解得开() {
     assert!(out.join("a-2.0.0/pack.json").is_file());
 }
 
-/// 断点续传拼出来的文件要和一次下完的完全一致。
-#[test]
-fn 续传拼接后的文件与完整文件一致() {
-    use sha2::{Digest as _, Sha256};
-
+/// 下载中途断线时,`packs::install` 必须自己带着半成品续上,不能把错误抛给
+/// 用户再点一次。以前那条"先写一半再 append"的测试只验了文件系统,HTTP
+/// Range、重试、校验失败会不会误删 `.part`,一条都没碰到。
+#[tokio::test]
+async fn 下载中途断线后安装仍能完成() {
+    let _guard = SERIAL.lock().await;
     let tmp = tempfile::tempdir().expect("临时目录");
-    let whole: Vec<u8> = (0..64_u32 * 1024).map(|i| (i % 251) as u8).collect();
+    unsafe { std::env::set_var("XDG_CONFIG_HOME", tmp.path()) };
 
-    // 模拟"下到一半断了"：先写前 20000 字节，再追加剩下的。
-    let part = tmp.path().join("x.part");
-    std::fs::write(&part, &whole[..20_000]).expect("写半成品");
-    let mut f = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&part)
-        .expect("追加打开");
-    f.write_all(&whole[20_000..]).expect("追加剩余");
-    drop(f);
+    let src = tmp.path().join("src");
+    build_pack(&src, "1.0.0");
+    let archive = tmp.path().join("doc-runtime-1.0.0.tar.zst");
+    let (size, sha256) = tarball(&src, &archive, "doc-runtime-1.0.0-any");
+    let bytes = std::fs::read(&archive).expect("读压缩包");
+    assert!(
+        bytes.len() > 60,
+        "压缩包太小,砍一截看不出续传。实际 {} 字节",
+        bytes.len()
+    );
 
-    let mut h = Sha256::new();
-    h.update(&whole);
-    let want = format!("{:x}", h.finalize());
-    let mut h = Sha256::new();
-    h.update(std::fs::read(&part).expect("读回"));
-    assert_eq!(format!("{:x}", h.finalize()), want);
+    let mut server = Server::bind().await;
+    let manifest = serde_json::json!({
+        "packs": { "doc-runtime": { "version": "1.0.0", "platforms": { packs::platform_key(): {
+            "url": format!("{}/doc-runtime.tar.zst", server.base),
+            "sha256": sha256,
+            "size": size,
+        }}}}
+    });
+    unsafe {
+        std::env::set_var(
+            "RIOT_PACKS_MANIFEST_URL",
+            format!("{}/packs.json", server.base),
+        )
+    };
+    let drop_after = bytes.len() / 3;
+    serve_flaky(
+        server.listener.take().expect("listener 还在"),
+        manifest.to_string().into_bytes(),
+        bytes,
+        drop_after,
+    );
+
+    let pack = packs::install("doc-runtime", |_| {})
+        .await
+        .expect("中途断线后应当自动续传并装完");
+    assert_eq!(pack.manifest.version, "1.0.0");
+    assert!(pack.root.join("pack.json").is_file());
 }

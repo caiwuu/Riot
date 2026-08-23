@@ -594,9 +594,9 @@ const THEME = {
   brightCyan: "#a2e8dd",
   brightWhite: "#ffffff",
   // 半透明而不是实色：滑块压在输出上，底下的字还得看得见
-  scrollbarSliderBackground: "#ffffff1a",
-  scrollbarSliderHoverBackground: "#ffffff2e",
-  scrollbarSliderActiveBackground: "#ffffff42",
+  scrollbarSliderBackground: "#ffffff10",
+  scrollbarSliderHoverBackground: "#ffffff1c",
+  scrollbarSliderActiveBackground: "#ffffff28",
 };
 
 /* ── 图标 ───────────────────────────────────── */

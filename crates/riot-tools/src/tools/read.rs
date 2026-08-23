@@ -86,7 +86,8 @@ impl Tool for Read {
              不要带行号。\n\
              - 一次最多返回 {MAX_LINES} 行；文件更长时用 `offset` 继续读。\n\
              - 超过 {MAX_LINE_CHARS} 字符的行会被截断。\n\
-             - 读取整个文件之后才能用 Edit 修改它。\n\
+             - 文件很长时用 `offset` 分段读。Edit 会自行载入全文做唯一性\
+             检查，不必为了改文件再读一遍整份。\n\
              - 图片文件（png / jpg / gif / webp）也可以读:会返回图片内容。\
              `offset` 和 `limit` 对图片无效。不要试图用 shell 去解码图片。"
         )
@@ -208,10 +209,8 @@ impl Tool for Read {
 
         let render = render(&file.content, parsed.offset, parsed.limit);
 
-        // 只有完整读到文件末尾才算 Full 视图。
-        //
-        // `[约束]` 截断过的内容必须标成 Partial —— Edit 会拒绝 Partial
-        // 视图。这是"模型没看到全文就动手改"的唯一防线。
+        // 给模型看的输出被截断时标 Partial。缓存里始终是全文，Edit
+        // 按全文做唯一性检查，不再因为 Partial 拒绝（见 precondition）。
         let view = if render.is_complete {
             FileView::Full
         } else {

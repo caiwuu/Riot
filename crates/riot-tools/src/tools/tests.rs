@@ -140,7 +140,7 @@ async fn offset_为_0_被拒并说明从_1_开始() {
 
 #[tokio::test]
 async fn 部分读取标记为_partial_视图() {
-    // 这是"模型没看到全文就动手改"的唯一防线
+    // Partial 记录给模型看的范围；缓存里仍是全文。
     let h = harness(base_fs().with_file("/work/a.txt", "a\nb\nc\nd"));
     read(
         &h,
@@ -154,7 +154,7 @@ async fn 部分读取标记为_partial_视图() {
         .expect("有缓存");
     assert!(
         matches!(s.view, FileView::Partial { .. }),
-        "部分读取必须标 Partial，否则 Edit 会放行"
+        "部分读取必须标 Partial，给模型看的范围和全文不是一回事"
     );
 }
 
@@ -508,6 +508,20 @@ async fn 读过之后可以覆盖() {
 }
 
 #[tokio::test]
+async fn 只读过一部分也可以覆盖() {
+    let h = harness(base_fs().with_file("/work/a.txt", "a\nb\nc\nd"));
+    read(
+        &h,
+        serde_json::json!({ "path": "a.txt", "offset": 2, "limit": 2 }),
+    )
+    .await;
+
+    let out = write(&h, serde_json::json!({ "path": "a.txt", "content": "new" })).await;
+    assert!(is_ok(&out), "{}", text_of(&out));
+    assert_eq!(h.fs.text("/work/a.txt").as_deref(), Some("new"));
+}
+
+#[tokio::test]
 async fn 外部改动后拒绝覆盖() {
     let h = harness(base_fs().with_file("/work/a.txt", "v1"));
     read(&h, serde_json::json!({ "path": "a.txt" })).await;
@@ -631,37 +645,106 @@ async fn 正常替换() {
 }
 
 #[tokio::test]
-async fn 没读过就改被拒() {
-    let h = harness(base_fs().with_file("/work/a.rs", "x"));
+async fn 没读过也可以改_从磁盘载入全文() {
+    // Edit 自己读全文。再逼模型先 Read，超长文件会卡在 Partial 死锁里。
+    let h = harness(base_fs().with_file("/work/a.rs", "fn a() {}\nfn b() {}\n"));
     let out = edit(
         &h,
-        serde_json::json!({ "path": "a.rs", "old_string": "x", "new_string": "y" }),
+        serde_json::json!({
+            "path": "a.rs",
+            "old_string": "fn a() {}",
+            "new_string": "fn a() { x }"
+        }),
     )
     .await;
 
-    assert!(!is_ok(&out));
-    assert!(text_of(&out).contains("Read"));
-    assert_eq!(h.fs.text("/work/a.rs").as_deref(), Some("x"));
+    assert!(is_ok(&out), "{}", text_of(&out));
+    assert_eq!(
+        h.fs.text("/work/a.rs").as_deref(),
+        Some("fn a() { x }\nfn b() {}\n")
+    );
 }
 
 #[tokio::test]
-async fn 只读过一部分就改被拒() {
-    // 模型以为看到了全文，把"这个函数只出现一次"当成事实
-    let h = harness(base_fs().with_file("/work/a.rs", "a\nb\nc\nd"));
+async fn 只读过一部分也可以改_唯一性仍按全文() {
+    // Read 给模型的可能是一段，缓存里是全文。再报错逼它"不带
+    // offset/limit 重读"对超长文件永远无法满足（单次上限 2000 行）。
+    let h = harness(base_fs().with_file("/work/a.rs", "fn a() {}\nfn b() {}\n"));
     read(
         &h,
-        serde_json::json!({ "path": "a.rs", "offset": 1, "limit": 2 }),
+        serde_json::json!({ "path": "a.rs", "offset": 1, "limit": 1 }),
     )
     .await;
 
     let out = edit(
         &h,
-        serde_json::json!({ "path": "a.rs", "old_string": "a", "new_string": "z" }),
+        serde_json::json!({
+            "path": "a.rs",
+            "old_string": "fn a() {}",
+            "new_string": "fn a() { x }"
+        }),
+    )
+    .await;
+
+    assert!(is_ok(&out), "{}", text_of(&out));
+    assert_eq!(
+        h.fs.text("/work/a.rs").as_deref(),
+        Some("fn a() { x }\nfn b() {}\n")
+    );
+}
+
+#[tokio::test]
+async fn 只读过一部分但全文有多处仍拒绝() {
+    let h = harness(base_fs().with_file("/work/a.rs", "let x = 1;\nlet x = 2;\n"));
+    read(
+        &h,
+        serde_json::json!({ "path": "a.rs", "offset": 1, "limit": 1 }),
+    )
+    .await;
+
+    let out = edit(
+        &h,
+        serde_json::json!({ "path": "a.rs", "old_string": "let x", "new_string": "let y" }),
     )
     .await;
 
     assert!(!is_ok(&out));
-    assert!(text_of(&out).contains("完整"), "{}", text_of(&out));
+    assert!(text_of(&out).contains("2 次"), "{}", text_of(&out));
+    assert_eq!(
+        h.fs.text("/work/a.rs").as_deref(),
+        Some("let x = 1;\nlet x = 2;\n"),
+        "拒绝之后文件不能被改动"
+    );
+}
+
+#[tokio::test]
+async fn 超长文件截断后仍可编辑() {
+    // 默认 Read 超过 2000 行会标 Partial。旧逻辑要求"再读一次全文"，
+    // 再读一次还是 Partial，Edit 死循环。
+    let body = (1..=2500)
+        .map(|i| format!("line{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let h = harness(base_fs().with_file("/work/big.txt", &body));
+    read(&h, serde_json::json!({ "path": "big.txt" })).await;
+
+    let out = edit(
+        &h,
+        serde_json::json!({
+            "path": "big.txt",
+            "old_string": "line2500",
+            "new_string": "line2500-changed"
+        }),
+    )
+    .await;
+
+    assert!(is_ok(&out), "{}", text_of(&out));
+    assert!(
+        h.fs.text("/work/big.txt")
+            .expect("有")
+            .ends_with("line2500-changed"),
+        "应改到全文末尾那一行（模型没看到的后半段）"
+    );
 }
 
 #[tokio::test]
@@ -887,7 +970,8 @@ async fn 编辑后缓存更新() {
 }
 
 #[tokio::test]
-async fn 编辑围栏外的文件被拒() {
+async fn 项目目录之外也能改() {
+    // 工具层放行不等于没人管。写操作照样过权限闸；敏感目标另有 safety 层。
     let h = harness(
         base_fs()
             .with_dir("/etc")
@@ -899,8 +983,8 @@ async fn 编辑围栏外的文件被拒() {
     )
     .await;
 
-    assert!(!is_ok(&out));
-    assert_eq!(h.fs.text("/etc/hosts").as_deref(), Some("127.0.0.1"));
+    assert!(is_ok(&out), "{}", text_of(&out));
+    assert_eq!(h.fs.text("/etc/hosts").as_deref(), Some("0.0.0.1"));
 }
 
 // ── call() 自己就是一道关口 ────────────────────────────
@@ -934,7 +1018,7 @@ async fn write_的_call_独立拦住先读后写() {
 }
 
 #[tokio::test]
-async fn edit_的_call_独立拦住先读后写() {
+async fn edit_的_call_没读过也从磁盘载入() {
     let h = harness(base_fs().with_file("/work/a.rs", "fn a() {}"));
 
     let out = Edit
@@ -946,9 +1030,12 @@ async fn edit_的_call_独立拦住先读后写() {
         )
         .await;
 
-    assert!(!is_ok(&out));
-    assert_eq!(h.fs.text("/work/a.rs").as_deref(), Some("fn a() {}"));
-    assert!(text_of(&out).contains("还没有读过"), "{}", text_of(&out));
+    assert!(
+        is_ok(&out),
+        "call 不能依赖 validate_input 已经载入：{}",
+        text_of(&out)
+    );
+    assert_eq!(h.fs.text("/work/a.rs").as_deref(), Some("fn z() {}"));
 }
 
 #[tokio::test]

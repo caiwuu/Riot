@@ -378,10 +378,15 @@ async fn serve_host_call(svc: Option<Arc<dyn HostCallHandler>>, envelope: &Value
 
 /// 定位内核二进制。
 ///
-/// dev 和 bundle 两种情况下它都在宿主可执行文件旁边:dev 是 workspace 的
-/// target/debug/(一起 build),bundle 是 externalBin 进 Contents/MacOS/。
+/// bundle 里它在宿主旁边（externalBin 进 Contents/MacOS）。dev 也在
+/// `target/debug/`，但 `cargo run` 宿主**不会**连带编这个 bin —— 只编
+/// 成依赖库。工具改了只重启 host、内核仍跑旧二进制，表现就是改了
+/// precondition 界面上还是旧报错。所以 debug 启动前先编一次 sidecar。
 /// 再试一层上级目录:测试二进制在 target/debug/deps/ 下,内核在上一级。
 pub fn locate_kernel() -> Result<PathBuf, String> {
+    #[cfg(debug_assertions)]
+    rebuild_kernel_bin()?;
+
     let exe = std::env::current_exe().map_err(|e| format!("拿不到宿主路径:{e}"))?;
     let dir = exe
         .parent()
@@ -397,4 +402,21 @@ pub fn locate_kernel() -> Result<PathBuf, String> {
         "找不到内核二进制 {}。开发模式请先 `cargo build -p riot-kernel`。",
         dir.join(&name).display()
     ))
+}
+
+/// `cargo run` 宿主不会产出 `riot-kernel` 这个可执行文件。
+#[cfg(debug_assertions)]
+fn rebuild_kernel_bin() -> Result<(), String> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .ok_or_else(|| "src-tauri 没有上级目录".to_owned())?;
+    let status = std::process::Command::new("cargo")
+        .args(["build", "-p", "riot-kernel", "--quiet"])
+        .current_dir(root)
+        .status()
+        .map_err(|e| format!("编内核失败:{e}"))?;
+    if !status.success() {
+        return Err("cargo build -p riot-kernel 失败".to_owned());
+    }
+    Ok(())
 }

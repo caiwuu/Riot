@@ -186,9 +186,36 @@ type HistorySnap = {
  */
 const waitStartAt = new Map<string, number>();
 
+const EMPTY_STATE: SessionState = {
+  items: [],
+  streaming: "",
+  thinking: "",
+  streamingPlan: null,
+  busy: false,
+  compacting: false,
+  asks: [],
+  tokens: { input: 0, output: 0 },
+  hostMode: null,
+  queued: [],
+  withdrawn: null,
+};
+
+/**
+ * 切走会话后界面树可能被卸掉，条目先记在这里。下一次挂上这个 id
+ * 时立刻还原，不用干等 getHistory —— 等的那段时间主区是空的，长
+ * 会话看起来就是白屏。
+ */
+const sessionCache = new Map<string, SessionState>();
+
 /** 状态行计时的起点。null = 此刻没有在等的东西。 */
 export function waitStartedAt(sessionId: string): number | null {
   return waitStartAt.get(sessionId) ?? null;
+}
+
+/** 会话删掉时清掉缓存，免得占着一份已经没了的对话。 */
+export function forgetSession(id: string) {
+  sessionCache.delete(id);
+  waitStartAt.delete(id);
 }
 
 export function useSession(
@@ -201,19 +228,21 @@ export function useSession(
     onBrowserOpen?: () => void;
   },
 ) {
-  const [state, setState] = useState<SessionState>({
-    items: [],
-    streaming: "",
-    thinking: "",
-    streamingPlan: null,
-    busy: false,
-    compacting: false,
-    asks: [],
-    tokens: { input: 0, output: 0 },
-    hostMode: null,
-    queued: [],
-    withdrawn: null,
-  });
+  const [state, setStateRaw] = useState<SessionState>(
+    () => sessionCache.get(sessionId) ?? EMPTY_STATE,
+  );
+  /** 历史快照到过（或缓存里已有）。没到之前不要把长会话画成空招呼页。 */
+  const [ready, setReady] = useState(() => sessionCache.has(sessionId));
+  const setState = useCallback<typeof setStateRaw>(
+    (update) => {
+      setStateRaw((prev) => {
+        const next = typeof update === "function" ? update(prev) : update;
+        sessionCache.set(sessionId, next);
+        return next;
+      });
+    },
+    [sessionId],
+  );
 
   // delta 先攒在 ref，由 rAF 决定何时 setState。逐条 setState 会让 React
   // 在快速流式输出时掉帧。页面不可见时 WebKit 会节流 rAF，那时直接刷 ——
@@ -616,6 +645,7 @@ export function useSession(
       .finally(() => {
         if (cancelled) return;
         historyReady = true;
+        setReady(true);
         for (const e of buffered) {
           // text/thinking 已经折进 liveText/liveThinking，再 handle 会重拼。
           if (isLiveDelta(e)) continue;
@@ -1024,6 +1054,7 @@ export function useSession(
 
   return {
     ...state,
+    ready,
     send,
     stop,
     answer,

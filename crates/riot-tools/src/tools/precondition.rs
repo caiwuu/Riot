@@ -1,18 +1,15 @@
 //! 先读后写协议。
 //!
-//! `[约束]` 修改一个已存在的文件之前，必须先完整 Read 过它，而且从那次
-//! Read 到现在文件没有被外部改动。
+//! Write 覆盖整个文件，必须先 Read 过，而且从那次 Read 到现在磁盘
+//! 没有被外部改动 —— 否则会把用户的改动整份盖掉。
 //!
-//! 三条检查各自防的是不同的事故:
+//! Edit 是精确替换。`old_string` 必须在**当前磁盘全文**里唯一命中，
+//! 这已经能挡住猜错位置。再逼模型"先完整 Read"是死锁：Read 单次最多
+//! 2000 行，超长文件永远是 Partial，报错 → 重读 → 还是 Partial。
+//! 所以 Edit 自己从磁盘载入全文，不把"请再读一遍"踢回给模型。
 //!
-//! 1. **没读过就改** —— 模型凭猜测写 `old_string`，改中了同名的另一处;
-//! 2. **只读过一部分** —— 模型以为看到了全文，把"这个函数只出现一次"
-//!    当成事实，而它在没读到的那半边还有一个;
-//! 3. **读完之后文件变了** —— 用户在编辑器里改了同一个文件，agent 的
-//!    写入会把用户的改动整个盖掉，而且没有任何提示。
-//!
-//! 第 3 条要查两次:决策时一次，真正写入前再一次。中间隔着权限弹窗，
-//! 用户可能盯着弹窗想了半分钟，这半分钟里什么都可能发生。
+//! 写入前的内容比对（[`verify_unchanged`]）两边都要做。中间隔着权限
+//! 弹窗，用户可能盯着弹窗想了半分钟。
 //!
 //! 见 ARCHITECTURE.md §6.6
 
@@ -20,12 +17,12 @@ use std::path::Path;
 
 use riot_protocol::tool::{FileState, FileView, ToolContext};
 
+use super::text;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Staleness {
     /// 没有读过这个文件。
     NeverRead,
-    /// 只读过一部分。
-    PartialOnly { offset: usize, limit: usize },
     /// 读过之后文件被外部改动了。
     ChangedOnDisk { cached_ms: u64, disk_ms: u64 },
 }
@@ -40,10 +37,6 @@ impl Staleness {
             Staleness::NeverRead => {
                 format!("还没有读过 {path}。请先用 Read 读取这个文件，然后再修改它。")
             }
-            Staleness::PartialOnly { .. } => format!(
-                "只读取了 {path} 的一部分。修改文件前需要看到完整内容 —— \
-                 请不带 offset/limit 重新 Read 一次。"
-            ),
             Staleness::ChangedOnDisk { .. } => format!(
                 "{path} 在你读取之后被外部修改过。请重新 Read 获取最新内容，\
                  确认你的改动仍然适用，再重新提交修改。"
@@ -52,22 +45,16 @@ impl Staleness {
     }
 }
 
-/// 检查一个已存在的文件能不能被修改。
-///
-/// 返回缓存里的状态 —— 调用方用它做内容比对。
+/// Write 用：没读过或磁盘变了就拒绝。只看过一段则升成 Full。
 pub async fn check_fresh(resolved: &Path, ctx: &ToolContext) -> Result<FileState, Staleness> {
     let Some(state) = ctx.file_state.get(resolved) else {
         return Err(Staleness::NeverRead);
     };
 
-    if let FileView::Partial { offset, limit } = state.view {
-        return Err(Staleness::PartialOnly { offset, limit });
-    }
-
     // 拿不到磁盘 mtime 时放行 —— 文件可能刚被删掉，那个错误由后续的
     // 写入操作报出来会更准确。这里不是判断文件存不存在的地方。
     let Ok(meta) = ctx.fs.metadata(resolved).await else {
-        return Ok(state);
+        return Ok(promote_full(resolved, state, ctx));
     };
 
     if meta.mtime_ms > state.mtime_ms {
@@ -77,6 +64,62 @@ pub async fn check_fresh(resolved: &Path, ctx: &ToolContext) -> Result<FileState
         });
     }
 
+    Ok(promote_full(resolved, state, ctx))
+}
+
+/// Edit 用：缓存没有、只看过一段、或磁盘更新了，都从磁盘载入全文。
+///
+/// 不把"请先 Read / 请再读一遍"踢回给模型。唯一性检查按这份全文做。
+pub async fn ensure_loaded(resolved: &Path, ctx: &ToolContext) -> Result<FileState, String> {
+    if let Some(state) = ctx.file_state.get(resolved)
+        && let Ok(meta) = ctx.fs.metadata(resolved).await
+        && meta.mtime_ms <= state.mtime_ms
+    {
+        return Ok(promote_full(resolved, state, ctx));
+    }
+
+    load_from_disk(resolved, ctx).await
+}
+
+/// Read 截断给模型看的那一份，缓存里已经是全文。升成 Full，后续 Write
+/// 不再被同一条"请再读一遍"拦住。
+fn promote_full(resolved: &Path, state: FileState, ctx: &ToolContext) -> FileState {
+    if state.view == FileView::Full {
+        return state;
+    }
+
+    let full = FileState {
+        view: FileView::Full,
+        ..state
+    };
+    ctx.file_state.put(resolved.to_path_buf(), full.clone());
+    full
+}
+
+async fn load_from_disk(resolved: &Path, ctx: &ToolContext) -> Result<FileState, String> {
+    let meta = ctx
+        .fs
+        .metadata(resolved)
+        .await
+        .map_err(|e| format!("读不了 {}：{e}", resolved.display()))?;
+    if meta.is_dir {
+        return Err(format!("{} 是目录，不能修改。", resolved.display()));
+    }
+
+    let bytes = ctx
+        .fs
+        .read(resolved)
+        .await
+        .map_err(|e| format!("读不了 {}：{e}", resolved.display()))?;
+    let file = text::decode(&bytes)
+        .map_err(|e| format!("{} 无法作为文本修改（{e}）。", resolved.display()))?;
+
+    let state = FileState {
+        content: file.content,
+        mtime_ms: meta.mtime_ms,
+        view: FileView::Full,
+    };
+    ctx.file_state.put(resolved.to_path_buf(), state.clone());
     Ok(state)
 }
 

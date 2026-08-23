@@ -396,7 +396,7 @@ pub struct FileState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileView {
     Full,
-    /// 部分视图不可作为编辑依据。
+    /// 给模型看过的范围被截断。缓存里仍是全文，Edit 按全文检查。
     Partial {
         offset: usize,
         limit: usize,

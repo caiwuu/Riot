@@ -49,7 +49,7 @@ import { SessionChangesBar } from "./components/SessionChangesBar";
 import { ScopePanel } from "./components/ScopePanel";
 import { SessionSettings } from "./components/SessionSettings";
 import { ConfirmDialog, type ConfirmRequest } from "./components/ConfirmDialog";
-import { Markdown, ProjectRootContext } from "./components/Markdown";
+import { LazyMarkdown, Markdown, ProjectRootContext } from "./components/Markdown";
 import {
   AskChoiceCard,
   PermissionDialog,
@@ -66,6 +66,7 @@ import {
   type Item,
   type QueuedItem,
   type WithdrawnPrompt,
+  forgetSession,
   useSession,
   waitStartedAt,
 } from "./hooks/useSession";
@@ -93,9 +94,32 @@ interface MenuState {
 const LS = {
   sidebar: "riot.layout.sidebar",
   sidebarOpen: "riot.layout.sidebarOpen",
+  collapsedProjects: "riot.layout.collapsedProjects",
   drawer: "riot.layout.drawer",
   term: "riot.layout.term",
 };
+
+function loadCollapsedProjects(): Set<string> {
+  try {
+    const raw = localStorage.getItem(LS.collapsedProjects);
+    if (!raw) return new Set();
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((x): x is string => typeof x === "string"));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveCollapsedProjects(roots: Set<string>) {
+  localStorage.setItem(LS.collapsedProjects, JSON.stringify([...roots]));
+}
+
+/** 同时保活的会话树上限。切走不卸 DOM，切回才不是白屏。 */
+const KEEP_CHATS = 4;
+
+/** 对话流滚到哪。切走再切回要自己还 —— 单靠 CSS 在 WebKit 上偶尔仍会丢。 */
+const transcriptScroll = new Map<string, number>();
 
 const SIDEBAR = { def: 280, min: 180, max: 420 };
 /** Overlay 标题栏的红绿灯只在 macOS 占左上角。Windows / Linux 的窗口
@@ -148,6 +172,8 @@ export function App() {
   /** 用户从终端选中、要交给模型的一段输出。塞进输入框而不是直接发送 ——
    *  他多半还要在前面补一句"这个报错怎么回事"。 */
   const [termSnippet, setTermSnippet] = useState<string | null>(null);
+  /** 最近看过的会话 id（LRU）。这些 Chat 卸不掉，切回去是显示/隐藏。 */
+  const [kept, setKept] = useState<string[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(
     () => localStorage.getItem(LS.sidebarOpen) !== "0",
   );
@@ -187,6 +213,26 @@ export function App() {
 
   const projects = config?.config.projects ?? [];
   const activeSession = sessions.find((s) => s.id === active) ?? null;
+
+  useLayoutEffect(() => {
+    if (!active) return;
+    setKept((prev) => {
+      const alive = new Set(sessions.map((s) => s.id));
+      const next = [...prev.filter((id) => id !== active && alive.has(id)), active];
+      const clipped = next.length > KEEP_CHATS ? next.slice(next.length - KEEP_CHATS) : next;
+      if (clipped.length === prev.length && clipped.every((id, i) => id === prev[i])) return prev;
+      return clipped;
+    });
+  }, [active, sessions]);
+
+  const mountedSessions = useMemo(() => {
+    const alive = new Set(sessions.map((s) => s.id));
+    const ids = kept.filter((id) => alive.has(id));
+    if (active && !ids.includes(active)) ids.push(active);
+    return ids
+      .map((id) => sessions.find((s) => s.id === id))
+      .filter((s): s is SessionInfo => !!s);
+  }, [kept, sessions, active]);
 
   // 窗口标题跟随项目。多窗口/多桌面时，标题栏是用户分辨"哪个是哪个"
   // 的唯一线索。
@@ -319,6 +365,9 @@ export function App() {
 
   const doDeleteSession = async (id: string) => {
     await deleteSession(id);
+    forgetSession(id);
+    transcriptScroll.delete(id);
+    setKept((prev) => prev.filter((x) => x !== id));
     const victim = sessions.find((s) => s.id === id);
     const next = sessions.filter((s) => s.id !== id);
     setSessions(next);
@@ -345,6 +394,15 @@ export function App() {
 
   const doRemoveProject = async (root: string) => {
     const closed = await removeProject(root);
+    const gone = new Set([
+      ...closed,
+      ...sessions.filter((s) => s.root === root).map((s) => s.id),
+    ]);
+    for (const id of gone) {
+      forgetSession(id);
+      transcriptScroll.delete(id);
+    }
+    setKept((prev) => prev.filter((id) => !gone.has(id)));
     setConfig(await getConfig());
     const next = sessions.filter((s) => s.root !== root && !closed.includes(s.id));
     setSessions(next);
@@ -517,25 +575,39 @@ export function App() {
         <div className="workarea">
           <div className="chat-col">
             {activeSession ? (
-              <Chat
-                key={activeSession.id}
-                sessionId={activeSession.id}
-                config={config}
-                workspace={activeSession.root}
-                initialMode={activeSession.mode}
-                onConfig={setConfig}
-                onOpenSettings={() => setShowSettings(true)}
-                onFirstMessage={onFirstMessage}
-                onSessionEmptied={onSessionEmptied}
-                onAgentBrowser={() => {
-                  if (browserDismissed.current.has(activeSession.id)) return;
-                  setDrawer("browser");
-                }}
-                onTurnEnd={() => setChangesRev((n) => n + 1)}
-                onBusy={(b) => patchSession(activeSession.id, { busy: b })}
-                insertText={termSnippet}
-                onInserted={() => setTermSnippet(null)}
-              />
+              mountedSessions.map((s) => {
+                const visible = s.id === activeSession.id;
+                return (
+                  <div
+                    key={s.id}
+                    className={visible ? "chat-pane" : "chat-pane is-hidden"}
+                    aria-hidden={!visible}
+                    inert={!visible}
+                  >
+                    <Chat
+                      sessionId={s.id}
+                      visible={visible}
+                      expectHistory={s.title != null}
+                      config={config}
+                      workspace={s.root}
+                      initialMode={s.mode}
+                      onConfig={setConfig}
+                      onOpenSettings={() => setShowSettings(true)}
+                      onFirstMessage={onFirstMessage}
+                      onSessionEmptied={onSessionEmptied}
+                      onAgentBrowser={() => {
+                        if (!visible) return;
+                        if (browserDismissed.current.has(s.id)) return;
+                        setDrawer("browser");
+                      }}
+                      onTurnEnd={() => setChangesRev((n) => n + 1)}
+                      onBusy={(b) => patchSession(s.id, { busy: b })}
+                      insertText={visible ? termSnippet : null}
+                      onInserted={() => setTermSnippet(null)}
+                    />
+                  </div>
+                );
+              })
             ) : (
               <Welcome
                 projects={projects}
@@ -988,7 +1060,41 @@ interface SidebarProps {
 }
 
 function Sidebar(props: SidebarProps) {
-  const { width, projects, sessions, onOpenProject, onSettings } = props;
+  const { width, projects, sessions, active, onOpenProject, onSettings } = props;
+  const [collapsed, setCollapsed] = useState(loadCollapsedProjects);
+  // 用来分辨「刚切到一个会话」和「本来就停在这个会话」。后者不能
+  // 强制展开 —— 用户把当前项目折起来是有意的。
+  const prevActive = useRef(active);
+
+  const toggleCollapsed = useCallback((root: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(root)) next.delete(root);
+      else next.add(root);
+      saveCollapsedProjects(next);
+      return next;
+    });
+  }, []);
+
+  const expandProject = useCallback((root: string) => {
+    setCollapsed((prev) => {
+      if (!prev.has(root)) return prev;
+      const next = new Set(prev);
+      next.delete(root);
+      saveCollapsedProjects(next);
+      return next;
+    });
+  }, []);
+
+  // 新会话从右键菜单、欢迎页进来时不会经过项目行上的 +，不展开的话
+  // 建出来的会话会藏在折叠组里，看起来像没建成功。
+  useEffect(() => {
+    if (active && active !== prevActive.current) {
+      const s = sessions.find((x) => x.id === active);
+      if (s) expandProject(s.root);
+    }
+    prevActive.current = active;
+  }, [active, sessions, expandProject]);
 
   // 有会话但不在项目列表里的根也要显示（理论上不会发生，但真发生时
   // 隐藏会话比多显示一个组糟得多）。
@@ -1019,6 +1125,9 @@ function Sidebar(props: SidebarProps) {
             {...props}
             root={root}
             sessions={sessions.filter((s) => s.root === root)}
+            collapsed={collapsed.has(root)}
+            onToggle={() => toggleCollapsed(root)}
+            onExpand={() => expandProject(root)}
           />
         ))}
       </nav>
@@ -1033,31 +1142,61 @@ function Sidebar(props: SidebarProps) {
   );
 }
 
-function ProjectGroup(props: SidebarProps & { root: string }) {
+function ProjectGroup(
+  props: SidebarProps & {
+    root: string;
+    collapsed: boolean;
+    onToggle: () => void;
+    onExpand: () => void;
+  },
+) {
   const {
     root,
     sessions,
     active,
     renaming,
+    collapsed,
     onSelect,
     onNewSession,
     onSessionMenu,
     onProjectMenu,
     onRenameSubmit,
     onRenameCancel,
+    onToggle,
+    onExpand,
   } = props;
   const name = basename(root) || root;
   // 最近的在上面
   const ordered = [...sessions].sort((a, b) => b.seq - a.seq);
+  const busy = collapsed && ordered.some((s) => s.busy);
 
   return (
-    <div className="project">
-      <div className="project-head" title={root} onContextMenu={(e) => onProjectMenu(e, root)}>
-        <FolderIcon />
-        <span className="project-name">{name}</span>
+    <div className={collapsed ? "project collapsed" : "project"}>
+      <div className="project-head" onContextMenu={(e) => onProjectMenu(e, root)}>
+        <button
+          type="button"
+          className="project-toggle"
+          aria-expanded={!collapsed}
+          aria-label={`${name}，${collapsed ? "已折叠" : "已展开"}`}
+          title={root}
+          onClick={onToggle}
+        >
+          <Chevron open={!collapsed} />
+          <FolderIcon />
+          <span className="project-name">{name}</span>
+          {busy ? (
+            <span className="thread-busy" title="有会话正在运行" aria-label="有会话正在运行" />
+          ) : null}
+          {collapsed && ordered.length > 0 ? (
+            <span className="project-count">{ordered.length}</span>
+          ) : null}
+        </button>
         <button
           className="row-btn"
-          onClick={() => onNewSession(root)}
+          onClick={() => {
+            onExpand();
+            onNewSession(root);
+          }}
           title={`在 ${name} 开新会话`}
         >
           <PlusIcon />
@@ -1067,40 +1206,48 @@ function ProjectGroup(props: SidebarProps & { root: string }) {
         </button>
       </div>
 
-      {ordered.map((s) =>
-        renaming === s.id ? (
-          <input
-            key={s.id}
-            className="rename-input"
-            defaultValue={s.title ?? ""}
-            autoFocus
-            onFocus={(e) => e.currentTarget.select()}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") onRenameSubmit(s.id, e.currentTarget.value);
-              if (e.key === "Escape") onRenameCancel();
-            }}
-            onBlur={(e) => onRenameSubmit(s.id, e.currentTarget.value)}
-          />
-        ) : (
-          <div
-            key={s.id}
-            className={s.id === active ? "thread active" : "thread"}
-            onContextMenu={(e) => onSessionMenu(e, s)}
-          >
-            <button className="thread-label" onClick={() => onSelect(s.id)}>
-              {/* 正在跑的会话给个小圆点 —— 切走之后它还在干活，列表里
-                  得看得出来，不然用户以为它闲着。 */}
-              {s.busy ? (
-                <span className="thread-busy" title="正在运行" aria-label="正在运行" />
-              ) : null}
-              {s.title ?? "新会话"}
-            </button>
-            <button className="row-btn" onClick={(e) => onSessionMenu(e, s)} title="会话操作">
-              <DotsIcon />
-            </button>
-          </div>
-        ),
-      )}
+      <div
+        className={collapsed ? "smooth-fold" : "smooth-fold open"}
+        inert={collapsed}
+        aria-hidden={collapsed}
+      >
+        <div className="smooth-fold-inner project-threads-inner">
+          {ordered.map((s) =>
+            renaming === s.id ? (
+              <input
+                key={s.id}
+                className="rename-input"
+                defaultValue={s.title ?? ""}
+                autoFocus
+                onFocus={(e) => e.currentTarget.select()}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") onRenameSubmit(s.id, e.currentTarget.value);
+                  if (e.key === "Escape") onRenameCancel();
+                }}
+                onBlur={(e) => onRenameSubmit(s.id, e.currentTarget.value)}
+              />
+            ) : (
+              <div
+                key={s.id}
+                className={s.id === active ? "thread active" : "thread"}
+                onContextMenu={(e) => onSessionMenu(e, s)}
+              >
+                <button className="thread-label" onClick={() => onSelect(s.id)}>
+                  {/* 正在跑的会话给个小圆点 —— 切走之后它还在干活，列表里
+                      得看得出来，不然用户以为它闲着。 */}
+                  {s.busy ? (
+                    <span className="thread-busy" title="正在运行" aria-label="正在运行" />
+                  ) : null}
+                  {s.title ?? "新会话"}
+                </button>
+                <button className="row-btn" onClick={(e) => onSessionMenu(e, s)} title="会话操作">
+                  <DotsIcon />
+                </button>
+              </div>
+            ),
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -1223,6 +1370,8 @@ async function notifyTurnDone() {
 
 function Chat({
   sessionId,
+  visible,
+  expectHistory,
   config,
   workspace,
   initialMode,
@@ -1237,6 +1386,10 @@ function Chat({
   onInserted,
 }: {
   sessionId: string;
+  /** 在前台。隐藏的保活实例不接全局快捷键 / 粘贴 / 权限弹窗。 */
+  visible: boolean;
+  /** 侧栏已经有标题：历史还没到时别画成空招呼页。 */
+  expectHistory: boolean;
   config: ConfigStatus;
   workspace: string;
   initialMode: PermissionMode;
@@ -1280,7 +1433,10 @@ function Chat({
     }
   }, [busy]);
   const empty =
-    session.items.length === 0 && !session.streaming && !session.thinking;
+    session.items.length === 0 &&
+    !session.streaming &&
+    !session.thinking &&
+    (session.ready || !expectHistory);
 
   // 撤回把会话清空了：那句话回到了输入框，侧栏不该再拿它当名字。
   // 只报一次 —— 输入框消费掉之后 withdrawn 就置回 null 了。
@@ -1347,6 +1503,7 @@ function Chat({
       onWithdrawnRestored={session.clearWithdrawn}
       onOpenSettings={onOpenSettings}
       insertText={insertText ?? null}
+      armed={visible}
       {...(onInserted ? { onInserted } : {})}
     />
   );
@@ -1367,7 +1524,11 @@ function Chat({
       {todoActive ? (
         <TodoPanel items={session.items} />
       ) : (
-        <SessionChangesBar sessionId={sessionId} refreshKey={editCount} />
+        <SessionChangesBar
+          sessionId={sessionId}
+          refreshKey={editCount}
+          paused={!visible}
+        />
       )}
       {composer}
     </div>
@@ -1387,6 +1548,7 @@ function Chat({
         </div>
       ) : (
         <Transcript
+          sessionId={sessionId}
           items={session.items}
           streaming={session.streaming}
           thinking={session.thinking}
@@ -1394,6 +1556,7 @@ function Chat({
           busy={session.busy}
           compacting={session.compacting}
           waitSince={waitStartedAt(sessionId)}
+          armed={visible}
           onRegenerate={session.regenerate}
           {...(planAsk ? { planAsk } : {})}
           {...(choiceAsk ? { choiceAsk } : {})}
@@ -1403,7 +1566,7 @@ function Chat({
       )}
       {dock}
 
-      {modalAsk ? (
+      {visible && modalAsk ? (
         // key 让每个请求拿到全新的弹窗实例：并发的两个请求先后弹出时，
         // 第一个里勾的"总是允许"不会残留到第二个上。
         <PermissionDialog
@@ -1569,6 +1732,7 @@ function FindBar({
 }
 
 function Transcript({
+  sessionId,
   items,
   streaming,
   thinking,
@@ -1576,17 +1740,21 @@ function Transcript({
   busy,
   compacting,
   waitSince,
+  armed = true,
   planAsk,
   choiceAsk,
   onAnswerPlan,
   onAnswerChoice,
   onRegenerate,
 }: {
+  sessionId: string;
   items: Item[];
   streaming: string;
   thinking: string;
   streamingPlan: string | null;
   busy: boolean;
+  /** 前台才接 ⌘F。保活的隐藏实例不能跟前台抢查找。 */
+  armed?: boolean;
   /** 宿主正在压缩上下文。见 useSession 里同名字段。 */
   compacting: boolean;
   /**
@@ -1626,6 +1794,10 @@ function Transcript({
   };
 
   useEffect(() => {
+    if (!armed) {
+      setFindOpen(false);
+      return;
+    }
     const onKey = (e: KeyboardEvent) => {
       if (e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "f") {
         e.preventDefault();
@@ -1634,7 +1806,7 @@ function Transcript({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [armed]);
 
   // 只在用户本来就贴着底部时才自动滚。他往上翻着看历史的时候把他拽回来，
   // 是聊天界面里最招人烦的一件事。
@@ -1653,6 +1825,7 @@ function Transcript({
       const delta = top - lastTop;
       // pinning 帧也要记位置，不然下一次用户滚动会拿到跨帧的假 delta。
       lastTop = top;
+      transcriptScroll.set(sessionId, top);
       if (pinning.current) return;
       const gap = box.scrollHeight - top - box.clientHeight;
       if (delta < 0 && gap > 1) {
@@ -1668,7 +1841,20 @@ function Transcript({
     };
     box.addEventListener("scroll", onScroll, { passive: true });
     return () => box.removeEventListener("scroll", onScroll);
-  }, []);
+  }, [sessionId]);
+
+  // 切回来：没贴底的要把滚走的位置还回去。display:none 会清掉
+  // scrollTop；即便改成 visibility 隐藏，WebKit 有时也会丢。
+  useLayoutEffect(() => {
+    if (!armed) return;
+    const box = boxRef.current;
+    if (!box || stick.current) return;
+    const top = transcriptScroll.get(sessionId);
+    if (top == null) return;
+    box.scrollTop = top;
+    const gap = box.scrollHeight - box.scrollTop - box.clientHeight;
+    setAwayFromBottom(gap > box.clientHeight);
+  }, [armed, sessionId]);
 
   // 正文晚一拍量完（markdown / 图片）时高度还会涨，贴着就跟上。
   useEffect(() => {
@@ -1730,16 +1916,20 @@ function Transcript({
   // 没有直播组可挂时才单独成行 —— 那一行随后被组头原地接替，也不跳。
   const tailBlock = blocks[blocks.length - 1];
   const liveFold = tailBlock?.kind === "fold" && tailBlock.live ? tailBlock : undefined;
+  // 贴底的那几条立刻走完整 markdown / diff。更早的等进视野再解析，
+  // 否则长会话第一次打开会把主线程卡死。查找时全量水合，否则搜不到。
+  const hydrateFrom = Math.max(0, blocks.length - 12);
 
   return (
     <main className="transcript" ref={boxRef}>
-      {findOpen ? <FindBar box={boxRef} onClose={() => setFindOpen(false)} /> : null}
+      {findOpen && armed ? <FindBar box={boxRef} onClose={() => setFindOpen(false)} /> : null}
       <div className="thread-col">
-        {blocks.map((b) =>
+        {blocks.map((b, i) =>
           b.kind === "row" ? (
             <Row
               key={b.item.id}
               item={b.item}
+              hydrate={findOpen || i >= hydrateFrom}
               regenEnabled={!busy}
               {...(onRegenerate ? { onRegenerate } : {})}
             />
@@ -1830,10 +2020,13 @@ const Row = memo(function Row({
   item,
   onRegenerate,
   regenEnabled,
+  hydrate,
 }: {
   item: Item;
   onRegenerate?: (itemId: string) => void;
   regenEnabled?: boolean;
+  /** 贴底 / 查找中：立刻解析 markdown 和工具详情。 */
+  hydrate?: boolean;
 }) {
   switch (item.kind) {
     case "user":
@@ -1855,7 +2048,7 @@ const Row = memo(function Row({
     case "assistant":
       return (
         <div className="msg assistant">
-          <Markdown text={item.text} />
+          <LazyMarkdown text={item.text} eager={!!hydrate} />
           {/* 半截话得说明白它为什么半截 —— 不标的话，用户过一会儿回来
               看到的是一句戛然而止的回答，分不清是自己停的还是模型崩了。 */}
           {item.stopped ? <div className="msg-stopped">已停止生成</div> : null}
@@ -1869,7 +2062,7 @@ const Row = memo(function Row({
     case "thinking":
       return <ThinkingBlock text={item.text} />;
     case "tool":
-      return <ToolCard tool={item} />;
+      return <ToolCard tool={item} eager={!!hydrate} />;
     case "error":
       return <div className="msg error">{item.text}</div>;
     case "notice":
@@ -2875,6 +3068,7 @@ function Composer({
   onOpenSettings,
   insertText,
   onInserted,
+  armed = true,
 }: {
   sessionId: string;
   /** 会话的项目根。斜杠命令要按它找项目级 commands/。 */
@@ -2904,6 +3098,8 @@ function Composer({
   /** 外部要塞进来的一段文字（终端选中的输出）。null = 没有。 */
   insertText?: string | null;
   onInserted?: () => void;
+  /** 前台才接全局拖放 / 粘贴。隐藏的保活实例不能跟前台抢。 */
+  armed?: boolean;
 }) {
   // 编辑区是**非受控**的：内容住在 DOM 里，这些 state 只是它的投影。
   // 受控写法（每次输入都回写 innerHTML）会在每一次按键后重置光标，
@@ -3085,11 +3281,19 @@ function Composer({
     const el = ref.current;
     if (!el) return;
     writeEditor(el, drafts.get(sessionId) ?? []);
-    el.focus();
-    caretToEnd(el);
+    if (armed) {
+      el.focus();
+      caretToEnd(el);
+    }
     sync();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
+
+  // 保活的会话切回来：编辑区没重挂，得自己把焦点要回来。
+  useEffect(() => {
+    if (!armed) return;
+    ref.current?.focus();
+  }, [armed]);
 
   // 补全菜单只在"还没敲空格"时出：`/co` 出菜单，`/compact 参数` 不出 ——
   // 后者用户已经选定命令在写参数了，菜单只会挡住视线。
@@ -3423,32 +3627,34 @@ function Composer({
   // 新的闭包，直接进依赖数组会让拖放订阅跟着输入框的每一次输入重建。
   const dropRef = useRef(takePaths);
   dropRef.current = takePaths;
-  useEffect(
-    () =>
-      subscribeDragDrop((e) => {
-        if (e.kind === "leave") {
-          setDragging(false);
-          return;
-        }
-        if (e.kind === "enter") {
-          // 没有路径的拖拽（拖一段文字、拖网页里的图）不亮落点提示 ——
-          // 亮了却接不住是更糟的反馈。
-          setDragging(e.paths.length > 0);
-          return;
-        }
-        if (e.kind !== "drop") return;
+  useEffect(() => {
+    if (!armed) {
+      setDragging(false);
+      return;
+    }
+    return subscribeDragDrop((e) => {
+      if (e.kind === "leave") {
         setDragging(false);
-        if (e.paths.length) {
-          void dropRef.current(e.paths);
-        } else {
-          setDropError(
-            "拖进来的东西在磁盘上没有对应文件（多半是从网页里直接拖的图）。" +
-              `复制它，再回到这里 ${PASTE_KEY}。`,
-          );
-        }
-      }),
-    [],
-  );
+        return;
+      }
+      if (e.kind === "enter") {
+        // 没有路径的拖拽（拖一段文字、拖网页里的图）不亮落点提示 ——
+        // 亮了却接不住是更糟的反馈。
+        setDragging(e.paths.length > 0);
+        return;
+      }
+      if (e.kind !== "drop") return;
+      setDragging(false);
+      if (e.paths.length) {
+        void dropRef.current(e.paths);
+      } else {
+        setDropError(
+          "拖进来的东西在磁盘上没有对应文件（多半是从网页里直接拖的图）。" +
+            `复制它，再回到这里 ${PASTE_KEY}。`,
+        );
+      }
+    });
+  }, [armed]);
 
   // 焦点不在输入框时 ⌘V 也算数 —— 在 Finder 里复制完文件回到窗口，第一
   // 反应是直接粘，不会先去点一下输入框。
@@ -3457,6 +3663,7 @@ function Composer({
   const pasteRef = useRef(pasteFiles);
   pasteRef.current = pasteFiles;
   useEffect(() => {
+    if (!armed) return;
     const onPaste = (e: ClipboardEvent) => {
       const t = e.target;
       if (t instanceof Element && t.closest("input, textarea, [contenteditable='true']")) return;
@@ -3466,7 +3673,7 @@ function Composer({
     };
     document.addEventListener("paste", onPaste);
     return () => document.removeEventListener("paste", onPaste);
-  }, []);
+  }, [armed]);
 
   const applyMode = (m: PermissionMode) => {
     const prev = mode;

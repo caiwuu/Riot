@@ -20,7 +20,7 @@ use riot_protocol::tool::{
 use serde::Deserialize;
 
 use super::path;
-use super::precondition::{check_fresh, verify_unchanged};
+use super::precondition::{ensure_loaded, verify_unchanged};
 use super::text;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -52,7 +52,8 @@ impl Tool for Edit {
     fn prompt(&self, _ctx: &PromptContext) -> String {
         "修改文件中的一段文本。\n\
          \n\
-         - 修改之前必须先用 Read 完整读过这个文件。\n\
+         - 改之前最好先 Read 看过相关位置；系统会自行载入全文做唯一性检查，\
+         不必为了过关再读一遍整文件。\n\
          - `old_string` 要和文件内容逐字符一致，**不要带 Read 显示的行号**。\n\
          - `old_string` 必须在文件里唯一。如果它出现多次，加上前后几行\
          上下文让它唯一，或者用 `replace_all`。\n\
@@ -119,9 +120,9 @@ impl Tool for Edit {
             .await
             .map_err(|e| ValidationError::rejected(e.for_model()))?;
 
-        let state = check_fresh(&resolved, ctx)
+        let state = ensure_loaded(&resolved, ctx)
             .await
-            .map_err(|s| ValidationError::rejected(s.for_model(&parsed.path)))?;
+            .map_err(ValidationError::rejected)?;
 
         // 唯一性在这里先查一次，让模型在权限弹窗之前就拿到反馈。
         // call() 里还会再查 —— 那次才是决定性的。
@@ -141,9 +142,9 @@ impl Tool for Edit {
             Err(e) => return ToolOutcome::failed(e.for_model()),
         };
 
-        let state = match check_fresh(&resolved, &ctx).await {
+        let state = match ensure_loaded(&resolved, &ctx).await {
             Ok(s) => s,
-            Err(stale) => return ToolOutcome::failed(stale.for_model(&parsed.path)),
+            Err(msg) => return ToolOutcome::failed(msg),
         };
 
         // TOCTOU 复查。validate_input 到这里之间隔着权限弹窗，

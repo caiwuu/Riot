@@ -1,10 +1,11 @@
-import { memo, useEffect, useState } from "react";
+import { memo, startTransition, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { readImage } from "../bridge";
 import type { Item } from "../hooks/useSession";
 import { Chevron } from "./Chevron";
 import { useEscLayer } from "./Modal";
+import { SmoothFold } from "./SmoothFold";
 
 type Tool = Extract<Item, { kind: "tool" }>;
 
@@ -29,8 +30,20 @@ function todosOf(t: Tool): TodoInput[] {
  *
  * memo：流式输出时 transcript 每帧重渲染，历史工具卡片不该跟着刷。
  */
-export const ToolCard = memo(function ToolCard({ tool }: { tool: Tool }) {
+export const ToolCard = memo(function ToolCard({
+  tool,
+  eager = false,
+}: {
+  tool: Tool;
+  /**
+   * 贴底的那几条立刻画详情。其余的等进视野再挂 —— Edit/Write 默认
+   * 展开，长会话里几十份 diff 一起进 DOM 会把切回卡成白屏。
+   */
+  eager?: boolean;
+}) {
   const [userToggle, setUserToggle] = useState<boolean | null>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
+  const [near, setNear] = useState(eager);
   // 图片结果（截图、读图）默认展开：截图的意义就是给人看，藏在"展开"
   // 后面的话用户不知道图已经在这里了，会转头让模型"把图贴出来"。
   // Edit / Write 也默认展开：用户要看的就是改了什么、写了什么。
@@ -45,8 +58,30 @@ export const ToolCard = memo(function ToolCard({ tool }: { tool: Tool }) {
     (Boolean(tool.resultImage || tool.resultImagePath) ||
       tool.name === "Edit" ||
       tool.name === "Write");
-  const detail = renderDetail(tool);
+  const detail = hasDetail(tool);
   const summary = summarize(tool);
+
+  useEffect(() => {
+    if (near) return;
+    const el = cardRef.current;
+    if (!el) return;
+    const root = el.closest(".transcript");
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          io.disconnect();
+          startTransition(() => setNear(true));
+        }
+      },
+      { root: root instanceof Element ? root : null, rootMargin: "800px 0px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [near]);
+
+  useEffect(() => {
+    if (eager) setNear(true);
+  }, [eager]);
 
   // 摘要行被 CSS 截成一行，title 兜底让全文悬停可见 —— 长 Bash 命令
   // 在展开区还有完整版（见 renderDetail）。
@@ -66,11 +101,14 @@ export const ToolCard = memo(function ToolCard({ tool }: { tool: Tool }) {
   );
 
   return (
-    <div className={`tool tool-${tool.status}`}>
+    <div ref={cardRef} className={`tool tool-${tool.status}`}>
       {detail ? (
         <button
           className="tool-head"
-          onClick={() => setUserToggle(!open)}
+          onClick={() => {
+            setNear(true);
+            setUserToggle(!open);
+          }}
           type="button"
           aria-expanded={open}
         >
@@ -82,7 +120,11 @@ export const ToolCard = memo(function ToolCard({ tool }: { tool: Tool }) {
         <div className="tool-head">{head}</div>
       )}
 
-      {open && detail ? <div className="tool-detail">{detail}</div> : null}
+      {detail ? (
+        <SmoothFold open={open && near}>
+          <div className="tool-detail">{renderDetail(tool)}</div>
+        </SmoothFold>
+      ) : null}
     </div>
   );
 });
@@ -203,6 +245,19 @@ export function summarize(t: Tool): string {
 /** 超长才截，截了要看得出来 —— 没有省略号的硬截像话说了一半。 */
 function clip(s: string, max: number): string {
   return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
+}
+
+/** 有没有值得展开的内容。只读字段，不建 React 树。 */
+function hasDetail(t: Tool): boolean {
+  if (t.name === "TodoWrite") return todosOf(t).length > 0;
+  if (t.resultImage || t.resultImagePath) return true;
+  if (t.output.length > 0) return true;
+  if (t.status !== "running" && t.result) return true;
+  const i = t.input as Record<string, unknown>;
+  if (t.name === "Bash" && typeof i.command === "string" && i.command) return true;
+  if (t.name === "Edit" && (i.old_string || i.new_string)) return true;
+  if (t.name === "Write" && typeof i.content === "string" && i.content) return true;
+  return false;
 }
 
 /**

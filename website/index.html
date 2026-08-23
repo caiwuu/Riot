@@ -1,0 +1,570 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Riot — 跑在本机的 AI Agent</title>
+    <meta
+      name="description"
+      content="Riot 是本地桌面 AI Agent。模型走你自己的 API，工具在本机执行，写文件和跑命令默认先问再做。macOS 与 Windows 双平台。"
+    />
+    <meta property="og:title" content="Riot — 跑在本机的 AI Agent" />
+    <meta
+      property="og:description"
+      content="模型走你自己的 API，工具在本机执行，写文件和跑命令默认先问再做。"
+    />
+    <meta property="og:type" content="website" />
+    <link rel="icon" href="assets/riot-logo.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body id="top">
+    <!-- 全站背景质感层 -->
+    <div class="bg" aria-hidden="true">
+      <div class="bg-noise"></div>
+    </div>
+    <div class="cursor-mark" id="cursor-mark" aria-hidden="true"></div>
+
+    <!-- 导航 -->
+    <header class="nav" id="nav">
+      <div class="container nav-inner">
+        <a class="brand" href="#top" aria-label="Riot 首页">
+          <span class="brand-mark" aria-hidden="true">
+            <img src="assets/riot-logo.png" alt="" style="width: 100%; height: 100%" />
+          </span>
+          <span class="brand-name">RIOT</span>
+        </a>
+
+        <nav class="nav-links" aria-label="主导航">
+          <a href="#product">产品</a>
+          <a href="#features">能力</a>
+          <a href="#security">安全</a>
+          <a href="#download">下载</a>
+        </nav>
+
+        <div class="nav-cta">
+          <a
+            class="nav-github"
+            href="https://github.com/caiwuu/Riot"
+            target="_blank"
+            rel="noopener"
+            aria-label="GitHub 仓库"
+          >
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+              <path
+                d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.55 0-.27-.01-1.17-.02-2.12-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.03 1.76 2.69 1.25 3.35.96.1-.75.4-1.25.72-1.54-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.28 1.18-3.09-.12-.29-.51-1.46.11-3.05 0 0 .96-.31 3.16 1.18a11 11 0 0 1 5.76 0c2.2-1.49 3.16-1.18 3.16-1.18.62 1.59.23 2.76.11 3.05.74.81 1.18 1.83 1.18 3.09 0 4.42-2.69 5.39-5.26 5.68.41.35.78 1.05.78 2.12 0 1.53-.01 2.76-.01 3.14 0 .3.2.67.8.55A11.52 11.52 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z"
+              />
+            </svg>
+          </a>
+          <a class="btn btn-primary btn-sm js-primary-download" href="#download">下载</a>
+          <button class="nav-burger" id="nav-burger" aria-label="打开菜单" aria-expanded="false">
+            <span></span><span></span><span></span>
+          </button>
+        </div>
+      </div>
+
+      <div class="mobile-menu" id="mobile-menu">
+        <a href="#product">产品</a>
+        <a href="#features">能力</a>
+        <a href="#security">安全</a>
+        <a href="#download">下载</a>
+        <a class="btn btn-primary js-primary-download" href="#download">下载 Riot</a>
+      </div>
+    </header>
+
+    <main>
+      <!-- Hero -->
+      <section class="hero" id="hero">
+        <div class="hero-sky" aria-hidden="true">
+          <canvas id="agent-field" class="agent-field-canvas"></canvas>
+          <div class="hero-veil"></div>
+        </div>
+        <div class="container hero-inner">
+          <div class="hero-badge" data-reveal>
+            <span class="hero-badge-dot" aria-hidden="true"></span>
+            本地执行 · 权限默认询问
+          </div>
+
+          <h1 class="hero-title" data-reveal data-reveal-delay="1">
+            <span class="hero-title-logo" aria-hidden="true" style="filter: none">
+              <img src="assets/riot-logo.png" alt="" style="width: 100%; height: 100%" />
+            </span>
+            <span class="hero-title-text">Riot</span>
+          </h1>
+
+          <p class="hero-sub" data-reveal data-reveal-delay="2">
+            一款轻量、强大的<strong>智能体工作台</strong>。
+          </p>
+
+          <div class="hero-actions" data-reveal data-reveal-delay="3">
+            <a
+              class="btn btn-primary btn-lg js-primary-download"
+              href="#download"
+              id="hero-download"
+            >
+              <span class="btn-os-icon" id="hero-os-icon" aria-hidden="true"></span>
+              <span id="hero-download-label">前往下载</span>
+            </a>
+            <a class="btn btn-ghost btn-lg" href="#download">全部下载选项</a>
+          </div>
+          <p class="hero-meta" data-reveal data-reveal-delay="3">
+            <span id="hero-download-meta">macOS 与 Windows 双平台</span> ·
+            <span class="js-version">v0.1.0</span> · 免费且 MIT 开源
+          </p>
+
+          <ul class="hero-chips" data-reveal data-reveal-delay="4">
+            <li>Rust 独立内核</li>
+            <li>内置终端 · 浏览器</li>
+            <li>文档产物交付</li>
+            <li>macOS · Windows</li>
+          </ul>
+        </div>
+
+        <!-- 产品主视觉截图 -->
+        <div class="container hero-shot-wrap" data-reveal data-reveal-delay="5">
+          <div class="hero-shot">
+            <div class="window">
+              <div class="window-bar">
+                <span class="dot dot-r"></span><span class="dot dot-y"></span
+                ><span class="dot dot-g"></span>
+                <span class="window-title">Riot — ~/code/your-project</span>
+              </div>
+              <img
+                src="assets/app-screenshot.png"
+                alt="Riot 应用界面截图"
+                width="3022"
+                height="1890"
+              />
+            </div>
+            <div class="hero-shot-glow" aria-hidden="true"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 模型跑马灯 -->
+      <section class="marquee-band" aria-label="支持的模型服务">
+        <p class="marquee-label">自带模型 · 接上你已有的 API</p>
+        <div class="marquee">
+          <div class="marquee-track">
+            <span>OpenAI 兼容</span><i></i><span>Anthropic Messages</span><i></i
+            ><span>DeepSeek</span><i></i><span>Kimi</span><i></i><span>Qwen</span><i></i
+            ><span>OpenRouter</span><i></i><span>vLLM</span><i></i><span>Ollama</span><i></i>
+            <span>OpenAI 兼容</span><i></i><span>Anthropic Messages</span><i></i
+            ><span>DeepSeek</span><i></i><span>Kimi</span><i></i><span>Qwen</span><i></i
+            ><span>OpenRouter</span><i></i><span>vLLM</span><i></i><span>Ollama</span><i></i>
+          </div>
+        </div>
+      </section>
+
+      <!-- 产品支柱 -->
+      <section class="section" id="product">
+        <div class="container">
+          <div class="section-head" data-reveal>
+            <p class="eyebrow">产品</p>
+            <h2>一扇窗口，把活干完</h2>
+            <p class="section-sub">
+              Agent
+              读仓库、改代码、写文档、跑命令，全部发生在你的机器上，不把项目交到别人的云端执行环境。
+            </p>
+          </div>
+
+          <div class="trio-grid">
+            <article class="trio-card" data-reveal>
+              <span class="trio-num">01</span>
+              <h3>独立内核</h3>
+              <p class="trio-tag">分进程 · 文档产物</p>
+              <p>
+                宿主与内核分进程，Agent 崩溃不拖垮窗口。Word / Excel / PPT / PDF
+                按需装运行时，渲成页面后再交付。
+              </p>
+            </article>
+            <article class="trio-card" data-reveal data-reveal-delay="1">
+              <span class="trio-num">02</span>
+              <h3>权限与扩展</h3>
+              <p class="trio-tag">先问再做 · 可插拔</p>
+              <p>Skills、斜杠命令、Hooks、MCP、项目记忆。权限默认询问，规划模式先写计划再动手。</p>
+            </article>
+            <article class="trio-card" data-reveal data-reveal-delay="2">
+              <span class="trio-num">03</span>
+              <h3>一体工作台</h3>
+              <p class="trio-tag">对话 · 终端 · 浏览器</p>
+              <p>
+                侧栏会话、流式对话、内嵌终端、内置浏览器、Git 改动面板。<code>@</code>
+                引用、拖放与粘贴附件。
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- 能力 Bento -->
+      <section class="section" id="features">
+        <div class="container">
+          <div class="section-head" data-reveal>
+            <p class="eyebrow">它做什么</p>
+            <h2>交代任务，剩下的交给 Riot</h2>
+            <p class="section-sub">
+              打开一个项目，用自然语言交代任务。Riot
+              会搜索、阅读、编辑、执行，并在需要你拍板时停下来。
+            </p>
+          </div>
+
+          <div class="bento">
+            <!-- 文档能力 -->
+            <article class="bento-card span-4" data-reveal>
+              <div class="bento-icon" aria-hidden="true">
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                  <path d="M14 2v6h6" />
+                  <path d="M8 13h8M8 17h5" />
+                </svg>
+              </div>
+              <h3>Word、Excel、PPT、PDF，一个都不少</h3>
+              <p>
+                表格走真实公式求值；Word / PPT / PDF 渲成页面图，模型逐页看过再交付。机器上不必预装
+                Python、Node 或 LibreOffice——装上文档运行时即可。
+              </p>
+              <div class="file-badges" aria-hidden="true">
+                <span class="fb fb-docx">DOCX</span>
+                <span class="fb fb-xlsx">XLSX</span>
+                <span class="fb fb-pptx">PPTX</span>
+                <span class="fb fb-pdf">PDF</span>
+              </div>
+            </article>
+
+            <!-- 规划模式 -->
+            <article class="bento-card span-2" data-reveal data-reveal-delay="1">
+              <div class="bento-icon" aria-hidden="true">
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <circle cx="12" cy="12" r="10" />
+                  <path d="m15.5 8.5-2 5-5 2 2-5z" />
+                </svg>
+              </div>
+              <h3>规划后再动手</h3>
+              <p>规划模式只读侦察并写出计划，你批准后才改代码。</p>
+              <ol class="plan-steps" aria-hidden="true">
+                <li>只读侦察</li>
+                <li>写出计划</li>
+                <li>批准执行</li>
+              </ol>
+            </article>
+
+            <!-- 权限档位 -->
+            <article class="bento-card span-2" data-reveal>
+              <div class="bento-icon" aria-hidden="true">
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path d="M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z" />
+                </svg>
+              </div>
+              <h3>六档权限，随时切换</h3>
+              <p>默认档位每次询问；需要放开时，可限制命令只在工作区里改文件，或再掐掉联网。</p>
+              <div class="perm-pills" aria-hidden="true">
+                <span>每次询问</span><span>自动接受编辑</span><span>规划</span><span>自动判危</span
+                ><span>全部放行</span><span>无人值守</span>
+              </div>
+            </article>
+
+            <!-- 终端与浏览器 -->
+            <article class="bento-card span-4" data-reveal data-reveal-delay="1">
+              <div class="bento-icon" aria-hidden="true">
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <rect x="2" y="4" width="20" height="16" rx="2" />
+                  <path d="m6 9 3 3-3 3M12 15h6" />
+                </svg>
+              </div>
+              <h3>看见同一份环境</h3>
+              <p>
+                内嵌终端可共享给
+                Agent；内置浏览器与对话共用同一页，模型点、输、截图时你也能看见；右侧随时切到 Git
+                改动。
+              </p>
+              <div class="terminal" aria-hidden="true">
+                <div class="terminal-bar">
+                  <span class="dot dot-r"></span><span class="dot dot-y"></span
+                  ><span class="dot dot-g"></span
+                  ><span class="terminal-title">riot · 会话终端</span>
+                </div>
+                <div class="terminal-body">
+                  <p class="t-line" style="--i: 0">
+                    <span class="t-prompt">›</span> 把 CHANGELOG 整理成发布公告，配一份 PPT
+                  </p>
+                  <p class="t-line t-dim" style="--i: 1">
+                    <span class="t-mark t-run">●</span> 读取 CHANGELOG.md · 3.2 KB
+                  </p>
+                  <p class="t-line t-dim" style="--i: 2">
+                    <span class="t-mark t-run">●</span> 生成 announcement.docx · 渲染页面预览
+                  </p>
+                  <p class="t-line" style="--i: 3">
+                    <span class="t-mark t-ask">✋</span> 写入 release.pptx —— 需要你的允许
+                    <span class="t-btn">允许</span><span class="t-btn t-btn-ghost">拒绝</span>
+                  </p>
+                  <p class="t-line t-dim" style="--i: 4">
+                    <span class="t-mark t-run">●</span> 逐页检查 12 张幻灯片…
+                  </p>
+                  <p class="t-line" style="--i: 5">
+                    <span class="t-mark t-ok">✓</span> 已交付 announcement.docx · release.pptx
+                  </p>
+                </div>
+              </div>
+            </article>
+
+            <!-- 自带模型 -->
+            <article class="bento-card span-3" data-reveal>
+              <div class="bento-icon" aria-hidden="true">
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <rect x="4" y="4" width="16" height="16" rx="3" />
+                  <path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3" />
+                </svg>
+              </div>
+              <h3>自带模型，key 不出本机</h3>
+              <p>
+                OpenAI 兼容或 Anthropic Messages，DeepSeek、Kimi、Qwen、OpenRouter、vLLM、Ollama
+                都能接。API key 单独存在 <code>auth.json</code>（权限 0600），不进普通配置。
+              </p>
+            </article>
+
+            <!-- 可扩展 -->
+            <article class="bento-card span-3" data-reveal data-reveal-delay="1">
+              <div class="bento-icon" aria-hidden="true">
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path d="M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
+                </svg>
+              </div>
+              <h3>改完即生效的扩展体系</h3>
+              <p>Skills、斜杠命令、Hooks、MCP、项目记忆。改完下一轮对话生效，不用重启。</p>
+              <div class="code-chips" aria-hidden="true">
+                <code>/git:pr</code><code>@src/App.tsx</code><code>$ARGUMENTS</code
+                ><code>SKILL.md</code>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- 安全与设计原则 -->
+      <section class="section section-security" id="security">
+        <div class="container security-grid">
+          <div class="security-copy" data-reveal>
+            <p class="eyebrow">设计原则</p>
+            <h2>默认不信任工具，<br />也不把执行权交给远端</h2>
+            <ul class="principles">
+              <li>
+                <h4>本地执行</h4>
+                <p>读仓库、改文件、跑命令都在本机。云端只发生在你配置的模型 API。</p>
+              </li>
+              <li>
+                <h4>Fail-closed</h4>
+                <p>工具默认会写、默认需要权限；shell 解析不了就问人。</p>
+              </li>
+              <li>
+                <h4>崩溃隔离</h4>
+                <p>内核是独立进程。Agent 卡住或崩溃时，窗口还能提示重启，不会整窗一起掉。</p>
+              </li>
+              <li>
+                <h4>错误回到对话</h4>
+                <p>工具失败会作为结果喂回模型，让它自己纠正，而不是把主循环打断。</p>
+              </li>
+            </ul>
+          </div>
+
+          <div class="security-visual" data-reveal data-reveal-delay="2" aria-hidden="true">
+            <div class="perm-dialog">
+              <div class="perm-dialog-head">
+                <span class="perm-dialog-icon">✋</span>
+                <div>
+                  <p class="perm-dialog-title">权限请求</p>
+                  <p class="perm-dialog-sub">Agent 想要执行命令</p>
+                </div>
+              </div>
+              <div class="perm-dialog-cmd"><span>$</span> cargo test --workspace</div>
+              <p class="perm-dialog-path">位于 ~/code/your-project</p>
+              <div class="perm-dialog-actions">
+                <button class="pd-btn">拒绝</button>
+                <button class="pd-btn">允许一次</button>
+                <button class="pd-btn pd-btn-primary">本会话允许</button>
+              </div>
+            </div>
+            <div class="perm-toast">
+              <span class="perm-toast-icon">✓</span>
+              <span>写入 <code>src/App.tsx</code></span>
+              <span class="perm-toast-diff"><em class="add">+42</em> <em class="del">−7</em></span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 下载 -->
+      <section class="section section-download" id="download">
+        <div class="container">
+          <div class="dl-panel" data-reveal>
+            <div class="section-head">
+              <p class="eyebrow">下载</p>
+              <h2>立即下载体验Riot</h2>
+              <p class="section-sub" id="download-detect">
+                macOS 与 Windows 双平台，免费且 MIT 开源。
+              </p>
+            </div>
+
+            <div class="dl-grid">
+              <article class="dl-card" id="dl-card-mac">
+                <span class="dl-recommend" hidden>为你推荐</span>
+                <div class="dl-os-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="currentColor">
+                    <path
+                      d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09l.01-.01zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z"
+                    />
+                  </svg>
+                </div>
+                <h3>macOS 版</h3>
+                <p class="dl-req">macOS 12+ · Apple Silicon 与 Intel</p>
+                <p class="dl-desc">
+                  下载 .dmg，拖进「应用程序」即可。首次启动选择项目目录，在设置里粘贴 API key
+                  就能对话。
+                </p>
+                <a
+                  class="btn btn-primary btn-block js-dl-mac"
+                  href="https://github.com/caiwuu/Riot/releases/latest/download/Riot_0.1.0_aarch64.dmg"
+                  download
+                >
+                  下载 .dmg
+                </a>
+                <p class="dl-meta"><span class="js-version">v0.1.0</span> · 约 30 MB</p>
+              </article>
+
+              <article class="dl-card" id="dl-card-win">
+                <span class="dl-recommend" hidden>为你推荐</span>
+                <div class="dl-os-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="currentColor">
+                    <path
+                      d="M3 5.5 10.5 4.4v7.1H3V5.5ZM3 12.5h7.5v7.1L3 18.5v-6ZM11.5 4.25 21 3v8.5h-9.5V4.25ZM21 12.5V21l-9.5-1.35V12.5H21Z"
+                    />
+                  </svg>
+                </div>
+                <h3>Windows 版</h3>
+                <p class="dl-req">Windows 10 / 11 · x64</p>
+                <p class="dl-desc">
+                  NSIS
+                  安装包，下一步到底即可。同样首发全部能力：终端、浏览器、文档运行时与权限管线。
+                </p>
+                <a
+                  class="btn btn-primary btn-block js-dl-win"
+                  href="https://github.com/caiwuu/Riot/releases/latest/download/Riot_0.1.0_x64-setup.exe"
+                  download
+                >
+                  下载 .exe
+                </a>
+                <p class="dl-meta"><span class="js-version">v0.1.0</span> · 约 35 MB</p>
+              </article>
+            </div>
+
+            <p class="dl-foot">
+              需要 Linux 或想从源码构建？仓库自带完整构建脚本——<a
+                href="https://github.com/caiwuu/Riot"
+                target="_blank"
+                rel="noopener"
+                >前往 GitHub</a
+              >
+            </p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- 页脚 -->
+    <footer class="footer">
+      <div class="container footer-inner">
+        <div class="footer-brand">
+          <a class="brand" href="#top" aria-label="回到顶部">
+            <span class="brand-mark" aria-hidden="true">
+              <img src="assets/riot-logo.png" alt="" style="width: 100%; height: 100%" />
+            </span>
+            <span class="brand-name">RIOT</span>
+          </a>
+          <p>跑在本机的 AI Agent。<br />你的模型，你的机器，你的 Agent。</p>
+        </div>
+        <nav class="footer-col" aria-label="产品">
+          <h5>产品</h5>
+          <a href="#product">产品</a>
+          <a href="#features">能力</a>
+          <a href="#download">下载</a>
+        </nav>
+        <nav class="footer-col" aria-label="资源">
+          <h5>资源</h5>
+          <a href="https://github.com/caiwuu/Riot" target="_blank" rel="noopener">GitHub</a>
+          <a
+            href="https://github.com/caiwuu/Riot/blob/master/docs/ARCHITECTURE.md"
+            target="_blank"
+            rel="noopener"
+            >架构文档</a
+          >
+          <a href="https://github.com/caiwuu/Riot/releases" target="_blank" rel="noopener"
+            >更新日志</a
+          >
+        </nav>
+        <nav class="footer-col" aria-label="规范">
+          <h5>规范</h5>
+          <a
+            href="https://github.com/caiwuu/Riot/blob/master/LICENSE"
+            target="_blank"
+            rel="noopener"
+            >MIT 许可</a
+          >
+          <a href="#security">安全设计</a>
+        </nav>
+      </div>
+      <div class="container footer-bottom">
+        <p>© <span id="year">2026</span> Riot. 以 MIT 许可开源发布。</p>
+        <p>内核 Rust · 界面 Tauri + React</p>
+      </div>
+    </footer>
+
+    <script src="script.js"></script>
+  </body>
+</html>

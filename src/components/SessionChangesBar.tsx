@@ -19,14 +19,18 @@ export function SessionChangesBar({
   /** 变一次就重新拉一次。外层在每次编辑工具落盘时递增 ——
    *  跑轮中的改动要实时长出来,不能等到轮子结束。 */
   refreshKey,
+  paused = false,
 }: {
   sessionId: string;
   refreshKey: number;
+  /** 保活但不可见时别轮询。切回来 refreshKey 会再推一次。 */
+  paused?: boolean;
 }) {
   const [changes, setChanges] = useState<FileChange[] | null>(null);
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
+    if (paused) return;
     // alive 防的是快速切会话:先发的请求后返回,会把新会话的改动
     // 覆盖成旧会话的。
     let alive = true;
@@ -41,7 +45,7 @@ export function SessionChangesBar({
     return () => {
       alive = false;
     };
-  }, [sessionId, refreshKey]);
+  }, [sessionId, refreshKey, paused]);
 
   if (!changes?.length) return null;
 

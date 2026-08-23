@@ -426,16 +426,6 @@ MUTANTS = [
         "模型以为改的是这一处，实际改了另一处 —— 代码悄悄坏掉，不报错",
     ),
     (
-        "Partial 视图当成 Full",
-        "tools",
-        "tools/precondition.rs",
-        """    if let FileView::Partial { offset, limit } = state.view {
-        return Err(Staleness::PartialOnly { offset, limit });
-    }""",
-        "",
-        "模型只读了半个文件就改，把'这个函数只出现一次'当成事实",
-    ),
-    (
         "写入前只查 mtime 不比对内容",
         "tools",
         "tools/precondition.rs",
@@ -503,7 +493,7 @@ MUTANTS = [
         """        let view = if true {
             FileView::Full
         } else {""",
-        "Edit 的'必须完整读过'防线失效 —— 模型没看到全文就动手改",
+        "截断了却标 Full，模型会把半截文件当成全文",
     ),
     # ── Bash ──────────────────────────────────────────
     (

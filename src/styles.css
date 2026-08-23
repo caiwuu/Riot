@@ -87,9 +87,10 @@
   --accent: #5a8dd6;
   --accent-dim: #2a3d5c;
   /* 滚动条 thumb。用白透明而不是实心灰：叠在 --bg / --bg-side 上都是
-     一条淡痕，不会在侧栏里变成近白的硬条。hover 再抬一档。 */
-  --scrollbar-thumb: #ffffff22;
-  --scrollbar-thumb-hover: #ffffff3a;
+     一条淡痕，不会在侧栏里变成近白的硬条。hover 再抬一档。
+     别超过 ~10%：系统 overlay 默认就偏亮，我们要的是暗痕不是灰条。 */
+  --scrollbar-thumb: #ffffff12;
+  --scrollbar-thumb-hover: #ffffff22;
 
   /* 层级表：全应用的 z-index 只从这里取。右键菜单在弹窗之上 ——
      弹窗里也能点出右键菜单，反过来不成立。 */
@@ -119,7 +120,14 @@
    的 ::-webkit-scrollbar 规则就会被整体忽略（CSSWG 给旧伪元素定的迁移路径，
    WebKit 18.2 起实装）。macOS WKWebView 还会给 scrollbar-color 叠一层
    对比度，#52525c 这种实心灰会被抬成近白硬条 —— 所以标准属性只给
-   Firefox，WebKit / Chromium 走伪元素拿真实颜色。 */
+   Firefox，WebKit / Chromium 走伪元素拿真实颜色。
+
+   `[约束]` macOS 不许写 ::-webkit-scrollbar 几何。只要给了 width，
+   WKWebView 就把系统 overlay 打成 classic 常驻槽：既占一列宽度、又
+   一直亮着。macOS 交给系统 overlay（滚才出现、叠在内容上不占布局）。
+   Windows / Linux 没有这层 overlay，继续走下面的细条。
+   选择器避开 [data-vibrancy=mac]，并且默认（属性还没挂上时）也不写
+   几何 —— 否则首帧会闪出一条占位槽。 */
 @supports (-moz-appearance: none) {
   * {
     scrollbar-width: thin;
@@ -127,25 +135,49 @@
   }
 }
 
-*::-webkit-scrollbar {
+:is(html[data-vibrancy='win'], html:not([data-vibrancy])) *::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 
-*::-webkit-scrollbar-track,
-*::-webkit-scrollbar-corner {
+:is(html[data-vibrancy='win'], html:not([data-vibrancy])) *::-webkit-scrollbar-track,
+:is(html[data-vibrancy='win'], html:not([data-vibrancy])) *::-webkit-scrollbar-corner {
   background: transparent;
 }
 
-*::-webkit-scrollbar-thumb {
+:is(html[data-vibrancy='win'], html:not([data-vibrancy])) *::-webkit-scrollbar-thumb {
   background-color: var(--scrollbar-thumb);
   border-radius: 999px;
   border: 2px solid transparent;
   background-clip: padding-box;
 }
 
-*::-webkit-scrollbar-thumb:hover {
+:is(html[data-vibrancy='win'], html:not([data-vibrancy])) *::-webkit-scrollbar-thumb:hover {
   background-color: var(--scrollbar-thumb-hover);
+}
+
+/* macOS 系统 overlay 条太亮，而 ::-webkit-scrollbar 一写颜色就会打成
+   classic 常驻槽。原生条藏掉，滑块改由 .riot-osb 画（main.tsx）。 */
+html[data-vibrancy='mac'] *::-webkit-scrollbar {
+  display: none;
+}
+
+.riot-osb {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 5px;
+  border-radius: 999px;
+  background: var(--scrollbar-thumb);
+  pointer-events: none;
+  opacity: 0;
+  z-index: calc(var(--z-modal) + 1);
+  transition: opacity 0.22s ease;
+}
+
+.riot-osb.show {
+  opacity: 1;
+  transition-duration: 0.05s;
 }
 
 html,
@@ -591,10 +623,14 @@ pre {
 
 .threads {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  /* Chromium：叠在内容上，不占一列。不认 overlay 的引擎会丢掉这行，
+     落到上一行的 auto。macOS 不写 ::-webkit-scrollbar 几何，走系统
+     overlay：滚才出现。 */
+  overflow-y: overlay;
   margin-top: 14px;
-  /* 滚出侧栏的右内边距，滑块贴着分隔线；padding 把会话行推回原位，
-     避免字和圆角选中底被 8px 槽压住。 */
+  /* 滚出侧栏的右内边距，滑块贴着分隔线；padding 把会话行推回原位。 */
   margin-right: -10px;
   padding-right: 10px;
   display: flex;
@@ -616,17 +652,103 @@ pre {
   gap: 1px;
 }
 
+/* 高度不定的开合：0fr → 1fr 能过渡，max-height 会按上限算时间。 */
+.smooth-fold {
+  display: grid;
+  grid-template-rows: 0fr;
+  min-height: 0;
+  overflow: hidden;
+  transition: grid-template-rows 0.2s ease;
+}
+
+.smooth-fold.open {
+  grid-template-rows: 1fr;
+}
+
+.smooth-fold:not(.open) {
+  pointer-events: none;
+}
+
+.smooth-fold-inner {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.project.collapsed {
+  gap: 0;
+}
+
+.project-threads-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.project-toggle .chevron,
+.think-head .chevron,
+.fold-head .chevron,
+.tool-head .chevron {
+  transition: transform 0.2s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .smooth-fold,
+  .project-toggle .chevron,
+  .think-head .chevron,
+  .fold-head .chevron,
+  .tool-head .chevron {
+    transition: none;
+  }
+}
+
 .project-head {
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 5px 10px;
+  gap: 2px;
+  padding: 2px 4px 2px 6px;
+  border-radius: 8px;
   color: var(--text-dim);
   font-size: 13px;
 }
 
+/* hover 画在整行上，把旁边的 + / … 一起罩进去。折叠仍然只绑在
+   .project-toggle 上，点按钮不会折起来。 */
+.project-head:hover,
+.project-head:focus-within {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.project-head:hover .chevron,
+.project-head:focus-within .chevron {
+  color: var(--text-dim);
+}
+
 .project-head svg {
   flex-shrink: 0;
+}
+
+/* 项目名这一截是折叠开关。+ / … 是旁边的独立键，点它们不该折起来。 */
+.project-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 4px 4px 4px 2px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  text-align: left;
+}
+
+.project-toggle:hover:not(:disabled) {
+  background: transparent;
+  color: var(--text);
 }
 
 .project-name {
@@ -635,6 +757,14 @@ pre {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 500;
+}
+
+.project-count {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+  padding-right: 2px;
 }
 
 .row-btn {
@@ -677,7 +807,8 @@ pre {
   padding: 0 6px 0 0;
 }
 
-.thread:hover {
+.thread:hover,
+.thread:focus-within {
   background: var(--bg-hover);
 }
 
@@ -690,7 +821,8 @@ pre {
 .thread-label {
   flex: 1;
   min-width: 0;
-  padding: 6px 4px 6px 31px;
+  /* 对齐项目名：头 6 + 开关 2 + 箭头 14 + 缝 6 + 文件夹 14 + 缝 6 */
+  padding: 6px 4px 6px 48px;
   border: none;
   background: transparent;
   font-size: 13px;
@@ -701,7 +833,9 @@ pre {
   text-align: left;
 }
 
-.thread-label:hover {
+/* 标题是 button，全局 button:hover 会再铺一层。半透明 hover 叠两层
+   后标题比右边的 … 亮一截，看起来像高亮没罩到按钮。 */
+.thread .thread-label:hover:not(:disabled) {
   background: transparent;
 }
 
@@ -733,7 +867,7 @@ pre {
 }
 
 .rename-input {
-  margin: 0 6px 0 27px;
+  margin: 0 6px 0 44px;
   padding: 5px 8px;
   font-size: 13px;
   border-radius: 7px;
@@ -897,10 +1031,30 @@ pre {
 .chat-col {
   flex: 1;
   min-width: 0;
+  /* 隐藏的保活面板绝对定位叠在这一列里，要有定位根。 */
+  position: relative;
   display: flex;
   flex-direction: column;
   container-type: inline-size;
   container-name: chat;
+}
+
+/* 保活的会话树。切走不能 hidden / display:none —— 浏览器会把
+   滚动容器的 scrollTop 清成 0，往上翻过的会话切回来就跳到顶。
+   看不见、不占 flex，但尺寸还在，滚动位置才能留着。 */
+.chat-pane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-pane.is-hidden {
+  visibility: hidden;
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
 }
 
 /* 右侧抽屉：全高一列，和主区平级（Codex 同款）。宽度由内联样式给
@@ -4488,6 +4642,13 @@ pre {
   white-space: normal;
 }
 
+/* 还没 parse 的正文占位。进视野后换成 .md。 */
+.md-lazy {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.7;
+}
+
 .md > :first-child {
   margin-top: 0;
 }
@@ -5283,16 +5444,21 @@ pre {
 
 /* 改动视图里的滚动条走隐形路线：平时不占视线，悬停到滚动区域才
    现身。列表和 diff 都是"看内容"的地方，常驻的滚动条只是噪音。
-   （只盖 thumb 颜色、不动 scrollbar-width —— 见文件顶部的互斥约束。） */
-.changes-bar-list::-webkit-scrollbar-thumb,
-.changes-body::-webkit-scrollbar-thumb,
-.change-diff::-webkit-scrollbar-thumb {
+   （只盖 thumb 颜色、不动 scrollbar-width —— 见文件顶部的互斥约束。
+   macOS 不写伪元素，留给系统 overlay，避免又打成 classic 槽。） */
+:is(html[data-vibrancy='win'], html:not([data-vibrancy]))
+  .changes-bar-list::-webkit-scrollbar-thumb,
+:is(html[data-vibrancy='win'], html:not([data-vibrancy])) .changes-body::-webkit-scrollbar-thumb,
+:is(html[data-vibrancy='win'], html:not([data-vibrancy])) .change-diff::-webkit-scrollbar-thumb {
   background-color: transparent;
 }
 
-.changes-bar-list:hover::-webkit-scrollbar-thumb,
-.changes-body:hover::-webkit-scrollbar-thumb,
-.change-diff:hover::-webkit-scrollbar-thumb {
+:is(html[data-vibrancy='win'], html:not([data-vibrancy]))
+  .changes-bar-list:hover::-webkit-scrollbar-thumb,
+:is(html[data-vibrancy='win'], html:not([data-vibrancy]))
+  .changes-body:hover::-webkit-scrollbar-thumb,
+:is(html[data-vibrancy='win'], html:not([data-vibrancy]))
+  .change-diff:hover::-webkit-scrollbar-thumb {
   background-color: var(--scrollbar-thumb);
 }
 
@@ -5482,28 +5648,6 @@ pre {
 }
 
 /* ── 对话卡片 P2 批量修复 ───── */
-
-/* 展开内容高度不定，max-height 动画容易坏 —— 只做短淡入 */
-.tool-detail {
-  animation: tool-detail-in 0.12s ease-out;
-}
-
-@keyframes tool-detail-in {
-  from {
-    opacity: 0;
-    transform: translateY(2px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .tool-detail {
-    animation: none;
-  }
-}
 
 /* 长清单限高：限定 .todo-panel，不影响 ToolCard 快照里的同名类 */
 .todo-panel .todo-list {

@@ -236,7 +236,7 @@ fn resolve(raw: &str, cwd: &Path) -> Option<PathBuf> {
 ///
 /// `file_state` 是可选的工作集登记：登记之后模型可以直接 Edit 这个文件，
 /// 不用先 Read 一遍（先读后写协议认这份缓存）。截断过的内容登记成
-/// `Partial` —— 那道协议存在的意义就是"没看全就别改"。
+/// `Partial`（给模型看的范围），缓存里仍是全文。
 pub fn expand(mentions: &[Mention], file_state: Option<&dyn FileStateCache>) -> Vec<Attachment> {
     let mut out = Vec::new();
     let mut budget = MAX_TOTAL_CHARS;
@@ -295,7 +295,8 @@ pub fn expand(mentions: &[Mention], file_state: Option<&dyn FileStateCache>) -> 
         budget = budget.saturating_sub(body.chars().count());
 
         if let Some(fs) = file_state {
-            // 登记进工作集：模型可以直接改（截断的只算读了个开头）。
+            // 登记进工作集：模型可以直接改。截断只影响给模型看的那段，
+        // 缓存里是全文，Edit 按全文做唯一性检查。
             let view = if truncated {
                 FileView::Partial {
                     offset: 0,
@@ -690,7 +691,7 @@ mod tests {
 
     #[test]
     fn 超大文件截断且标成部分视图() {
-        // 没看全就允许 Edit，是"改坏文件"最常见的那条路。
+        // 给模型看的那段被截断，缓存仍登记成 Partial。
         let t = tempfile::tempdir().expect("目录");
         let f = t.path().join("big.txt");
         std::fs::write(&f, "x".repeat(MAX_FILE_CHARS + 100)).expect("写");
@@ -708,7 +709,7 @@ mod tests {
         }
         assert!(
             matches!(state.get(&f).expect("有").view, FileView::Partial { .. }),
-            "截断过的必须是 Partial，否则 Edit 会以为看过全文"
+            "截断过的必须是 Partial，否则模型会以为看过全文"
         );
     }
 

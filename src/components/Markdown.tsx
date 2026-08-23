@@ -1,4 +1,12 @@
-import { createContext, memo, useContext, useState } from "react";
+import {
+  createContext,
+  memo,
+  startTransition,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
@@ -120,6 +128,52 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
       >
         {text}
       </ReactMarkdown>
+    </div>
+  );
+});
+
+/**
+ * 视口外的正文先按纯文本占位，进视野再 parse。
+ *
+ * 切到长会话时上百条一起走 ReactMarkdown + highlight 会把主线程卡死，
+ * 表现为白屏。贴底的那几条（`eager`）立刻渲染，用户看到的就是最新对话。
+ */
+export const LazyMarkdown = memo(function LazyMarkdown({
+  text,
+  eager = false,
+}: {
+  text: string;
+  eager?: boolean;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [on, setOn] = useState(eager);
+
+  useEffect(() => {
+    if (eager) setOn(true);
+  }, [eager]);
+
+  useEffect(() => {
+    if (on) return;
+    const el = ref.current;
+    if (!el) return;
+    const root = el.closest(".transcript");
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          io.disconnect();
+          startTransition(() => setOn(true));
+        }
+      },
+      { root: root instanceof Element ? root : null, rootMargin: "1200px 0px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [on]);
+
+  if (on) return <Markdown text={text} />;
+  return (
+    <div ref={ref} className="md md-lazy">
+      {text}
     </div>
   );
 });

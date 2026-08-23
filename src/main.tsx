@@ -33,6 +33,51 @@ if (ua.includes("Mac")) {
 const root = document.getElementById("root");
 if (!root) throw new Error("#root 不存在");
 
+/* macOS 系统 overlay 滚动条在深色底上偏亮，又不能用 ::-webkit-scrollbar
+   改颜色（一写就把 overlay 打成占位槽）。藏掉原生条，滚动时自己画一条
+   更暗的滑块，叠在内容上、不占宽度。 */
+function installMacOverlayScrollbar() {
+  if (document.documentElement.dataset.vibrancy !== "mac") return;
+  document.querySelector(".riot-osb")?.remove();
+
+  const thumb = document.createElement("div");
+  thumb.className = "riot-osb";
+  thumb.setAttribute("aria-hidden", "true");
+  document.body.appendChild(thumb);
+
+  let hide = 0;
+  const show = (el: EventTarget | null) => {
+    if (!(el instanceof HTMLElement)) return;
+    if (el === document.documentElement || el === document.body) return;
+    const overflowY = getComputedStyle(el).overflowY;
+    if (overflowY !== "auto" && overflowY !== "scroll" && overflowY !== "overlay") {
+      return;
+    }
+    const { scrollTop, scrollHeight, clientHeight } = el;
+    if (scrollHeight - clientHeight < 2) {
+      thumb.classList.remove("show");
+      return;
+    }
+    const r = el.getBoundingClientRect();
+    const pad = 3;
+    const track = Math.max(0, r.height - pad * 2);
+    const h = Math.min(track, Math.max(18, (clientHeight / scrollHeight) * track));
+    const top = r.top + pad + (scrollTop / (scrollHeight - clientHeight)) * (track - h);
+    thumb.style.height = `${h}px`;
+    thumb.style.transform = `translate(${Math.round(r.right - 7)}px, ${Math.round(top)}px)`;
+    thumb.classList.add("show");
+    window.clearTimeout(hide);
+    hide = window.setTimeout(() => thumb.classList.remove("show"), 680);
+  };
+
+  document.addEventListener("scroll", (e) => show(e.target), {
+    capture: true,
+    passive: true,
+  });
+}
+
+installMacOverlayScrollbar();
+
 ReactDOM.createRoot(root).render(
   <React.StrictMode>
     <App />

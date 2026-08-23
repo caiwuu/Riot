@@ -2,6 +2,7 @@ import { memo, useEffect, useRef, useState } from "react";
 
 import type { Item } from "../hooks/useSession";
 import { Chevron } from "./Chevron";
+import { SmoothFold } from "./SmoothFold";
 import { summarize, ToolCard } from "./ToolCard";
 
 /** 能折进过程组的条目：思考和工具调用。 */
@@ -230,7 +231,7 @@ export const ProcessGroup = memo(
             </span>
           ) : null}
         </button>
-        {open ? (
+        <SmoothFold open={open}>
           <div className="fold-body">
             {items.map((it) =>
               it.kind === "thinking" ? (
@@ -241,7 +242,7 @@ export const ProcessGroup = memo(
             )}
             {thinkingText ? <ThinkingBlock text={thinkingText} live /> : null}
           </div>
-        ) : null}
+        </SmoothFold>
       </div>
     );
   },
@@ -315,11 +316,11 @@ export function ThinkingBlock({ text, live }: { text: string; live?: boolean }) 
           </span>
         ) : null}
       </button>
-      {open ? (
+      <SmoothFold open={open}>
         <div className="think-body" ref={bodyRef} onScroll={onBodyScroll}>
           {text}
         </div>
-      ) : null}
+      </SmoothFold>
     </div>
   );
 }
