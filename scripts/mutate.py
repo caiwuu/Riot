@@ -460,17 +460,10 @@ MUTANTS = [
         "Edit 的 call 依赖 validate_input 查过",
         "tools",
         "tools/edit.rs",
-        """        let state = match check_fresh(&resolved, &ctx).await {
-            Ok(s) => s,
-            Err(stale) => return ToolOutcome::failed(stale.for_model(&parsed.path)),
-        };""",
-        """        let state = match check_fresh(&resolved, &ctx).await {
-            Ok(s) => s,
-            Err(_) => match ctx.file_state.get(&resolved) {
-                Some(s) => s,
-                None => return ToolOutcome::failed("读取失败"),
-            },
-        };""",
+        """        if let Err(msg) = verify_unchanged(&resolved, &state.content, &ctx).await {
+            return ToolOutcome::failed(msg);
+        }""",
+        "",
         "权限弹窗那段时间里文件被改，call 不再复查 —— TOCTOU 防线消失",
     ),
     (

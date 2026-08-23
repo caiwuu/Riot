@@ -1,0 +1,20 @@
+name: Prepare host build inputs
+description: >
+  tauri-build 要求 sidecar 和浏览器 resources 路径存在，缺了直接 panic。
+  内核编一份真的（kernel_e2e 也要用）；浏览器只建空目录过存在性检查。
+
+inputs:
+  profile:
+    description: stage-kernel 的 profile（debug 或 release）
+    required: false
+    default: debug
+
+runs:
+  using: composite
+  steps:
+    - name: Stage kernel sidecar
+      run: node scripts/stage-kernel.mjs ${{ inputs.profile }}
+      shell: bash
+    - name: Placeholder browser bundle
+      run: mkdir -p crates/riot-browser/target/bundle/riot-browser.app crates/riot-browser/target/bundle/riot-browser
+      shell: bash

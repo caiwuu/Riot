@@ -683,28 +683,22 @@ def restore_stale():         # 启动时捡回上次没恢复的
 
 ## 7. CI 流水线
 
+两人小团队,日常 push 只拦干净机器上会漏的三类:协议生成物、内核 debug 测试、Windows 宿主。rustfmt、变异、release 复测、macOS host、混沌长跑放到 nightly / `workflow_dispatch`,避免改 UI 也被第二份清单卡住。
+
+host 的 sidecar / 浏览器占位抽在 `.github/actions/prepare-host`,`host` 和 `chaos-host` 共用,不要在某个 job 里手写一份。
+
 ```yaml
-jobs:
-  contract:
-    - cargo run -p riot-protocol --bin gen_schema
-    - git diff --exit-code schemas/ src/bridge/generated.ts
+# 每次 push / PR
+contract:  pnpm gen && git diff --exit-code schemas/ src/bridge/generated.ts
+test:      cargo clippy/test --workspace --exclude riot-host   # 含 golden / fault / e2e
+host:      Windows 上 cargo test -p riot-host                  # 先 prepare-host
 
-  check:
-    - cargo clippy --workspace --all-targets -- -D warnings
-    - cargo fmt --check
-
-  test:
-    - cargo test --workspace              # 含 debug 断言
-    - cargo test --workspace --release    # 确认 release 下也不炸
-
-  golden:
-    - cargo test -p riot-core --test golden
-
-  fault:
-    - cargo test -p riot-core --test fault_injection
-
-  chaos:            # 只在 nightly
-    - cargo test --release -- --ignored chaos_soak
+# nightly / 手动
+extra:         cargo test --workspace --exclude riot-host --release
+host (macOS):  与 Windows 同一套,只在 nightly 跑
+mutation:      scripts/mutate.py
+chaos:         cargo test -p riot-core --release chaos_soak
+chaos-host:    cargo test -p riot-host --release -- --ignored
 ```
 
 `[约束]` `cargo test --workspace` 必须在 debug 模式跑一遍,因为不变量断言只在 debug 下 panic。只跑 release 等于关掉了 L2 整层。

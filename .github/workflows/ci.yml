@@ -1,3 +1,5 @@
+# 两人小团队：日常 push 只拦「干净机器上内核还过、协议没漂、Windows 宿主还能编」。
+# rustfmt、变异、release 复测、macOS host、混沌长跑放到 nightly / 手动，避免改 UI 也被锚点卡住。
 name: CI
 
 on:
@@ -6,12 +8,12 @@ on:
   pull_request:
   schedule:
     - cron: "0 18 * * *"
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
-  # 内核侧的 job 不碰 Tauri，省掉 Linux 上那一大坨 WebKitGTK 系统依赖。
-  # 宿主由下面的 host job 在 macOS/Windows 上真机覆盖。
+  # 内核侧不碰 Tauri，省掉 Linux 上那一大坨 WebKitGTK。
   KERNEL_ONLY: --workspace --exclude riot-host
 
 jobs:
@@ -27,7 +29,6 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm }
       - run: pnpm install --frozen-lockfile
-      # gen 里带 tag 撞名检查：newtype variant 摊平后与外层 tag 同名会直接失败
       - run: pnpm gen
       - name: 检查协议生成物与 Rust 类型同步
         run: |
@@ -37,114 +38,58 @@ jobs:
           }
       - run: pnpm typecheck
 
-  lint:
+  # clippy 的 disallowed-methods 是安全闸；debug 测试带着 L2 不变量。
+  # golden / fault / e2e 都在 --workspace 里，不再拆 job 重编一遍。
+  test:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all --check
-      # clippy.toml 里的 disallowed-methods 是确定性防线，
-      # 这一步失败通常意味着有人绕过了注入的 trait
-      - run: cargo clippy ${{ env.KERNEL_ONLY }} --all-targets -- -D warnings
-
-  # L2 不变量断言只在 debug 下 panic，所以 debug 这一遍不能省
-  test-debug:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test ${{ env.KERNEL_ONLY }}
-
-  test-release:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test ${{ env.KERNEL_ONLY }} --release
-
-  # 宿主层必须双平台。macOS 用 WKWebView、Windows 用 WebView2，
-  # 进程组语义也完全不同（进程组 vs Job Object）——
-  # 只在一个平台开发，另一个平台的问题会攒到发布前才爆。
-  host:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # riot-host 的 build.rs（tauri-build）要求 externalBin 的内核二进制
-      # 已在 src-tauri/binaries/ 就位，缺了直接 panic —— 本地由
-      # pnpm tauri dev/build 顺手 stage，CI 得显式来一遍。
-      # kernel_e2e 也靠这一步产出的 target/debug/riot-kernel。
-      - run: node scripts/stage-kernel.mjs
-      # 浏览器 bundle 同理也是 tauri-build 检查的资源，但 CEF 有几百 MB，
-      # 不该是 CI 的前置条件 —— 给空占位目录过存在性检查。空目录里没有
-      # 可执行文件，宿主和 e2e 的"有没有打包"判据（executable_in）会正确
-      # 判成没打包：装 NoBrowser、浏览器用例跳过。
-      - run: mkdir -p crates/riot-browser/target/bundle/riot-browser.app crates/riot-browser/target/bundle/riot-browser
-        shell: bash
-      - run: cargo clippy -p riot-host --all-targets -- -D warnings
-      # 进程生命周期测试是这里最重要的一项：
-      # 孤儿进程泄漏在功能测试里完全看不出来
-      - run: cargo test -p riot-host
-
-  # L3 黄金回放。用例见 crates/riot-core/tests/golden/
-  golden:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p riot-core --test golden
-      # UPDATE_GOLDEN 会重写基准文件。真跑到了说明有人把它写进了脚本，
-      # 那等于把这层防线关掉 —— 基准会跟着代码一起漂，测什么都是绿的。
-      - name: 确认没人把基准更新固化进流程
+      - run: cargo clippy ${{ env.KERNEL_ONLY }} --all-targets -- -D warnings
+      - run: cargo test ${{ env.KERNEL_ONLY }}
+      - name: 确认没人把黄金基准更新固化进流程
         run: |
           git diff --exit-code crates/riot-core/tests/golden || {
             echo "::error::黄金基准在 CI 里被改写了"
             exit 1
           }
 
-  # L4 故障注入。用例见 docs/VERIFICATION.md §5.3
-  fault-injection:
+  # 本机是 Mac，跨平台回归全靠 Windows。macOS host 只在 nightly / 手动跑。
+  host:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    if: >
+      matrix.os == 'windows-latest' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/prepare-host
+      - run: cargo clippy -p riot-host --all-targets -- -D warnings
+      - run: cargo test -p riot-host
+
+  extra:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p riot-core --test fault_injection
+      # release 下 invariant! 不 panic，确认优化构建也不会炸
+      - run: cargo test ${{ env.KERNEL_ONLY }} --release
 
-  # L5 跨层端到端：真实组件接进主循环。
-  # 单独一个 job 是因为它抓的错误类型和上面几层不同 —— 两层各自都对，
-  # 但接缝上的契约不匹配。见 docs/VERIFICATION.md §1
-  end-to-end:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # 模型侧：原始 SSE 字节 → AgentEvent
-      - run: cargo test -p riot-providers --test end_to_end
-      # 工具侧：tool_use → 分批并发 → 保序 tool_result
-      - run: cargo test -p riot-tools --test with_agent_loop
-
-  # 变异测试：往权限层注入真实可能被写出来的 bug，检查测试抓不抓得住。
-  #
-  # 这一步验证的不是代码，是测试。权限是安全边界，"测试全绿"在这里
-  # 不够 —— 需要知道测试在实现被改坏时真的会红。
-  # 变异测试：验证测试本身有没有用。
-  # 分层跑是为了让失败直接指向出问题的那一层，也让两层能并行。
   mutation:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -154,15 +99,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # 锚点先查。锚点失效时变异脚本什么都不改，会假装"全部通过" ——
-      # 那比红灯危险，它给的是虚假的安全感。
       - run: python3 scripts/mutate.py --check-anchors
       - run: python3 scripts/mutate.py ${{ matrix.layer }}
 
-  # 混沌长跑，只在 nightly。
-  # 双平台是因为它跑的是并发与取消，调度差异在单平台上盖不住。
   chaos:
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -172,13 +113,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # release 下 invariant! 不 panic 而是记录，能一次跑完看到全部违规
       - run: cargo test -p riot-core --release chaos_soak -- --nocapture
 
-  # 宿主的进程启停长跑。不放进上面的矩阵是因为 riot-host 在 Linux 上
-  # 要拖一整套 WebKitGTK，而它测的进程组语义在 Linux 上和 macOS 一致。
   chaos-host:
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -188,4 +126,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/prepare-host
+        with:
+          profile: release
       - run: cargo test -p riot-host --release -- --ignored --nocapture
