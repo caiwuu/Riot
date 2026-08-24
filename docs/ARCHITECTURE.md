@@ -1553,11 +1553,20 @@ src/
 ├── bridge/           # 唯一允许调用宿主的地方
 │   ├── generated.ts  # 从 schemas/protocol.json 生成,不要手改
 │   └── index.ts      # 方法调用 + 事件订阅的封装
-├── components/       # 全部 UI 组件(Settings、ToolCard、权限弹窗……)
+├── components/       # UI 组件
+│   ├── Transcript.tsx  # 对话流:滚动语义(贴底/恢复)全在这里
+│   ├── Composer.tsx    # 输入区:contenteditable 编辑器、附件、斜杠菜单
+│   ├── Sidebar.tsx / Welcome.tsx / chrome.tsx  # 侧栏、欢迎页、窗口 chrome
+│   ├── pickers.tsx / icons.tsx                 # 下拉件与内联 SVG
+│   └── Settings、ToolCard、权限弹窗……
 ├── hooks/            # 会话状态(useSession 等,本地 state,没有用状态库)
-├── lib/              # 纯工具
-└── App.tsx           # 装配根
+├── lib/              # 纯工具(promptText:@引用/斜杠命令的解析,两侧共用)
+└── App.tsx           # 装配根:布局状态 + Chat 会话装配(~1100 行)
 ```
+
+`[约束]` `@` 引用和斜杠命令的**解析规则只有 `lib/promptText.ts` 一份**:
+Composer 发出去的标记和 Transcript 画回来的块靠同一份规则对上。在任何
+一侧就地写解析是在制造"发出去的引用画不回来"这类错位。
 
 `[约束]` **组件里不允许出现 `invoke(...)` 或 `listen(...)`。**全部走 `bridge/`。这层抽象是以后换宿主(Tauri → Electron 或反之)的唯一保险,一旦被绕过就失效了。
 
