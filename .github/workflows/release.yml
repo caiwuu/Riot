@@ -1,0 +1,136 @@
+# 打安装包并挂到 GitHub Release。日常 push 不跑 —— CEF 太重，不该挡 UI 改动。
+#
+# 触发：
+#   - 推 tag `Riot_0.1.0`（版本号对齐 src-tauri/tauri.conf.json）
+#   - Actions 里手动跑 Release（先出 draft，核对资产再发布）
+#
+# 官网下载地址按这个 tag 约定写：
+#   Riot_<ver>/Riot_<ver>_aarch64.dmg
+#   Riot_<ver>/Riot_<ver>_x64-setup.exe
+#
+# 未配置 Apple 证书时 macOS 仍能打出 dmg，只是没签名，别人要右键打开。
+# 需要公证时在仓库 Secrets 里加 APPLE_CERTIFICATE（p12 的 base64）、
+# APPLE_CERTIFICATE_PASSWORD、APPLE_ID、APPLE_PASSWORD、APPLE_TEAM_ID。
+name: Release
+
+on:
+  push:
+    tags:
+      - "Riot_*"
+      - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # 浏览器脚本和 cef-dll-sys 都认这个。放 workspace 里方便 cache。
+  CEF_PATH: ${{ github.workspace }}/.cef
+
+jobs:
+  bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: macOS
+          - os: windows-latest
+            name: Windows
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # 浏览器是独立 workspace，不写进来的话 CEF 绑定每次重编。
+          workspaces: |
+            . -> target
+            crates/riot-browser -> crates/riot-browser/target
+
+      - name: 缓存 CEF 二进制
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CEF_PATH }}
+          key: cef-${{ runner.os }}-${{ runner.arch }}-151.3
+
+      - name: 缓存 CEF 相关 cargo bin
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/export-cef-dir
+            ~/.cargo/bin/export-cef-dir.exe
+            ~/.cargo/bin/bundle-cef-app
+          key: cef-bins-${{ runner.os }}-151.3
+
+      - name: Windows 打开长路径 / MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: 拉取 CEF
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -d "$CEF_PATH/Chromium Embedded Framework.framework" || -f "$CEF_PATH/libcef.dll" || -f "$CEF_PATH/Release/libcef.dll" ]]; then
+            echo "CEF 缓存命中: $CEF_PATH"
+            exit 0
+          fi
+          if ! command -v export-cef-dir >/dev/null 2>&1; then
+            # 版本必须停在 151.3 这一线，和 crates/riot-browser 的 cef crate 对齐。
+            cargo install export-cef-dir --locked --version "151.6.0+151.3.18"
+          fi
+          export-cef-dir --force "$CEF_PATH"
+
+      - name: 打包内置浏览器
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            powershell -ExecutionPolicy Bypass -File scripts/build-browser.ps1
+          else
+            ./scripts/build-browser.sh
+          fi
+
+      - run: pnpm install --frozen-lockfile
+
+      # beforeBuildCommand 会再跑 stage-kernel / stage-browser / 前端构建。
+      # 浏览器包必须已经在 crates/riot-browser/target/bundle/，否则 stage-browser 直接失败。
+      - name: 打安装包并上传 Release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: Riot___VERSION__
+          releaseName: Riot __VERSION__
+          releaseBody: |
+            macOS：`Riot_*_aarch64.dmg`（Apple Silicon）
+            Windows：`Riot_*_x64-setup.exe`
+          # 手动跑先出 draft，推 tag 直接挂到正式 Release。
+          releaseDraft: ${{ github.event_name == 'workflow_dispatch' }}
+          prerelease: false
+          generateReleaseNotes: true
+          uploadUpdaterJson: false
+          uploadUpdaterSignatures: false
+          uploadWorkflowArtifacts: true
+          tauriScript: pnpm tauri
+          retryAttempts: 2
