@@ -89,6 +89,13 @@ jobs:
             echo "CEF 缓存命中: $CEF_PATH"
             exit 0
           fi
+          # Windows 不能在 bash 里 cargo install：Git Bash 的 /usr/bin/link.exe
+          # 会盖掉 MSVC 链接器，编 build script 直接挂。而且 Windows 的 CEF
+          # 本来就由 cef-dll-sys 在编 riot-browser 时下到 CEF_PATH，不必预拉。
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            echo "Windows 上 CEF 由 cef-dll-sys 在下一步下载"
+            exit 0
+          fi
           if ! command -v export-cef-dir >/dev/null 2>&1; then
             # 版本必须停在 151.3 这一线，和 crates/riot-browser 的 cef crate 对齐。
             cargo install export-cef-dir --locked --version "151.6.0+151.3.18"
@@ -107,18 +114,43 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # GitHub 没配 secret 时仍会把空字符串写进环境变量。tauri 只要看见
+      # APPLE_CERTIFICATE 就去 security import，空数据报
+      # `SecKeychainItemImport: parameters not valid`，包已经编出来了也打不成。
+      # 有内容才交给下一步；没配就走未签名 dmg（别人要右键打开）。
+      - name: 有证书才打开签名
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          _CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          _CERT_PW: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          _SIGN_ID: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          _APPLE_ID: ${{ secrets.APPLE_ID }}
+          _APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          _APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [[ -z "$_CERT" ]]; then
+            echo "未配置 APPLE_CERTIFICATE，打未签名 dmg"
+            exit 0
+          fi
+          {
+            echo "APPLE_CERTIFICATE<<EOF"
+            printf '%s\n' "$_CERT"
+            echo "EOF"
+            echo "APPLE_CERTIFICATE_PASSWORD=$_CERT_PW"
+            echo "APPLE_SIGNING_IDENTITY=$_SIGN_ID"
+            echo "APPLE_ID=$_APPLE_ID"
+            echo "APPLE_PASSWORD=$_APPLE_PASSWORD"
+            echo "APPLE_TEAM_ID=$_APPLE_TEAM_ID"
+          } >> "$GITHUB_ENV"
+          echo "已启用 Apple 签名（证书 ${#_CERT} 字节）"
+
       # beforeBuildCommand 会再跑 stage-kernel / stage-browser / 前端构建。
       # 浏览器包必须已经在 crates/riot-browser/target/bundle/，否则 stage-browser 直接失败。
       - name: 打安装包并上传 Release
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: Riot___VERSION__
           releaseName: Riot __VERSION__
