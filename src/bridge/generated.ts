@@ -7,8 +7,8 @@ export type AgentEvent =
       turn: number;
       type: "request_start";
     }
-  | StreamDelta
-  | Message
+  | AgentEventDelta
+  | AgentEventMessage
   | {
       payload: ProgressPayload;
       tool_use_id: string;
@@ -70,9 +70,22 @@ export type Transition =
  * **不进 transcript，黄金回放测试也会忽略它** —— 断言 Delta
  * 会让用例极其脆弱，改一点流式切分逻辑就全红。
  */
-export type StreamDelta = {
+export type AgentEventDelta = StreamDelta & {
   type: "delta";
-} & (
+};
+/**
+ * 流式增量的种类。
+ *
+ * `[约束]` tag 必须是 `kind`，不能是 `type`。
+ *
+ * `AgentEvent::Delta` 是 newtype variant，serde 的 internally-tagged 表示会把
+ * 这里的字段**摊平**到 AgentEvent 那一层。两边都叫 `type` 的话，序列化产物是
+ * `{"type":"delta","type":"text",...}` —— 重复 key，反序列化直接报
+ * `duplicate field`，前端一个 token 都收不到。
+ *
+ * 由 `every_event_variant_roundtrips` 断言。
+ */
+export type StreamDelta =
   | {
       kind: "text";
       message_id: string;
@@ -92,14 +105,14 @@ export type StreamDelta = {
       kind: "tool_input";
       partial_json: string;
       tool_use_id: string;
-    }
-);
+    };
 /**
  * 一条完整消息。可持久化、可回放、可送回模型。
  */
-export type Message = {
+export type AgentEventMessage = Message & {
   type: "message";
-} & (
+};
+export type Message =
   | {
       content: UserContent[];
       id: string;
@@ -118,8 +131,7 @@ export type Message = {
       level: SystemLevel;
       role: "system";
       text: string;
-    }
-);
+    };
 export type UserContent =
   | {
       text: string;
@@ -131,7 +143,7 @@ export type UserContent =
       tool_use_id: string;
       type: "tool_result";
     }
-  | Attachment;
+  | UserContentAttachment;
 export type ToolResultContent =
   | {
       text: string;
@@ -193,9 +205,10 @@ export type ToolResultContent =
 /**
  * 文件引用、图片、系统提醒。展开时机由上下文管理层决定。
  */
-export type Attachment = {
+export type UserContentAttachment = Attachment & {
   type: "attachment";
-} & (
+};
+export type Attachment =
   | {
       content: string;
       kind: "memory";
@@ -235,8 +248,7 @@ export type Attachment = {
        * 给模型的转述，自带"当作亲眼所见"的使用指示。
        */
       text: string;
-    }
-);
+    };
 export type AssistantContent =
   | {
       text: string;
@@ -279,6 +291,42 @@ export type ProgressPayload =
       kind: "nested";
     };
 export type OutputStream = "stdout" | "stderr";
+export type AskPreview =
+  | {
+      command: string;
+      cwd: string;
+      kind: "command";
+    }
+  | {
+      diff: string;
+      kind: "file_edit";
+      path: string;
+    }
+  | {
+      bytes: number;
+      kind: "file_write";
+      lines: number;
+      path: string;
+      preview: string;
+      truncated: boolean;
+    }
+  | {
+      kind: "network_fetch";
+      url: string;
+    }
+  | {
+      kind: "plain";
+      text: string;
+    }
+  | {
+      /**
+       * 允许选多项。
+       */
+      allow_multiple: boolean;
+      kind: "choice";
+      options: AskChoiceOption[];
+      question: string;
+    };
 /**
  * 决策理由。UI 的解释、日志、遥测共用同一份数据。
  *
@@ -417,26 +465,6 @@ export type AgentError =
       kind: "internal";
       message: string;
     };
-export type Message1 =
-  | {
-      content: UserContent[];
-      id: string;
-      meta?: MessageMeta;
-      role: "user";
-    }
-  | {
-      content: AssistantContent[];
-      id: string;
-      meta?: MessageMeta;
-      role: "assistant";
-      usage?: Usage | null;
-    }
-  | {
-      id: string;
-      level: SystemLevel;
-      role: "system";
-      text: string;
-    };
 /**
  * 宿主对权限请求的应答。
  */
@@ -463,75 +491,29 @@ export type PermissionResponse =
  *
  * 可序列化是为了黄金回放：用例把模型响应存成 JSON，测试时原样喂回主循环。
  */
-export type ProviderEvent = StreamDelta1 | Message2 | Usage1 | ProviderError;
-/**
- * 流式增量的种类。
- *
- * `[约束]` tag 必须是 `kind`，不能是 `type`。
- *
- * `AgentEvent::Delta` 是 newtype variant，serde 的 internally-tagged 表示会把
- * 这里的字段**摊平**到 AgentEvent 那一层。两边都叫 `type` 的话，序列化产物是
- * `{"type":"delta","type":"text",...}` —— 重复 key，反序列化直接报
- * `duplicate field`，前端一个 token 都收不到。
- *
- * 由 `every_event_variant_roundtrips` 断言。
- */
-export type StreamDelta1 = {
+export type ProviderEvent = ProviderEventDelta | ProviderEventMessage | ProviderEventUsage | ProviderEventError;
+export type ProviderEventDelta = StreamDelta & {
   event: "delta";
-} & (
-  | {
-      kind: "text";
-      message_id: string;
-      text: string;
-    }
-  | {
-      kind: "thinking";
-      message_id: string;
-      text: string;
-    }
-  | {
-      kind: "tool_start";
-      name: string;
-      tool_use_id: string;
-    }
-  | {
-      kind: "tool_input";
-      partial_json: string;
-      tool_use_id: string;
-    }
-);
+};
 /**
  * 一条完整的助手消息。
  */
-export type Message2 = {
+export type ProviderEventMessage = Message & {
   event: "message";
-} & (
-  | {
-      content: UserContent[];
-      id: string;
-      meta?: MessageMeta;
-      role: "user";
-    }
-  | {
-      content: AssistantContent[];
-      id: string;
-      meta?: MessageMeta;
-      role: "assistant";
-      usage?: Usage | null;
-    }
-  | {
-      id: string;
-      level: SystemLevel;
-      role: "system";
-      text: string;
-    }
-);
+};
+/**
+ * 用量更新。累计值，用 [`Usage::merge`] 合并。
+ */
+export type ProviderEventUsage = Usage & {
+  event: "usage";
+};
 /**
  * 出错。**流在此结束**，不会再有后续事件。
  */
-export type ProviderError = {
+export type ProviderEventError = ProviderError & {
   event: "error";
-} & (
+};
+export type ProviderError =
   | {
       kind: "context_overflow";
       limit: number;
@@ -559,8 +541,7 @@ export type ProviderError = {
   | {
       kind: "refused";
       message: string;
-    }
-);
+    };
 /**
  * 内核 → 宿主，单向推送。
  */
@@ -609,7 +590,14 @@ export type RpcRequest =
   | {
       method: "turn.submit";
       params: {
+        /**
+         * 本轮的完整配置:模型端点、联网/视觉、limits、mode、会话设置。
+         * Box 是因为它比其它变体大得多,不装箱会把整个 enum 撑大。
+         */
         config: TurnConfig;
+        /**
+         * 用户原始输入(text/images/refs)。图片转述、`@` 展开、hook 都在内核做。
+         */
         input: TurnInput;
         session_id: string;
       };
@@ -617,7 +605,7 @@ export type RpcRequest =
   | {
       method: "turn.regenerate";
       params: {
-        config: TurnConfig1;
+        config: TurnConfig;
         /**
          * 要点重新生成的助手消息 id（不是界面条目 id）。
          */
@@ -748,6 +736,30 @@ export type RpcRequest =
  */
 export type ApiProtocol = "openai" | "anthropic";
 /**
+ * 命令的 OS 级隔离强度。和宿主 `config::SandboxMode` 同构。
+ */
+export type SandboxKind = "workspace_write" | "workspace_write_no_net" | "off";
+/**
+ * 会话级的思考策略。宿主存这个，主循环每次请求时解析成 [`ThinkingConfig`]。
+ *
+ * 策略和配置分开是因为 `Adaptive` 需要**每请求**决策（首请求 vs 工具续轮），
+ * 而会话设置只在轮子开始前读一次 —— 合成一个类型的话，自适应就只能整轮同档。
+ */
+export type ThinkingPolicy =
+  | {
+      mode: "default";
+    }
+  | {
+      mode: "adaptive";
+    }
+  | {
+      mode: "disabled";
+    }
+  | {
+      level: ThinkingEffort;
+      mode: "fixed";
+    };
+/**
  * 思考力度档。取值刻意与 OpenAI 的 `reasoning_effort` 对齐 ——
  * low/medium/high 是各家（OpenAI / DeepSeek / GLM）都接受的交集，
  * DeepSeek 和 GLM 会把 medium 兼容映射到 high。
@@ -768,7 +780,7 @@ export type RpcResponse =
         /**
          * 压缩边界之前的消息。模型看不见,界面画在分割线上面。
          */
-        archived: Message1[];
+        archived: Message[];
         /**
          * 有没有轮子在跑。决定界面显示停止键还是发送键。
          */
@@ -783,7 +795,7 @@ export type RpcResponse =
          * 正在流式生成的思考。症状同 `live_text`：思考块的字数清零重数。
          */
         live_thinking?: string;
-        messages: Message1[];
+        messages: Message[];
         /**
          * 还在等用户回答的权限询问。事件只发一次，弹窗跨"切走再切回"
          * 活下来靠这份快照。`default` 兼容旧 transcript 回放。
@@ -818,7 +830,7 @@ export type RpcResponse =
     }
   | {
       data: {
-        input?: TurnInput1 | null;
+        input?: TurnInput | null;
       };
       result: "queue_taken";
     }
@@ -883,7 +895,7 @@ export type RpcErrorCode = ("session_not_found" | "invalid_params" | "internal")
  */
 export interface ProtocolRoot {
   agent_event: AgentEvent;
-  message: Message1;
+  message: Message;
   permission_ask: PermissionAsk;
   permission_response: PermissionResponse;
   provider_event: ProviderEvent;
@@ -940,42 +952,7 @@ export interface PermissionAsk {
   /**
    * 结构化预览：diff、命令、URL。UI 据此渲染。
    */
-  preview:
-    | {
-        command: string;
-        cwd: string;
-        kind: "command";
-      }
-    | {
-        diff: string;
-        kind: "file_edit";
-        path: string;
-      }
-    | {
-        bytes: number;
-        kind: "file_write";
-        lines: number;
-        path: string;
-        preview: string;
-        truncated: boolean;
-      }
-    | {
-        kind: "network_fetch";
-        url: string;
-      }
-    | {
-        kind: "plain";
-        text: string;
-      }
-    | {
-        /**
-         * 允许选多项。
-         */
-        allow_multiple: boolean;
-        kind: "choice";
-        options: AskChoiceOption[];
-        question: string;
-      };
+  preview: AskPreview;
   reason: DecisionReason;
   suggestions: PermissionUpdate[];
   /**
@@ -1000,21 +977,11 @@ export interface AskChoiceOption {
   label: string;
 }
 /**
- * Token 用量。
+ * 提交一轮所需的完整配置(`turn.submit` 的 RPC 载荷,除用户输入之外的一切)。
  *
- * 注意：流式 API 报的是**累计值不是增量**。`message_delta` 里的
- * input/cache 字段可能回 0，直接覆盖会抹掉 `message_start` 的真值。
- * 累加时用 [`Usage::merge`]，它对这些字段做了 `> 0` 守卫。
- */
-export interface Usage1 {
-  cache_creation_tokens: number;
-  cache_read_tokens: number;
-  input_tokens: number;
-  output_tokens: number;
-}
-/**
- * 本轮的完整配置:模型端点、联网/视觉、limits、mode、会话设置。
- * Box 是因为它比其它变体大得多,不装箱会把整个 enum 撑大。
+ * 宿主从 `AppConfig` + 会话设置解析出它,内核据此现装 provider、联网、视觉、
+ * 子 agent、权限。**不含** MCP / Skill 工具:那些是 trait object,不能跨进程,
+ * 由内核自己从 MCP hub 和技能目录装配(见 M-B4b)。
  */
 export interface TurnConfig {
   /**
@@ -1026,8 +993,11 @@ export interface TurnConfig {
   /**
    * 会话权限模式。
    */
-  mode: "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "unattended" | "dontAsk";
-  model: ModelEndpoint1;
+  mode: PermissionMode;
+  /**
+   * 主模型端点。
+   */
+  model: ModelEndpoint;
   /**
    * 会话级 Python 虚拟环境根目录。
    */
@@ -1043,20 +1013,7 @@ export interface TurnConfig {
   /**
    * 会话级思考策略。
    */
-  thinking?:
-    | {
-        mode: "default";
-      }
-    | {
-        mode: "adaptive";
-      }
-    | {
-        mode: "disabled";
-      }
-    | {
-        level: ThinkingEffort;
-        mode: "fixed";
-      };
+  thinking?: ThinkingPolicy;
   vision: VisionSetup;
   web: WebSetup;
 }
@@ -1112,33 +1069,7 @@ export interface TurnLimits {
    * 单轮最多自主往返多少步。
    */
   max_turns: number;
-  /**
-   * 命令的 OS 级隔离强度。和宿主 `config::SandboxMode` 同构。
-   */
-  sandbox?: "workspace_write" | "workspace_write_no_net" | "off";
-}
-/**
- * 一个已解析的模型端点:宿主把 provider 配置和明文 key 都填好,内核直接
- * 拿它建 Provider。
- *
- * 这是 `config::ResolvedModel` 的"传输版" —— 区别在于 `api_key` 是**明文**
- * (宿主已从环境变量 / auth.json 解析出来),而不是一个待查的变量名。
- * 拆进程后内核拿不到 auth.json,key 必须在宿主这一侧解析完再传进来。
- */
-export interface ModelEndpoint1 {
-  /**
-   * 明文密钥。见模块文档的约束。
-   */
-  api_key: string;
-  /**
-   * 接口路径,空 = 按主机猜(见 `riot_providers::endpoint`)。
-   */
-  api_path: string;
-  base_url: string;
-  fallback_model?: string | null;
-  model: string;
-  protocol: ApiProtocol;
-  sampling?: EndpointSampling;
+  sandbox?: SandboxKind & string;
 }
 export interface PermissionRule {
   decision: RuleDecision;
@@ -1181,7 +1112,9 @@ export interface WebSetup {
   searxng_url?: string;
 }
 /**
- * 用户原始输入(text/images/refs)。图片转述、`@` 展开、hook 都在内核做。
+ * 用户这一轮发来的原始输入。图片转述、`@` 展开、UserPromptSubmit hook 都在
+ * 内核完成 —— 所以这里只传原始三样,内核据此构造最终消息(内核有 vision /
+ * mentions / hooks,宿主没有,不能在宿主构造一半)。
  */
 export interface TurnInput {
   images?: ImageInput[];
@@ -1194,57 +1127,6 @@ export interface TurnInput {
 export interface ImageInput {
   data: string;
   mediaType: string;
-}
-/**
- * 提交一轮所需的完整配置(`turn.submit` 的 RPC 载荷,除用户输入之外的一切)。
- *
- * 宿主从 `AppConfig` + 会话设置解析出它,内核据此现装 provider、联网、视觉、
- * 子 agent、权限。**不含** MCP / Skill 工具:那些是 trait object,不能跨进程,
- * 由内核自己从 MCP hub 和技能目录装配(见 M-B4b)。
- */
-export interface TurnConfig1 {
-  /**
-   * 只读侦察子 agent 的便宜档;也用于 Auto 模式的判危分类器。
-   * None = 跟主模型。
-   */
-  cheap_model?: ModelEndpoint | null;
-  limits: TurnLimits;
-  /**
-   * 会话权限模式。
-   */
-  mode: "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "unattended" | "dontAsk";
-  model: ModelEndpoint1;
-  /**
-   * 会话级 Python 虚拟环境根目录。
-   */
-  python_venv?: string | null;
-  /**
-   * 会话内累积的权限规则("总是允许"等)。
-   */
-  rules?: PermissionRule[];
-  /**
-   * 会话级追加系统提示词。
-   */
-  system_prompt_extra?: string | null;
-  /**
-   * 会话级思考策略。
-   */
-  thinking?:
-    | {
-        mode: "default";
-      }
-    | {
-        mode: "adaptive";
-      }
-    | {
-        mode: "disabled";
-      }
-    | {
-        level: ThinkingEffort;
-        mode: "fixed";
-      };
-  vision: VisionSetup;
-  web: WebSetup;
 }
 /**
  * MCP 服务器的启动描述。宿主从设置里组好(过滤掉未启用/没填完的),
@@ -1290,16 +1172,6 @@ export interface QueuedSummary {
    * 引用的文件路径。面板直接列出来(它们是路径,不重)。
    */
   refs: string[];
-  text: string;
-}
-/**
- * 用户这一轮发来的原始输入。图片转述、`@` 展开、UserPromptSubmit hook 都在
- * 内核完成 —— 所以这里只传原始三样,内核据此构造最终消息(内核有 vision /
- * mentions / hooks,宿主没有,不能在宿主构造一半)。
- */
-export interface TurnInput1 {
-  images?: ImageInput[];
-  refs?: string[];
   text: string;
 }
 export interface FileChange {

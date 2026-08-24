@@ -7,6 +7,7 @@
 //! 3. **级联**（[`scheduler`]）—— 级联范围搞错会误杀无关工具
 
 pub mod partition;
+pub mod redact;
 pub mod registry;
 pub mod scheduler;
 pub mod tools;

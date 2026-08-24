@@ -21,6 +21,18 @@ use riot_host_lib::browser::{Browser, Tab, ops};
 use riot_protocol::browser::{Command, Event, TabId};
 use tokio::sync::mpsc;
 
+/// 全部用例**串行**跑（每个用例开头 `SERIAL.lock().await`）。
+///
+/// 每个用例各起一整棵 Chromium 进程树。cargo test 默认按核数并行，
+/// 十几个 Chromium 同时抢 CPU 时，投屏帧、IME 组字这类时序断言会随机
+/// 超时 —— 全量跑已经偶发过两次（投屏缩放、IME 各一次），单独跑都绿。
+/// 那种红是纯噪音：查不出东西，还教人忽略红色。
+///
+/// 用 tokio 锁不用 std 锁：guard 要跨 `.await` 活着，std 的会踩
+/// await_holding_lock；panic 时 guard 随展开释放，不存在中毒。
+/// 代价是这个二进制变慢（串行起进程），换"红了就是真坏了"。
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// 每个用例一个独立 profile。
 ///
 /// `[约束]` 共用一个目录的话，并行跑的第二个实例会因为拿不到 Chromium 的
@@ -91,6 +103,7 @@ async fn wait_for(
 
 #[tokio::test]
 async fn 宿主能驱动浏览器加载页面并跑_cdp() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包，先跑 scripts/build-browser.sh");
         return;
@@ -156,6 +169,7 @@ async fn 宿主能驱动浏览器加载页面并跑_cdp() {
 /// 重启应用。
 #[tokio::test]
 async fn 进程退出后句柄不再声称自己活着() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -209,6 +223,7 @@ async fn 进程退出后句柄不再声称自己活着() {
 #[tokio::test]
 #[ignore = "会杀掉机器上所有 riot-browser，只能单独跑"]
 async fn 崩掉之后下一次调用会自己重开() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -258,6 +273,7 @@ async fn 崩掉之后下一次调用会自己重开() {
 
 #[tokio::test]
 async fn cdp_按_id_配对_并发调用不会串() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -304,6 +320,7 @@ async fn cdp_按_id_配对_并发调用不会串() {
 
 #[tokio::test]
 async fn cdp_的错误会翻出来而不是当成成功() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -337,6 +354,7 @@ async fn cdp_的错误会翻出来而不是当成成功() {
 
 #[tokio::test]
 async fn 高层操作在真实页面上成立() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -452,6 +470,7 @@ async fn 高层操作在真实页面上成立() {
 /// 有没有留在页面上（留了的话之后每张普通截图都带框）。
 #[tokio::test]
 async fn 叠框截图在真实页面成立() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -520,6 +539,7 @@ async fn 叠框截图在真实页面成立() {
 /// 不会有编译错误，只会在运行时变成"工具说浏览器不可用"。
 #[tokio::test]
 async fn 工具层能真的驱动浏览器() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -560,6 +580,7 @@ async fn 工具层能真的驱动浏览器() {
 /// 思路:断言"页面收到了"，而不是"命令发出去了"。
 #[tokio::test]
 async fn 点击和输入能驱动真实页面() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -685,6 +706,7 @@ async fn 点击和输入能驱动真实页面() {
 /// 和交互主用例同一个思路:断言"页面真的收到了"，而不是"命令发出去了"。
 #[tokio::test]
 async fn 扩展交互在真实页面成立() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -759,6 +781,7 @@ async fn 扩展交互在真实页面成立() {
 /// 抓包:开着累积、刷新后能列出请求，并能审计响应头。
 #[tokio::test]
 async fn 抓包在真实页面成立() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -795,6 +818,7 @@ async fn 抓包在真实页面成立() {
 /// 会让页面永久挂起，这是这个用例最重要的一条）。重放也顺带验证。
 #[tokio::test]
 async fn 拦截与重放在真实页面成立() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -850,6 +874,7 @@ async fn 拦截与重放在真实页面成立() {
 /// Cookie 读取带安全属性:HttpOnly 的 cookie 也要能看到。
 #[tokio::test]
 async fn 读cookie带安全属性() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -876,6 +901,7 @@ async fn 读cookie带安全属性() {
 /// 被动探针 —— fuzz 的判定逻辑由 pentest 纯逻辑单测覆盖。
 #[tokio::test]
 async fn 被动探针在真实页面成立() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -918,6 +944,7 @@ async fn 被动探针在真实页面成立() {
 /// 文件上传:给 file input 设文件后，页面读到 files[0].name。
 #[tokio::test]
 async fn 文件上传在真实页面成立() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -953,6 +980,7 @@ async fn 文件上传在真实页面成立() {
 /// 爬虫:两页互链，站点地图应当把两页都访问到。
 #[tokio::test]
 async fn 爬虫生成站点地图() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -1000,6 +1028,7 @@ fn ref_in_snapshot(snap: &str, needle: &str) -> u32 {
 /// 所以先花一个用例问清楚。
 #[tokio::test]
 async fn screencast_在离屏模式下能出帧() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -1066,6 +1095,7 @@ async fn screencast_在离屏模式下能出帧() {
 /// 这条必须断言"至少两帧"，只验一帧的用例挡不住这个 bug。
 #[tokio::test]
 async fn 画面能持续推送而不是只出一帧() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -1109,6 +1139,7 @@ async fn 画面能持续推送而不是只出一帧() {
 
 #[tokio::test]
 async fn 改视口之后帧尺寸跟着变() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -1156,6 +1187,7 @@ async fn 改视口之后帧尺寸跟着变() {
 /// 画面还是旧尺寸，等比铺放后右侧/下侧留黑边，而缩小看起来一切正常。
 #[tokio::test]
 async fn screencast_进行中放大面板画面要跟上() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -1272,6 +1304,7 @@ async fn screencast_进行中放大面板画面要跟上() {
 /// screencast 也跟上了。
 #[tokio::test]
 async fn 画面尺寸跟着面板走() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -1330,6 +1363,7 @@ async fn 画面尺寸跟着面板走() {
 /// 真实像素要是它的两倍（清晰度靠它）。只验一个的话，另一个错了照样绿。
 #[tokio::test]
 async fn 帧按屏幕的像素密度出() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -1424,6 +1458,7 @@ fn jpeg_size(b: &[u8]) -> (u16, u16) {
 /// 渲染下有没有效，只有真的滚一次才知道。
 #[tokio::test]
 async fn 面板的滚轮能横竖两个方向滚动页面() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -1491,6 +1526,7 @@ async fn 面板的滚轮能横竖两个方向滚动页面() {
 ///   变成"ni你"，而这种错只有中文用户看得见。
 #[tokio::test]
 async fn 输入法的组字和确认都落进页面() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -1566,6 +1602,7 @@ async fn wait_console(host: &riot_host_lib::browser::access::HostBrowser, want: 
 /// 中下段采到的全是首屏的颜色，立刻红。
 #[tokio::test]
 async fn 整页截图不平铺视口() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -1631,6 +1668,7 @@ async fn 整页截图不平铺视口() {
 /// 路径下会差几个百分点。
 #[tokio::test]
 async fn 截图体积不随屏幕密度变化() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -1683,6 +1721,7 @@ async fn 截图体积不随屏幕密度变化() {
 /// 关窗口一个道理）。
 #[tokio::test]
 async fn 多个标签页各自独立() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -1770,6 +1809,7 @@ async fn 多个标签页各自独立() {
 /// 而现象是"面板卡死"，唯一线索是一串指向明明开着的号的"标签页不存在"。
 #[tokio::test]
 async fn 弹窗被拦成事件而母页面还能用() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -1858,6 +1898,7 @@ async fn 弹窗被拦成事件而母页面还能用() {
 /// 号由这一层发、页由这一层开。少了这一半的现象是"点外链什么都没发生"。
 #[tokio::test]
 async fn 点外链开在新标签页里() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -1907,6 +1948,7 @@ async fn 点外链开在新标签页里() {
 /// 30 秒超时：面板彻底卡住，且没有任何一条报错说得出"那一页已经没了"。
 #[tokio::test]
 async fn 页面自己关掉一页之后还能继续用() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -1996,6 +2038,7 @@ async fn wait_tabs(
 /// `browser_open` 连着发两次，每次都问一遍活动页。这里就照那个形状并发。
 #[tokio::test]
 async fn 并发问活动页只会开出一页() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -2023,6 +2066,7 @@ async fn 并发问活动页只会开出一页() {
 /// 全都正常，看起来像页面卡住了。
 #[tokio::test]
 async fn 画面跟着活动标签页走() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -2096,6 +2140,7 @@ async fn wait_frames(
 /// 每一步都等到可观测的提交信号，没有赌的成分。
 #[tokio::test]
 async fn 空白页在地址栏里是空的() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;
@@ -2152,6 +2197,7 @@ async fn 空白页在地址栏里是空的() {
 /// 是页面**真实的** location，不能是我们自己算出来的那个状态。
 #[tokio::test]
 async fn 工具栏能在历史里前进后退() {
+    let _serial = SERIAL.lock().await;
     let Some(app) = bundle() else {
         eprintln!("跳过：还没打包");
         return;

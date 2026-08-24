@@ -98,6 +98,13 @@ impl FakeTool {
         self
     }
 
+    /// 自定义成功输出。测"结果出口的加工"（凭证遮蔽等）要用 ——
+    /// 默认的「X 完成」碰不到任何加工规则。
+    pub fn ok_text(mut self, text: impl Into<String>) -> Self {
+        self.behavior = Behavior::Ok(text.into());
+        self
+    }
+
     pub fn slow(mut self, ms: u64) -> Self {
         self.behavior = Behavior::SlowOk {
             text: format!("{} 完成", self.name),

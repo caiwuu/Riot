@@ -565,7 +565,7 @@ async fn execute_guarded(
 }
 
 fn split_outcome(outcome: ToolOutcome) -> (ToolResultContent, Vec<Message>) {
-    match outcome {
+    let (content, side) = match outcome {
         ToolOutcome::Ok {
             model_content,
             side_messages,
@@ -576,6 +576,63 @@ fn split_outcome(outcome: ToolOutcome) -> (ToolResultContent, Vec<Message>) {
         } => (ToolResultContent::text(error_for_model), Vec::new()),
         // 取消也要有结果，否则 tool_use 成了孤儿
         ToolOutcome::Cancelled => (ToolResultContent::text("已取消，此工具未完成"), Vec::new()),
+    };
+    (redact_content(content), side)
+}
+
+/// 凭证遮蔽（见 [`crate::redact`]）收口在这里：Ok / Failed 的文本都过，
+/// Read / Bash / WebFetch / MCP 一视同仁 —— 散到各工具里的话，新接的
+/// 那个不会有任何报错，只是悄悄漏。UiPayload 不经过这里，界面照常显示
+/// 原文（那是用户自己的文件，对他遮蔽毫无意义）。
+fn redact_content(content: ToolResultContent) -> ToolResultContent {
+    match content {
+        ToolResultContent::Text { text } => match crate::redact::redact_secrets(&text) {
+            Some(redacted) => ToolResultContent::Text { text: redacted },
+            None => ToolResultContent::Text { text },
+        },
+        ToolResultContent::Spilled {
+            path,
+            preview,
+            total_bytes,
+        } => {
+            let preview = crate::redact::redact_secrets(&preview).unwrap_or(preview);
+            ToolResultContent::Spilled {
+                path,
+                preview,
+                total_bytes,
+            }
+        }
+        // 模型只读 text 的两个图文变体：文字部分照遮，图片本体不碰
+        // （截图里的密钥属于视觉通道，这层管不了，也不该假装能管）。
+        ToolResultContent::DescribedImage {
+            media_type,
+            data,
+            path,
+            text,
+        } => {
+            let text = crate::redact::redact_secrets(&text).unwrap_or(text);
+            ToolResultContent::DescribedImage {
+                media_type,
+                data,
+                path,
+                text,
+            }
+        }
+        ToolResultContent::MarkedImage {
+            media_type,
+            data,
+            path,
+            text,
+        } => {
+            let text = crate::redact::redact_secrets(&text).unwrap_or(text);
+            ToolResultContent::MarkedImage {
+                media_type,
+                data,
+                path,
+                text,
+            }
+        }
+        other @ (ToolResultContent::Cleared | ToolResultContent::Image { .. }) => other,
     }
 }
 
@@ -657,6 +714,30 @@ mod tests {
     }
 
     // ── 测试 ──────────────────────────────────────────
+
+    /// 凭证遮蔽必须发生在调度器的结果出口，对所有工具生效。
+    ///
+    /// 收口在这里而不是各工具里，是为了让"新接一个工具忘了遮蔽"这种
+    /// 遗漏不可能发生 —— 这条测试守的就是收口点本身：它断掉的表现是
+    /// 密钥原文进对话历史、进 transcript、发到第三方模型服务。
+    #[tokio::test]
+    async fn 凭证在结果出口被遮蔽() {
+        let s = scheduler(vec![Arc::new(
+            FakeTool::read_only("Read").ok_text("AWS_KEY=AKIAIOSFODNN7EXAMPLE\n其余配置正常"),
+        )]);
+        let events = run(&s, vec![call("t1", "Read")]).await;
+        let pairs = result_pairs(outcome(&events));
+        assert!(
+            !pairs[0].1.contains("AKIAIOSFODNN7EXAMPLE"),
+            "密钥值不能出现在发给模型的结果里：{}",
+            pairs[0].1
+        );
+        assert!(
+            pairs[0].1.contains("已遮蔽") && pairs[0].1.contains("其余配置正常"),
+            "遮蔽要留痕、周围内容要保留：{}",
+            pairs[0].1
+        );
+    }
 
     #[tokio::test]
     async fn posttooluse_的反馈作为带外提示进对话() {

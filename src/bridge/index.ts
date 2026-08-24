@@ -21,6 +21,7 @@ import type {
   PermissionMode,
   PermissionResponse,
   ThinkingEffort,
+  ThinkingPolicy as GeneratedThinkingPolicy,
 } from "./generated";
 
 export type {
@@ -53,17 +54,13 @@ export interface Sampling {
 export type ThinkingLevel = ThinkingEffort;
 
 /**
- * 会话级思考策略（与宿主 riot-protocol 的 ThinkingPolicy 序列化形状一致）。
+ * 会话级思考策略。生成类型的别名（同 Protocol 的理由）：
  * - default：不发任何思考参数，端点默认行为；
  * - adaptive：首请求中档、工具续轮低档；
  * - disabled：显式关闭思考（部分端点不支持，如 GLM-5.3 / OpenAI 官方）；
  * - fixed：每次请求固定档位。
  */
-export type ThinkingPolicy =
-  | { mode: "default" }
-  | { mode: "adaptive" }
-  | { mode: "disabled" }
-  | { mode: "fixed"; level: ThinkingLevel };
+export type ThinkingPolicy = GeneratedThinkingPolicy;
 
 /** 一个模型服务方。**不含 API key** —— 密钥存宿主侧的 auth.json。 */
 export interface ProviderConfig {
