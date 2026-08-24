@@ -159,13 +159,18 @@ CI 驱动开发（mac 上写、CI 上验）。必备用例，全部对照 macOS 
    令牌，Windows CI 单元测试 `受限令牌是低完整性` 读回 RID 断言 0x1000。
    `supported()` 恒 false —— 令牌能造但没接 spawn，不谎报。跨平台
    façade 已拆好（`sandbox.rs` 核心 + `sandbox_macos.rs` 后端）。
-2. **M2 spawn + 授权面**（部分落地）：
-   - ✅ 标签管理：`LabelLedger`（清单持久化 + 孤儿识别，跨平台单测过）
-     与 `sandbox_win::label::{tag_low, untag}`（Win32 FFI，隔离验签名）。
-   - ⏳ 尚未做，且**gate 在 M1 令牌 CI 绿之后**：用令牌走
-     `CreateProcessAsUserW`（自管管道/超时，见 §3）、把 ledger 与 tag
-     串成激活序列、temp 重写、`supported()` 转真实探测。这块最大且强
-     依赖令牌运行时正确性，不在未验证的令牌上抢建。CI 用例 1-5 随此完成。
+2. **M2 spawn + 授权面**（授权面已落地，spawn 待做）：
+   - ✅ 标签管理：`LabelLedger`（清单持久化 + 孤儿识别）、
+     `sandbox_win::label::{tag_low, untag}`（Win32 FFI，隔离验签名 +
+     Windows CI 编译过）、`WinLabeler`（接进跨平台 trait）。
+   - ✅ 授权编排：`authorize_writable`（逐个打标签 + 记账，任一失败
+     全部回滚），回滚正确性用假 labeler 跨平台单测过 —— 这是「激活
+     任一步失败 → 回滚 → activate None」那条 §2 约束的落地。
+   - ⏳ 待做：用 M1 令牌走 `CreateProcessAsUserW`（自管管道/超时/进程组，
+     见 §3）、temp 子目录重写、把 authorize + 令牌 + spawn 串成完整
+     `SandboxedRunner::run`（Windows 分支）、`supported()` 转真实探测。
+     这块是纯运行时正确性（管道不死锁、令牌真降权、Job Object 清理），
+     隔离 check 看不出来，**必须多轮 Windows CI 迭代**。CI 用例 1-5 随此完成。
 3. **M3 接线**：config 档位映射（含 NoNet 降级文案），用例 6 过，
    双平台 CI 全绿后发布。
 

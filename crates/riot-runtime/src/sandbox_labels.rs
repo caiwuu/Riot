@@ -110,9 +110,61 @@ impl LabelLedger {
     }
 }
 
+/// 给目录打 / 去 Low 完整性标签的能力。
+///
+/// 抽成 trait 是为了让**编排逻辑**（[`authorize_writable`] 的"逐个打、
+/// 失败回滚"）跨平台可测 —— 真实实现是 Win32（`sandbox_win::WinLabeler`，
+/// 只在 Windows 编译），测试用假的。编排的正确性（尤其是回滚干不干净）
+/// 和 OS 无关，不该只能在 Windows CI 上验。
+pub trait DirLabeler {
+    /// 给目录打 Low 标签，让低完整性进程能写它。
+    fn tag(&self, dir: &Path) -> std::io::Result<()>;
+    /// 去掉 Low 标签，回到默认完整性。
+    fn untag(&self, dir: &Path) -> std::io::Result<()>;
+}
+
+/// 给一组可写目录打 Low 标签并记账；**任一失败就把已打的全部回滚**。
+///
+/// 这是 Windows 沙箱激活序列的授权准备步（SANDBOX_WINDOWS.md §2 步骤
+/// 1-2）。它必须是**全有或全无**：
+///
+/// `[约束]` 打到第 N 个失败（比如撞上 FAT32 卷、组策略锁 SACL），前
+/// N-1 个已经打上的标签必须撤掉、清单必须清干净，然后整体失败让
+/// `activate()` 返回 None。留一半的话，那些目录就成了没人认领的孤儿
+/// （打了 Low 标签、却不在任何活跃会话的记录里）——虽然下次启动的孤儿
+/// 回收兜得住，但"本次激活失败"不该依赖"下次启动清理"来收拾自己的烂摊子。
+///
+/// 回滚时 `untag` 自己也可能失败（目录刚被删等）—— 尽力而为，记日志，
+/// 不因为回滚里的二次失败而 panic 或吞掉原始错误。
+pub fn authorize_writable<L: DirLabeler>(
+    dirs: &[PathBuf],
+    labeler: &L,
+    ledger: &mut LabelLedger,
+    now_ms: u64,
+) -> std::io::Result<()> {
+    let mut done: Vec<PathBuf> = Vec::with_capacity(dirs.len());
+    for dir in dirs {
+        match labeler.tag(dir).and_then(|()| ledger.record(dir, now_ms)) {
+            Ok(()) => done.push(dir.clone()),
+            Err(e) => {
+                // 回滚已打的（逆序，纯粹是对称好读，标签之间无依赖）。
+                for d in done.iter().rev() {
+                    if let Err(re) = labeler.untag(d) {
+                        tracing::warn!(dir = %d.display(), error = %re, "回滚标签失败，留给下次启动的孤儿回收");
+                    }
+                    let _ = ledger.forget(d);
+                }
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
 
     fn ledger_path() -> (tempfile::TempDir, PathBuf) {
         let t = tempfile::tempdir().expect("临时目录");
@@ -198,5 +250,106 @@ mod tests {
         led.record(Path::new("/work/a"), 100).expect("记");
         assert!(!p.with_extension("json.tmp").exists(), "临时文件该被 rename 掉");
         assert!(p.exists(), "目标清单该在");
+    }
+
+    /// 假 labeler：记下每次 tag / untag，可指定「第几次 tag 失败」和
+    /// 「untag 是否也失败」，用来验编排的回滚。
+    struct FakeLabeler {
+        tag_calls: RefCell<Vec<PathBuf>>,
+        untag_calls: RefCell<Vec<PathBuf>>,
+        /// tag 到第几个（1-based）返回失败；0 = 从不失败。
+        fail_tag_at: usize,
+        /// untag 也失败（测回滚里的二次失败不 panic）。
+        untag_fails: bool,
+    }
+
+    impl FakeLabeler {
+        fn new(fail_tag_at: usize) -> Self {
+            Self {
+                tag_calls: RefCell::new(Vec::new()),
+                untag_calls: RefCell::new(Vec::new()),
+                fail_tag_at,
+                untag_fails: false,
+            }
+        }
+    }
+
+    impl DirLabeler for FakeLabeler {
+        fn tag(&self, dir: &Path) -> std::io::Result<()> {
+            self.tag_calls.borrow_mut().push(dir.to_path_buf());
+            if self.tag_calls.borrow().len() == self.fail_tag_at {
+                return Err(std::io::Error::other("打标签失败（模拟 FAT32/组策略）"));
+            }
+            Ok(())
+        }
+        fn untag(&self, dir: &Path) -> std::io::Result<()> {
+            self.untag_calls.borrow_mut().push(dir.to_path_buf());
+            if self.untag_fails {
+                return Err(std::io::Error::other("去标签也失败"));
+            }
+            Ok(())
+        }
+    }
+
+    fn dirs(n: usize) -> Vec<PathBuf> {
+        (0..n).map(|i| PathBuf::from(format!("/work/d{i}"))).collect()
+    }
+
+    #[test]
+    fn 授权全成功_每个目录都打标签并记账() {
+        let (_t, p) = ledger_path();
+        let mut led = LabelLedger::load(p);
+        let lab = FakeLabeler::new(0);
+        let ds = dirs(3);
+
+        authorize_writable(&ds, &lab, &mut led, 100).expect("该全成功");
+
+        assert_eq!(lab.tag_calls.borrow().len(), 3);
+        assert!(lab.untag_calls.borrow().is_empty(), "成功路径不该回滚");
+        let mut recorded = led.dirs();
+        recorded.sort();
+        assert_eq!(recorded, ds);
+    }
+
+    /// 打到第 3 个失败：前 2 个已打的必须被 untag，清单必须清空。
+    #[test]
+    fn 中途失败把已打的全部回滚() {
+        let (_t, p) = ledger_path();
+        let mut led = LabelLedger::load(p.clone());
+        let lab = FakeLabeler::new(3);
+        let ds = dirs(5);
+
+        let r = authorize_writable(&ds, &lab, &mut led, 100);
+        assert!(r.is_err(), "第 3 个失败该整体失败");
+
+        // tag 试了 3 个（第 3 个失败后不再往下），untag 回滚前 2 个。
+        assert_eq!(lab.tag_calls.borrow().len(), 3);
+        assert_eq!(lab.untag_calls.borrow().len(), 2, "前两个要被撤回");
+        assert!(led.dirs().is_empty(), "清单必须清干净，不留孤儿");
+        // 重新 load 也是空 —— 回滚的 forget 落了盘。
+        assert!(LabelLedger::load(p).dirs().is_empty());
+    }
+
+    /// 第一个就失败：没有已打的可回滚，清单本就空。
+    #[test]
+    fn 第一个就失败不留痕() {
+        let (_t, p) = ledger_path();
+        let mut led = LabelLedger::load(p);
+        let lab = FakeLabeler::new(1);
+        assert!(authorize_writable(&dirs(3), &lab, &mut led, 100).is_err());
+        assert!(lab.untag_calls.borrow().is_empty(), "没打成的不用回滚");
+        assert!(led.dirs().is_empty());
+    }
+
+    /// 回滚里 untag 二次失败：尽力而为，不 panic、不吞原始错误。
+    #[test]
+    fn 回滚失败也不panic() {
+        let (_t, p) = ledger_path();
+        let mut led = LabelLedger::load(p);
+        let mut lab = FakeLabeler::new(2);
+        lab.untag_fails = true;
+        let r = authorize_writable(&dirs(3), &lab, &mut led, 100);
+        assert!(r.is_err(), "原始失败要如实返回");
+        assert_eq!(lab.untag_calls.borrow().len(), 1, "仍尝试回滚了第 1 个");
     }
 }

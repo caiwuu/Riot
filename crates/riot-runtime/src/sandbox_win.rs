@@ -265,4 +265,19 @@ mod label {
             }
         }
     }
+
+    /// 真实的目录打标签器。把 [`tag_low`] / [`untag`] 接进跨平台的
+    /// [`crate::sandbox_labels::DirLabeler`]，好让激活序列的回滚编排
+    /// （`authorize_writable`）用上它 —— 那套编排的正确性在 sandbox_labels
+    /// 里跨平台测过，这里只负责把 Win32 错误转成 io 错误接上去。
+    pub struct WinLabeler;
+
+    impl crate::sandbox_labels::DirLabeler for WinLabeler {
+        fn tag(&self, dir: &std::path::Path) -> std::io::Result<()> {
+            tag_low(dir).map_err(|e| std::io::Error::other(e.to_string()))
+        }
+        fn untag(&self, dir: &std::path::Path) -> std::io::Result<()> {
+            untag(dir).map_err(|e| std::io::Error::other(e.to_string()))
+        }
+    }
 }
