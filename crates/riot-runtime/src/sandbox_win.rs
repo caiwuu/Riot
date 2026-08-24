@@ -281,3 +281,294 @@ mod label {
         }
     }
 }
+
+// 用受限令牌起进程。这是 M2 的最后一块，也是 spawn 集成的核心难点。
+//
+// 为什么不能复用 proc.rs：tokio / std 的 Command 都不暴露「用这个令牌
+// 起进程」，只有 CreateProcessAsUserW 收令牌。所以整条 spawn 自己写：
+// 建管道、拼命令行/环境块、起进程、挂 Job Object、并发读、超时/取消。
+// 语义对齐 proc.rs（两个并发 drain + select 等待 + 无条件杀组），只是
+// 底层从 tokio::process 换成同步 Win32 + spawn_blocking。
+#[cfg(windows)]
+#[allow(dead_code)]
+mod spawn {
+    use std::io::Read;
+    use std::os::windows::io::FromRawHandle;
+    use std::time::{Duration, Instant};
+
+    use riot_protocol::tool::{ProcessOutput, ProcessSpec};
+    use tokio_util::sync::CancellationToken;
+    use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE, SetHandleInformation, HANDLE_FLAGS, HANDLE_FLAG_INHERIT};
+    use windows::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, TerminateJobObject,
+    };
+    use windows::Win32::System::Pipes::CreatePipe;
+    use windows::Win32::System::Threading::{
+        CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW,
+        GetExitCodeProcess, INFINITE, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
+        STARTUPINFOW, WaitForSingleObject,
+    };
+    use windows::core::{PCWSTR, PWSTR};
+
+    const EXIT_TIMEOUT: i32 = 124;
+    const EXIT_CANCELLED: i32 = 130;
+
+    /// 建好、已在跑的子进程。字段都 `Send`（读端是 `File`，句柄搬成
+    /// `isize`），好 move 进 `spawn_blocking`。
+    struct Spawned {
+        process: isize,
+        job: isize,
+        read_out: std::fs::File,
+        read_err: std::fs::File,
+    }
+
+    /// 用 `token` 起 `spec`，接管道/超时/进程组，返回输出。
+    ///
+    /// 语义对齐 `proc.rs::SystemProcessRunner::run`：
+    /// - stdout / stderr **并发**读（串行会死锁，见 proc.rs 注释）；
+    /// - 等到「进程退出 / 超时 / 取消」任一，**无条件**杀整个 Job（正常
+    ///   退出也杀，清掉可能残留的后台子进程）；
+    /// - 读任务在杀组之后 await —— 写端全关了 EOF 才来。
+    pub(crate) async fn spawn_with_token(
+        token: HANDLE,
+        spec: ProcessSpec,
+        max_output: usize,
+        cancel: CancellationToken,
+    ) -> std::io::Result<ProcessOutput> {
+        let started = Instant::now();
+        let timeout = spec.timeout_ms.map(Duration::from_millis);
+
+        // 建进程是同步 Win32，快，直接在异步上下文里做。
+        let sp = unsafe { create(token, &spec) }?;
+        let (process, job) = (sp.process, sp.job);
+
+        let h_out = tokio::task::spawn_blocking(move || drain(sp.read_out, max_output));
+        let h_err = tokio::task::spawn_blocking(move || drain(sp.read_err, max_output));
+        let waiter = tokio::task::spawn_blocking(move || unsafe {
+            WaitForSingleObject(HANDLE(process as *mut _), INFINITE);
+        });
+
+        let ended = tokio::select! {
+            _ = waiter => Ended::Exited,
+            _ = sleep_opt(timeout) => Ended::TimedOut,
+            _ = cancel.cancelled() => Ended::Cancelled,
+        };
+
+        // 无条件杀整组（对齐 proc.rs：正常退出 ≠ 后台子进程也退了）。
+        unsafe {
+            let _ = TerminateJobObject(HANDLE(job as *mut _), 1);
+        }
+
+        // 杀组之后再收输出：写端此刻全关，drain 才等得到 EOF。
+        let (stdout, out_capped) = h_out.await.map_err(join_err)??;
+        let (stderr, err_capped) = h_err.await.map_err(join_err)??;
+        if out_capped || err_capped {
+            tracing::warn!(program = %spec.program, "沙箱命令输出超上限，已截断");
+        }
+
+        let exit_code = match ended {
+            Ended::Exited => unsafe { exit_code_of(process) },
+            Ended::TimedOut => EXIT_TIMEOUT,
+            Ended::Cancelled => EXIT_CANCELLED,
+        };
+        unsafe {
+            let _ = CloseHandle(HANDLE(process as *mut _));
+            let _ = CloseHandle(HANDLE(job as *mut _));
+        }
+
+        Ok(ProcessOutput {
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            exit_code,
+            timed_out: matches!(ended, Ended::TimedOut),
+            duration_ms: started.elapsed().as_millis() as u64,
+        })
+    }
+
+    enum Ended {
+        Exited,
+        TimedOut,
+        Cancelled,
+    }
+
+    /// 同步建进程：建管道、拼命令行/环境、CreateProcessAsUserW、挂 Job、
+    /// 关父进程持有的写端。返回 Send 的句柄束。
+    unsafe fn create(token: HANDLE, spec: &ProcessSpec) -> std::io::Result<Spawned> {
+        unsafe {
+            // 写端要能被子进程继承，读端不能（否则子进程持有读端，EOF 不来）。
+            let sa = SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: std::ptr::null_mut(),
+                bInheritHandle: true.into(),
+            };
+            let (read_out, write_out) = pipe(&sa)?;
+            let (read_err, write_err) = pipe(&sa)?;
+            // stdin 给 NUL：一律立即 EOF —— 读 stdin 的命令（cat、等确认的
+            // 脚本）不会挂住。对齐 proc.rs 的 Stdio::null()。
+            let nul = CreateFileW(
+                windows::core::w!("NUL"),
+                GENERIC_READ.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                Some(&sa),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                None,
+            )
+            .map_err(win_err)?;
+
+            let si = STARTUPINFOW {
+                cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+                dwFlags: STARTF_USESTDHANDLES,
+                hStdInput: nul,
+                hStdOutput: write_out,
+                hStdError: write_err,
+                ..Default::default()
+            };
+
+            let base: Vec<(String, String)> = std::env::vars().collect();
+            let mut env = crate::sandbox_cmdline::build_env_block(&base, &spec.env);
+            let mut cmdline: Vec<u16> = crate::sandbox_cmdline::build_command_line(&spec.program, &spec.args)
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let cwd: Vec<u16> = spec
+                .cwd
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+
+            let mut pi = PROCESS_INFORMATION::default();
+            // CREATE_SUSPENDED：先把进程挂进 Job 再放它跑，否则它可能在
+            // AssignProcessToJobObject 之前就 fork 出逃逸 Job 的子进程。
+            CreateProcessAsUserW(
+                Some(token),
+                PCWSTR::null(),
+                Some(PWSTR(cmdline.as_mut_ptr())),
+                None,
+                None,
+                true,
+                CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+                Some(env.as_mut_ptr() as *mut std::ffi::c_void),
+                PCWSTR(cwd.as_ptr()),
+                &si,
+                &mut pi,
+            )
+            .map_err(win_err)?;
+
+            // 起完就关父进程这边的写端和 NUL —— 写端不关，读端 EOF 永远不来。
+            let _ = CloseHandle(write_out);
+            let _ = CloseHandle(write_err);
+            let _ = CloseHandle(nul);
+
+            let job = CreateJobObjectW(None, PCWSTR::null()).map_err(win_err)?;
+            let mut limit = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            limit.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &limit as *const _ as *const std::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+            .map_err(win_err)?;
+            AssignProcessToJobObject(job, pi.hProcess).map_err(win_err)?;
+
+            ResumeThread(pi.hThread);
+            let _ = CloseHandle(pi.hThread);
+
+            Ok(Spawned {
+                process: pi.hProcess.0 as isize,
+                job: job.0 as isize,
+                read_out: std::fs::File::from_raw_handle(read_out.0 as std::os::windows::io::RawHandle),
+                read_err: std::fs::File::from_raw_handle(read_err.0 as std::os::windows::io::RawHandle),
+            })
+        }
+    }
+
+    unsafe fn pipe(sa: &SECURITY_ATTRIBUTES) -> std::io::Result<(HANDLE, HANDLE)> {
+        unsafe {
+            let mut read = HANDLE::default();
+            let mut write = HANDLE::default();
+            CreatePipe(&mut read, &mut write, Some(sa), 0).map_err(win_err)?;
+            // 读端清掉继承标志：只让写端进子进程。
+            SetHandleInformation(read, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)).map_err(win_err)?;
+            Ok((read, write))
+        }
+    }
+
+    unsafe fn exit_code_of(process: isize) -> i32 {
+        unsafe {
+            let mut code = 0u32;
+            if GetExitCodeProcess(HANDLE(process as *mut _), &mut code).is_ok() {
+                code as i32
+            } else {
+                -1
+            }
+        }
+    }
+
+    /// 同步读到 EOF 或读满上限。返回 (内容, 是否触上限)。
+    fn drain(mut f: std::fs::File, cap: usize) -> std::io::Result<(Vec<u8>, bool)> {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 16 * 1024];
+        loop {
+            let n = f.read(&mut chunk)?;
+            if n == 0 {
+                return Ok((buf, false));
+            }
+            let room = cap.saturating_sub(buf.len());
+            if room == 0 {
+                return Ok((buf, true));
+            }
+            buf.extend_from_slice(&chunk[..n.min(room)]);
+        }
+    }
+
+    async fn sleep_opt(d: Option<Duration>) {
+        match d {
+            Some(d) => tokio::time::sleep(d).await,
+            None => std::future::pending().await,
+        }
+    }
+
+    fn win_err(e: windows::core::Error) -> std::io::Error {
+        std::io::Error::other(e.to_string())
+    }
+
+    fn join_err(e: tokio::task::JoinError) -> std::io::Error {
+        std::io::Error::other(format!("读取输出的任务异常：{e}"))
+    }
+
+    use std::os::windows::ffi::OsStrExt;
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// 冒烟：用受限 Low 令牌起 `cmd /c echo hi`，验证整条 spawn 通路
+        /// （管道不死锁、拿得到 stdout、退出码正常）。这是 spawn 集成最大的
+        /// 运行时风险点，单独钉死；边界（工作区外写被拒）留给 M2 的接线用例。
+        #[tokio::test]
+        async fn 受限令牌起进程拿得到输出() {
+            let tok = super::super::token::create_restricted_low_il().expect("造令牌");
+            let spec = ProcessSpec {
+                program: "cmd".to_owned(),
+                args: vec!["/c".to_owned(), "echo hi".to_owned()],
+                cwd: std::env::temp_dir(),
+                env: Vec::new(),
+                timeout_ms: Some(10_000),
+            };
+            let out = spawn_with_token(*tok.0, spec, 1 << 20, CancellationToken::new())
+                .await
+                .expect("跑得起来");
+            assert_eq!(out.exit_code, 0, "stderr={}", out.stderr);
+            assert!(out.stdout.contains("hi"), "stdout={:?}", out.stdout);
+        }
+    }
+}

@@ -68,6 +68,10 @@ windows = { version = "0.62", features = [
     "Win32_System_SystemServices",
     "Win32_Foundation",
     "Win32_System_Memory",
+    # 沙箱 spawn：CreateProcessAsUserW + 管道 + Job Object 进程树清理。
+    "Win32_System_Pipes",
+    "Win32_System_JobObjects",
+    "Win32_Storage_FileSystem",
 ] }
 # 真实 HTTP。用 rustls 而不是 native-tls：后者在 Linux 上要系统装 openssl，
 # 在 CI 和用户机器上都是一类反复出现的构建失败。

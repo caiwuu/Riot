@@ -166,11 +166,16 @@ CI 驱动开发（mac 上写、CI 上验）。必备用例，全部对照 macOS 
    - ✅ 授权编排：`authorize_writable`（逐个打标签 + 记账，任一失败
      全部回滚），回滚正确性用假 labeler 跨平台单测过 —— 这是「激活
      任一步失败 → 回滚 → activate None」那条 §2 约束的落地。
-   - ⏳ 待做：用 M1 令牌走 `CreateProcessAsUserW`（自管管道/超时/进程组，
-     见 §3）、temp 子目录重写、把 authorize + 令牌 + spawn 串成完整
-     `SandboxedRunner::run`（Windows 分支）、`supported()` 转真实探测。
-     这块是纯运行时正确性（管道不死锁、令牌真降权、Job Object 清理），
-     隔离 check 看不出来，**必须多轮 Windows CI 迭代**。CI 用例 1-5 随此完成。
+   - ✅ spawn 机制：`sandbox_win::spawn::spawn_with_token` —— 用令牌走
+     `CreateProcessAsUserW`，建管道、Job Object（KILL_ON_JOB_CLOSE）、
+     并发读、超时/取消，语义对齐 `proc.rs`。命令行 / 环境块拼接是
+     `sandbox_cmdline`（纯逻辑跨平台单测）。FFI 签名隔离验过，运行时靠
+     Windows CI 的冒烟测试 `受限令牌起进程拿得到输出`（起 `cmd /c echo`
+     验管道通路）。
+   - ⏳ 待做（接线，下一步）：把 authorize + 令牌 + spawn 串成
+     `SandboxedRunner::run` 的 Windows 分支、temp 子目录重写、
+     `activate()` 接 ledger（要 config 路径，动 session.rs 装配）、
+     `supported()` 转真实探测。然后边界用例 1-6（§6）。
 3. **M3 接线**：config 档位映射（含 NoNet 降级文案），用例 6 过，
    双平台 CI 全绿后发布。
 

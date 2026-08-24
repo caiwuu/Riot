@@ -18,6 +18,9 @@
 pub mod fs;
 pub mod proc;
 pub mod sandbox;
+// 跨平台：Windows spawn 的命令行 / 环境块拼接（纯字符串逻辑，见文件头）。
+// 同 sandbox_labels，只有 Windows 后端用，但不门控平台好让 mac 测。
+pub mod sandbox_cmdline;
 // 跨平台：Low 标签清单的孤儿回收逻辑，任何平台都能测（见文件头）。
 // 当前只有 Windows 后端会用它，但纯逻辑不门控平台，好让 mac 也跑测试。
 pub mod sandbox_labels;
