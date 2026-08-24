@@ -70,6 +70,10 @@ jobs:
       - uses: ./.github/actions/prepare-host
       - run: cargo clippy -p riot-host --all-targets -- -D warnings
       - run: cargo test -p riot-host
+      # Windows 沙箱（Restricted Token + Low IL）的后端只在这个平台编译，
+      # 本机 Mac 碰不到 —— clippy 和 token 单测都得靠这里真跑。
+      - run: cargo clippy -p riot-runtime --all-targets -- -D warnings
+      - run: cargo test -p riot-runtime
 
   host-macos:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

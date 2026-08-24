@@ -18,6 +18,10 @@
 pub mod fs;
 pub mod proc;
 pub mod sandbox;
+#[cfg(target_os = "macos")]
+pub mod sandbox_macos;
+#[cfg(windows)]
+pub mod sandbox_win;
 pub mod web;
 
 pub use fs::{MemoryFileState, SystemFs};

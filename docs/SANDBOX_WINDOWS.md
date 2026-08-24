@@ -148,9 +148,19 @@ CI 驱动开发（mac 上写、CI 上验）。必备用例，全部对照 macOS 
 
 ## 7. 里程碑
 
-1. **M1 骨架**：`sandbox_win.rs` 的 token + spawn 通路，硬编码单目录
-   白名单，CI 用例 1 过 —— 证明机制成立；
-2. **M2 授权面**：标签管理（打/恢复/孤儿回收）、temp 重写、
-   `workspace_write` 的完整 writable 列表，用例 2-5 过；
-3. **M3 接线**：`activate()` 平台分发、config 档位映射、降级文案，
-   用例 6 过，双平台 CI 全绿后发布。
+1. **M1 令牌地基**（✅ 已落地）：`sandbox_win.rs::token` 造受限 + Low IL
+   令牌，Windows CI 单元测试 `受限令牌是低完整性` 读回 RID 断言 0x1000。
+   `supported()` 恒 false —— 令牌能造但没接 spawn，不谎报。跨平台
+   façade 已拆好（`sandbox.rs` 核心 + `sandbox_macos.rs` 后端）。
+2. **M2 spawn + 授权面**：用 M1 的令牌走 `CreateProcessAsUserW`（自管
+   管道/超时，见 §3），标签管理（打/恢复/孤儿回收）、temp 重写、
+   `workspace_write` 的完整 writable 列表，`supported()` 转真实探测，
+   CI 用例 1-5 过；
+3. **M3 接线**：config 档位映射（含 NoNet 降级文案），用例 6 过，
+   双平台 CI 全绿后发布。
+
+`[实施注记]` M1 的 FFI 签名是在 Mac 上用一个只依赖 `windows` crate 的
+临时 crate `cargo check --target x86_64-pc-windows-msvc` 逐个逼出来的
+（reqwest→ring 的 C 交叉编译在 Mac 上跑不起来，整包 check 不通，但
+`windows` 的元数据平台无关，隔离出来能查）。运行时行为仍以 Windows CI
+为准 —— check 过不代表 `SetTokenInformation` 真生效。

@@ -59,7 +59,16 @@ process-wrap = { version = "9", features = ["tokio1"] }
 # cmd.creation_flags、也不能用 process-wrap 自带的 CreationFlags，
 # 见 riot-runtime 的命令执行器。版本跟 process-wrap 依赖的 windows
 # 保持同一 minor，免得解析出两份。
-windows = { version = "0.62", features = ["Win32_System_Threading"] }
+windows = { version = "0.62", features = [
+    "Win32_System_Threading",
+    # 沙箱（Low IL 受限令牌）：建 token、改完整性级别、打目录标签。
+    # 见 docs/SANDBOX_WINDOWS.md。
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_SystemServices",
+    "Win32_Foundation",
+    "Win32_System_Memory",
+] }
 # 真实 HTTP。用 rustls 而不是 native-tls：后者在 Linux 上要系统装 openssl，
 # 在 CI 和用户机器上都是一类反复出现的构建失败。
 #
