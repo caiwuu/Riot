@@ -72,6 +72,10 @@ where
                 }
 
                 _ = tick => {
+                    // 证据采集：是否值得实现"超时后降级非流式"（ARCHITECTURE
+                    // §11.3 标注未实现）取决于这条真实触发的频率。日志攒一阵，
+                    // 频率可观再排期，别为没证实的场景先付一套非流式解析。
+                    tracing::warn!(idle_secs = idle.as_secs(), "流式静默超时，结束本条流");
                     yield ProviderEvent::Error(ProviderError::Transport {
                         message: format!(
                             "流静默超过 {} 秒。连接还在，但服务端不发数据了 —— \

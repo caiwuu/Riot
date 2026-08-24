@@ -21,9 +21,10 @@
 //! # 目前只有 macOS
 //!
 //! seatbelt（`sandbox-exec`）虽然在 man page 里被标了 deprecated，但整个
-//! macOS 系统自己还在用它，Chromium 和 Codex CLI 也都在用。Linux 的
-//! landlock + seccomp、Windows 的 AppContainer 是同一个位置上的另外两块，
-//! 接口已经按"能替换"的形状留好了。
+//! macOS 系统自己还在用它，Chromium 和 Codex CLI 也都在用。接口已经按
+//! "能替换"的形状留好：Windows 版走 Restricted Token + Low IL（设计
+//! 定稿在 docs/SANDBOX_WINDOWS.md —— 为什么不是 AppContainer 也写在
+//! 那里），Linux 的 landlock + seccomp 未排期。
 
 #![allow(clippy::disallowed_methods)]
 
