@@ -45,6 +45,18 @@ pub struct Fence {
     root: PathBuf,
 }
 
+/// 哪些路径现在不是目录。侧栏标失效项目用，不改配置、不建围栏。
+///
+/// 只看 `is_dir`：canonicalize 在目录已删时必然失败，这里不需要再走
+/// 一遍围栏。传入的字符串原样返回，方便前端按项目列表的 key 对上。
+pub fn missing_dirs(paths: impl IntoIterator<Item = impl AsRef<str>>) -> Vec<String> {
+    paths
+        .into_iter()
+        .map(|p| p.as_ref().to_owned())
+        .filter(|p| !Path::new(p).is_dir())
+        .collect()
+}
+
 impl Fence {
     /// `root` 必须已存在。
     pub fn new(root: impl AsRef<Path>) -> Result<Self, FenceError> {
@@ -159,6 +171,14 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 缺失目录能找出来() {
+        let dir = tempfile::tempdir().expect("建临时目录");
+        let gone = dir.path().join("nope").to_string_lossy().into_owned();
+        let live = dir.path().to_string_lossy().into_owned();
+        assert_eq!(missing_dirs([&gone, &live]), vec![gone]);
+    }
 
     fn tmp_fence() -> (tempfile::TempDir, Fence) {
         let dir = tempfile::tempdir().expect("建临时目录");

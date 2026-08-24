@@ -417,7 +417,13 @@ impl AppState {
     /// `root` 在这里过一遍围栏构造 —— 不存在、不是目录、或 canonicalize
     /// 失败都会在创建时报错，而不是等到第一次工具调用才炸。
     pub async fn create_session(&self, root: &str) -> HostResult<SessionInfo> {
-        let fence = Fence::new(root)?;
+        let fence = match Fence::new(root) {
+            Ok(f) => f,
+            Err(crate::fence::FenceError::Unresolvable { path, .. }) => {
+                return Err(HostError::MissingProject(path.display().to_string()));
+            }
+            Err(e) => return Err(e.into()),
+        };
         let root_str = fence.root().display().to_string();
 
         // 纯宿主操作:分配 id、登记、落索引。内核那边**不建** —— 第一次
@@ -1787,12 +1793,13 @@ mod tests {
     #[tokio::test]
     async fn 不存在的目录建不出会话() {
         let state = state().await;
+        let err = state
+            .create_session("/definitely/not/a/real/path/xyz")
+            .await
+            .expect_err("坏目录应该在创建时报错，而不是第一次工具调用才炸");
         assert!(
-            state
-                .create_session("/definitely/not/a/real/path/xyz")
-                .await
-                .is_err(),
-            "坏目录应该在创建时报错，而不是第一次工具调用才炸"
+            matches!(err, HostError::MissingProject(_)),
+            "缺目录是可恢复错误，实际: {err:?}"
         );
     }
 

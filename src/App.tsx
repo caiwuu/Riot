@@ -26,6 +26,7 @@ import {
   type PermissionMode,
   type PermissionResponse,
   pickDirectory,
+  probeDirs,
   type ProviderConfig,
   removeProject,
   renameSession,
@@ -49,6 +50,7 @@ import { SessionChangesBar } from "./components/SessionChangesBar";
 import { ScopePanel } from "./components/ScopePanel";
 import { SessionSettings } from "./components/SessionSettings";
 import { ConfirmDialog, type ConfirmRequest } from "./components/ConfirmDialog";
+import { MissingProjectDialog } from "./components/MissingProjectDialog";
 import { LazyMarkdown, Markdown, ProjectRootContext } from "./components/Markdown";
 import {
   AskChoiceCard,
@@ -153,6 +155,12 @@ function clamp(v: number, lo: number, hi: number): number {
   return Math.min(Math.max(v, lo), hi);
 }
 
+/** 宿主把缺目录收成 `项目目录不存在：…`；老错误文案也认，免得宿主没跟上。 */
+function isMissingProjectError(e: unknown): boolean {
+  const s = String(e);
+  return s.startsWith("项目目录不存在：") || s.includes("无法解析路径");
+}
+
 export function App() {
   const [config, setConfig] = useState<ConfigStatus | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
@@ -162,6 +170,10 @@ export function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
+  /** 目录已不在磁盘上、等用户决定怎么处理的那个项目。 */
+  const [goneRoot, setGoneRoot] = useState<string | null>(null);
+  /** 探测过、确认不存在的项目根。用来在侧栏和欢迎页标「已失效」。 */
+  const [missing, setMissing] = useState<Set<string>>(() => new Set());
   const [renaming, setRenaming] = useState<string | null>(null);
   /** 右侧抽屉此刻装着谁。两个都是整列，只能二选一。 */
   const [drawer, setDrawer] = useState<"browser" | "changes" | null>(null);
@@ -218,8 +230,34 @@ export function App() {
       .finally(() => setBooting(false));
   }, []);
 
-  const projects = config?.config.projects ?? [];
+  const projectList = config?.config.projects;
+  const projects = projectList ?? [];
   const activeSession = sessions.find((s) => s.id === active) ?? null;
+
+  // 项目列表不会因为用户在访达里删了文件夹而自己更新。启动和窗口
+  // 回到前台时探一次，侧栏才能把失效项标出来，而不必等点「新会话」才知道。
+  useEffect(() => {
+    const roots = [...new Set([...(projectList ?? []), ...sessions.map((s) => s.root)])];
+    if (roots.length === 0) {
+      setMissing(new Set());
+      return;
+    }
+    const scan = () => {
+      probeDirs(roots)
+        .then((gone) => setMissing(new Set(gone)))
+        .catch(() => {});
+    };
+    scan();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") scan();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", scan);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", scan);
+    };
+  }, [projectList, sessions]);
 
   useLayoutEffect(() => {
     if (!active) return;
@@ -248,15 +286,37 @@ export function App() {
     setWindowTitle(name ? `${name} — Riot` : "Riot").catch(() => {});
   }, [activeSession?.root]);
 
+  const noteError = useCallback((title: string, e: unknown) => {
+    setConfirm({
+      title,
+      body: String(e),
+      confirmLabel: "知道了",
+      danger: false,
+      action: () => {},
+    });
+  }, []);
+
   const newSession = useCallback(async (root: string) => {
     try {
       const info = await createSession(root);
+      setMissing((prev) => {
+        if (!prev.has(root)) return prev;
+        const next = new Set(prev);
+        next.delete(root);
+        return next;
+      });
       setSessions((prev) => [...prev, info]);
       setActive(info.id);
     } catch (e) {
-      setBootError(String(e));
+      // 目录被删是可恢复的：问要不要从列表拿掉或另选，别整页「出错了」。
+      if (isMissingProjectError(e)) {
+        setMissing((prev) => new Set(prev).add(root));
+        setGoneRoot(root);
+        return;
+      }
+      noteError("无法创建会话", e);
     }
-  }, []);
+  }, [noteError]);
 
   const openProject = useCallback(async () => {
     const dir = await pickDirectory();
@@ -268,9 +328,14 @@ export function App() {
       setConfig(await getConfig());
       await newSession(root);
     } catch (e) {
-      setBootError(String(e));
+      if (isMissingProjectError(e)) {
+        setMissing((prev) => new Set(prev).add(dir));
+        setGoneRoot(dir);
+        return;
+      }
+      noteError("打不开这个目录", e);
     }
-  }, [newSession]);
+  }, [newSession, noteError]);
 
   /** 会话发出第一条消息后补标题。宿主的 title 来自历史，UI 上要即时。 */
   const onFirstMessage = useCallback((sessionId: string, text: string) => {
@@ -413,10 +478,56 @@ export function App() {
     setConfig(await getConfig());
     const next = sessions.filter((s) => s.root !== root && !closed.includes(s.id));
     setSessions(next);
+    setMissing((prev) => {
+      if (!prev.has(root)) return prev;
+      const n = new Set(prev);
+      n.delete(root);
+      return n;
+    });
+    if (goneRoot === root) setGoneRoot(null);
     const activeGone =
       active !== null &&
       (closed.includes(active) || sessions.find((s) => s.id === active)?.root === root);
     if (activeGone) setActive(next[next.length - 1]?.id ?? null);
+  };
+
+  /**
+   * 失效项目换一个还在的目录。先打开新的，再把旧的从列表拿掉 ——
+   * 反过来的话，选目录失败会先丢掉旧会话。
+   */
+  const relocateGone = async (oldRoot: string) => {
+    const dir = await pickDirectory();
+    if (!dir) return;
+    try {
+      const root = await addProject(dir);
+      const info = await createSession(root);
+      const closed = root === oldRoot ? [] : await removeProject(oldRoot);
+      const dropped = new Set(closed);
+      for (const id of dropped) {
+        forgetSession(id);
+        transcriptView.delete(id);
+      }
+      setKept((prev) => prev.filter((id) => !dropped.has(id)));
+      setConfig(await getConfig());
+      setSessions((prev) => [
+        ...prev.filter((s) => s.root !== oldRoot && !dropped.has(s.id)),
+        info,
+      ]);
+      setActive(info.id);
+      setMissing((prev) => {
+        const n = new Set(prev);
+        n.delete(root);
+        n.delete(oldRoot);
+        return n;
+      });
+    } catch (e) {
+      if (isMissingProjectError(e)) {
+        setMissing((prev) => new Set(prev).add(dir));
+        setGoneRoot(dir);
+        return;
+      }
+      noteError("打不开这个目录", e);
+    }
   };
 
   const sessionMenu = (e: React.MouseEvent, s: SessionInfo) => {
@@ -513,6 +624,7 @@ export function App() {
           <Sidebar
             width={sidebarW}
             projects={projects}
+            missing={missing}
             sessions={sessions}
             active={active}
             renaming={renaming}
@@ -597,6 +709,8 @@ export function App() {
                       expectHistory={s.title != null}
                       config={config}
                       workspace={s.root}
+                      workspaceMissing={missing.has(s.root)}
+                      onMissingWorkspace={() => setGoneRoot(s.root)}
                       initialMode={s.mode}
                       onConfig={setConfig}
                       onOpenSettings={() => setShowSettings(true)}
@@ -618,6 +732,7 @@ export function App() {
             ) : (
               <Welcome
                 projects={projects}
+                missing={missing}
                 onNewSession={newSession}
                 onOpenProject={openProject}
               />
@@ -741,6 +856,14 @@ export function App() {
 
       {menu ? <ContextMenu menu={menu} onClose={() => setMenu(null)} /> : null}
       {confirm ? <ConfirmDialog c={confirm} onClose={() => setConfirm(null)} /> : null}
+      {goneRoot ? (
+        <MissingProjectDialog
+          root={goneRoot}
+          onClose={() => setGoneRoot(null)}
+          onRemove={() => void doRemoveProject(goneRoot).catch((err: unknown) => noteError("无法移除项目", err))}
+          onRelocate={() => void relocateGone(goneRoot)}
+        />
+      ) : null}
     </div>
     </ProjectRootContext.Provider>
   );
@@ -1053,6 +1176,8 @@ interface SidebarProps {
   /** 用户拖出来的宽度。真值和持久化都在 App 那层。 */
   width: number;
   projects: string[];
+  /** 磁盘上已经找不到的项目根。 */
+  missing: ReadonlySet<string>;
   sessions: SessionInfo[];
   active: string | null;
   renaming: string | null;
@@ -1131,6 +1256,7 @@ function Sidebar(props: SidebarProps) {
             key={root}
             {...props}
             root={root}
+            gone={props.missing.has(root)}
             sessions={sessions.filter((s) => s.root === root)}
             collapsed={collapsed.has(root)}
             onToggle={() => toggleCollapsed(root)}
@@ -1152,6 +1278,7 @@ function Sidebar(props: SidebarProps) {
 function ProjectGroup(
   props: SidebarProps & {
     root: string;
+    gone: boolean;
     collapsed: boolean;
     onToggle: () => void;
     onExpand: () => void;
@@ -1159,6 +1286,7 @@ function ProjectGroup(
 ) {
   const {
     root,
+    gone,
     sessions,
     active,
     renaming,
@@ -1179,18 +1307,26 @@ function ProjectGroup(
 
   return (
     <div className={collapsed ? "project collapsed" : "project"}>
-      <div className="project-head" onContextMenu={(e) => onProjectMenu(e, root)}>
+      <div
+        className={gone ? "project-head gone" : "project-head"}
+        onContextMenu={(e) => onProjectMenu(e, root)}
+      >
         <button
           type="button"
           className="project-toggle"
           aria-expanded={!collapsed}
-          aria-label={`${name}，${collapsed ? "已折叠" : "已展开"}`}
-          title={root}
+          aria-label={`${name}，${collapsed ? "已折叠" : "已展开"}${gone ? "，目录已不存在" : ""}`}
+          title={gone ? `${root}（目录已不存在）` : root}
           onClick={onToggle}
         >
           <Chevron open={!collapsed} />
           <FolderIcon />
           <span className="project-name">{name}</span>
+          {gone ? (
+            <span className="project-gone" title="目录已不存在">
+              已失效
+            </span>
+          ) : null}
           {busy ? (
             <span className="thread-busy" title="有会话正在运行" aria-label="有会话正在运行" />
           ) : null}
@@ -1316,10 +1452,12 @@ const RECENT_LIMIT = 4;
 
 function Welcome({
   projects,
+  missing,
   onNewSession,
   onOpenProject,
 }: {
   projects: string[];
+  missing: ReadonlySet<string>;
   onNewSession: (root: string) => void;
   onOpenProject: () => void;
 }) {
@@ -1342,12 +1480,19 @@ function Welcome({
         <div className="recent">
           <div className="recent-label">最近</div>
           {recent.map((root) => (
-            <button key={root} className="recent-row" onClick={() => onNewSession(root)}>
+            <button
+              key={root}
+              className={missing.has(root) ? "recent-row gone" : "recent-row"}
+              onClick={() => onNewSession(root)}
+            >
               <FolderIcon />
               <span className="recent-name">{basename(root)}</span>
               {/* 只显示父目录。完整路径的最后一段就是左边那个名字，
-                  重复一遍既占地方又要截断。 */}
-              <span className="recent-path">{tildify(parentOf(root))}</span>
+                  重复一遍既占地方又要截断。失效项改说「找不到」，
+                  父目录还在也帮不上忙。 */}
+              <span className="recent-path">
+                {missing.has(root) ? "找不到这个目录" : tildify(parentOf(root))}
+              </span>
             </button>
           ))}
         </div>
@@ -1381,6 +1526,8 @@ function Chat({
   expectHistory,
   config,
   workspace,
+  workspaceMissing,
+  onMissingWorkspace,
   initialMode,
   onConfig,
   onOpenSettings,
@@ -1399,6 +1546,9 @@ function Chat({
   expectHistory: boolean;
   config: ConfigStatus;
   workspace: string;
+  /** 绑定的项目目录已经不在磁盘上。 */
+  workspaceMissing?: boolean;
+  onMissingWorkspace?: () => void;
   initialMode: PermissionMode;
   onConfig: (s: ConfigStatus) => void;
   onOpenSettings: () => void;
@@ -1494,6 +1644,7 @@ function Chat({
     <Composer
       sessionId={sessionId}
       workspace={workspace}
+      {...(workspaceMissing ? { workspaceMissing: true, onMissingWorkspace } : {})}
       busy={session.busy}
       config={config}
       onConfig={onConfig}
@@ -1550,7 +1701,19 @@ function Chat({
           </span>
           <h1 className="hero-title">今天做点什么？</h1>
           <p className="hero-ws" title={workspace}>
-            <FolderIcon /> <span className="hero-ws-path">{workspace}</span>
+            {workspaceMissing ? (
+              <button
+                type="button"
+                className="hero-ws-missing"
+                onClick={onMissingWorkspace}
+              >
+                目录已不存在，点这里处理
+              </button>
+            ) : (
+              <>
+                <FolderIcon /> <span className="hero-ws-path">{workspace}</span>
+              </>
+            )}
           </p>
         </div>
       ) : (
@@ -3086,6 +3249,8 @@ function QueuePanel({
 function Composer({
   sessionId,
   workspace,
+  workspaceMissing,
+  onMissingWorkspace,
   busy,
   config,
   onConfig,
@@ -3108,6 +3273,8 @@ function Composer({
   sessionId: string;
   /** 会话的项目根。斜杠命令要按它找项目级 commands/。 */
   workspace: string;
+  workspaceMissing?: boolean;
+  onMissingWorkspace?: () => void;
   busy: boolean;
   config: ConfigStatus;
   onConfig: (s: ConfigStatus) => void;
@@ -3744,6 +3911,12 @@ function Composer({
         <div className="drop-veil" aria-hidden>
           <div className="drop-veil-card">松手，加进输入框</div>
         </div>
+      ) : null}
+
+      {workspaceMissing ? (
+        <button className="key-banner" onClick={onMissingWorkspace}>
+          项目目录已经不在磁盘上。点这里移除或另选目录。
+        </button>
       ) : null}
 
       {/* 三种"还不能发消息"要分开说。都写成"还没有 API key"的话，

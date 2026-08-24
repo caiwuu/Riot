@@ -25,6 +25,7 @@
     "allow-set-api-key",
     "allow-add-project",
     "allow-create-session",
+    "allow-probe-dirs",
     "allow-list-sessions",
     "allow-get-history",
     "allow-delete-session",

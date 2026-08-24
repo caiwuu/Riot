@@ -635,6 +635,11 @@ export function createSession(root: string): Promise<SessionInfo> {
   return invoke<SessionInfo>("create_session", { root });
 }
 
+/** 哪些路径现在不是目录。只看、不改配置。侧栏用来标失效项目。 */
+export function probeDirs(paths: string[]): Promise<string[]> {
+  return invoke<string[]>("probe_dirs", { paths });
+}
+
 /** 所有活着的会话。启动或刷新后用它对齐侧边栏。 */
 export function listSessions(): Promise<SessionInfo[]> {
   return invoke<SessionInfo[]>("list_sessions");

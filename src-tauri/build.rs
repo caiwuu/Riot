@@ -18,6 +18,7 @@ const COMMANDS: &[&str] = &[
     "set_api_key",
     "add_project",
     "create_session",
+    "probe_dirs",
     "list_sessions",
     "get_history",
     "delete_session",

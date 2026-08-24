@@ -767,6 +767,17 @@ pre {
   padding-right: 2px;
 }
 
+.project-head.gone {
+  color: var(--text-faint);
+}
+
+.project-gone {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--warn);
+  padding-right: 2px;
+}
+
 .row-btn {
   padding: 2px 4px;
   background: transparent;
@@ -985,6 +996,14 @@ pre {
   background: var(--bg-hover);
   border-color: transparent;
   color: var(--text);
+}
+
+.recent-row.gone {
+  color: var(--text-faint);
+}
+
+.recent-row.gone .recent-path {
+  color: var(--warn);
 }
 
 .recent-row svg {
@@ -1743,6 +1762,16 @@ pre {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.hero-ws-missing {
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--warn);
+  font: inherit;
+  cursor: pointer;
 }
 
 .transcript {
@@ -4633,6 +4662,18 @@ pre {
   background: color-mix(in srgb, var(--danger) 12%, var(--bg-card));
   border-color: color-mix(in srgb, var(--danger) 35%, transparent);
   color: var(--danger-soft);
+}
+
+.missing-project-path {
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  word-break: break-all;
+  color: var(--text);
 }
 
 /* ── Markdown 正文 ──────────────────────────── */

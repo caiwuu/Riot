@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-probe-dirs"
+description = "Enables the probe_dirs command without any pre-configured scope."
+commands.allow = ["probe_dirs"]
+
+[[permission]]
+identifier = "deny-probe-dirs"
+description = "Denies the probe_dirs command without any pre-configured scope."
+commands.deny = ["probe_dirs"]

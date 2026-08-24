@@ -48,6 +48,9 @@ pub enum HostError {
     Kernel(#[from] kernel::KernelError),
     #[error(transparent)]
     Fence(#[from] fence::FenceError),
+    /// 工作区根已经不在磁盘上。前端当成可恢复错误，不要整页炸掉。
+    #[error("项目目录不存在：{0}")]
+    MissingProject(String),
     #[error("浏览器不可用：{0}")]
     Browser(riot_protocol::browser::BrowserUnavailable),
     #[error("会话不存在。先用 create_session 建一个（每个会话绑定一个项目目录）。")]
@@ -764,6 +767,15 @@ async fn create_session(
     state.create_session(&root).await
 }
 
+/// 哪些路径现在不是目录。只看、不改配置。
+///
+/// 侧栏和欢迎页用来标失效项目：目录是用户在访达里删的，配置里的
+/// 列表不会自己消失。每次点开再 canonicalize 失败再整页报错，太晚了。
+#[tauri::command]
+fn probe_dirs(paths: Vec<String>) -> Vec<String> {
+    fence::missing_dirs(paths)
+}
+
 /// 所有活着的会话。前端启动或刷新后用它对齐侧边栏。
 #[tauri::command]
 async fn list_sessions(state: tauri::State<'_, AppState>) -> HostResult<Vec<state::SessionInfo>> {
@@ -954,6 +966,7 @@ pub fn run() {
             packs_uninstall,
             add_project,
             create_session,
+            probe_dirs,
             list_sessions,
             get_history,
             delete_session,

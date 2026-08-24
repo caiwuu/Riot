@@ -9,6 +9,8 @@ export interface ConfirmRequest {
   body: ReactNode;
   confirmLabel: string;
   action: () => void;
+  /** 默认 true。非破坏性确认（「知道了」）设 false，用主按钮而不是红色。 */
+  danger?: boolean;
 }
 
 /**
@@ -36,7 +38,7 @@ export function ConfirmDialog({
           取消
         </button>
         <button
-          className="btn-danger"
+          className={c.danger === false ? "primary" : "btn-danger"}
           onClick={() => {
             onClose();
             c.action();
