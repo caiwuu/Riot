@@ -12,6 +12,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 
 import type {
   AgentEvent,
+  ApiProtocol,
   FileChange,
   GitChanges,
   Message,
@@ -19,6 +20,7 @@ import type {
   PermissionAsk,
   PermissionMode,
   PermissionResponse,
+  ThinkingEffort,
 } from "./generated";
 
 export type {
@@ -32,8 +34,10 @@ export type {
   PermissionResponse,
 };
 
-/** 服务方协议。决定请求格式、认证头和哪些采样参数可发送。 */
-export type Protocol = "openai" | "anthropic";
+/** 服务方协议。决定请求格式、认证头和哪些采样参数可发送。
+ * 生成类型的别名，不是第二份定义 —— 手写一份的话，Rust 侧加变体时
+ * 这边不会有任何报错，只会在运行时变成一个"未知协议"。 */
+export type Protocol = ApiProtocol;
 
 /** 采样参数。null/undefined = 不设置：provider 层表示用服务端默认，会话覆盖层表示继承 provider。 */
 export interface Sampling {
@@ -44,8 +48,9 @@ export interface Sampling {
   maxOutputTokens?: number | null;
 }
 
-/** 思考力度档。取值与 OpenAI 的 reasoning_effort 对齐，DeepSeek / GLM 也认。 */
-export type ThinkingLevel = "low" | "medium" | "high";
+/** 思考力度档。取值与 OpenAI 的 reasoning_effort 对齐，DeepSeek / GLM 也认。
+ * 生成类型（riot-protocol 的 ThinkingEffort）的别名，同 Protocol 的理由。 */
+export type ThinkingLevel = ThinkingEffort;
 
 /**
  * 会话级思考策略（与宿主 riot-protocol 的 ThinkingPolicy 序列化形状一致）。
@@ -1090,6 +1095,31 @@ export function subscribeFullscreen(cb: (full: boolean) => void): () => void {
       if (stopped) unlisten();
     } catch {
       // 不在 Tauri 里（纯浏览器、组件测试）就当没全屏。
+    }
+  })();
+  return () => {
+    stopped = true;
+    unlisten?.();
+  };
+}
+
+/**
+ * 原生窗口焦点变化。比 window 的 "focus" 事件多覆盖一类场景：
+ * 睡眠唤醒时 WebView 可能不发 DOM focus（窗口一直"可见"），
+ * 只有 Tauri 层这个事件可靠。
+ */
+export function subscribeWindowFocus(cb: (focused: boolean) => void): () => void {
+  let stopped = false;
+  let unlisten: (() => void) | undefined;
+  void (async () => {
+    try {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      unlisten = await getCurrentWindow().onFocusChanged(({ payload }) => {
+        if (!stopped) cb(payload);
+      });
+      if (stopped) unlisten();
+    } catch {
+      // 不在 Tauri 里（纯浏览器、组件测试）。DOM 的 focus 监听兜底。
     }
   })();
   return () => {

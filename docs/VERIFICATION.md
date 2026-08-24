@@ -192,6 +192,8 @@ pub fn check_batch_safety(batch: &[ToolUse], registry: &ToolRegistry) {
 
 **防的 bug**:分批逻辑写错,导致两个 Edit 并行写同一个文件。
 
+**现状**:生产侧没有调用点,而且不可能有 —— 分批在 `riot-tools::partition`,生产依赖方向 tools ↛ core 禁止回调。那边按构造 fail-closed(判断不了就串行 + `catch_unwind`)。core 里这份是参照实现,供回放/混沌测试做事后断言;元测试里有对应豁免。
+
 #### INV-4:Done 事件恰好一次,且是最后一个
 
 ```rust
@@ -267,6 +269,8 @@ pub fn check_cache_breakpoints(req: &ModelRequest) {
 
 **检查点**:provider 组装请求后。
 
+**现状**:断点标记长在 riot-providers 的 wire 层,而生产依赖方向 providers ↛ core(riot-core 只是那边的 dev-dependency)。实际守护在 `anthropic/request.rs`:`build()` 里的 `debug_assert` + `validate_cache_breakpoints` 的负面测试。元测试里有对应豁免。
+
 #### INV-9:换模型后没有残留 thinking signature
 
 ```rust
@@ -292,24 +296,16 @@ pub fn check_path_in_fence(resolved: &Path, roots: &[PathBuf]) {
 
 **检查点**:所有文件写操作实际执行前(权限检查之外的第二道防线)。
 
+**现状**:工作目录围栏已按 ARCHITECTURE §9.5.1 整体移除,这条的检查点随之消失 —— 现在挡危险写入的是权限弹窗 + 敏感路径安全检查 + Bash 静态分析三层。函数保留待 sandbox 的 workspace-write 语义复用;元测试里有对应豁免。
+
 ### 3.3 断言的 review 方式
 
 你 review 时看两件事:
 
-1. `invariants.rs` 里的检查函数是否都实现了,逻辑是否正确(这个文件应该在 300 行以内);
+1. `invariants.rs` 里的检查函数是否都实现了,逻辑是否正确;
 2. 主循环里的**检查点是否都调用了**。
 
-第 2 点可以用一个测试保证:
-
-```rust
-#[test]
-fn all_invariants_have_call_sites() {
-    let src = include_str!("../src/loop.rs");
-    for name in ALL_INVARIANT_FNS {
-        assert!(src.contains(name), "invariant `{}` is never called", name);
-    }
-}
-```
+第 2 点由 `invariants.rs` 里的 `all_invariants_have_call_sites` 保证(已实现):它扫描 `crates/*/src` 和 `src-tauri/src` 下每个文件 `#[cfg(test)]` 之前的部分,要求 `ALL_INVARIANT_FNS` 里的每个函数要么有生产调用点,要么在**豁免表**里写清为什么没有(目前豁免:INV-3、INV-8、INV-10,理由见各自的「现状」)。豁免过期(后来接上线了)同样会失败 —— 豁免表不许静默腐烂。
 
 ---
 

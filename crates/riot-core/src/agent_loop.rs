@@ -107,6 +107,9 @@ pub fn run_agent(
             let messages = state.model_messages();
             invariants::check_api_payload(&messages);
             invariants::check_thinking_signatures(&messages, &state.model);
+            // 队列 drain 时机错了（用户插话被夹进 tool_use 和 tool_result
+            // 之间）会在这里现形，而不是等服务方 400。
+            invariants::check_message_sequence(&messages);
 
             let request = ProviderRequest {
                 model: state.model.clone(),
@@ -262,6 +265,11 @@ pub fn run_agent(
                 // 收尾闸（stop hooks）：产出检查脚本说"活没干完"就不让停，
                 // 反馈注入对话强制再跑一轮。排在队列 drain **之前** ——
                 // 活没干完就不该开始处理插话。
+                //
+                // INV-6：API 错误上跑 stop hooks 是"error → hook 注入 →
+                // 重试 → 又 error"死循环的入口，错误路径必须在到达这里
+                // 之前就 return。
+                invariants::check_hook_eligibility(state.messages.last(), true);
                 match deps.stop_gate.check(state.stop_hook_blocks).await {
                     StopDecision::Allow => {}
                     StopDecision::Block { reason } => {

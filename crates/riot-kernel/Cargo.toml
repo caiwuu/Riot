@@ -39,4 +39,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
+# 测试要用 ScriptedProvider 等替身。生产依赖（上面那份）不带这个
+# feature —— 测试构建靠 feature 并集拿到它，发布构建保持干净。
+riot-core = { workspace = true, features = ["testing"] }
 tempfile = { workspace = true }

@@ -22,6 +22,9 @@ pub mod guard;
 pub mod invariants;
 pub mod state;
 pub mod summarize;
+// 测试替身只进测试构建。下游要用的话在 dev-dependencies 里开
+// `features = ["testing"]`（riot-tools 的同名 feature 是同一个模式）。
+#[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod turn;
 

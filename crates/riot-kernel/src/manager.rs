@@ -26,9 +26,9 @@ use riot_protocol::permission::{PermissionResponse, SafetyClassifier};
 use riot_protocol::rpc::RpcNotification;
 use riot_protocol::turn::{SandboxKind, TurnConfig, TurnInput as RpcTurnInput};
 
+use crate::content::ImageInput;
 use crate::session::{
-    EventSink, ImageInput, Session, SessionPersist, SinkClosed, TurnCapabilities, TurnInput,
-    TurnLimits,
+    EventSink, Session, SessionPersist, SinkClosed, TurnCapabilities, TurnInput, TurnLimits,
 };
 
 /// 出站通道:序列化好的一行 JSON 交给 serve 的 writer 任务写 stdout。

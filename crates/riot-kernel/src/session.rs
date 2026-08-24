@@ -1,14 +1,18 @@
 //! 会话：把内核零件组装成能跑的东西。
 //!
-//! # 为什么内核在宿主进程内跑
+//! # 职责边界
 //!
-//! 架构文档里内核最终是独立进程（M4）。现在还不是 —— 阶段 A 它是一个
-//! library，直接在 Tauri 的 tokio runtime 上跑。
+//! 这里只做**装配与运行**：每轮把工具、权限闸、provider、能力包串成
+//! 一个能跑的轮子，并维护会话状态（历史、队列、挂起的询问）。
+//! 单一职责的零件在各自的模块里：
 //!
-//! 这不是偷懒，是顺序问题：进程边界要解决的是崩溃隔离和资源限制，而在
-//! 主循环的正确性还没被真实模型验证过之前，那层边界只会让每一次调试
-//! 多一跳。等这里稳定了再拆，拆的时候 `AgentDeps` 的形状不用变 ——
-//! 它本来就是按"能被替换"设计的。
+//! - [`crate::prompt`] —— 系统提示词与规划模式提醒
+//! - [`crate::content`] —— 用户输入 → 消息内容（图片/引用/占位）
+//! - [`crate::gate`] —— 权限闸（弹窗、等待、判危竞速）
+//! - [`crate::models`] —— 模型端点 → Provider 实例、清单与连通性探测
+//!
+//! 内核以 `riot-kernel` 二进制独立运行（阶段 B，见 ARCHITECTURE §2.2），
+//! 宿主通过 stdio JSON-RPC 驱动；测试与内嵌场景则直接调这里的类型。
 //!
 //! # 历史从事件流重建
 //!
@@ -16,35 +20,29 @@
 //! 攒起来得到的。这样宿主和 UI 看到的是同一份东西 —— 如果它们各自维护
 //! 一份，两者的分歧只会在几十轮之后以"模型突然失忆"的形式暴露出来。
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use riot_core::{AgentDeps, AgentState, run_agent};
-use riot_permissions::RuleSet;
 use riot_protocol::event::{AgentEvent, StreamDelta};
-use riot_protocol::id::{IdGenerator, MessageId, NanoIdGenerator, RequestId, SessionId};
+use riot_protocol::id::{IdGenerator, MessageId, NanoIdGenerator, SessionId};
 use riot_protocol::message::{Attachment, Message, MessageMeta, UserContent};
 use riot_protocol::permission::{
-    AskPreview, DecisionReason, GateOutcome, PendingAsk, PermissionAsk, PermissionContext,
-    PermissionGate, PermissionMode, PermissionModeState, PermissionResponse, PermissionResult,
-    PermissionRule, SafetyVerdict,
+    PermissionContext, PermissionGate, PermissionMode, PermissionModeState, PermissionRule,
 };
 use riot_protocol::provider::Provider;
 use riot_protocol::tool::{FileStateCache, PromptContext, Tool};
-use riot_providers::anthropic::request::SystemSection;
-use riot_providers::{
-    AnthropicConfig, AnthropicProvider, OpenAiConfig, OpenAiProvider, ReqwestTransport,
-};
 use riot_runtime::{MemoryFileState, SystemFs, SystemProcessRunner};
 use riot_tools::registry::Registry;
 use riot_tools::scheduler::Scheduler;
 
-use crate::config::{ResolvedModel, Sampling};
+use crate::config::Sampling;
+use crate::content::{ImageInput, MentionCtx};
+use crate::gate::{HostGate, PendingAsks};
 
 /// 等用户回应权限请求的上限区间（秒）。实际值由用户在设置里定，
 /// 由 [`crate::config::normalize`] 夹进这个区间。
@@ -57,104 +55,6 @@ const ASK_TIMEOUT_RANGE: std::ops::RangeInclusive<u64> = 5..=3600;
 /// 单轮最大往返数的合理区间。见 [`crate::config::default_max_turns`]。
 /// 至少 1（0 等于什么都做不了），上限 1000（再多多半是跑飞了）。
 const MAX_TURNS_RANGE: std::ops::RangeInclusive<u32> = 1..=1000;
-
-/// 判危通过之后，等这么久再自动放行。
-///
-/// 存在的理由是防误触：弹窗不该在用户手指正落下的那一刻消失，把这次点击
-/// 漏给底下的界面。它挡不住"看到弹窗、想两秒才点"—— 那时早放行了；挡的是
-/// 判危结果和点击几乎同时到达的那一小段。
-const CLASSIFY_GRACE: Duration = Duration::from_millis(200);
-
-/// 用户随消息附上的一张图。
-///
-/// 只走内容不走路径:图片可能压根没有路径（从剪贴板粘的截图），而有路径的
-/// 那些也要读成 base64 才能进请求 —— 统一成内容，下游少一条分支。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImageInput {
-    /// MIME 类型，如 `image/png`。
-    pub media_type: String,
-    /// base64 编码的图片数据。
-    pub data: String,
-}
-
-/// 读回来的一张图。字段名和 [`ImageInput`] 对齐 —— 前端读完直接原样发回来。
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImageOutput {
-    pub media_type: String,
-    pub data: String,
-    /// 文件名。界面上给附件条做标签用。
-    pub name: String,
-}
-
-/// 磁盘上的图片文件读进来的上限（原始字节）。
-///
-/// base64 之后会涨三分之一，所以这个数要比单图上限小一截。
-const MAX_IMAGE_FILE: u64 = 3_500_000;
-
-/// 读一个图片文件。
-///
-/// `[约束]` 类型按**扩展名**判断，而且只认这几种。不认的一律拒绝 ——
-/// 把一个 PDF 当 image/png 发出去，服务方要么 400、要么解出一张坏图，
-/// 而报错完全不会指向"类型判错了"。
-pub async fn read_image(path: &str) -> Result<ImageOutput, String> {
-    let p = std::path::Path::new(path);
-    let ext = p
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let media_type = match ext.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        other => {
-            return Err(format!(
-                "不支持 .{other} —— 只能附 png / jpg / gif / webp。\
-                 其它文件可以用「附加文件」，模型会自己去读。"
-            ));
-        }
-    };
-
-    // 豁免理由：这是宿主层，读的是用户亲手选的那个文件，注入 FileSystem
-    // 抽象在这里没有意义（见 clippy.toml 的说明）。
-    #[allow(clippy::disallowed_methods)]
-    let meta = tokio::fs::metadata(p)
-        .await
-        .map_err(|e| format!("读不到 {path}：{e}"))?;
-    if meta.len() > MAX_IMAGE_FILE {
-        return Err(format!(
-            "这张图有 {} MB，太大了（上限约 {} MB）。裁剪或缩小之后再附。",
-            meta.len() / 1_000_000,
-            MAX_IMAGE_FILE / 1_000_000,
-        ));
-    }
-
-    #[allow(clippy::disallowed_methods)]
-    let bytes = tokio::fs::read(p)
-        .await
-        .map_err(|e| format!("读不到 {path}：{e}"))?;
-
-    use base64::Engine as _;
-    Ok(ImageOutput {
-        media_type: media_type.to_owned(),
-        data: base64::engine::general_purpose::STANDARD.encode(&bytes),
-        name: p
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("image")
-            .to_owned(),
-    })
-}
-
-/// 单张图的上限（base64 后的长度）。
-///
-/// 各家服务方对单张图有自己的限制（Anthropic 是 5MB），超了是一个 400。
-/// 在这里拦住，用户能立刻知道是哪张图太大 —— 而模型那边报回来的错只会说
-/// "请求无效"。前端会先按长边缩一遍，走到这条的多半是超大截图。
-const MAX_IMAGE_B64: usize = 5_000_000;
 
 /// 用户这一轮发过来的东西。
 ///
@@ -519,74 +419,6 @@ fn fold_live(live: &mut LiveStream, ev: &AgentEvent) {
     }
 }
 
-/// 一条挂着的询问：应答通道，加上给界面重建弹窗用的详情。
-struct PendingEntry {
-    tx: oneshot::Sender<PermissionResponse>,
-    detail: PermissionAsk,
-    /// 到达序号。HashMap 不保序，快照按它排 —— 乱序重建会让弹窗
-    /// 顺序和产生顺序对不上。
-    seq: u64,
-}
-
-#[derive(Default)]
-pub struct PendingAsks {
-    map: Mutex<HashMap<String, PendingEntry>>,
-    seq: AtomicU64,
-}
-
-impl PendingAsks {
-    async fn insert(
-        &self,
-        id: String,
-        tx: oneshot::Sender<PermissionResponse>,
-        detail: PermissionAsk,
-    ) {
-        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-        self.map
-            .lock()
-            .await
-            .insert(id, PendingEntry { tx, detail, seq });
-    }
-
-    pub async fn resolve(&self, id: &str, response: PermissionResponse) -> bool {
-        match self.map.lock().await.remove(id) {
-            // 接收端已经走了（超时或取消）。不是错误 —— 用户在超时之后
-            // 才点了按钮，这时候什么都不该发生。
-            Some(e) => e.tx.send(response).is_ok(),
-            None => false,
-        }
-    }
-
-    async fn forget(&self, id: &str) {
-        self.map.lock().await.remove(id);
-    }
-
-    /// 还在等回答的询问，按到达顺序。进会话快照（session.resume）——
-    /// `permission_request` 事件只发一次，切走的界面靠这份快照把弹窗
-    /// 重建出来，否则那次询问只能等到超时被拒。
-    pub async fn snapshot(&self) -> Vec<PendingAsk> {
-        let g = self.map.lock().await;
-        let mut v: Vec<(u64, PendingAsk)> = g
-            .iter()
-            .map(|(id, e)| {
-                (
-                    e.seq,
-                    PendingAsk {
-                        request_id: RequestId::from_raw(id.clone()),
-                        detail: e.detail.clone(),
-                    },
-                )
-            })
-            .collect();
-        v.sort_by_key(|(seq, _)| *seq);
-        v.into_iter().map(|(_, a)| a).collect()
-    }
-
-    async fn clear(&self) {
-        self.map.lock().await.clear();
-    }
-}
-
 /// 真正的用户提示：有正文、附图或 `@` 文件。工具结果不算。
 fn is_user_prompt(m: &Message) -> bool {
     match m {
@@ -609,169 +441,6 @@ fn cut_at_user_prompt(history: &[Message], assistant_id: &str) -> Option<usize> 
         .iter()
         .position(|m| matches!(m, Message::Assistant { .. }) && m.id().as_str() == assistant_id)?;
     history[..ast].iter().rposition(is_user_prompt)
-}
-
-/// 把用户这一轮的输入拼成消息内容。
-///
-/// `[约束]` 图片排在文字前面。两家服务方的文档都建议这个顺序，实测差别在
-/// "先看图再读问题"和"读完问题回头找图"之间 —— 后者更容易答偏。
-///
-/// `[约束]` 模型收不了图片时必须**在这里**转成文字，不能把图片原样塞进历史。
-/// 塞进去的话，OpenAI 那条路会把它发成一条模型看不懂的 image_url（400），
-/// Anthropic 那条路会被服务方拒 —— 而两种失败都发生在用户已经按下发送之后。
-async fn user_content(
-    input: TurnInput,
-    vision: &dyn riot_protocol::vision::VisionAccess,
-    mentions: MentionCtx<'_>,
-) -> Vec<UserContent> {
-    let mut content = Vec::with_capacity(input.images.len() + 1);
-
-    // `[约束]` 转述和各类说明用 SystemReminder 附件，不用 Text。
-    //
-    // 这些话是宿主替模型补的上下文，不是用户说的:混进 Text 的话，
-    // 前端重建历史时会把整段转述当成用户气泡显示出来（实时路径看不到
-    // 这个问题 —— 乐观回显只显示用户真正打的字，切回会话才暴露）。
-    // 模型侧则两条路都读得到，SystemReminder 还多了"这是带外提示"的语义。
-    for (i, img) in input.images.into_iter().enumerate() {
-        if img.data.len() > MAX_IMAGE_B64 {
-            content.push(UserContent::Attachment(Attachment::SystemReminder {
-                text: format!(
-                    "用户附了第 {} 张图，但它有 {} KB，超过单张上限，没有发给你。\
-                     可以请用户裁剪或缩小之后再发。",
-                    i + 1,
-                    img.data.len() / 1024,
-                ),
-            }));
-            continue;
-        }
-
-        if vision.accepts_images() {
-            content.push(UserContent::Attachment(Attachment::Image {
-                media_type: img.media_type,
-                data: img.data,
-            }));
-            continue;
-        }
-
-        // 走视觉兼容。失败也要留一句话 —— 静默丢掉的话，用户明明附了图，
-        // 模型却完全不知道有这回事，然后答得像用户什么都没给。
-        //
-        // 转述进 DescribedImage 而不是 SystemReminder：模型那边两者一样（都
-        // 只读文字，provider 不发图），但前者把图片本体留在了消息里，界面
-        // 切回会话时还能把用户发过的图画出来。
-        let described = vision
-            .describe(riot_protocol::vision::DescribeRequest {
-                media_type: img.media_type.clone(),
-                data: img.data.clone(),
-                focus: "用户附上这张图是想让你看懂它的内容:上面的文字、界面元素、\
-                        数据、以及任何看起来是报错的地方"
-                    .to_owned(),
-            })
-            .await;
-        content.push(UserContent::Attachment(Attachment::DescribedImage {
-            media_type: img.media_type,
-            data: img.data,
-            text: match described {
-                Ok(desc) => format!("用户附的第 {} 张图：\n{desc}", i + 1),
-                Err(e) => format!("用户附了第 {} 张图，但没能转成文字：{e}", i + 1),
-            },
-        }));
-    }
-
-    let text_for_mentions = input.text.clone();
-    content.push(UserContent::Text {
-        text: prompt_text(&input.text),
-    });
-    // `@路径` 引用：用户点名的文件连内容一起带上，排在正文之后
-    //（先读问题再看材料 —— 和图片相反，图片是"看着图听问题"）。
-    // 两路来源：正文里手打的 @，和界面上选中的块。
-    let refs = crate::mentions::merge(
-        crate::mentions::parse(&text_for_mentions, mentions.cwd),
-        crate::mentions::from_paths(&input.refs, mentions.cwd),
-    );
-    if !refs.is_empty() {
-        tracing::info!(count = refs.len(), "展开 @ 文件引用");
-        content.extend(
-            crate::mentions::expand(&refs, mentions.file_state)
-                .into_iter()
-                .map(UserContent::Attachment),
-        );
-    }
-
-    // UserPromptSubmit hook 的补充上下文排在最后 —— 它是对这条消息的
-    // 注解，不是消息本身。
-    for ctx in input.extra_context {
-        content.push(UserContent::Attachment(Attachment::SystemReminder {
-            text: format!("UserPromptSubmit hook 的补充上下文：\n{ctx}"),
-        }));
-    }
-    content
-}
-
-/// 用户这条消息的正文。
-///
-/// 空文本也要留个位置:用户可能只丢了一张图什么都没说，而空的 user 消息
-/// 会被一部分服务方拒。
-fn prompt_text(text: &str) -> String {
-    if text.trim().is_empty() {
-        "看这张图。".to_owned()
-    } else {
-        text.to_owned()
-    }
-}
-
-/// 用户这一轮输入的**占位形态**：只有他真正打的字、附的图和点名的文件。
-///
-/// [`user_content`] 要调模型（图片转述）、读磁盘（`@` 展开）才能定稿，
-/// 期间界面得先有东西可画（见 `Session::pending_user`）。缺的是那些
-/// 本来就是补给模型的上下文 —— 用户自己在气泡里看到的就是这些。
-///
-/// `[约束]` 图片一律进 `DescribedImage`。这份内容按设计不会发给模型
-/// （定稿版会整条顶掉它），但万一漏出去，这个变体只会渲染成一段文字 ——
-/// 而 `Image` 会让收不了图的模型 400，正是 [`user_content`] 要避免的那个。
-///
-/// `[约束]` `@` 引用块也要占位。展开要读盘，切会话再回来如果只有正文、
-/// 没有 `UserFile`，前端曾经只能画出一串 `@路径` 纯文字（实时路径靠乐观
-/// 回显还看得见）。内容先空着 —— 定稿版会整条顶掉。
-fn pending_user_content(input: &TurnInput) -> Vec<UserContent> {
-    let mut content: Vec<UserContent> = input
-        .images
-        .iter()
-        .enumerate()
-        // 超限的图定稿时也不会带上，占位这里同样跳过 —— 它进不了历史，
-        // 却要跟着每次拉历史在 RPC 上来回搬几 MB。
-        .filter(|(_, img)| img.data.len() <= MAX_IMAGE_B64)
-        .map(|(i, img)| {
-            UserContent::Attachment(Attachment::DescribedImage {
-                media_type: img.media_type.clone(),
-                data: img.data.clone(),
-                text: format!("用户附的第 {} 张图，还在读。", i + 1),
-            })
-        })
-        .collect();
-    content.push(UserContent::Text {
-        text: prompt_text(&input.text),
-    });
-    for p in &input.refs {
-        if p.trim().is_empty() {
-            continue;
-        }
-        content.push(UserContent::Attachment(Attachment::UserFile {
-            path: std::path::PathBuf::from(p),
-            content: String::new(),
-        }));
-    }
-    content
-}
-
-/// `@` 引用展开要用的东西：解析相对路径的基准 + 工作集登记。
-///
-/// `file_state` 为 None 时不登记（测试）。登记之后模型能直接 Edit
-/// 引用过的文件，不用先 Read 一遍。
-#[derive(Clone, Copy)]
-struct MentionCtx<'a> {
-    cwd: &'a std::path::Path,
-    file_state: Option<&'a dyn riot_protocol::tool::FileStateCache>,
 }
 
 impl Session {
@@ -1111,8 +780,12 @@ impl Session {
                 }
             }
             let id = self.ids.next_id("msg");
-            let content =
-                user_content(input.clone(), caps.vision.as_ref(), self.mention_ctx()).await;
+            let content = crate::content::user_content(
+                input.clone(),
+                caps.vision.as_ref(),
+                self.mention_ctx(),
+            )
+            .await;
             let msg = Message::User {
                 id: MessageId::from_raw(id.clone()),
                 content,
@@ -1750,7 +1423,7 @@ impl Session {
         model: riot_protocol::ModelEndpoint,
         sink: SessionSink,
     ) -> Result<(), String> {
-        let provider = provider_from_endpoint(&model)?;
+        let provider = crate::models::provider_from_endpoint(&model)?;
         let cancel = CancellationToken::new();
         // 占住 running：期间的插话照常排队，下一轮的收尾 drain 会捞到。
         {
@@ -1807,7 +1480,7 @@ impl Session {
         cancel: CancellationToken,
         limits: TurnLimits,
     ) -> Result<(), String> {
-        let provider = provider_from_endpoint(&model)?;
+        let provider = crate::models::provider_from_endpoint(&model)?;
         let clock: Arc<dyn riot_protocol::tool::Clock> =
             Arc::new(riot_providers::watchdog::TokioClock);
 
@@ -1898,15 +1571,17 @@ impl Session {
             }
         }
 
+        // 模型对"今天"没有概念，它的年份停在训练截止那天。不注入的话它
+        // 搜"最新版本"会带上一个两年前的年份，然后拿着过期结果言之凿凿；
+        // 聊天里问「最近」「今年」也一样。系统提示词和工具 prompt 共用
+        // 这一份，粒度（只到月，为缓存）见 tools::web::date。
+        let today = riot_tools::tools::web::date::year_month(clock.now_ms());
         let make_ctx = |sibling_tools: Vec<String>| PromptContext {
             cwd: self.cwd.clone(),
             platform: std::env::consts::OS.to_owned(),
             // 全部正式名。工具的 prompt 靠它写清分工（"有 X 就别用我"）。
             sibling_tools,
-            // 模型对"今天"没有概念，它的年份停在训练截止那天。不注入的
-            // 话它搜"最新版本"会带上一个两年前的年份，然后拿着过期结果
-            // 言之凿凿。见 tools::web::date。
-            today: riot_tools::tools::web::date::year_month(clock.now_ms()),
+            today: today.clone(),
         };
 
         // 规划模式的出口工具只在规划模式注册：其它模式下它没有意义，
@@ -2012,7 +1687,7 @@ impl Session {
             // 再切回来必须还看得见自己刚发的话（见 `pending_user`）。
             *self.pending_user.lock().await = Some(Message::User {
                 id: user_id.clone(),
-                content: pending_user_content(&input),
+                content: crate::content::pending_user_content(&input),
                 meta: MessageMeta::default(),
             });
 
@@ -2040,7 +1715,8 @@ impl Session {
                     None => tracing::warn!("主动压缩失败，本轮用完整历史"),
                 }
             }
-            let mut content = user_content(input, vision.as_ref(), self.mention_ctx()).await;
+            let mut content =
+                crate::content::user_content(input, vision.as_ref(), self.mention_ctx()).await;
             // 记忆注入：会话的**第一条**用户消息前置 AGENTS.md（全局 + 项目）。
             // 只注入一次 —— 它随消息进历史和 transcript，往后每轮自然带着；
             // 每轮都注的话，同一份内容会在上下文里堆出 N 份。
@@ -2063,6 +1739,10 @@ impl Session {
                 prelude.append(&mut content);
                 content = prelude;
             }
+            // 规划模式的约束跟在消息**末尾**（用户正文之后）：它是对本轮
+            // 状态的注解，不是消息本身，和 extra_context 同一个位置逻辑。
+            // 为什么不进 system prompt，见 plan_mode_reminder 的取舍注释。
+            content.extend(crate::prompt::plan_mode_reminder(mode));
             let user_msg = Message::User {
                 id: user_id.clone(),
                 content,
@@ -2089,11 +1769,11 @@ impl Session {
                     .clamp(*MAX_TURNS_RANGE.start(), *MAX_TURNS_RANGE.end()),
             );
 
-        let system = system_prompt(
+        let system = crate::prompt::system_prompt(
             &self.cwd,
+            &today,
             python_venv.as_deref(),
             self.system_prompt_extra().await.as_deref(),
-            mode,
             hook_engine.has_pre_tool_use()
                 || hook_engine.has_post_tool_use()
                 || hook_engine.has_stop(),
@@ -2343,1130 +2023,15 @@ fn leaves_a_trace(ev: &AgentEvent) -> bool {
     matches!(ev, AgentEvent::Message(_))
 }
 
-/// 按配置构建 provider。会话和"测试连接"共用 —— 两处各写一遍的话，
-/// 测试通过而正式请求失败（或反过来）这种事迟早发生。
-pub fn provider_for(model: &ResolvedModel) -> Result<Arc<dyn Provider>, String> {
-    provider_from_endpoint(&model.to_endpoint().map_err(|e| e.to_string())?)
-}
-
-/// 从一个解析好的端点(含明文 key)建 Provider。
-///
-/// 这是建 Provider 的核心入口。阶段 B 拆进程后内核走这条:宿主把
-/// [`riot_protocol::ModelEndpoint`] 随 RPC 传进来,内核不碰 auth.json。
-/// 内嵌期的 [`provider_for`] 也经它 —— 只是多一步从 `ResolvedModel` 把 key
-/// 解析出来。两处共用一份建构逻辑,避免"内嵌能连、RPC 连不上"这类分叉。
-pub fn provider_from_endpoint(
-    model: &riot_protocol::ModelEndpoint,
-) -> Result<Arc<dyn Provider>, String> {
-    let key = model.api_key.clone();
-    // 空 key = 宿主没解析出密钥(环境变量 / auth.json 都没有)。在这里立即
-    // 失败,不建 provider、不发请求 —— 和拆进程前 provider_for 缺 key 的行为
-    // 一致(那时靠 ResolvedModel::api_key() 报 MissingKey)。
-    if key.trim().is_empty() {
-        return Err("缺少 API key".to_owned());
-    }
-    let transport = Arc::new(ReqwestTransport::new().map_err(|e| e.to_string())?);
-    let clock = Arc::new(riot_providers::watchdog::TokioClock);
-
-    let sampling = riot_providers::SamplingParams {
-        temperature: model.sampling.temperature,
-        top_p: model.sampling.top_p,
-        top_k: model.sampling.top_k,
-    };
-
-    if model.is_anthropic() {
-        return Ok(Arc::new(AnthropicProvider::new(
-            transport,
-            clock,
-            Vec::new(),
-            AnthropicConfig {
-                base_url: model.base_url.clone(),
-                api_path: model.api_path.clone(),
-                api_key: key,
-                fallback_model: model.fallback_model.clone(),
-                sampling,
-                ..Default::default()
-            },
-        )));
-    }
-
-    Ok(Arc::new(OpenAiProvider::new(
-        transport,
-        clock,
-        Vec::<SystemSection>::new(),
-        OpenAiConfig {
-            base_url: model.base_url.clone(),
-            api_path: model.api_path.clone(),
-            api_key: key,
-            fallback_model: model.fallback_model.clone(),
-            sampling,
-            ..Default::default()
-        },
-    )))
-}
-
-/// 拉取服务方的可用模型列表（`GET /v1/models`，两个协议的响应
-/// 恰好都是 `{"data":[{"id":...}]}`）。
-///
-/// 独立于 Provider trait：列模型是配置期操作，不该走流式管线。
-pub async fn list_models(p: &crate::config::ProviderConfig) -> Result<Vec<String>, String> {
-    let key = p.api_key().map_err(|e| e.to_string())?;
-    let client = reqwest::Client::new();
-
-    let mut ids: Vec<String> = Vec::new();
-    let mut first_error: Option<String> = None;
-
-    for url in model_list_urls(&p.base_url, &p.api_path) {
-        let req = match p.protocol {
-            crate::config::Protocol::Openai => client.get(&url).bearer_auth(key.clone()),
-            crate::config::Protocol::Anthropic => client
-                .get(&url)
-                .header("x-api-key", key.clone())
-                .header("anthropic-version", "2023-06-01"),
-        };
-        match fetch_models(req).await {
-            Ok(found) => ids.extend(found),
-            Err(e) => {
-                if first_error.is_none() {
-                    first_error = Some(e);
-                }
-            }
-        }
-    }
-
-    if ids.is_empty() {
-        // 一个都没问到才算失败。报第一条错 —— 它来自最规范的那个路径，
-        // 而后面那个只是补充。
-        return Err(first_error.unwrap_or_else(|| "服务方没有返回任何模型".to_owned()));
-    }
-
-    ids.sort();
-    ids.dedup();
-    Ok(ids)
-}
-
-/// 模型清单可能在哪几个地址上。
-///
-/// `[约束]` 要问不止一个路径。各家的"清单"和"对话"不一定在同一层:智谱的
-/// `/api/paas/v4/models` 只列 8 个模型，而 `/api/paas/v4/v1/models` 列 14 个
-/// （视觉模型全在后者里），两个都通 —— 而对话**必须**走不带 `/v1` 的那个，
-/// 带上就 404。
-///
-/// 只问一个的后果是"能用的模型在列表里看不见":用户在设置里找不到
-/// `glm-4.6v`，而它明明能对话。实测过这两个路径的返回。
-///
-/// `[取舍]` 合并两份清单，代价是可能列出对话端点不认的模型。那个由模型弹窗
-/// 里的「测试模型」兜底 —— 一次点击就能确认，比"看不见"好排查得多。
-fn model_list_urls(base: &str, api_path: &str) -> Vec<String> {
-    let root = base.trim().trim_end_matches('/');
-    let mut urls = Vec::new();
-
-    // 用户配了对话路径的话，清单大概率和它同一层:把接口那一段换成 models。
-    // `/v1/chat/completions` → `/v1/models`。
-    //
-    // `[约束]` 要按**已知的接口尾巴**剥，不能只剥最后一段。OpenAI 的尾巴是
-    // 两段（`chat/completions`），只剥一段会拼出 `/v1/chat/models`。
-    if let Some(prefix) = strip_endpoint_tail(api_path)
-        && !prefix.is_empty()
-    {
-        urls.push(format!("{root}/{prefix}/models"));
-    }
-
-    urls.push(riot_providers::endpoint::api_url(base, "v1", "models"));
-    // 再试一次在同一个根上多接一层 `v1`（智谱那种把 OpenAI 兼容清单挂在
-    // `<根>/v1/models` 的布局）。
-    urls.push(format!("{root}/v1/models"));
-
-    urls.dedup();
-    // 去重要按值，不只是相邻 —— 上面三条在常见配置下会两两相同。
-    let mut seen = std::collections::HashSet::new();
-    urls.retain(|u| seen.insert(u.clone()));
-    urls
-}
-
-/// 把对话路径末尾那个接口名剥掉，留下它所在的那一层。
-///
-/// 认得出的尾巴优先（两个协议各一个）；都不匹配时退回"去掉最后一段"，
-/// 那对自定义网关是个合理的猜测。
-fn strip_endpoint_tail(api_path: &str) -> Option<&str> {
-    let p = api_path
-        .trim()
-        .trim_start_matches('/')
-        .trim_end_matches('/');
-    if p.is_empty() {
-        return None;
-    }
-    for tail in ["chat/completions", "messages", "completions"] {
-        if let Some(rest) = p.strip_suffix(tail) {
-            return Some(rest.trim_end_matches('/'));
-        }
-    }
-    p.rsplit_once('/').map(|(head, _)| head)
-}
-
-/// 发一次清单请求。
-async fn fetch_models(req: reqwest::RequestBuilder) -> Result<Vec<String>, String> {
-    // 等外部服务，真实时钟
-    #[allow(clippy::disallowed_methods)]
-    let resp = req
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await
-        .map_err(|e| format!("请求失败：{e}"))?;
-
-    let status = resp.status();
-    let body = resp.text().await.map_err(|e| format!("读响应失败：{e}"))?;
-    if !status.is_success() {
-        // 错误体里常有有用的说明（key 无效、路径不对），截断后带给用户
-        let hint: String = body.chars().take(200).collect();
-        return Err(format!("HTTP {status}：{hint}"));
-    }
-
-    #[derive(serde::Deserialize)]
-    struct ModelEntry {
-        id: String,
-    }
-    #[derive(serde::Deserialize)]
-    struct ModelList {
-        data: Vec<ModelEntry>,
-    }
-
-    let list: ModelList =
-        serde_json::from_str(&body).map_err(|e| format!("响应不是模型列表：{e}"))?;
-    Ok(list.data.into_iter().map(|m| m.id).collect())
-}
-
-/// 用当前配置发一个最小请求，验证 base URL、key、模型名这条链路通不通。
-///
-/// 这是设置页"测试连接"按钮的后端。没有它的话，配置错误的表现是
-/// "发消息后转圈很久然后报一长串"—— 用户分不清是网络、key 还是模型名的锅。
-pub async fn test_connection(model: &ResolvedModel) -> Result<String, String> {
-    use riot_protocol::provider::{ProviderEvent, ProviderRequest};
-
-    let provider = provider_for(model)?;
-    let req = ProviderRequest {
-        model: model.model.clone(),
-        messages: vec![Message::User {
-            id: MessageId::from_raw("msg_conn_test"),
-            content: vec![UserContent::Text {
-                text: "ping".into(),
-            }],
-            meta: MessageMeta::default(),
-        }],
-        system: String::new(),
-        tools: Vec::new(),
-        // 要的是"链路通"，不是回答质量 —— 别让用户为一次握手付整段生成的钱
-        max_output_tokens: Some(16),
-        thinking: Default::default(),
-    };
-
-    let cancel = CancellationToken::new();
-    let mut stream = provider.stream(req, cancel.clone());
-
-    use futures::StreamExt;
-    // 等的是外部服务，真实时钟。30 秒等不来第一个事件就是链路有问题。
-    #[allow(clippy::disallowed_methods)]
-    let verdict = tokio::time::timeout(Duration::from_secs(30), async {
-        while let Some(ev) = stream.next().await {
-            match ev {
-                ProviderEvent::Message(_) | ProviderEvent::Usage(_) => {
-                    return Ok(());
-                }
-                ProviderEvent::Error(e) => return Err(format!("{e}")),
-                _ => {}
-            }
-        }
-        Err("连接中断，没有收到任何响应".to_owned())
-    })
-    .await;
-
-    cancel.cancel();
-    match verdict {
-        Ok(Ok(())) => Ok(format!("连接正常：{} @ {}", model.model, model.base_url)),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err("30 秒内没有响应。检查 base URL 和网络。".to_owned()),
-    }
-}
-
-/// 一次询问的全部内容，来自 [`PermissionResult::Ask`]。
-///
-/// 三个字段捆在一起传是因为它们同源:都由决策链在同一处算出。拆成
-/// 三个参数散着传，就给了调用点"只带一部分、剩下的现编"的机会 ——
-/// `reason` 曾经就是这么被写死成 `Mode` 的。
-struct AskSpec {
-    message: String,
-    suggestions: Vec<riot_protocol::permission::PermissionUpdate>,
-    reason: DecisionReason,
-}
-
-/// 宿主侧的权限闸。
-///
-/// 决策链算出 allow/ask/deny，这里负责 ask 那一支 —— 弹窗、等待、超时。
-struct HostGate {
-    sink: SessionSink,
-    pending: Arc<PendingAsks>,
-    ids: Arc<dyn IdGenerator>,
-    ctx: PermissionContext,
-    /// 和 Session.rules 是同一份。"总是允许"写进这里，同一轮内的
-    /// 下一次调用立即生效。
-    rules_live: Arc<Mutex<Vec<PermissionRule>>>,
-    /// 和 Session.mode 是同一份。批准计划把模式切到执行档之后，
-    /// 同一轮的下一个工具调用就要按新模式判定。
-    mode_live: Arc<Mutex<PermissionMode>>,
-    cwd: std::path::PathBuf,
-    /// 等用户回应的上限，来自配置。见 [`ASK_TIMEOUT_RANGE`]。
-    ask_timeout: Duration,
-    /// PreToolUse hooks。deny 一票否决、ask 强制询问、allow 只把
-    /// "要问"升级成"放行" —— 内置决策链的 Deny 不可被 hook 压过。
-    hooks: Arc<crate::hooks::HookEngine>,
-    /// Auto 模式的判危分类器。没配便宜档模型时是
-    /// [`riot_protocol::permission::NoClassifier`]（永远 Hold），
-    /// Auto 模式于是退化成 Default —— 不会静默放行。
-    classifier: Arc<dyn riot_protocol::permission::SafetyClassifier>,
-}
-
-#[async_trait::async_trait]
-impl PermissionGate for HostGate {
-    async fn check(
-        &self,
-        tool: &dyn Tool,
-        input: &serde_json::Value,
-        tool_use_id: &riot_protocol::id::ToolUseId,
-        cancel: &CancellationToken,
-    ) -> GateOutcome {
-        // ── PreToolUse hooks 先跑 ────────────────────────────────
-        // 聚合规则照 CC：deny > ask > allow。deny 直接拒（不再走决策链，
-        // 理由发回模型让它换个做法）；ask / allow 记下来和决策链的结果
-        // 合成。
-        //
-        // `[约束]` hook 的 allow **只能免掉例行询问**（Consent /
-        // Unverifiable / 模式引起的那些），压不过三样东西：决策链的
-        // Deny、安全检查（SafetyCheck，对 bypass 都免疫）、以及用户
-        // 自己写的 ask 规则。否则一行 hooks.json 就等于把整套安全
-        // 检查关掉 —— 而 hooks.json 是项目目录里的文件，clone 别人的
-        // 仓库就可能带一个。
-        let mut hook_allow = false;
-        let mut hook_ask: Option<String> = None;
-        let mut rewritten: Option<serde_json::Value> = None;
-        if self.hooks.has_pre_tool_use() {
-            for o in self
-                .hooks
-                .pre_tool_use(tool.name(), input, tool_use_id.as_str())
-                .await
-            {
-                match o {
-                    crate::hooks::Outcome::Block { reason } => {
-                        return GateOutcome::Deny {
-                            message: format!("PreToolUse hook 拒绝了这次调用：{reason}"),
-                        };
-                    }
-                    crate::hooks::Outcome::Ask { reason } => hook_ask = Some(reason),
-                    crate::hooks::Outcome::Allow => hook_allow = true,
-                    crate::hooks::Outcome::Rewrite { input } => rewritten = Some(input),
-                    crate::hooks::Outcome::Context { .. } => {}
-                }
-            }
-        }
-        // 改写后的输入从这里开始就是"这次调用"本身：判定、弹窗预览、
-        // 最终执行都用它。判定看旧输入而执行跑新输入 = 按 A 授权执行 B。
-        let input: &serde_json::Value = rewritten.as_ref().unwrap_or(input);
-
-        // 每次都从共享状态取最新规则和模式，不用构建时的快照 —— 快照
-        // 意味着"总是允许"和"批准计划切模式"都要到下一轮才生效。
-        let rules = RuleSet::new(self.rules_live.lock().await.clone());
-        let mut ctx = self.ctx.clone();
-        ctx.mode = PermissionModeState(Some(*self.mode_live.lock().await));
-
-        let decided = riot_permissions::decide(tool, input, &ctx, &rules);
-
-        // hook 要求强制询问：除非决策链本来就要拒，一律改成问用户。
-        let outcome = if let Some(reason) =
-            hook_ask.filter(|_| !matches!(decided, PermissionResult::Deny { .. }))
-        {
-            let spec = AskSpec {
-                message: format!("PreToolUse hook 要求确认：{reason}"),
-                suggestions: vec![],
-                reason: DecisionReason::Hook {
-                    name: "PreToolUse".into(),
-                },
-            };
-            self.ask(tool, input, tool_use_id, cancel, spec).await
-        } else {
-            match decided {
-                PermissionResult::Allow { updated_input, .. } => {
-                    GateOutcome::Allow { updated_input }
-                }
-
-                PermissionResult::Deny { message, .. } => GateOutcome::Deny { message },
-
-                // Passthrough 到这里说明决策链没能定性。收敛成询问，不是放行 ——
-                // 「不知道该不该」和「可以」是两回事。
-                PermissionResult::Passthrough if hook_allow => GateOutcome::Allow {
-                    updated_input: None,
-                },
-                PermissionResult::Passthrough => {
-                    let spec = AskSpec {
-                        message: "需要确认这次调用".into(),
-                        suggestions: vec![],
-                        reason: DecisionReason::Unverifiable {
-                            what: tool.name().to_owned(),
-                        },
-                    };
-                    self.ask(tool, input, tool_use_id, cancel, spec).await
-                }
-
-                PermissionResult::Ask {
-                    message,
-                    suggestions,
-                    reason,
-                } => {
-                    if hook_allow && hook_may_skip_ask(&reason) {
-                        GateOutcome::Allow {
-                            updated_input: None,
-                        }
-                    } else {
-                        let spec = AskSpec {
-                            message,
-                            suggestions,
-                            reason,
-                        };
-                        self.ask(tool, input, tool_use_id, cancel, spec).await
-                    }
-                }
-            }
-        };
-
-        // hook 的改写要跟到执行那一步。权限层自己也可能改写（给命令补
-        // 安全 flag），那份更靠后、基于改写后的输入算出来的，优先。
-        match (outcome, rewritten) {
-            (
-                GateOutcome::Allow {
-                    updated_input: None,
-                },
-                Some(r),
-            ) => GateOutcome::Allow {
-                updated_input: Some(r),
-            },
-            (other, _) => other,
-        }
-    }
-}
-
-/// PreToolUse hook 的 allow 能不能免掉这次询问。
-///
-/// 能：例行询问（陌生域名的同意、静态分析看不懂的命令、模式引起的确认）
-/// —— 这正是 hook 存在的意义，"我这个项目里这类操作没问题"。
-///
-/// 不能：安全检查（写 SSH 配置、凭证文件、命令注入……对 bypass 都免疫，
-/// 更不该被一个脚本压过）和用户自己写的 ask 规则（那是用户明确要求
-/// "这个必须问我"，脚本无权替他改主意）。
-///
-/// 也不能：提问（`UserChoice`，即 `AskUserQuestion` 的选项卡）。这不是
-/// 信任问题 —— hook 的 allow 回答不了一道选择题。跳过卡片的话工具拿着
-/// 空选择跑，必然以"没有收到用户的选择"失败。
-fn hook_may_skip_ask(reason: &DecisionReason) -> bool {
-    !matches!(
-        reason,
-        DecisionReason::SafetyCheck { .. }
-            | DecisionReason::Rule { .. }
-            | DecisionReason::UserChoice { .. }
-    )
-}
-
-/// 把用户选中的选项写进工具输入，交给 `AskUserQuestion` 读。
-///
-/// 走 `updated_input` 而不是另开一条通道：权限层本来就有改写输入的权力
-/// （给命令补安全 flag 用的就是它），提问的答案是同一件事的另一种用法。
-///
-/// 返回 None = 不改输入。空选择必须走这条路：普通的"允许一次"也经过这里，
-/// 给每个工具都塞一个空的 `__chosen` 字段会让工具入参多出一个没人要的键。
-fn inject_choice(input: &serde_json::Value, choice: Vec<String>) -> Option<serde_json::Value> {
-    if choice.is_empty() {
-        return None;
-    }
-    let mut v = input.clone();
-    // 非对象的输入没法插字段。走到这里说明工具入参不成形，validate_input
-    // 会在后面把它拦下 —— 这里静默不改，不要 panic。
-    let obj = v.as_object_mut()?;
-    obj.insert(
-        riot_tools::tools::ask::CHOSEN_KEY.to_owned(),
-        serde_json::Value::Array(choice.into_iter().map(serde_json::Value::String).collect()),
-    );
-    Some(v)
-}
-
-/// 落实"总是允许"里的 AddRule 建议。SetMode 在 [`HostGate::remember`]
-/// 处理（要碰会话的 mode_live 和事件通道）；AddWorkingDirectory 仍然
-/// 明确不支持 —— 扩围栏牵动的状态面更大，明确不支持好过半支持。
-fn apply_remember(
-    rules: &mut Vec<PermissionRule>,
-    updates: Vec<riot_protocol::permission::PermissionUpdate>,
-) {
-    for u in updates {
-        if let riot_protocol::permission::PermissionUpdate::AddRule {
-            tool,
-            pattern,
-            decision,
-            ..
-        } = u
-        {
-            let rule = PermissionRule {
-                tool,
-                pattern,
-                decision,
-                source: riot_protocol::permission::RuleSource::Session,
-            };
-            if !rules.contains(&rule) {
-                rules.push(rule);
-            }
-        }
-    }
-}
-
-impl HostGate {
-    async fn remember(&self, updates: Vec<riot_protocol::permission::PermissionUpdate>) {
-        if updates.is_empty() {
-            return;
-        }
-        // 模式切换先落。批准计划的场景里，模型的**下一个**工具调用就要
-        // 按新模式判定 —— check() 每次都从 mode_live 现读，这里写完
-        // 立即可见。
-        for u in &updates {
-            if let riot_protocol::permission::PermissionUpdate::SetMode { mode, .. } = u {
-                *self.mode_live.lock().await = *mode;
-                tracing::info!(mode = ?mode, "权限模式已切换（用户批准计划时选择）");
-                // 告诉界面。不发的话 composer 还显示「规划模式」，而宿主
-                // 已经按新档放行 —— 显示得比实际更严是最坏的一种错。
-                let _ = self.sink.send(AgentEvent::ModeChanged { mode: *mode });
-            }
-        }
-        apply_remember(&mut *self.rules_live.lock().await, updates);
-    }
-
-    // 等用户回应用的是真实时钟。禁用列表针对的是内核逻辑 —— 那里的时间
-    // 必须可控才能做黄金回放；这里等的是人，回放里根本走不到。
-    #[allow(clippy::disallowed_methods)]
-    async fn ask(
-        &self,
-        tool: &dyn Tool,
-        input: &serde_json::Value,
-        tool_use_id: &riot_protocol::id::ToolUseId,
-        cancel: &CancellationToken,
-        // `[约束]` `reason` 必须原样来自决策链，不能在这里现编。
-        // 曾经这里写死成 `Mode`，于是所有弹窗都自称"由权限模式决定"，
-        // 用户看到的解释和实际原因无关：明明是写 `~/.zshrc` 触发的安全
-        // 检查，弹窗说的却是模式。那种解释比没有解释更糟 —— 它把人引向
-        // 去改模式设置，而改了也没用。
-        spec: AskSpec,
-    ) -> GateOutcome {
-        let request_id = self.ids.next_id("ask");
-        // 判危要看这个理由（它是安全边界的判据），而下面它会被 move 进
-        // PermissionAsk —— 先留一份。
-        let reason = spec.reason.clone();
-        let (tx, rx) = oneshot::channel();
-
-        let ask = PermissionAsk {
-            tool_use_id: tool_use_id.clone(),
-            tool_name: tool.name().to_owned(),
-            summary: if spec.message.trim().is_empty() {
-                tool.describe(input)
-            } else {
-                spec.message
-            },
-            preview: preview_of(tool, input, &self.cwd),
-            suggestions: spec.suggestions,
-            reason: spec.reason,
-        };
-        // 详情和应答通道一起挂着：事件只发一次，界面切走再切回时靠
-        // session.resume 的快照重建弹窗（见 PendingAsks::snapshot）。
-        self.pending
-            .insert(request_id.clone(), tx, ask.clone())
-            .await;
-
-        let sent = self.sink.send(AgentEvent::PermissionRequest {
-            request_id: RequestId::from_raw(request_id.clone()),
-            detail: Box::new(ask),
-        });
-
-        if sent.is_err() {
-            self.pending.forget(&request_id).await;
-            return GateOutcome::Deny {
-                message: "无法向用户请求授权（界面已断开），本次操作未执行".into(),
-            };
-        }
-
-        // 计划批准不吃普通询问的超时：计划是要读的文档，几页纸读一刻钟
-        // 很正常，而普通超时默认才 60 秒 —— 读到一半计划被"超时拒绝"，
-        // 模型退回规划模式重新提交，用户刚读的白读。上限一小时兜底
-        //（人真的走了不能让轮次永远挂着）。
-        let timeout = if tool.name() == "ExitPlanMode" {
-            Duration::from_secs(3600)
-        } else {
-            self.ask_timeout
-        };
-
-        // 这里等的是**用户**，用真实时钟而不是注入的 Clock。黄金回放里
-        // 走不到这条路径（那些用例不弹窗），注入只会多一层没人用的间接。
-        //
-        // Auto 模式下弹窗和判危并行跑，先有结果的算（见 classify_race）。
-        tokio::pin!(rx);
-        if let Some(verdict) = self
-            .classify_race(tool, input, &reason, &mut rx, cancel)
-            .await
-        {
-            self.pending.forget(&request_id).await;
-            // 告诉界面这个弹窗作废了，理由是分类器 —— 不发的话它挂在那里，
-            // 用户点"允许"毫无反应（操作早就放行并跑完了）。
-            self.resolved(&request_id, verdict);
-            return GateOutcome::Allow {
-                updated_input: None,
-            };
-        }
-
-        let answer = tokio::select! {
-            r = tokio::time::timeout(timeout, &mut rx) => r,
-            _ = cancel.cancelled() => {
-                self.pending.forget(&request_id).await;
-                self.resolved(&request_id, DecisionReason::UserChoice { remembered: false });
-                return GateOutcome::Deny { message: "用户已中断，本次操作未执行".into() };
-            }
-        };
-
-        match answer {
-            Ok(Ok(PermissionResponse::Allow { remember, choice })) => {
-                self.remember(remember).await;
-                GateOutcome::Allow {
-                    updated_input: inject_choice(input, choice),
-                }
-            }
-            Ok(Ok(PermissionResponse::Deny { message })) => GateOutcome::Deny {
-                message: match message.as_deref().map(str::trim) {
-                    Some(m) if !m.is_empty() => format!("用户拒绝了这次操作：{m}"),
-                    _ => "用户拒绝了这次操作。换一种方式，或者问清楚再动手。".to_owned(),
-                },
-            },
-            Ok(Err(_)) => GateOutcome::Deny {
-                message: "授权请求没有得到回应，本次操作未执行".into(),
-            },
-            Err(_) => {
-                self.pending.forget(&request_id).await;
-                // 告诉界面这个弹窗已经作废。不发的话它会一直挂在那里，
-                // 用户点"允许"也不会有任何反应 —— 操作早就被拒绝了。
-                self.resolved(&request_id, DecisionReason::Timeout);
-                // `[约束]` 超时按拒绝处理。见 ASK_TIMEOUT_RANGE 的注释。
-                //
-                // 提问的超时不能劝模型"重新提出"：没人在场时重新提问的结局
-                // 还是超时，一来一回就成了每分钟一轮的提问循环。和工具自己
-                // 的空选择失败同一个口径 —— 讲清取舍，停下来等人。
-                let message = if tool.name() == "AskUserQuestion" {
-                    format!(
-                        "等了 {} 秒没有人回答。不要立刻重新提问，也不要自己替用户挑一个 —— \
-                         用普通回复把这个决定和各选项的取舍讲清楚，然后停下来等他说。",
-                        timeout.as_secs()
-                    )
-                } else {
-                    format!(
-                        "等待授权超过 {} 秒，本次操作未执行。如果仍然需要，请重新提出。",
-                        timeout.as_secs()
-                    )
-                };
-                GateOutcome::Deny { message }
-            }
-        }
-    }
-
-    /// Auto 模式：判危与弹窗竞速。
-    ///
-    /// 返回 `Some(reason)` = 分类器判它安全，自动放行；`None` = 继续等用户
-    /// （不是 Auto 模式、这类询问不许它判、判不准、或者用户先答了）。
-    ///
-    /// # 三道闸
-    ///
-    /// 1. **模式**：只有 [`PermissionMode::Auto`]。
-    /// 2. **理由**：只有 `yields_to_bypass()` 为真的询问。安全检查和用户
-    ///    亲手写的 ask 规则对它免疫 —— 和 bypass 模式共用同一个谓词，
-    ///    不是另立一套。**这是整个 Auto 模式的安全边界。**
-    /// 3. **工具**：只有覆盖了 `classifier_input()` 的工具。没覆盖的返回
-    ///    None，等于"这个工具不打算被自动判"，照常问人。
-    ///
-    /// # 宽限期
-    ///
-    /// 拿到 Safe 之后不立刻放行，先等 [`CLASSIFY_GRACE`]。这段时间里用户
-    /// 的答案仍然优先 —— 弹窗不会在他手指正落下时消失，把点击漏给底下的
-    /// 界面。它挡不住"用户看到弹窗、想了两秒才点"（那时早放行了），挡的是
-    /// 判危结果和点击几乎同时到达的那一小段。
-    #[allow(clippy::disallowed_methods)]
-    async fn classify_race(
-        &self,
-        tool: &dyn Tool,
-        input: &serde_json::Value,
-        reason: &DecisionReason,
-        rx: &mut std::pin::Pin<&mut oneshot::Receiver<PermissionResponse>>,
-        cancel: &CancellationToken,
-    ) -> Option<DecisionReason> {
-        if *self.mode_live.lock().await != PermissionMode::Auto {
-            return None;
-        }
-        // 这一行是安全边界。改成 `true` 会让 Auto 模式能自动放行写 SSH
-        // 密钥和 shell 启动脚本 —— 而全套测试里只有守着它的那几个会红。
-        if !reason.yields_to_bypass() {
-            return None;
-        }
-        let what = tool.classifier_input(input)?;
-
-        let verdict = tokio::select! {
-            v = self.classifier.judge(tool.name(), &what) => v,
-            // 用户先答了：判危白跑，让下面的正常流程去收他的答案。
-            _ = &mut *rx => return None,
-            _ = cancel.cancelled() => return None,
-        };
-
-        let SafetyVerdict::Safe { confidence } = verdict else {
-            return None;
-        };
-
-        // 宽限期。用户在这段时间里答了就算他的。
-        tokio::select! {
-            _ = &mut *rx => return None,
-            _ = tokio::time::sleep(CLASSIFY_GRACE) => {}
-        }
-
-        tracing::info!(
-            tool = tool.name(),
-            confidence,
-            "判危通过，自动放行（Auto 模式）"
-        );
-        Some(DecisionReason::Classifier { confidence })
-    }
-
-    /// 通知界面某个权限请求已经作废。发送失败无所谓 —— 那说明界面已经断开。
-    fn resolved(&self, request_id: &str, reason: DecisionReason) {
-        let _ = self.sink.send(AgentEvent::PermissionResolved {
-            request_id: RequestId::from_raw(request_id.to_owned()),
-            reason,
-        });
-    }
-}
-
-fn preview_of(tool: &dyn Tool, input: &serde_json::Value, cwd: &std::path::Path) -> AskPreview {
-    match tool.name() {
-        "Bash" => AskPreview::Command {
-            command: input
-                .get("command")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_owned(),
-            cwd: cwd.to_path_buf(),
-        },
-        "Write" => {
-            let content = input
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            // 前 40 行够看清"要写个什么东西"，又不至于把整个文件铺进弹窗。
-            const MAX_LINES: usize = 40;
-            let total = content.lines().count();
-            let truncated = total > MAX_LINES;
-            let preview = content
-                .lines()
-                .take(MAX_LINES)
-                .collect::<Vec<_>>()
-                .join("\n");
-            AskPreview::FileWrite {
-                path: tool.target_path(input).unwrap_or_default(),
-                bytes: content.len() as u64,
-                preview,
-                lines: total as u64,
-                truncated,
-            }
-        }
-        "Edit" => AskPreview::FileEdit {
-            path: tool.target_path(input).unwrap_or_default(),
-            diff: format!(
-                "- {}\n+ {}",
-                input
-                    .get("old_string")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default(),
-                input
-                    .get("new_string")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default(),
-            ),
-        },
-        // 模型主动提的问题：把选项原样交给界面渲染成对话里的选项卡。
-        // 拆不出来（参数不成形）就退回普通描述 —— validate_input 会在
-        // 权限之后把它拦下，这里不该因为参数坏了就崩。
-        "AskUserQuestion" => riot_tools::tools::ask::preview_parts(input).map_or_else(
-            || AskPreview::Plain {
-                text: tool.describe(input),
-            },
-            |(question, options, allow_multiple)| AskPreview::Choice {
-                question,
-                options,
-                allow_multiple,
-            },
-        ),
-        // 计划批准卡显示计划**原文** —— 摘要等于让用户盲签一份实施方案。
-        "ExitPlanMode" => AskPreview::Plain {
-            text: input
-                .get("plan")
-                .and_then(|v| v.as_str())
-                .unwrap_or("（计划为空 —— 这不该发生，拒绝并让模型重新提交）")
-                .to_owned(),
-        },
-        _ => AskPreview::Plain {
-            text: tool.describe(input),
-        },
-    }
-}
-
-fn system_prompt(
-    cwd: &std::path::Path,
-    python_venv: Option<&str>,
-    extra: Option<&str>,
-    mode: PermissionMode,
-    has_hooks: bool,
-) -> String {
-    let mut p = format!(
-        "你是 Riot——跑在用户机器上的全能智能体，Codex 的叛逆版。\n\
-         编码只是你的一部分能力；你还负责调研、浏览、自动化、排查、验证，\
-         以及把事情真正做完，而不是只给建议。\n\
-         \n\
-         工作目录：{}\n\
-         平台：{}\n\
-         \n\
-         你能做的事包括但不限于：\n\
-         - 读改代码、搜文件、跑命令、验证结果\n\
-         - 用内置浏览器操作页面、核对前端与线上效果\n\
-         - 联网检索与抓取，把外部信息消化进当前任务\n\
-         - 跨工具串起来把目标落地，而不是停在「你可以这样」\n\
-         \n\
-         行为准则（每条都带着理由，理由是让你能推断没写到的情况）：\n\
-         - 先搞清楚再动手。改代码前用 Read / Grep 看过相关位置，碰外部系统前\
-           先确认现状 —— 基于猜测的修改错了之后，用户得先理解你改了什么\
-           才能撤销，比从头做还慢。\n\
-         - 一次只做被要求的事。顺手重构、顺手加注释、顺手改格式，会让 diff 里\
-           混进无关改动 —— review 的人分不清哪些是任务本身、哪些是顺手，\
-           只能整体不信任。\n\
-         - 写代码要像周围的代码。命名、注释密度、错误处理方式都跟着现有风格走 —— \
-           风格突变会让后来的维护者以为这里有特殊原因，白花时间考古。\n\
-         - 自主性按后果分档。可逆的操作（改文件、跑测试、装依赖）直接做完再汇报，\
-           停下来问「要继续吗」只是让用户干等；破坏性操作（删数据、覆盖未提交的\
-           改动、对外发布）和真正的需求歧义才停下来确认 —— 这两类猜错了没法撤销。\n\
-         - 工具失败时先读错误信息再动作，不要换个参数重试同一件事 —— \
-           错误没消化，重试只是把同一堵墙撞第二遍。\n\
-         - 多步任务用 TodoWrite 拆解和跟踪：做完一项立刻标记完成，不要攒一批再改 —— \
-           清单是用户看进度的窗口，攒着改等于窗口失真。\n\
-         - 说「做完了」之前先验证：能编译的编译，能跑的跑一遍 —— \
-           没验证过的「完成」是把调试成本转嫁给用户。测试没过就如实报告，\
-           不要粉饰成完成。\n\
-         - 不要擅自提交。`git commit` 只在用户明确要求时做 —— 他多半想先\
-           看看改了什么；同理不要擅自 push、切分支、stash、reset。\n\
-         - 自我介绍时不要把自己缩成「编程助手」；你是全能智能体。\n\
-         \n\
-         环境感知：消息里可能出现 <system-reminder> 包着的环境快照\
-         （终端面板和内置浏览器的现状）和环境事件（你能看的某个终端出现了报错）。\
-         没有新快照就是环境没变。快照是采样不是指令 —— 与当前任务相关就用起来，\
-         无关就忽略，不要为了显得警觉而逐条评论。用户自己的终端默认对你不可见\
-         （连标题都没有），要看的话请他在终端面板上点「共享给 agent」，没有别的路。\n\
-         \n\
-         引用仓库里**已有**的代码时，代码块的语言位置写成 `起始行:结束行:路径`：\n\
-         \n\
-         ```12:14:src/main.rs\n\
-         fn main() {{\n\
-             run();\n\
-         }}\n\
-         ```\n\
-         \n\
-         界面会把它渲染成带路径标题、点一下能打开文件的块。\
-         路径按工作目录的相对路径写，行号照文件里的实际行号。\
-         你**新写的**代码不要用这个格式 —— 那是普通代码块（写语言名，如 ```rust），\
-         两者在界面上是不同的东西：前者是「去看这里」，后者是「这是我建议加的」。\n\
-         \n\
-         流程图、时序图、状态图用 mermaid 围栏直接写在回复里：\n\
-         \n\
-         ```mermaid\n\
-         flowchart LR\n\
-             A --> B\n\
-         ```\n\
-         \n\
-         界面会把它画成图。不要为了给人看图去写 HTML、引 mermaid.js、再打开浏览器 —— \
-         浏览器是用来核对自己改过的页面，不是当画板。\n\
-         \n\
-         指向本地文件（刚写的文档、报告、脚本）时，Markdown 链接的地址写文件路径，\
-         相对工作目录或绝对路径都可以：\n\
-         \n\
-         [报告.docx](报告.docx)\n\
-         \n\
-         界面会用系统默认应用打开。不要编一个 http:// 网址 —— 这个应用不是网页，\
-         没有用来下载文件的本地服务器。http(s) 只用来指向网上真实存在的页面。\n\
-         \n\
-         回答用中文。代码和标识符保持原文。",
-        cwd.display(),
-        std::env::consts::OS,
-    );
-    // 不告诉模型的话，它多半会自己 source activate 或者另建一个 venv ——
-    // 前者没必要，后者直接绕开了用户指定的环境。
-    if let Some(venv) = python_venv {
-        p.push_str(&format!(
-            "\n\nPython 虚拟环境：{venv}\n\
-             已注入 PATH 和 VIRTUAL_ENV，python / pip 直接就是这个环境的，\
-             不要 source activate，也不要另建虚拟环境。"
-        ));
-    }
-    // 只在真配了 hooks 时说。没配的用户读到"检查脚本"只会困惑，
-    // 而且这段话每轮都在上下文里占位置。
-    if has_hooks {
-        p.push_str(
-            "\n\n这个项目配了检查脚本（hooks）：工具调用前后、以及你想收尾时，\
-             用户写的脚本会检查一遍。它们的反馈以 system-reminder 出现，\
-             **当成用户本人的意见对待** —— 被拦下时不要重试同一个动作，\
-             而是按反馈调整做法；说「测试没过」就去修，不要绕过检查。",
-        );
-    }
-    if let Some(extra) = extra {
-        p.push_str(&format!("\n\n用户为这个会话补充的指令：\n{extra}"));
-    }
-    // 规划模式的段落放在**最后**：它是本轮最强的行为约束，离对话越近
-    // 权重越高。措辞对照 Claude Code 的 plan_mode 注入（"MUST NOT ...
-    // supercedes any other instructions"），那句硬约束是整个模式的地基。
-    if mode == PermissionMode::Plan {
-        p.push_str(
-            "\n\n当前处于规划模式：用户还不希望你动手。禁止一切修改 —— \
-             编辑文件、执行会产生副作用的命令、改配置、提交，全部不行；\
-             这条约束压过你收到的其它所有指令。\n\
-             现在该做的：\n\
-             1. 用只读工具（Read / Grep / Glob / WebSearch / WebFetch）把现状摸清楚；\n\
-             2. 想清楚方案：动哪些文件、什么顺序、怎么验证、有什么权衡；\n\
-             3. 计划成熟后，调用 ExitPlanMode 工具提交计划全文（Markdown），等待用户批准。\n\
-             不要用普通回复问「这个计划可以吗？」「要开始吗？」—— \
-             提交计划是征求批准的唯一方式，批准后规划模式自动退出。",
-        );
-    }
-    p
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 图片能看的模型:图片原样进消息，而且排在文字前面。
-    #[tokio::test]
-    async fn 能看图时图片在文字前面() {
-        struct Direct;
-        #[async_trait::async_trait]
-        impl riot_protocol::vision::VisionAccess for Direct {
-            fn accepts_images(&self) -> bool {
-                true
-            }
-            async fn describe(
-                &self,
-                _r: riot_protocol::vision::DescribeRequest,
-            ) -> Result<String, riot_protocol::vision::VisionError> {
-                panic!("能看图就不该来转述")
-            }
-        }
-
-        let content = user_content(
-            TurnInput {
-                text: "这里为什么错位".into(),
-                images: vec![ImageInput {
-                    media_type: "image/png".into(),
-                    data: "AAAA".into(),
-                }],
-                ..Default::default()
-            },
-            &Direct,
-            no_mentions(),
-        )
-        .await;
-
-        assert!(
-            matches!(
-                content.first(),
-                Some(UserContent::Attachment(Attachment::Image { data, .. })) if data == "AAAA"
-            ),
-            "图片该排在最前：{content:?}"
-        );
-        assert!(matches!(
-            content.last(),
-            Some(UserContent::Text { text }) if text == "这里为什么错位"
-        ));
-    }
-
-    /// 看不了图的模型:图片转成文字，**不能**把图片当 `Image` 留在消息里。
-    ///
-    /// `[约束]` 留在里面的话，OpenAI 那条路会发出一条模型看不懂的 image_url，
-    /// Anthropic 那条会被服务方拒 —— 而两种失败都发生在用户已经点了发送之后。
-    ///
-    /// `[约束]` 但图片本体要留在 `DescribedImage` 里给界面。丢掉的话，用户
-    /// 切走再切回来自己发过的图就没了（实时路径靠乐观回显看不出这个问题）。
-    #[tokio::test]
-    async fn 看不了图时转成文字() {
-        struct Compat;
-        #[async_trait::async_trait]
-        impl riot_protocol::vision::VisionAccess for Compat {
-            fn accepts_images(&self) -> bool {
-                false
-            }
-            async fn describe(
-                &self,
-                _r: riot_protocol::vision::DescribeRequest,
-            ) -> Result<String, riot_protocol::vision::VisionError> {
-                Ok("图里是一个两栏布局".into())
-            }
-        }
-
-        let content = user_content(
-            TurnInput {
-                text: String::new(),
-                images: vec![ImageInput {
-                    media_type: "image/png".into(),
-                    data: "AAAA".into(),
-                }],
-                ..Default::default()
-            },
-            &Compat,
-            no_mentions(),
-        )
-        .await;
-
-        assert!(
-            !content
-                .iter()
-                .any(|c| matches!(c, UserContent::Attachment(Attachment::Image { .. }))),
-            "不能把图片当 Image 留在消息里：{content:?}"
-        );
-        // 转述进附件而不是 Text:它是宿主补的上下文，不是用户说的话。混进
-        // Text 的话，前端重建历史时会把整段转述当成用户气泡显示出来。
-        // 用 DescribedImage 而不是 SystemReminder:图片本体得跟着留下来。
-        assert!(
-            content.iter().any(|c| matches!(
-                c,
-                UserContent::Attachment(Attachment::DescribedImage { text, data, .. })
-                    if text.contains("两栏") && data == "AAAA"
-            )),
-            "转述和图片本体要一起以 DescribedImage 附件带上：{content:?}"
-        );
-        // 只丢了图什么都没说时，也得有一句话 —— 空 user 消息会被一部分
-        // 服务方拒。
-        assert!(
-            content.iter().any(|c| matches!(
-                c, UserContent::Text { text } if text.contains("看这张图")
-            )),
-            "空文本要补一句：{content:?}"
-        );
-    }
-
-    /// 超大图不发出去，但要告诉模型"有这么回事"。
-    #[tokio::test]
-    async fn 超大图被拦下并留一句说明() {
-        struct Direct;
-        #[async_trait::async_trait]
-        impl riot_protocol::vision::VisionAccess for Direct {
-            fn accepts_images(&self) -> bool {
-                true
-            }
-            async fn describe(
-                &self,
-                _r: riot_protocol::vision::DescribeRequest,
-            ) -> Result<String, riot_protocol::vision::VisionError> {
-                unreachable!()
-            }
-        }
-
-        let content = user_content(
-            TurnInput {
-                text: "看图".into(),
-                images: vec![ImageInput {
-                    media_type: "image/png".into(),
-                    data: "x".repeat(MAX_IMAGE_B64 + 1),
-                }],
-                ..Default::default()
-            },
-            &Direct,
-            no_mentions(),
-        )
-        .await;
-
-        assert!(
-            !content
-                .iter()
-                .any(|c| matches!(c, UserContent::Attachment(Attachment::Image { .. }))),
-            "超限的图不该发出去"
-        );
-        assert!(
-            content.iter().any(|c| matches!(
-                c,
-                UserContent::Attachment(Attachment::SystemReminder { text })
-                    if text.contains("超过单张上限")
-            )),
-            "要留一句说明，否则模型以为用户什么都没给：{content:?}"
-        );
-    }
-
-    /// 拉模型清单要问两个路径。
-    ///
-    /// `[约束]` 这条盯的是"能用的模型在列表里看不见"。智谱把 OpenAI 兼容的
-    /// 清单挂在 `<根>/v1/models`（14 个，视觉模型全在里面），而它自己的
-    /// `<根>/models` 只有 8 个 —— 对话却必须走不带 `/v1` 的根。只问一个路径，
-    /// 用户就永远找不到 `glm-4.6v`，而那个模型明明能对话。
-    #[test]
-    fn 模型清单问两个路径() {
-        let urls = model_list_urls("https://open.bigmodel.cn/api/paas/v4", "");
-        assert_eq!(
-            urls,
-            vec![
-                "https://open.bigmodel.cn/api/paas/v4/models".to_owned(),
-                "https://open.bigmodel.cn/api/paas/v4/v1/models".to_owned(),
-            ]
-        );
-
-        // 只有主机名时两条会撞成同一个地址，那就只问一次 —— 同一个请求发两遍
-        // 只是白等一次超时。
-        assert_eq!(
-            model_list_urls("https://api.deepseek.com", ""),
-            vec!["https://api.deepseek.com/v1/models".to_owned()]
-        );
-        // 尾斜杠不该产生双斜杠，有些网关把 `//` 当成另一个路径。
-        assert_eq!(
-            model_list_urls("https://api.deepseek.com/", ""),
-            vec!["https://api.deepseek.com/v1/models".to_owned()]
-        );
-    }
-
-    /// 用户配了对话路径时，清单先按同一层去问。
-    ///
-    /// `[约束]` 自建网关常常把两个接口挂在同一个前缀下（`/openai/v1/...`），
-    /// 而那个前缀我们猜不出来。不跟着用户配的路径走的话，他明明能对话，
-    /// 「从 API 获取」却一直失败。
-    #[test]
-    fn 配了路径时清单跟着同一层去问() {
-        let urls = model_list_urls("https://gw.test", "/openai/v1/chat/completions");
-        assert_eq!(urls[0], "https://gw.test/openai/v1/models");
-        // 后面两条兜底照旧留着 —— 有些网关的清单确实不在那一层。
-        assert!(urls.contains(&"https://gw.test/v1/models".to_owned()));
-
-        // 路径只有一段时没有"上一层"，跳过它别拼出 `//models`。
-        let urls = model_list_urls("https://gw.test/api", "/completions");
-        assert!(
-            urls.iter().all(|u| !u.contains("//models")),
-            "不该拼出双斜杠：{urls:?}"
-        );
-    }
-
-    /// 只认几种图片扩展名。
-    ///
-    /// `[约束]` 把 PDF 当 image/png 发出去，服务方要么 400、要么解出一张
-    /// 坏图，而报错完全不指向"类型判错了"。
-    #[tokio::test]
-    async fn 不认识的扩展名直接拒() {
-        let e = read_image("/tmp/whatever.pdf").await.expect_err("该拒");
-        assert!(e.contains("png"), "报错要说清能附什么：{e}");
-        // 文件压根不存在也是这个结论 —— 扩展名先判，省一次磁盘访问。
-        assert!(!e.contains("读不到"), "不该先去读盘：{e}");
-    }
+    use crate::gate::{apply_remember, hook_may_skip_ask, inject_choice, preview_of};
+    use riot_protocol::id::RequestId;
+    use riot_protocol::permission::{
+        AskPreview, DecisionReason, GateOutcome, PermissionAsk, PermissionResponse, SafetyVerdict,
+    };
+    use tokio::sync::oneshot;
 
     #[test]
     fn 超时区间足够长但不是无限() {
@@ -3801,152 +2366,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn 系统提示里带上工作目录() {
-        // 没有它模型会用相对路径乱猜
-        let p = system_prompt(
-            std::path::Path::new("/tmp/proj"),
-            None,
-            None,
-            PermissionMode::Default,
-            false,
-        );
-        assert!(p.contains("/tmp/proj"));
-        assert!(!p.contains("规划模式"), "默认模式不该带规划段落");
-    }
-
-    /// 代码引用的格式约定必须在提示词里，而且要说清和普通代码块的区别。
-    ///
-    /// 只在前端实现渲染是没用的：模型不知道有这个格式就永远不会产出它，
-    /// 那段渲染代码等于死代码。而不说清区别的话，它会把新写的代码也标上
-    /// 行号和路径 —— 用户点开发现文件里根本不是那样。
-    #[test]
-    fn 提示词里有代码引用的格式约定() {
-        let p = system_prompt(
-            std::path::Path::new("/tmp/proj"),
-            None,
-            None,
-            PermissionMode::Default,
-            false,
-        );
-        assert!(p.contains("起始行:结束行:路径"), "要给出格式");
-        assert!(p.contains("```12:14:src/main.rs"), "要给一个具体例子");
-        assert!(p.contains("新写的"), "要说清新代码不用这个格式");
-    }
-
-    /// mermaid 围栏能画成图这件事必须写进提示词。
-    ///
-    /// 只在前端接渲染、不告诉模型的话，它会写一个 HTML 再打开浏览器
-    /// 「测效果」—— 用户要的是对话里的图，不是多出来的测试页。
-    #[test]
-    fn 提示词里有_mermaid_围栏会画成图() {
-        let p = system_prompt(
-            std::path::Path::new("/tmp/proj"),
-            None,
-            None,
-            PermissionMode::Default,
-            false,
-        );
-        assert!(p.contains("```mermaid"), "要给出围栏写法");
-        assert!(p.contains("不要为了给人看图"), "要禁止借浏览器当画板");
-    }
-
-    /// 本地文件必须写成路径链接。不写进提示词的话，模型会编一个
-    /// `http://localhost:…` 假下载地址 —— 那是 webview 自己的页，点开不是文件。
-    #[test]
-    fn 提示词里有本地文件链接的写法() {
-        let p = system_prompt(
-            std::path::Path::new("/tmp/proj"),
-            None,
-            None,
-            PermissionMode::Default,
-            false,
-        );
-        assert!(p.contains("[报告.docx](报告.docx)"), "要给一个路径链接例子");
-        assert!(p.contains("不要编一个 http://"), "要禁止假下载网址");
-    }
-
-    #[test]
-    fn 会话设置会附加进系统提示() {
-        // venv 不进提示词的话，模型会自己 source activate 或另建环境；
-        // 追加提示词必须是**追加** —— 替换掉内置提示词等于丢了 cwd。
-        let p = system_prompt(
-            std::path::Path::new("/tmp/proj"),
-            Some("/tmp/proj/.venv"),
-            Some("测试要跑 pytest -x"),
-            PermissionMode::Default,
-            false,
-        );
-        assert!(p.contains("/tmp/proj"), "内置部分必须还在");
-        assert!(p.contains("/tmp/proj/.venv"));
-        assert!(p.contains("pytest -x"));
-    }
-
-    /// 自主性必须按后果分档，不能只写一句「不确定就问」。
-    ///
-    /// 裸的「不确定就问」会让模型向保守面倒：改个文件也停下来问「要继续吗」，
-    /// 用户干等。拆成可逆/破坏性两档后，模型能推断没列举到的操作该归哪档。
-    #[test]
-    fn 自主性按后果分档() {
-        let p = system_prompt(
-            std::path::Path::new("/tmp/proj"),
-            None,
-            None,
-            PermissionMode::Default,
-            false,
-        );
-        assert!(p.contains("可逆"), "可逆操作要直接做完");
-        assert!(p.contains("破坏性"), "破坏性操作才停下来确认");
-    }
-
-    /// 「做完了」之前必须验证，且不许粉饰失败。
-    ///
-    /// 不写这条的话，模型倾向于改完就宣布完成 —— 编译错误留给用户发现，
-    /// 等于把调试成本转嫁出去；测试失败时还可能措辞含糊地带过。
-    #[test]
-    fn 声称完成前要先验证() {
-        let p = system_prompt(
-            std::path::Path::new("/tmp/proj"),
-            None,
-            None,
-            PermissionMode::Default,
-            false,
-        );
-        assert!(p.contains("先验证"), "要求完成前验证");
-        assert!(p.contains("如实报告"), "失败不许粉饰");
-    }
-
-    #[test]
-    fn 配了_hooks_才说怎么对待检查反馈() {
-        // 不说的话模型会把 hook 的"测试没过"当成一次偶然失败去重试同一
-        // 个动作；而没配 hooks 的用户读到这段只会困惑，还每轮占上下文。
-        let path = std::path::Path::new("/tmp/proj");
-        let with = system_prompt(path, None, None, PermissionMode::Default, true);
-        assert!(with.contains("hooks"), "配了就要说明反馈怎么对待");
-        let without = system_prompt(path, None, None, PermissionMode::Default, false);
-        assert!(!without.contains("hooks"), "没配就别占上下文");
-    }
-
-    #[test]
-    fn 规划模式的段落押最后且指路出口() {
-        // 不注入的话模型不知道自己在规划模式：它会正常动手，然后每个
-        // 写操作都被拒，看起来像权限系统坏了。段落必须指路 ExitPlanMode ——
-        // 否则计划写完了模型不知道怎么提交，用户只能干等。
-        let p = system_prompt(
-            std::path::Path::new("/tmp/proj"),
-            None,
-            Some("补充指令"),
-            PermissionMode::Plan,
-            false,
-        );
-        assert!(p.contains("规划模式"));
-        assert!(p.contains("ExitPlanMode"), "必须指路出口工具");
-        assert!(
-            p.rfind("规划模式").expect("有") > p.rfind("补充指令").expect("有"),
-            "规划段落要押最后 —— 它是本轮最强的约束，离对话越近权重越高"
-        );
-    }
-
     fn empty_spec() -> riot_protocol::tool::ProcessSpec {
         riot_protocol::tool::ProcessSpec {
             program: "true".to_owned(),
@@ -4064,15 +2483,6 @@ mod tests {
         let s = SessionSink::default();
         s.attach(Arc::new(Discard));
         s
-    }
-
-    /// 不解析 @ 引用的上下文（图片相关的用例不碰文件）。cwd 指一个
-    /// 不存在的目录，万一测试文本里出现 @ 也读不到东西。
-    fn no_mentions() -> MentionCtx<'static> {
-        MentionCtx {
-            cwd: std::path::Path::new("/nonexistent-mentions"),
-            file_state: None,
-        }
     }
 
     /// 造一个装了指定 hooks 的权限闸。
@@ -4593,91 +3003,6 @@ mod tests {
             s.history.lock().await.is_empty(),
             "它只给界面看，不能混进模型读的历史"
         );
-    }
-
-    /// 占位内容 = 用户真正打的字 + 他附的图 + 点名的文件。
-    #[tokio::test]
-    async fn 占位带上正文和图片但跳过超限的图() {
-        let content = pending_user_content(&TurnInput {
-            text: "这里为什么错位".into(),
-            images: vec![
-                ImageInput {
-                    media_type: "image/png".into(),
-                    data: "AAAA".into(),
-                },
-                ImageInput {
-                    media_type: "image/png".into(),
-                    data: "x".repeat(MAX_IMAGE_B64 + 1),
-                },
-            ],
-            ..Default::default()
-        });
-
-        // `[约束]` 图片进 DescribedImage 而不是 Image：占位按设计不发给
-        // 模型，但万一漏出去，Image 会让收不了图的模型 400。
-        let imgs: Vec<&str> = content
-            .iter()
-            .filter_map(|c| match c {
-                UserContent::Attachment(Attachment::DescribedImage { data, .. }) => {
-                    Some(data.as_str())
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(imgs, ["AAAA"], "超限的图不该跟着占位来回搬：{content:?}");
-        assert!(
-            content.iter().any(|c| matches!(
-                c, UserContent::Text { text } if text == "这里为什么错位"
-            )),
-            "正文要原样带上：{content:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn 占位带上引用文件以免切会话丢块() {
-        let content = pending_user_content(&TurnInput {
-            text: "读下内容".into(),
-            refs: vec!["/tmp/a.xlsx".into(), "  ".into()],
-            ..Default::default()
-        });
-        let paths: Vec<String> = content
-            .iter()
-            .filter_map(|c| match c {
-                UserContent::Attachment(Attachment::UserFile { path, content }) => {
-                    assert!(content.is_empty(), "占位不读盘，内容该空：{content}");
-                    Some(path.to_string_lossy().into_owned())
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(paths, ["/tmp/a.xlsx"], "空路径不该占一条：{content:?}");
-    }
-
-    /// 只丢了一张图什么都没说时，占位的正文和定稿版保持一致。
-    /// 两边对不上的话，前端按正文去重的那步会把气泡显示成两条。
-    #[tokio::test]
-    async fn 空文本的占位和定稿用同一句话() {
-        let input = TurnInput {
-            text: "  ".into(),
-            images: vec![ImageInput {
-                media_type: "image/png".into(),
-                data: "AAAA".into(),
-            }],
-            ..Default::default()
-        };
-        let pending = pending_user_content(&input);
-        let final_content =
-            user_content(input, &riot_protocol::vision::NoVision, no_mentions()).await;
-
-        let text_of = |c: &[UserContent]| {
-            c.iter()
-                .find_map(|x| match x {
-                    UserContent::Text { text } => Some(text.clone()),
-                    _ => None,
-                })
-                .expect("总要有一句正文")
-        };
-        assert_eq!(text_of(&pending), text_of(&final_content));
     }
 
     fn test_model() -> riot_protocol::ModelEndpoint {
@@ -5339,20 +3664,5 @@ mod tests {
             reminders[0].contains("不必评论"),
             "防分心护栏：{reminders:?}"
         );
-    }
-
-    /// 系统提示词教了环境感知的契约（静态段，缓存安全）。
-    #[test]
-    fn 提示词里有环境感知契约() {
-        let p = system_prompt(
-            std::path::Path::new("/w"),
-            None,
-            None,
-            PermissionMode::Default,
-            false,
-        );
-        assert!(p.contains("没有新快照就是环境没变"), "差分语义必须明说");
-        assert!(p.contains("共享给 agent"), "要指路怎么共享");
-        assert!(p.contains("不要为了显得警觉而逐条评论"), "防分心护栏");
     }
 }

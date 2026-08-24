@@ -69,7 +69,7 @@ impl HostVision {
                 .resolve_named(pid, model)
                 .inspect_err(|e| tracing::warn!(error = %e, "视觉兼容模型解析失败"))
                 .ok()?;
-            crate::session::provider_for(&resolved)
+            crate::models::provider_for(&resolved)
                 .inspect_err(|e| tracing::warn!(error = %e, "视觉兼容模型的 provider 建不出来"))
                 .ok()
                 .map(|provider| Aux {
@@ -84,7 +84,7 @@ impl HostVision {
     /// 内核走这条)。语义和 [`Self::from_config`] 一致。
     pub fn from_setup(setup: &riot_protocol::VisionSetup) -> Self {
         let aux = setup.describe.as_ref().and_then(|ep| {
-            crate::session::provider_from_endpoint(ep)
+            crate::models::provider_from_endpoint(ep)
                 .inspect_err(|e| tracing::warn!(error = %e, "视觉兼容模型的 provider 建不出来"))
                 .ok()
                 .map(|provider| Aux {

@@ -69,7 +69,7 @@ impl CheapModel {
     /// `None` = 没配便宜档,只读侦察跟主模型。
     pub fn from_endpoint(endpoint: Option<&riot_protocol::ModelEndpoint>) -> Option<Self> {
         let endpoint = endpoint?;
-        match crate::session::provider_from_endpoint(endpoint) {
+        match crate::models::provider_from_endpoint(endpoint) {
             Ok(provider) => Some(Self {
                 provider,
                 model: endpoint.model.clone(),
@@ -98,7 +98,7 @@ impl CheapModel {
                 return None;
             }
         };
-        match crate::session::provider_for(&resolved) {
+        match crate::models::provider_for(&resolved) {
             Ok(provider) => Some(Self {
                 provider,
                 model: resolved.model,

@@ -22,6 +22,14 @@ tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 
+[features]
+# 让下游测试能用 ScriptedProvider 等替身。生产构建不带 ——
+# 758 行测试基建没有理由进发布的二进制。
+testing = []
+
 [dev-dependencies]
 pretty_assertions = { workspace = true }
+# 自引用打开 testing feature：本 crate 的 tests/ 目录（黄金回放、混沌）
+# 以外部 crate 的身份链接 lib，光有 cfg(test) 看不到 testing 模块。
+riot-core = { path = ".", features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }

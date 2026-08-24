@@ -1282,16 +1282,16 @@ fn estimate_tokens(messages: &[Message]) -> u32 {
 
 ### 10.3 分层压缩管道
 
-每轮发 API 前按序执行,能便宜解决就不用贵的:
+能便宜解决就不用贵的。四层里前两层在**工具执行时**就发生(riot-tools),后两层在**压缩触发时**执行(riot-core 的 compactor):
 
-| 层 | 机制 | 信息损失 |
-|----|------|---------|
-| 1. 结果落盘 | 超大结果写文件,消息里留预览 + 路径 | 无(可重读) |
-| 2. 聚合预算 | 单消息内并行结果合计超限 → 替换 | 低 |
-| 3. microcompact | 旧 tool_result 清成占位符,只留最近 5 个 | 中 |
-| 4. 全量总结 | LLM 总结替换历史 | 高 |
+| 层 | 机制 | 在哪 | 信息损失 |
+|----|------|------|---------|
+| 1. 结果落盘 | 超大结果写文件,消息里留预览 + 路径 | riot-tools(执行管线第 8 步) | 无(可重读) |
+| 2. 聚合预算 | 单消息内并行结果合计超限 → 替换 | riot-tools(`tools/shrink.rs`) | 低 |
+| 3. 清旧结果 | 旧 tool_result 清成占位符,只留最近 **8** 个(`ClearOldResults`,原设计写 5,实现取 8) | riot-core `compactor.rs` | 中 |
+| 4. 全量总结 | LLM 总结替换历史 | riot-core `compactor.rs` | 高 |
 
-`[约束]` microcompact **只在 prompt cache 大概率已过期时才执行**(距上次交互 > 60 分钟)。缓存还热时改写历史会打碎前缀,反而更贵。这需要 `Clock` 依赖,见 §5.6。
+`[现状]` 原设计还有一条「microcompact 只在 prompt cache 大概率已过期时(距上次交互 > 60 分钟,依赖 `Clock`)才主动执行」——**未实现**。当前第 3 层只在压缩被触发时执行(主动阈值或反应式溢出),那个时刻不压就溢出,缓存热不热已不是主要矛盾;每轮空转的定期 microcompact 及其 60 分钟判断因此一直没有落地。要恢复这条,记得 `AgentDeps.clock` 就是为它留的。
 
 ### 10.4 总结 prompt 的要点
 
@@ -1304,7 +1304,7 @@ fn estimate_tokens(messages: &[Message]) -> u32 {
 
 `[约束]` 纯 summary 不够。压缩后必须重注入:
 
-1. 压缩前 `file_state` 里**最近 5 个已读文件,从磁盘重新读**(保证新鲜,单文件 ≤5k token,总 ≤50k);
+1. `file_state` 工作集里**最近 5 个已读文件**(取缓存内容,不重读磁盘;单文件 20k 字符 ≈5k token,总 100k 字符 ≈25k token,见 `session.rs::restored_files`);
 2. 当前 plan / todo 状态;
 3. 本会话已加载过的 skill 名单(避免重灌)。
 
@@ -1370,7 +1370,7 @@ fn build_request(state: &AgentState, retry: &RetryContext) -> ModelRequest
 `[约束]` 五条实现要求:
 
 1. **自己累加 `partial_json` 字符串,只在 `content_block_stop` 时 parse 一次。**不要每个 delta 都解析——那是 O(n²),大工具参数下很明显。
-2. **加 idle watchdog。**HTTP timeout 只覆盖初始连接,流式 body 挂死它管不着。默认 90s 无数据就取消,降级到非流式请求。计时器在**每个事件后重置**,看的是「两个事件之间隔了多久」——按整条流计时会把正常的长响应误杀。
+2. **加 idle watchdog。**HTTP timeout 只覆盖初始连接,流式 body 挂死它管不着。默认 90s 无数据就取消并报**可恢复错误**(交给重试管线,见 §11.4;原设计里"降级到非流式请求"未实现——重试一条新的流通常就够,非流式通道要单独维护一套解析,先不为一个没证实的场景付这个成本)。计时器在**每个事件后重置**,看的是「两个事件之间隔了多久」——按整条流计时会把正常的长响应误杀。
 3. **usage 是累计值不是增量。**`message_delta` 里的字段可能回 0,直接覆盖会抹掉 `message_start` 报的真值。累加时对 input/cache 字段加 `> 0` 守卫。这个 bug 不会报错,只会让成本统计静默偏小。
 4. **SSE 解析器收字节,不收字符串。**TCP 分片不认字符边界,一个中文字符被切成两个 chunk 是常态。UTF-8 重组必须在解析器内部统一做——推给 transport 层意味着每个 HTTP 客户端实现都要重做一遍,漏掉的那个会产生 `看��了` 这种乱码,而它不报错、不崩溃,只是内容悄悄坏掉。
 5. **缓冲区扫描要记住上次扫到哪。**每来一个 chunk 就从头找分隔符是 O(n²)。一次几十 KB 的工具参数(切成几百个 chunk)就能让这一层吃掉可观的 CPU。
@@ -1533,23 +1533,29 @@ tokio::select! {
 
 ### 13.1 目录
 
+实际布局(与最初规划的 store/features 结构不同,以此为准):
+
 ```
 src/
 ├── bridge/           # 唯一允许调用宿主的地方
-│   ├── generated.ts  # 从 Rust 生成,不要手改
-│   ├── commands.ts   # 方法调用封装
-│   └── events.ts     # 事件订阅
-├── store/            # 会话状态(Zustand)
-├── features/
-│   ├── conversation/ # 消息列表、虚拟滚动
-│   ├── composer/     # 输入区
-│   ├── diff/         # diff 审阅
-│   ├── terminal/     # xterm.js
-│   └── permission/   # 权限弹窗
-└── components/       # 通用 UI
+│   ├── generated.ts  # 从 schemas/protocol.json 生成,不要手改
+│   └── index.ts      # 方法调用 + 事件订阅的封装
+├── components/       # 全部 UI 组件(Settings、ToolCard、权限弹窗……)
+├── hooks/            # 会话状态(useSession 等,本地 state,没有用状态库)
+├── lib/              # 纯工具
+└── App.tsx           # 装配根
 ```
 
 `[约束]` **组件里不允许出现 `invoke(...)` 或 `listen(...)`。**全部走 `bridge/`。这层抽象是以后换宿主(Tauri → Electron 或反之)的唯一保险,一旦被绕过就失效了。
+
+`[现状]` 状态管理就是 `useSession` + 本地 state,**没有状态库**(zustand 依赖已删)。等出现"多个不相关组件要读同一份会话状态"这类真实痛点再引入,不为将来可能的需求先付一层间接。
+
+长会话的渲染预算分三层,各管一段(都已落地):
+1. **懒解析**——视口外的正文按纯文本占位,进视野(±1200px)再走 ReactMarkdown + highlight(`LazyMarkdown`;贴底 12 块立即解析,⌘F 查找时全量水合);
+2. **VDOM**——`Row` / `ProcessGroup` 都是 `memo`,流式期间每帧重渲染不触碰历史行;
+3. **排版绘制**——`.thread-col > *` 上 `content-visibility: auto`,离屏行浏览器直接跳过 layout/paint(样式文件里有取舍注释:为什么选它而不是 virtuoso 类窗口化列表——贴底/恢复那套滚动逻辑是按真实 DOM 高度调校的)。
+
+真正的窗口化列表(限制 DOM 节点数)留作后手:只有 profiling 证明上面三层不够时才动,因为它要求推倒重写滚动语义。
 
 ### 13.2 事件消费:三层合批
 

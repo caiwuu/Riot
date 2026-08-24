@@ -18,6 +18,7 @@ import {
   respondPermission,
   sendTurn,
   subscribeSession,
+  subscribeWindowFocus,
 } from "../bridge";
 import { extractTopLevelStringField, extractTopLevelStringFields } from "../lib/partialJson";
 
@@ -724,21 +725,11 @@ export function useSession(
     };
     window.addEventListener("focus", onWindowFocus);
 
-    let unlistenFocus: (() => void) | undefined;
-    void (async () => {
-      try {
-        const { getCurrentWindow } = await import("@tauri-apps/api/window");
-        const unlisten = await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
-          if (!focused || cancelled) return;
-          if (Date.now() - lastHeardAt.current < SINK_STALE_MS) return;
-          void ensureLive({ catchUp: true });
-        });
-        if (cancelled) unlisten();
-        else unlistenFocus = unlisten;
-      } catch {
-        // 不在 Tauri 里（纯浏览器、组件测试）。
-      }
-    })();
+    const unlistenFocus = subscribeWindowFocus((focused) => {
+      if (!focused || cancelled) return;
+      if (Date.now() - lastHeardAt.current < SINK_STALE_MS) return;
+      void ensureLive({ catchUp: true });
+    });
 
     const watchdog = window.setInterval(() => {
       if (cancelled) return;
@@ -754,7 +745,7 @@ export function useSession(
       sub.unsubscribe();
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("focus", onWindowFocus);
-      unlistenFocus?.();
+      unlistenFocus();
       window.clearInterval(watchdog);
       if (rafId.current) cancelAnimationFrame(rafId.current);
     };

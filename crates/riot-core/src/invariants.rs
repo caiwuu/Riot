@@ -120,6 +120,12 @@ pub fn check_message_sequence(messages: &[Message]) {
 // 防的 bug：分批逻辑写错，两个 Edit 并行写同一个文件。
 //
 // 检查点：每个并行批次开始执行前。
+//
+// `[现状]` 生产侧没有调用点，而且**不可能有**：分批发生在 riot-tools
+// 的 partition.rs，而生产依赖方向 tools ↛ core 禁止它回调这里。那边
+// 用同一条规则按构造保证（fail-closed 分批 + catch_unwind，判断不了
+// 就串行）。这份实现是参照版，供回放/混沌测试对事件序列做事后断言。
+// 元测试 all_invariants_have_call_sites 里有对应豁免。
 // ════════════════════════════════════════════════════════════
 
 pub struct BatchMember<'a> {
@@ -264,6 +270,12 @@ pub fn check_api_payload(messages: &[Message]) {
 // 多断点会被 API 拒绝，而且服务端 KV 页管理下多断点反而浪费。
 //
 // 检查点：provider 组装请求后。
+//
+// `[现状]` 断点标记长在 riot-providers 的 wire 层，而生产依赖方向
+// providers ↛ core（riot-core 只是那边的 dev-dependency），调不到这里。
+// 实际守护在 anthropic/request.rs：build() 里的 debug_assert +
+// validate_cache_breakpoints 的负面测试。这份实现供回放侧对事件做
+// 事后断言。元测试 all_invariants_have_call_sites 里有对应豁免。
 // ════════════════════════════════════════════════════════════
 
 pub fn check_cache_breakpoints(marker_count: usize) {
@@ -315,6 +327,12 @@ pub fn check_thinking_signatures(messages: &[Message], current_model: &str) {
 // 权限检查之外的第二道防线。symlink 解析前后都要在围栏内。
 //
 // 检查点：所有文件写操作实际执行前。
+//
+// `[现状]` 工作目录围栏已按 ARCHITECTURE §9.5.1 整体移除（挡正当用法
+// 挡得太狠），这条不变量的检查点随之消失 —— 现在挡危险写入的是权限
+// 弹窗 + 敏感路径安全检查 + Bash 静态分析那三层。函数保留：sandbox 的
+// workspace-write 语义（限定可写根）如果落地，它就是现成的断言。
+// 元测试 all_invariants_have_call_sites 里有对应豁免。
 // ════════════════════════════════════════════════════════════
 
 pub fn check_path_in_fence(resolved: &Path, roots: &[std::path::PathBuf]) {
@@ -562,5 +580,98 @@ mod tests {
             Path::new("/etc/passwd"),
             &[std::path::PathBuf::from("/home/u/proj")],
         );
+    }
+
+    /// 每条不变量要么有生产调用点，要么在豁免表里写清为什么没有。
+    ///
+    /// 这个测试是模块头注释里那句承诺的兑现。没有它的话，"断言存在"和
+    /// "断言被调用"是两件事 —— 一条从未被调用的不变量给人的是虚假的
+    /// 安全感，比没有更糟（review 的人看到它存在就不再检查那条性质了）。
+    ///
+    /// 判定方式是扫源码文本：只看 `crates/*/src` 下、每个文件
+    /// `#[cfg(test)]` 之前的部分（本仓库的约定是测试模块押在文件末尾），
+    /// 排除本文件自身。粗糙但够用 —— 它防的是"整条断言没人调"这种
+    /// 大颗粒遗漏，不是精确的调用图分析。
+    // 豁免理由：这个测试读的是仓库自己的源码文件（CI 环境），不是内核
+    // 运行时的文件访问 —— FileSystem 抽象在这里没有意义。
+    #[allow(clippy::disallowed_methods)]
+    #[test]
+    fn all_invariants_have_call_sites() {
+        // 豁免表：没有生产调用点的必须在这里给出理由。
+        // 豁免过期（后来接上线了）也会失败 —— 那时该把这条删掉。
+        let exempt: &[(&str, &str)] = &[
+            (
+                "check_batch_safety",
+                "分批在 riot-tools::partition，生产依赖方向 tools ↛ core \
+                 禁止回调；那边按构造 fail-closed（见 INV-3 的现状注释）",
+            ),
+            (
+                "check_path_in_fence",
+                "工作目录围栏已按 ARCHITECTURE §9.5.1 移除，检查点随之消失\
+                 （见 INV-10 的现状注释）",
+            ),
+            (
+                "check_cache_breakpoints",
+                "断点标记长在 riot-providers 的 wire 层，生产依赖方向 \
+                 providers ↛ core；那边由 build() 的 debug_assert + \
+                 validate_cache_breakpoints 负面测试守着（见 INV-8 的现状注释）",
+            ),
+        ];
+
+        // CARGO_MANIFEST_DIR 是 crates/riot-core，上两级是仓库根。
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("crates/riot-core 的上两级是仓库根");
+
+        fn rs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(rd) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    rs_files(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+
+        let mut files = Vec::new();
+        for krate in std::fs::read_dir(repo.join("crates")).expect("有 crates 目录") {
+            let src = krate.expect("crate 目录").path().join("src");
+            rs_files(&src, &mut files);
+        }
+        // 宿主也算生产代码（gate、序列化都可能住在那边）。
+        rs_files(&repo.join("src-tauri").join("src"), &mut files);
+
+        let mut production = String::new();
+        for f in &files {
+            if f.file_name().is_some_and(|n| n == "invariants.rs") {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(f) else {
+                continue;
+            };
+            // 只取测试模块之前的部分（本仓库约定 tests 押在文件末尾）。
+            production.push_str(content.split("#[cfg(test)]").next().unwrap_or(""));
+        }
+
+        for name in ALL_INVARIANT_FNS {
+            let called = production.contains(&format!("{name}("));
+            match exempt.iter().find(|(n, _)| n == name) {
+                Some((_, reason)) => assert!(
+                    !called,
+                    "`{name}` 在豁免表里（理由：{reason}），但源码里出现了生产调用 —— \
+                     豁免已过期，把它从表里删掉"
+                ),
+                None => assert!(
+                    called,
+                    "不变量 `{name}` 没有任何生产调用点。要么接上线，\
+                     要么在本测试的豁免表里写清为什么不接"
+                ),
+            }
+        }
     }
 }

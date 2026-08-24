@@ -14,8 +14,8 @@ pub mod fence;
 // 留在宿主的是需要 OS/tauri 能力的部分:browser、term、term_access、fence、
 // persist、gui_env、askpass、kernel(进程监管)。
 pub use riot_kernel::{
-    changes, classifier, config, git, hooks, memory, mentions, session, skills, slash, subagent,
-    vision, web,
+    changes, classifier, config, content, git, hooks, memory, mentions, models, session, skills,
+    slash, subagent, vision, web,
 };
 mod askpass;
 mod gui_env;
@@ -746,8 +746,8 @@ async fn term_busy(terms: tauri::State<'_, term::Terminals>, id: u32) -> HostRes
 /// 多 MB，光是 IPC 那一跳就能让界面卡住一两秒 —— 而它最终还是会被服务方
 /// 的单图上限拒掉。在这里拦住，用户立刻知道是哪张图的问题。
 #[tauri::command]
-async fn read_image(path: String) -> HostResult<session::ImageOutput> {
-    session::read_image(&path)
+async fn read_image(path: String) -> HostResult<content::ImageOutput> {
+    content::read_image(&path)
         .await
         .map_err(HostError::Provider)
 }
@@ -856,7 +856,7 @@ async fn test_connection(
         probe.active_model = m;
     }
     let resolved = probe.resolve()?;
-    session::test_connection(&resolved)
+    models::test_connection(&resolved)
         .await
         .map_err(HostError::Provider)
 }
@@ -882,7 +882,7 @@ async fn list_models(
     let p = config
         .provider(&provider_id)
         .ok_or_else(|| HostError::Provider(format!("找不到 provider「{provider_id}」")))?;
-    session::list_models(p).await.map_err(HostError::Provider)
+    models::list_models(p).await.map_err(HostError::Provider)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

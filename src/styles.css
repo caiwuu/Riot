@@ -1888,6 +1888,21 @@ pre {
   gap: 14px;
 }
 
+/* 长会话的渲染预算：离屏的行跳过排版和绘制（浏览器原生"虚拟化"）。
+   和 LazyMarkdown 的懒解析、Row 的 memo 是同一件事的三层 ——
+   解析、VDOM、排版绘制各管一段。选它而不是窗口化列表库（virtuoso 类）:
+   贴底跟随/位置恢复/橡皮筋处理那套滚动逻辑是按真实 DOM 高度调校的，
+   窗口化会把它整个推倒重来，收益却只多在"DOM 节点数"这一项上。
+
+   contain-intrinsic-size 的 auto 关键字：渲染过一次的行记住真实高度，
+   没渲染过的按 60px 估 —— 估偏了 scrollHeight 会抖，贴底逻辑靠
+   ResizeObserver + pinBottom 自愈，恢复位置有二次 rAF 补写兜着。
+   不支持的 WebView（Safari 18 之前）按普通渲染，只是不省。 */
+.thread-col > * {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 60px;
+}
+
 .msg {
   white-space: pre-wrap;
   word-break: break-word;

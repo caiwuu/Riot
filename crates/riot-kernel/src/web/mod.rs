@@ -76,7 +76,7 @@ impl HostWeb {
                 .resolve_named(pid, model)
                 .inspect_err(|e| tracing::warn!(error = %e, "辅助模型解析失败"))
                 .ok()?;
-            crate::session::provider_for(&resolved)
+            crate::models::provider_for(&resolved)
                 .inspect_err(|e| tracing::warn!(error = %e, "辅助模型的 provider 建不出来"))
                 .ok()
                 .map(|p| Distiller::new(p, resolved.model))
@@ -104,7 +104,7 @@ impl HostWeb {
             base_url: crate::config::resolve_searxng_url(&setup.searxng_url),
         });
         let distiller = setup.distill.as_ref().and_then(|ep| {
-            crate::session::provider_from_endpoint(ep)
+            crate::models::provider_from_endpoint(ep)
                 .inspect_err(|e| tracing::warn!(error = %e, "辅助模型的 provider 建不出来"))
                 .ok()
                 .map(|p| Distiller::new(p, ep.model.clone()))

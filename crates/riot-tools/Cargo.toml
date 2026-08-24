@@ -46,7 +46,7 @@ testing = []
 async-trait = { workspace = true }
 # core 只在测试里用：验证真实调度器接进主循环后配对成立。
 # 生产依赖方向仍是 protocol ← core 与 protocol ← tools，无环。
-riot-core = { workspace = true }
+riot-core = { workspace = true, features = ["testing"] }
 # 自引用打开 testing feature，这样 `cargo test -p riot-tools` 不用
 # 额外带 --features 就能跑集成测试 —— 本地和 CI 的命令保持一致。
 riot-tools = { path = ".", features = ["testing"] }

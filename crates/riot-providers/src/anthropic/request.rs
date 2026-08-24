@@ -243,6 +243,11 @@ pub fn build_request(
         stream: true,
     };
 
+    // 这条对应 riot-core 的 INV-8，但只能在这里以 debug_assert 的形态
+    // 存在：断点标记长在 wire 层，而生产依赖方向 providers ↛ core，
+    // 调不到 invariant! 机制（riot-core 只是本 crate 的 dev-dependency）。
+    // release 下多断点的下场是服务方 400 + provider 错误上抛 —— 可见，
+    // 只是少了违规上报。invariants.rs 的元测试里有对应豁免。
     debug_assert!(
         validate_cache_breakpoints(&out).is_ok(),
         "{:?}",

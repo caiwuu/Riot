@@ -24,6 +24,6 @@ tracing = { workspace = true }
 [dev-dependencies]
 # core 只在测试里用：验证真实 provider 接进主循环后整条链路成立。
 # 生产依赖方向仍是 protocol ← core 与 protocol ← providers，无环。
-riot-core = { workspace = true }
+riot-core = { workspace = true, features = ["testing"] }
 pretty_assertions = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

@@ -3707,6 +3707,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "pretty_assertions",
+ "riot-core",
  "riot-protocol",
  "schemars 1.2.2",
  "serde",
