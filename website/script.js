@@ -3,24 +3,78 @@
    ============================================================ */
 
 /**
- * 下载地址配置。
- * TODO: 发布后核对实际 release 资产文件名（Tauri v2 默认命名）。
+ * 下载地址跟着 GitHub 最新正式 Release 走。
+ * 发 Riot_0.1.1 时资产会变成 Riot_0.1.1_aarch64.dmg，写死 0.1.0 就会下到旧包。
+ * 没拉到接口时退回 /releases/latest 页面，不要链到某个过期文件名。
  */
+const RELEASES_PAGE = "https://github.com/caiwuu/Riot/releases/latest";
+const RELEASES_API = "https://api.github.com/repos/caiwuu/Riot/releases/latest";
+const RELEASE_CACHE = "riot.latest-release";
+
 const DOWNLOADS = {
   mac: {
-    url: "https://github.com/caiwuu/Riot/releases/download/Riot_0.1.0/Riot_0.1.0_aarch64.dmg",
+    url: RELEASES_PAGE,
     label: "下载 macOS 版",
     meta: ".dmg · 仅 Apple Silicon",
   },
   win: {
-    url: "https://github.com/caiwuu/Riot/releases/download/Riot_0.1.0/Riot_0.1.0_x64-setup.exe",
+    url: RELEASES_PAGE,
     label: "下载 Windows 版",
     meta: "NSIS 安装包 · x64",
   },
 };
 
-/** 全站统一版本号，注入 HTML 里所有 .js-version 占位 */
-const VERSION = "v0.1.0";
+/** 全站统一版本号，注入 HTML 里所有 .js-version 占位。拉到最新 Release 后再改。 */
+let VERSION = "";
+
+function versionLabel(tag) {
+  const v = String(tag || "")
+    .replace(/^Riot_/i, "")
+    .replace(/^v/i, "");
+  return v ? `v${v}` : "";
+}
+
+function pickAsset(assets, suffix) {
+  return (assets || []).find((a) => typeof a.name === "string" && a.name.endsWith(suffix));
+}
+
+async function loadLatestRelease() {
+  try {
+    const cached = sessionStorage.getItem(RELEASE_CACHE);
+    if (cached) return JSON.parse(cached);
+  } catch {
+    /* 隐私模式 / 禁用存储 */
+  }
+  const res = await fetch(RELEASES_API, {
+    headers: { Accept: "application/vnd.github+json" },
+  });
+  if (!res.ok) throw new Error(`releases/latest ${res.status}`);
+  const data = await res.json();
+  const slim = {
+    tag: data.tag_name,
+    mac: pickAsset(data.assets, "_aarch64.dmg")?.browser_download_url,
+    win: pickAsset(data.assets, "_x64-setup.exe")?.browser_download_url,
+  };
+  try {
+    sessionStorage.setItem(RELEASE_CACHE, JSON.stringify(slim));
+  } catch {
+    /* ignore */
+  }
+  return slim;
+}
+
+async function initDownloads() {
+  try {
+    const latest = await loadLatestRelease();
+    if (latest.mac) DOWNLOADS.mac.url = latest.mac;
+    if (latest.win) DOWNLOADS.win.url = latest.win;
+    VERSION = versionLabel(latest.tag);
+  } catch {
+    /* 没网就停在 Release 页 */
+  }
+  applyOS();
+  initVersion();
+}
 
 const OS_ICONS = {
   mac: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09l.01-.01zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z"/></svg>',
@@ -551,10 +605,10 @@ function initVersion () {
 }
 
 applyOS();
+initDownloads();
 initNav();
 initMobileMenu();
 initReveal();
 initOrbShader();
 initInteractiveHover();
 initYear();
-initVersion();
