@@ -44,7 +44,7 @@ impl WinSandbox {
         spec: riot_protocol::tool::ProcessSpec,
         cancel: tokio_util::sync::CancellationToken,
     ) -> std::io::Result<riot_protocol::tool::ProcessOutput> {
-        spawn::spawn_with_token(*self.token.0, spec, MAX_OUTPUT, cancel).await
+        spawn::spawn_with_token((*self.token.0).0 as isize, spec, MAX_OUTPUT, cancel).await
     }
 }
 
@@ -416,7 +416,13 @@ mod spawn {
         read_err: std::fs::File,
     }
 
-    /// 用 `token` 起 `spec`，接管道/超时/进程组，返回输出。
+    /// 用令牌起 `spec`，接管道/超时/进程组，返回输出。
+    ///
+    /// `token_raw` 是 `HANDLE.0 as isize` —— **不直接收 HANDLE**：HANDLE 是
+    /// `*mut c_void`，不是 Send，若作为参数活到函数尾就会跨过中间的 await，
+    /// 让整个 future 非 Send，而 `SandboxedRunner`（async_trait）要求返回
+    /// `Send` future。收 isize（Send），进函数立刻转回 HANDLE 且只在
+    /// **第一个 await 之前**的同步建进程段用掉，NLL 保证它不跨 await。
     ///
     /// 语义对齐 `proc.rs::SystemProcessRunner::run`：
     /// - stdout / stderr **并发**读（串行会死锁，见 proc.rs 注释）；
@@ -424,7 +430,7 @@ mod spawn {
     ///   退出也杀，清掉可能残留的后台子进程）；
     /// - 读任务在杀组之后 await —— 写端全关了 EOF 才来。
     pub(crate) async fn spawn_with_token(
-        token: HANDLE,
+        token_raw: isize,
         spec: ProcessSpec,
         max_output: usize,
         cancel: CancellationToken,
@@ -432,8 +438,9 @@ mod spawn {
         let started = Instant::now();
         let timeout = spec.timeout_ms.map(Duration::from_millis);
 
-        // 建进程是同步 Win32，快，直接在异步上下文里做。
-        let sp = unsafe { create(token, &spec) }?;
+        // 建进程是同步 Win32，快，直接在异步上下文里做。token 在这里用完
+        // （create 之后不再引用），NLL 让它在第一个 await 前就结束生命周期。
+        let sp = unsafe { create(HANDLE(token_raw as *mut std::ffi::c_void), &spec) }?;
         let (process, job) = (sp.process, sp.job);
 
         let h_out = tokio::task::spawn_blocking(move || drain(sp.read_out, max_output));
@@ -652,7 +659,7 @@ mod spawn {
                 env: Vec::new(),
                 timeout_ms: Some(10_000),
             };
-            let out = spawn_with_token(*tok.0, spec, 1 << 20, CancellationToken::new())
+            let out = spawn_with_token((*tok.0).0 as isize, spec, 1 << 20, CancellationToken::new())
                 .await
                 .expect("跑得起来");
             assert_eq!(out.exit_code, 0, "stderr={}", out.stderr);
@@ -689,16 +696,13 @@ mod e2e_tests {
             .expect("给 work 打标签");
 
         let tok = super::token::create_restricted_low_il().expect("造受限 Low 令牌");
-        let token = *tok.0; // HANDLE 是 Copy，搬进闭包
+        // 令牌句柄搬成 isize（Send），spawn_with_token 内部再转回 HANDLE。
+        let token = (*tok.0).0 as isize;
         // cwd 用中性的 base（普通 Medium 目录），把「写哪」和「进程 cwd」
         // 两个变量分开 —— 写目标一律用绝对路径。
         let cwd = base.clone();
 
-        async fn write_to(
-            token: windows::Win32::Foundation::HANDLE,
-            target: &Path,
-            cwd: &Path,
-        ) -> (i32, String) {
+        async fn write_to(token_raw: isize, target: &Path, cwd: &Path) -> (i32, String) {
             // `cmd /c` 后面每个片段单独成 arg：build_command_line 会原样
             // 拼回 `cmd /c echo hi > <path>`。**不要**把 `echo hi>"path"`
             // 拼成一个 arg —— 那样它含空格和 `>`，会被 argv 引用规则整体
@@ -718,7 +722,7 @@ mod e2e_tests {
                 env: Vec::new(),
                 timeout_ms: Some(10_000),
             };
-            let o = super::spawn::spawn_with_token(token, spec, 1 << 20, CancellationToken::new())
+            let o = super::spawn::spawn_with_token(token_raw, spec, 1 << 20, CancellationToken::new())
                 .await
                 .expect("跑得起来");
             (o.exit_code, o.stderr)
