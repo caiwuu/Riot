@@ -25,6 +25,7 @@ import {
   type PermissionAsk,
   type PermissionMode,
   type PermissionResponse,
+  openInBrowser,
   pickDirectory,
   probeDirs,
   type ProviderConfig,
@@ -72,6 +73,7 @@ import {
   useSession,
   waitStartedAt,
 } from "./hooks/useSession";
+import { useAppUpdate } from "./hooks/useAppUpdate";
 import { basename, parentOf, tildify } from "./pathDisplay";
 
 /**
@@ -233,6 +235,8 @@ export function App() {
   const projectList = config?.config.projects;
   const projects = projectList ?? [];
   const activeSession = sessions.find((s) => s.id === active) ?? null;
+  const update = useAppUpdate(!booting && !bootError);
+  const updateNotice = update.banner;
 
   // 项目列表不会因为用户在访达里删了文件夹而自己更新。启动和窗口
   // 回到前台时探一次，侧栏才能把失效项标出来，而不必等点「新会话」才知道。
@@ -691,6 +695,23 @@ export function App() {
           }}
         />
 
+        {updateNotice ? (
+          <div className="update-banner" role="status">
+            <span>Riot {updateNotice.latest} 已发布</span>
+            <button className="ghost" onClick={() => void openInBrowser(updateNotice.url)}>
+              去下载
+            </button>
+            <button
+              className="update-banner-dismiss"
+              onClick={update.dismiss}
+              title="关闭"
+              aria-label="关闭"
+            >
+              ×
+            </button>
+          </div>
+        ) : null}
+
         <div className="workarea">
           <div className="chat-col">
             {activeSession ? (
@@ -837,6 +858,11 @@ export function App() {
           onStatus={setConfig}
           onClose={() => setShowSettings(false)}
           activeRoot={activeSession?.root ?? null}
+          appVersion={update.version}
+          update={update.info}
+          updateChecking={update.checking}
+          updateError={update.error}
+          onCheckUpdate={() => void update.check()}
         />
       ) : null}
 

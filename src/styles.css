@@ -200,7 +200,7 @@ body {
 /* ── 磨砂侧栏（macOS / Windows）──────────────────
  *
  * 窗口底下垫了一层系统材质（macOS 是 tauri.conf.json 里 windowEffects 的
- * sidebar；Windows 是 DWM 的 acrylic，宿主设的，见 src-tauri/src/vibrancy.rs），
+ * sidebar；Windows 是 DWM 的 mica，宿主设的，见 src-tauri/src/vibrancy.rs），
  * 侧栏要透出它，整页就得先把背景让开 —— 于是正文区自己补一层不透明底，
  * 不然半透明会一路铺到对话上，背后的窗口把正文的字衬得晃眼。
  *
@@ -4120,6 +4120,140 @@ pre {
 
 .test-result.err {
   color: var(--danger);
+}
+
+.about-card {
+  padding: 14px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+}
+
+.about-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.about-mark {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  display: grid;
+  place-items: center;
+  color: var(--text);
+  flex-shrink: 0;
+}
+
+.about-brand-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-body .about-tagline {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.2;
+  color: var(--text-faint);
+}
+
+.about-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.about-name {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.about-ver {
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+.about-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.about-status {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.about-status.ok {
+  color: var(--ok);
+}
+
+.about-status.new {
+  color: var(--warn);
+}
+
+.about-status.err {
+  color: var(--danger-soft);
+}
+
+.about-path {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.about-path code {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+  word-break: break-all;
+}
+
+.update-banner {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  background: var(--warn-bg);
+  border-bottom: 1px solid var(--warn-border);
+  color: var(--warn);
+  font-size: 12px;
+}
+
+.update-banner-dismiss {
+  margin-left: auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  opacity: 0.7;
+}
+
+.update-banner-dismiss:hover:not(:disabled) {
+  opacity: 1;
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
 }
 
 .about-row {

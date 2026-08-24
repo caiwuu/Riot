@@ -30,7 +30,8 @@ pub mod persist;
 pub mod state;
 pub mod term;
 pub mod term_access;
-#[cfg(windows)]
+pub mod update;
+#[cfg(any(windows, target_os = "macos"))]
 mod vibrancy;
 
 use tauri::Manager;
@@ -68,6 +69,8 @@ pub enum HostError {
     Hook(String),
     #[error("{0}")]
     Pack(String),
+    #[error("{0}")]
+    Update(String),
 }
 
 // Tauri 要求错误类型可序列化。thiserror 不给 Serialize，手写一层。
@@ -321,6 +324,18 @@ async fn set_session_thinking(
 #[tauri::command]
 async fn get_config(state: tauri::State<'_, AppState>) -> HostResult<config::ConfigStatus> {
     Ok(config::ConfigStatus::of(state.config().await))
+}
+
+/// 和 `tauri.conf.json` 的 version 同一份，设置 → 关于用来显示。
+#[tauri::command]
+fn app_version(app: tauri::AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
+/// 对照 GitHub 上最新正式 Release。没网、还没发过版都不该让调用方当成崩溃。
+#[tauri::command]
+async fn check_update(app: tauri::AppHandle) -> HostResult<update::UpdateInfo> {
+    crate::update::check(&app.package_info().version.to_string()).await
 }
 
 #[tauri::command]
@@ -954,6 +969,8 @@ pub fn run() {
             read_image,
             clipboard_paths,
             get_config,
+            app_version,
+            check_update,
             set_config,
             set_api_key,
             mcp_status,
@@ -979,9 +996,13 @@ pub fn run() {
         // 启动时把 MCP 连接对齐配置。放 setup 里而不是 restore：
         // spawn 连接任务要求 runtime 已经起来，restore 跑在那之前。
         .setup(|app| {
-            // 侧栏的磨砂底在 Windows 上要等窗口建好再补几步，见 vibrancy 模块。
-            // 放在最前面：越早越不容易被用户看见中间态。
-            #[cfg(windows)]
+            // 只有一套深色配色。系统浅色时不钉住：macOS 的 sidebar 材质会变成
+            // 浅灰，Windows 的 mica 会垫一层白雾。配置里 theme: Dark 在建窗时
+            // 先钉上；这里再钉一次，覆盖菜单和以后新开的窗。
+            app.set_theme(Some(tauri::Theme::Dark));
+            // 侧栏材质的平台补钉，见 vibrancy 模块。放在最前面：越早越不容易
+            // 被用户看见中间态。
+            #[cfg(any(windows, target_os = "macos"))]
             if let Some(main) = app.get_webview_window("main") {
                 vibrancy::apply(&main);
             }

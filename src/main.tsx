@@ -18,7 +18,11 @@ import "./styles.css";
    透明窗口走的是 Tauri 的 `macOSPrivateApi`（私有 API）——用了它就上不了
    Mac App Store。Riot 走 Developer ID 签名 + DMG 自分发，这条路本来
    就没在计划里；哪天要上架，得连着这三处一起撤（配置、这里、CSS）。
-   Windows 的 acrylic 不涉及私有 API。 */
+   Windows 的 acrylic 不涉及私有 API。
+
+   材质明暗跟系统外观走。应用只有一套深色，所以宿主把窗口钉成 Dark
+   （tauri.conf.json 的 theme，以及 src-tauri/src/vibrancy.rs），浅色
+   系统上侧栏才不会翻成浅灰。 */
 const ua = navigator.userAgent;
 if (ua.includes("Mac")) {
   document.documentElement.dataset.vibrancy = "mac";

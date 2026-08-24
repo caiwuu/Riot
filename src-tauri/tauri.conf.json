@@ -27,6 +27,7 @@
         "hiddenTitle": true,
         "dragDropEnabled": true,
         "transparent": true,
+        "theme": "Dark",
         "windowEffects": {
           "effects": ["sidebar"],
           "state": "followsWindowActiveState"

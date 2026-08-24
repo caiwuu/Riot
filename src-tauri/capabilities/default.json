@@ -21,6 +21,8 @@
     "allow-respond-permission",
     "allow-set-permission-mode",
     "allow-get-config",
+    "allow-app-version",
+    "allow-check-update",
     "allow-set-config",
     "allow-set-api-key",
     "allow-add-project",

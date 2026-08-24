@@ -508,6 +508,25 @@ export function setPermissionMode(
   return invoke("set_permission_mode", { sessionId, mode });
 }
 
+/** 当前安装的版本，和 `tauri.conf.json` 同一份。 */
+export function appVersion(): Promise<string> {
+  return invoke<string>("app_version");
+}
+
+/** 对照 GitHub 最新正式 Release。 */
+export interface UpdateInfo {
+  current: string;
+  latest: string | null;
+  notes: string | null;
+  /** 当前平台的安装包，没有就给 Release 页。 */
+  url: string;
+  newer: boolean;
+}
+
+export function checkUpdate(): Promise<UpdateInfo> {
+  return invoke<UpdateInfo>("check_update");
+}
+
 export function getConfig(): Promise<ConfigStatus> {
   return invoke<ConfigStatus>("get_config");
 }

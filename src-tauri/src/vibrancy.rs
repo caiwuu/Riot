@@ -1,12 +1,23 @@
+//! 系统材质，以及把它钉在深色上。
+//!
+//! 应用只有一套深色配色。系统浅色时不钉住：
+//! - macOS 的 sidebar 材质（`NSVisualEffectMaterialSidebar`）跟着
+//!   `effectiveAppearance` 走，会变成系统浅色侧栏那种浅灰
+//! - Windows 的 mica 会在深色侧栏底下垫一层白雾
+//!
+//! macOS：配置里 `windowEffects: sidebar` 铺材质，`theme: Dark` 在建窗时先把
+//! NSApp 钉成 DarkAqua。本模块再把窗口和内容视图树的 appearance 钉死 —— 语义
+//! 材质读的是视图自己的 effectiveAppearance，只钉 NSApp 有时罩不住 overlay
+//! 标题栏底下那层 NSVisualEffectView。
+//!
 //! Windows：让侧栏透出系统材质（DWM 的 mica）。
 //!
 //! 选 mica 不选 acrylic：mica 采样桌面壁纸，色调稳定、跟窗口后面压着什么无关，
 //! 也是 Codex / WinUI 窗体的默认观感；acrylic 模糊的是紧贴窗后的内容，背后是
 //! 白文档侧栏就发白，背后是深色就发黑，观感跟着别的窗口走。
 //!
-//! macOS 一行配置就够（`tauri.conf.json` 的 `windowEffects: sidebar`）。Windows
-//! 要四步，而配置只表达得了第一步 —— 只做第一步的话，客户区里透明像素合成出来
-//! 是一片黑：材质只画在玻璃帧上，帧又没扩进客户区。
+//! Windows 要四步，而配置只表达得了第一步 —— 只做第一步的话，客户区里透明像素
+//! 合成出来是一片黑：材质只画在玻璃帧上，帧又没扩进客户区。
 //!
 //! ① 关掉 tao 给透明窗口开的逐像素 alpha —— 它建窗时拿一个空区域调
 //!    `DwmEnableBlurBehindWindow` 开出来的（tao 的 window.rs）。留着它，透明像素
@@ -28,19 +39,26 @@
 //! 页面得先把背景让开才看得见材质，见 `src/main.tsx` 的 `[data-vibrancy]`。
 
 use tauri::WebviewWindow;
+
+#[cfg(windows)]
 use windows::Win32::Foundation::HWND;
+#[cfg(windows)]
 use windows::Win32::Graphics::Dwm::{
     DWM_BB_ENABLE, DWM_BLURBEHIND, DWMSBT_MAINWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
     DWMWA_USE_IMMERSIVE_DARK_MODE, DwmEnableBlurBehindWindow, DwmExtendFrameIntoClientArea,
     DwmSetWindowAttribute,
 };
+#[cfg(windows)]
 use windows::Win32::Graphics::Gdi::HRGN;
+#[cfg(windows)]
 use windows::Win32::UI::Controls::MARGINS;
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
 };
 
 /// 整个客户区都当玻璃帧。-1 是 DWM 约定的"铺满"。
+#[cfg(windows)]
 const WHOLE_CLIENT_AREA: MARGINS = MARGINS {
     cxLeftWidth: -1,
     cxRightWidth: -1,
@@ -48,6 +66,7 @@ const WHOLE_CLIENT_AREA: MARGINS = MARGINS {
     cyBottomHeight: -1,
 };
 
+#[cfg(windows)]
 pub fn apply(window: &WebviewWindow) {
     let Ok(handle) = window.hwnd() else {
         tracing::warn!("拿不到窗口句柄，跳过系统材质");
@@ -113,5 +132,47 @@ pub fn apply(window: &WebviewWindow) {
         )
     } {
         tracing::warn!(error = %e, "窗口帧没重算，材质可能不生效");
+    }
+}
+
+/// 把 NSApp / NSWindow / 内容视图树钉成 DarkAqua，sidebar 材质才不会跟系统浅色走。
+#[cfg(target_os = "macos")]
+pub fn apply(window: &WebviewWindow) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{
+        NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSApplication, NSView,
+    };
+
+    let Ok(ptr) = window.ns_view() else {
+        tracing::warn!("拿不到 NSView，跳过深色外观钉死");
+        return;
+    };
+    let Some(mtm) = MainThreadMarker::new() else {
+        tracing::warn!("不在主线程，跳过深色外观钉死");
+        return;
+    };
+    // SAFETY: 这是 AppKit 导出的常量字符串，进程期内一直有效。
+    let Some(dark) = NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }) else {
+        tracing::warn!("系统没有 DarkAqua，跳过深色外观钉死");
+        return;
+    };
+
+    NSApplication::sharedApplication(mtm).setAppearance(Some(&dark));
+
+    // SAFETY: ns_view 是本窗口的 AppKit 内容视图，setup 期间窗口还活着。
+    let view = unsafe { &*ptr.cast::<NSView>() };
+    if let Some(ns_window) = view.window() {
+        ns_window.setAppearance(Some(&dark));
+    }
+    pin_view_tree(view, &dark);
+}
+
+#[cfg(target_os = "macos")]
+fn pin_view_tree(view: &objc2_app_kit::NSView, dark: &objc2_app_kit::NSAppearance) {
+    use objc2_app_kit::NSAppearanceCustomization;
+
+    view.setAppearance(Some(dark));
+    for sub in view.subviews() {
+        pin_view_tree(&sub, dark);
     }
 }

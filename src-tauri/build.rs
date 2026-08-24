@@ -14,6 +14,8 @@ const COMMANDS: &[&str] = &[
     "respond_permission",
     "set_permission_mode",
     "get_config",
+    "app_version",
+    "check_update",
     "set_config",
     "set_api_key",
     "add_project",
