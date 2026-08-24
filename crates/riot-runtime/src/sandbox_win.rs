@@ -572,3 +572,67 @@ mod spawn {
         }
     }
 }
+
+// M2 的端到端验收：把令牌 + 标签 + spawn 三块串起来，验证边界真的由
+// OS 执行 —— 低完整性进程只能写「打了 Low 标签的目录」，工作区外写不进。
+// 这是文档 §6 用例 1，整个 Windows 沙箱正确性的核心。机制在这里闭环
+// 验证（不碰 SandboxedRunner/session.rs），确认对了再接线（下一步）。
+#[cfg(all(windows, test))]
+mod e2e_tests {
+    use std::path::Path;
+
+    use riot_protocol::tool::ProcessSpec;
+    use tokio_util::sync::CancellationToken;
+
+    use crate::sandbox_labels::{DirLabeler, LabelLedger, authorize_writable};
+
+    #[tokio::test]
+    async fn 低完整性进程只能写打了标签的目录() {
+        let base = std::env::temp_dir().join(format!("riot-sbx-e2e-{}", std::process::id()));
+        let work = base.join("work");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&work).expect("建工作区");
+        std::fs::create_dir_all(&outside).expect("建外部目录");
+
+        // 只给 work 打 Low 标签；outside 保持默认（Medium）。
+        let mut ledger = LabelLedger::load(base.join("labels.json"));
+        let labeler = super::label::WinLabeler;
+        authorize_writable(std::slice::from_ref(&work), &labeler, &mut ledger, 0)
+            .expect("给 work 打标签");
+
+        let tok = super::token::create_restricted_low_il().expect("造受限 Low 令牌");
+        let token = *tok.0; // HANDLE 是 Copy，搬进闭包
+
+        async fn write_to(token: windows::Win32::Foundation::HANDLE, dir: &Path, name: &str, cwd: &Path) -> i32 {
+            let spec = ProcessSpec {
+                program: "cmd".to_owned(),
+                // 重定向目标加引号：临时路径一般无空格，但不赌。
+                args: vec!["/c".to_owned(), format!("echo hi>\"{}\\{}\"", dir.display(), name)],
+                cwd: cwd.to_path_buf(),
+                env: Vec::new(),
+                timeout_ms: Some(10_000),
+            };
+            super::spawn::spawn_with_token(token, spec, 1 << 20, CancellationToken::new())
+                .await
+                .expect("跑得起来")
+                .exit_code
+        }
+
+        // 工作区内：打了 Low 标签，低完整性进程写得进。
+        let ec_in = write_to(token, &work, "inside.txt", &work).await;
+        assert_eq!(ec_in, 0, "打了标签的目录该写得进");
+        assert!(work.join("inside.txt").exists(), "文件该真的被创建");
+
+        // 工作区外：没打标签（默认 Medium），Low 进程 no-write-up 被 MIC 拦。
+        let ec_out = write_to(token, &outside, "outside.txt", &work).await;
+        assert_ne!(ec_out, 0, "没打标签的目录，低完整性进程必须写不进");
+        assert!(
+            !outside.join("outside.txt").exists(),
+            "文件真的不该被创建 —— 边界没生效的话它就在那儿"
+        );
+
+        // 回滚标签 + 清理临时目录。
+        let _ = labeler.untag(&work);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
