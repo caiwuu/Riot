@@ -54,20 +54,29 @@ async fn 关掉抓取之后抓取报未配置() {
     assert!(matches!(e, WebError::NotConfigured { .. }));
 }
 
-#[tokio::test]
-async fn 开关开着但没填地址等于没配搜索() {
-    // 只开开关不填地址是设置页里必然出现的中间状态。这时候要报"未配置"
-    // （提示去填地址），不能变成一个连接失败。
+#[test]
+fn 开关开着空地址装配内置搜索() {
     let w = HostWeb::from_config(&cfg(WebConfig {
         search_enabled: true,
         searxng_url: "   ".into(),
         ..Default::default()
     }));
-    let e = w
-        .search(SearchQuery::default(), &CancellationToken::new())
-        .await
-        .expect_err("没地址搜不了");
-    assert!(matches!(e, WebError::NotConfigured { .. }), "{e:?}");
+    assert_eq!(
+        w.search_base(),
+        Some(crate::config::BUILTIN_SEARXNG_URL),
+        "空地址必须走内置，不能报未配置"
+    );
+}
+
+#[test]
+fn 内核setup空地址也走内置() {
+    let w = HostWeb::from_setup(&riot_protocol::WebSetup {
+        fetch_enabled: false,
+        search_enabled: true,
+        searxng_url: String::new(),
+        distill: None,
+    });
+    assert_eq!(w.search_base(), Some(crate::config::BUILTIN_SEARXNG_URL));
 }
 
 #[tokio::test]

@@ -107,9 +107,9 @@ export interface ModelConfig {
 export interface WebConfig {
   /** 允许 WebFetch 抓网页。 */
   fetchEnabled: boolean;
-  /** 允许 WebSearch 搜索。还要有 searxngUrl 才真的可用。 */
+  /** 允许 WebSearch 搜索。空地址走内置实例。 */
   searchEnabled: boolean;
-  /** SearXNG 实例地址，如 http://127.0.0.1:8080。 */
+  /** 覆盖内置 SearXNG 的地址。空 = 用内置。 */
   searxngUrl: string;
   /** 蒸馏网页正文的辅助模型，格式 `providerId/model`。空 = 不蒸馏。 */
   distillModel: string;
@@ -1005,7 +1005,7 @@ export function testConnection(providerId?: string, model?: string): Promise<str
 }
 
 /**
- * 测 SearXNG 地址通不通。传的是正在编辑的地址，不用先保存。
+ * 测搜索后端通不通。传正在编辑的地址；空 = 测内置，不用先保存。
  *
  * 会真发一次查询而不是只打首页 —— 首页 200 说明不了 JSON 输出开没开，
  * 而那正是最容易配错的一处。

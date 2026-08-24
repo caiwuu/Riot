@@ -242,11 +242,68 @@ impl Sampling {
     }
 }
 
+/// 内置 SearXNG。空地址走这里。
+///
+/// `[约束]` 这个常量不得出现在设置页、`config.json`、工具回传和错误文案里。
+/// 用户覆盖写成自己的地址；没覆盖时界面只说"内置搜索"。
+pub const BUILTIN_SEARXNG_URL: &str = "https://searxng.riotai.app";
+
+/// 写入配置用：内置域名收成空串，避免出现在 `config.json` 和设置页。
+pub fn normalize_searxng_url(raw: &str) -> String {
+    let t = raw.trim().trim_end_matches('/');
+    if t.is_empty() || is_builtin_searxng_url(t) {
+        String::new()
+    } else {
+        t.to_owned()
+    }
+}
+
+/// 真正发请求用的地址。空或内置域名 → 内置实例。
+pub fn resolve_searxng_url(raw: &str) -> String {
+    let saved = normalize_searxng_url(raw);
+    if saved.is_empty() {
+        BUILTIN_SEARXNG_URL.to_owned()
+    } else {
+        saved
+    }
+}
+
+pub fn is_builtin_searxng_url(url: &str) -> bool {
+    let t = url.trim().trim_end_matches('/');
+    let rest = t
+        .strip_prefix("https://")
+        .or_else(|| t.strip_prefix("http://"))
+        .unwrap_or(t);
+    rest.eq_ignore_ascii_case("searxng.riotai.app")
+}
+
+/// 给用户 / 模型看的名字。内置实例不暴露域名。
+pub fn searxng_error_label(url: &str) -> String {
+    if is_builtin_searxng_url(url) || url.trim().is_empty() {
+        "内置搜索".into()
+    } else {
+        url.trim().trim_end_matches('/').to_owned()
+    }
+}
+
+/// 错误文案里万一带上了内置地址，换成"内置搜索"。
+pub fn redact_searxng_url(msg: impl AsRef<str>) -> String {
+    msg.as_ref()
+        .replace(BUILTIN_SEARXNG_URL, "内置搜索")
+        .replace("http://searxng.riotai.app", "内置搜索")
+}
+
+fn deserialize_searxng_url<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let s = String::deserialize(d)?;
+    Ok(normalize_searxng_url(&s))
+}
+
 /// 联网能力的配置。
 ///
 /// 抓取（WebFetch）和搜索（WebSearch）分开开关：抓取不需要任何第三方
-/// 服务，配好就能用；搜索要先有一个 SearXNG 实例。"只让模型读我贴过来的
-/// 链接、别自己去搜"是一种合理的用法，两个开关合并就表达不出来。
+/// 服务，配好就能用；搜索默认走内置 SearXNG，用户也可以填自己的实例覆盖。
+/// "只让模型读我贴过来的链接、别自己去搜"是一种合理的用法，两个开关
+/// 合并就表达不出来。
 ///
 /// 只支持 SearXNG 一种后端。Tavily / Brave / Serper 都要 key、要额度、
 /// 而且在国内还要代理；SearXNG 自己起一个 docker 就能用，没有额度概念。
@@ -258,16 +315,18 @@ pub struct WebConfig {
     /// 允许 WebFetch 抓网页。
     #[serde(default = "yes")]
     pub fetch_enabled: bool,
-    /// 允许 WebSearch 搜索。关掉或没填地址时，工具会提示去设置里配。
-    #[serde(default)]
+    /// 允许 WebSearch 搜索。关掉时工具会提示去设置里打开。
+    #[serde(default = "yes")]
     pub search_enabled: bool,
-    /// SearXNG 实例地址，如 `http://127.0.0.1:8080`。
+    /// 用户覆盖的 SearXNG 地址。空 = 用内置实例。
     ///
     /// `[约束]` 这个地址**不过** SSRF 检查 —— 自托管实例跑在
-    /// `127.0.0.1` 是最常见的部署方式，套上抓取工具那层内网拦截会让它
+    /// `127.0.0.1` 是最常见的覆盖方式，套上抓取工具那层内网拦截会让它
     /// 完全没法用。这不是破例：安全边界在于它是用户亲手填的一个固定
     /// 地址，模型影响不了它，而模型能影响的 `q` 参数是被 URL 编码过的。
-    #[serde(default)]
+    ///
+    /// `[约束]` 内置域名读进来就收成空，禁止写回 `config.json`。
+    #[serde(default, deserialize_with = "deserialize_searxng_url")]
     pub searxng_url: String,
     /// 蒸馏网页正文用的辅助模型，格式 `providerId/model`。
     ///
@@ -491,8 +550,8 @@ impl Default for WebConfig {
             // 抓取默认开：它不依赖任何外部服务，而且每个域名还要过一次
             // 用户确认，再加一道默认关闭的开关只是让人多找一次设置。
             fetch_enabled: true,
-            // 搜索默认关：没填地址时开着也没用，只会让模型调一次失败一次。
-            search_enabled: false,
+            // 搜索默认开：空地址走内置实例，不用先填东西。
+            search_enabled: true,
             searxng_url: String::new(),
             distill_model: String::new(),
         }
@@ -500,9 +559,19 @@ impl Default for WebConfig {
 }
 
 impl WebConfig {
-    /// 搜索是不是真的可用（开关开着 + 地址填了）。
+    /// 搜索是不是真的可用。空地址走内置，所以只看开关。
     pub fn search_ready(&self) -> bool {
-        self.search_enabled && !self.searxng_url.trim().is_empty()
+        self.search_enabled
+    }
+
+    /// 真正发请求的地址。空 = 内置。
+    pub fn effective_searxng_url(&self) -> String {
+        resolve_searxng_url(&self.searxng_url)
+    }
+
+    /// 用户有没有覆盖内置实例。
+    pub fn using_custom_searxng(&self) -> bool {
+        !normalize_searxng_url(&self.searxng_url).is_empty()
     }
 
     /// 拆出 `providerId/model`。
@@ -1291,7 +1360,7 @@ fn migrate(old: LegacyConfig) -> AppConfig {
         default_mode: old.default_mode,
         ask_timeout_secs: default_ask_timeout_secs(),
         max_turns: default_max_turns(),
-        // 老格式里没有联网配置，用默认值（抓取开、搜索关）。
+        // 老格式里没有联网配置，用默认值（抓取开、搜索开、空地址走内置）。
         web: WebConfig::default(),
         mcp_servers: Vec::new(),
         compact_threshold_tokens: default_compact_threshold_tokens(),
@@ -1701,10 +1770,14 @@ mod tests {
         assert_eq!(c.active_model, "deepseek-chat");
         assert!(c.web.fetch_enabled, "抓取默认开");
         assert!(
-            !c.web.search_enabled,
-            "搜索默认关 —— 没填地址时开着只会调一次失败一次"
+            c.web.search_enabled,
+            "搜索默认开 —— 空地址走内置实例"
         );
-        assert!(!c.web.search_ready());
+        assert!(c.web.search_ready());
+        assert!(
+            !c.web.using_custom_searxng(),
+            "老配置没填地址，必须继续走内置，不能把域名写进配置"
+        );
     }
 
     #[test]
@@ -1730,6 +1803,43 @@ mod tests {
         assert_eq!(t("没有斜杠"), None);
         assert_eq!(t("/只有模型"), None);
         assert_eq!(t("只有provider/"), None);
+    }
+
+    #[test]
+    fn 内置搜索地址不进配置() {
+        assert_eq!(normalize_searxng_url(""), "");
+        assert_eq!(normalize_searxng_url("  "), "");
+        assert_eq!(normalize_searxng_url(BUILTIN_SEARXNG_URL), "");
+        assert_eq!(normalize_searxng_url("https://searxng.riotai.app/"), "");
+        assert_eq!(normalize_searxng_url("http://searxng.riotai.app"), "");
+        assert_eq!(
+            normalize_searxng_url("http://127.0.0.1:8080/"),
+            "http://127.0.0.1:8080"
+        );
+
+        assert_eq!(resolve_searxng_url(""), BUILTIN_SEARXNG_URL);
+        assert_eq!(
+            resolve_searxng_url("http://127.0.0.1:8080"),
+            "http://127.0.0.1:8080"
+        );
+        assert_eq!(searxng_error_label(""), "内置搜索");
+        assert_eq!(searxng_error_label(BUILTIN_SEARXNG_URL), "内置搜索");
+        assert_eq!(
+            searxng_error_label("http://127.0.0.1:8080"),
+            "http://127.0.0.1:8080"
+        );
+        assert!(
+            !redact_searxng_url(format!("连不上 {BUILTIN_SEARXNG_URL}"))
+                .contains("searxng.riotai.app")
+        );
+
+        let leaked = parse(&format!(
+            r#"{{"providers":[],"activeProvider":"","activeModel":"","projects":[],
+                "web":{{"searchEnabled":true,"searxngUrl":"{BUILTIN_SEARXNG_URL}"}}}}"#
+        ));
+        assert_eq!(leaked.web.searxng_url, "");
+        assert!(!leaked.web.using_custom_searxng());
+        assert_eq!(leaked.web.effective_searxng_url(), BUILTIN_SEARXNG_URL);
     }
 
     fn mcp(id: &str, command: &str) -> McpServerConfig {

@@ -1003,7 +1003,8 @@ impl AppState {
             web: riot_protocol::WebSetup {
                 fetch_enabled: config.web.fetch_enabled,
                 search_enabled: config.web.search_ready(),
-                searxng_url: config.web.searxng_url.clone(),
+                // 内置地址不传给内核进程，由内核自己补。覆盖才写进 turn。
+                searxng_url: crate::config::normalize_searxng_url(&config.web.searxng_url),
                 distill,
             },
             vision: riot_protocol::VisionSetup {

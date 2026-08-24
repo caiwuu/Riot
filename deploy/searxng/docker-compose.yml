@@ -1,0 +1,39 @@
+# SearXNG，给 Riot 联网搜索用。
+# 官方镜像默认只开 HTML；Riot 走 /search?format=json，必须另开 json。
+# 文档：https://docs.searxng.org/admin/installation-docker.html
+#
+#   cp .env.example .env          # 已有 .env 可跳过
+#   docker compose up -d
+#   设置里填 http://127.0.0.1:8080
+
+name: searxng
+
+services:
+  core:
+    container_name: searxng-core
+    image: docker.io/searxng/searxng:${SEARXNG_VERSION:-latest}
+    restart: unless-stopped
+    ports:
+      - ${SEARXNG_HOST:-127.0.0.1}:${SEARXNG_PORT:-8080}:${SEARXNG_PORT:-8080}
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?请先复制 .env.example 为 .env，并填 SEARXNG_SECRET}
+      SEARXNG_VALKEY_URL: valkey://valkey:6379/0
+      SEARXNG_BASE_URL: ${SEARXNG_BASE_URL:-http://127.0.0.1:8080/}
+      SEARXNG_PORT: ${SEARXNG_PORT:-8080}
+    volumes:
+      - ./core-config/:/etc/searxng/:Z
+      - core-data:/var/cache/searxng/
+    depends_on:
+      - valkey
+
+  valkey:
+    container_name: searxng-valkey
+    image: docker.io/valkey/valkey:9-alpine
+    command: valkey-server --save 30 1 --loglevel warning
+    restart: unless-stopped
+    volumes:
+      - valkey-data:/data/
+
+volumes:
+  core-data:
+  valkey-data:

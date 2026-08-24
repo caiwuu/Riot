@@ -153,7 +153,7 @@ impl Tool for WebSearch {
         }
 
         PermissionResult::Ask {
-            message: "是否允许联网搜索？搜索词会发送给你配置的搜索后端。".to_owned(),
+            message: "是否允许联网搜索？搜索词会发给搜索后端。".to_owned(),
             suggestions: vec![PermissionUpdate::AddRule {
                 tool: WEB_SEARCH.to_owned(),
                 pattern: None,
@@ -276,8 +276,8 @@ fn format_results(query: &str, hits: &[SearchHit], elapsed_ms: u64) -> String {
 fn search_hint(e: &WebError) -> String {
     match e {
         WebError::NotConfigured { .. } => {
-            "还没有配置搜索后端。请让用户打开「设置 → 联网」，打开搜索开关\
-             并填入 SearXNG 地址，配好之后再重试。在此之前不要反复调用这个工具。"
+            "搜索已关闭。请让用户打开「设置 → 联网」里的搜索开关，然后再重试。\
+             在此之前不要反复调用这个工具。"
                 .to_owned()
         }
         WebError::Status { code, body } => format!(
@@ -285,7 +285,7 @@ fn search_hint(e: &WebError) -> String {
              可能是地址配错了或者后端没开启 JSON 输出。告诉用户去检查设置，不要重试。"
         ),
         WebError::Transport { message } => {
-            format!("连不上搜索后端：{message}。让用户检查「设置 → 联网」里的地址，不要重试。")
+            format!("连不上搜索后端：{message}。让用户检查「设置 → 联网」，不要重试。")
         }
         WebError::Blocked { reason } => format!("搜索请求被拦截：{reason}。"),
         WebError::TooLarge { .. } => "搜索后端返回的内容过大，已放弃。".to_owned(),

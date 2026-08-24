@@ -11,7 +11,7 @@
 //! # 每轮重建，不做缓存
 //!
 //! [`HostWeb`] 由 `AppState::send_turn` 在每一轮开始时按当时的配置构造。
-//! 用户在对话中途填上 SearXNG 地址，下一轮就能搜 —— 不用重启，也不用为
+//! 用户在对话中途打开搜索或改覆盖地址，下一轮就能搜 —— 不用重启，也不用为
 //! "配置变了"再搭一套通知机制。构造成本是两个 `reqwest::Client`
 //! （内部连接池是 `Arc`，克隆很便宜），相对于一轮模型调用可以忽略。
 
@@ -40,7 +40,7 @@ const USER_AGENT: &str = concat!("Riot/", env!("CARGO_PKG_VERSION"), " (+agent)"
 pub struct HostWeb {
     /// `None` = 用户关掉了抓取。
     fetch: Option<SystemWebClient>,
-    /// `None` = 搜索没开或没填地址。
+    /// `None` = 用户关掉了搜索。空地址走内置，不算"没配"。
     search: Option<Searxng>,
     /// `None` = 没配辅助模型。抓取会降级成截断原文，不算失败。
     distiller: Option<Distiller>,
@@ -68,7 +68,7 @@ impl HostWeb {
 
         let search = cfg.web.search_ready().then(|| Searxng {
             client: search_client(),
-            base_url: cfg.web.searxng_url.trim().trim_end_matches('/').to_owned(),
+            base_url: cfg.web.effective_searxng_url(),
         });
 
         let distiller = cfg.web.distill_target().and_then(|(pid, model)| {
@@ -99,11 +99,10 @@ impl HostWeb {
                 r.inspect_err(|e| tracing::warn!(error = %e, "抓取客户端没建起来"))
                     .ok()
             });
-        let search =
-            (setup.search_enabled && !setup.searxng_url.trim().is_empty()).then(|| Searxng {
-                client: search_client(),
-                base_url: setup.searxng_url.trim().trim_end_matches('/').to_owned(),
-            });
+        let search = setup.search_enabled.then(|| Searxng {
+            client: search_client(),
+            base_url: crate::config::resolve_searxng_url(&setup.searxng_url),
+        });
         let distiller = setup.distill.as_ref().and_then(|ep| {
             crate::session::provider_from_endpoint(ep)
                 .inspect_err(|e| tracing::warn!(error = %e, "辅助模型的 provider 建不出来"))
@@ -136,6 +135,13 @@ fn search_client() -> reqwest::Client {
         // Client::builder() 只在 TLS 后端初始化失败时才会出错，那种情况下
         // 默认客户端也一样起不来。这里不值得把错误往上传一路。
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+impl HostWeb {
+    fn search_base(&self) -> Option<&str> {
+        self.search.as_ref().map(|s| s.base_url.as_str())
+    }
 }
 
 #[async_trait]
@@ -185,17 +191,15 @@ impl WebAccess for HostWeb {
 /// 用一个真实查询而不是打首页：首页返回 200 只说明有个 web 服务在那，
 /// 说明不了 JSON 输出开没开 —— 而那正是最容易配错的一处。
 pub async fn test_searxng(base_url: &str) -> Result<String, String> {
-    let base = base_url.trim().trim_end_matches('/');
-    if base.is_empty() {
-        return Err("先填 SearXNG 的地址，比如 http://127.0.0.1:8080".to_owned());
-    }
+    // 空 = 测内置。不要在这里要求用户填地址。
+    let base = crate::config::resolve_searxng_url(base_url);
     if !base.starts_with("http://") && !base.starts_with("https://") {
         return Err(format!("地址要带上协议：http://{base}"));
     }
 
     let hits = searxng::search(
         &search_client(),
-        base,
+        &base,
         &SearchQuery {
             query: "hello".to_owned(),
             max_results: 3,
@@ -204,7 +208,7 @@ pub async fn test_searxng(base_url: &str) -> Result<String, String> {
         &CancellationToken::new(),
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| crate::config::redact_searxng_url(e.to_string()))?;
 
     if hits.is_empty() {
         // 通了但没结果：JSON 是对的，是上游引擎那边的问题。这两种情况

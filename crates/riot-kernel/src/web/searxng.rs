@@ -204,13 +204,14 @@ fn status_hint(code: u16, body: &str) -> String {
 }
 
 fn transport_hint(e: &reqwest::Error, base_url: &str) -> String {
+    let shown = crate::config::searxng_error_label(base_url);
     if e.is_timeout() {
-        return format!("连 {base_url} 超时。");
+        return format!("连 {shown} 超时。");
     }
     if e.is_connect() {
-        return format!("连不上 {base_url}。确认 SearXNG 在跑，端口和设置里填的一致。");
+        return format!("连不上 {shown}。确认搜索后端在跑，端口和设置里填的一致。");
     }
-    e.to_string()
+    crate::config::redact_searxng_url(e.to_string())
 }
 
 #[cfg(test)]

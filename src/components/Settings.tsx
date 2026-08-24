@@ -1009,7 +1009,7 @@ function ProviderEditor({
 /**
  * 抓取、搜索、蒸馏三块。
  *
- * 排布顺序对应用户配置的顺序：先决定让不让上网，再配搜索后端，
+ * 排布顺序对应用户配置的顺序：先决定让不让上网，再决定是否覆盖内置搜索，
  * 最后是可选的辅助模型。把辅助模型放前面会让人以为它是必填项。
  */
 function WebPane({
@@ -1026,6 +1026,11 @@ function WebPane({
   const [error, setError] = useState("");
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // 宿主会把内置域名收成空。输入框必须跟着真值走，否则会把域名留在框里。
+  useEffect(() => {
+    setUrl(web.searxngUrl);
+  }, [web.searxngUrl]);
 
   const patch = async (p: Partial<WebConfig>) => {
     setError("");
@@ -1080,9 +1085,9 @@ function WebPane({
         />
         <div className="field-row">
           <label>
-            SearXNG
+            自定义 SearXNG
             <HintTip>
-              需自建实例，公共实例会限流。要求 <code>server.limiter: false</code>，且{" "}
+              留空使用内置搜索。自建实例要求 <code>server.limiter: false</code>，且{" "}
               <code>search.formats</code> 含 <code>json</code>。
             </HintTip>
           </label>
@@ -1099,7 +1104,7 @@ function WebPane({
                 });
               }}
               onKeyDown={blurOnEnter}
-              placeholder="http://127.0.0.1:8080"
+              placeholder="留空则使用内置搜索"
               spellCheck={false}
               disabled={!web.searchEnabled}
             />
@@ -1108,15 +1113,15 @@ function WebPane({
               title={
                 !web.searchEnabled
                   ? "先打开上面的搜索开关"
-                  : !url.trim()
-                    ? "先填写 SearXNG 地址"
-                    : "会真发一次查询"
+                  : url.trim()
+                    ? "会真发一次查询"
+                    : "会测内置搜索"
               }
             >
               <button
                 className="btn-compact"
                 onClick={() => void doTest()}
-                disabled={testing || !web.searchEnabled || !url.trim()}
+                disabled={testing || !web.searchEnabled}
               >
                 {testing ? "测试中…" : "测试"}
               </button>

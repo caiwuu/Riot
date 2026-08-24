@@ -1165,7 +1165,7 @@ export interface VisionSetup {
 /**
  * 联网能力配置(随 turn 传给内核)。
  *
- * 抓取(fetch)不需要第三方服务;搜索(search)要一个 SearXNG 实例;
+ * 抓取(fetch)不需要第三方服务;搜索(search)默认走内置 SearXNG,用户可覆盖;
  * 蒸馏(distill)要一个辅助模型端点。三者独立开关,和宿主 `WebConfig` 一致。
  */
 export interface WebSetup {
@@ -1176,7 +1176,7 @@ export interface WebSetup {
   fetch_enabled: boolean;
   search_enabled: boolean;
   /**
-   * SearXNG 实例地址。空 = 搜索不可用。
+   * 用户覆盖的 SearXNG 地址。空 = 用内置实例。
    */
   searxng_url?: string;
 }

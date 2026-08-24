@@ -74,13 +74,13 @@ impl ModelEndpoint {
 
 /// 联网能力配置(随 turn 传给内核)。
 ///
-/// 抓取(fetch)不需要第三方服务;搜索(search)要一个 SearXNG 实例;
+/// 抓取(fetch)不需要第三方服务;搜索(search)默认走内置 SearXNG,用户可覆盖;
 /// 蒸馏(distill)要一个辅助模型端点。三者独立开关,和宿主 `WebConfig` 一致。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct WebSetup {
     pub fetch_enabled: bool,
     pub search_enabled: bool,
-    /// SearXNG 实例地址。空 = 搜索不可用。
+    /// 用户覆盖的 SearXNG 地址。空 = 用内置实例。
     #[serde(default)]
     pub searxng_url: String,
     /// 网页正文蒸馏的辅助模型端点。None = 不蒸馏,抓取返回截断原文。

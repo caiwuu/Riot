@@ -341,12 +341,14 @@ async fn check_update(app: tauri::AppHandle) -> HostResult<update::UpdateInfo> {
 #[tauri::command]
 async fn set_config(
     state: tauri::State<'_, AppState>,
-    config: config::AppConfig,
+    mut config: config::AppConfig,
 ) -> HostResult<config::ConfigStatus> {
     // 保存前校验：active 指向不存在的 provider 在这里报错，而不是
     // 等到发消息时才发现设置页写坏了配置。模型允许暂空（新 provider
     // 还没配模型的中间状态），resolve() 在发请求时拦。
     config.validate()?;
+    // 内置域名不写进 config.json，设置页也看不到。
+    config.web.searxng_url = config::normalize_searxng_url(&config.web.searxng_url);
     config::save(&config)?;
     state.set_config(config.clone()).await;
     // MCP 连接对齐新配置。reconcile 只 diff + 起连接任务，不等握手，
@@ -859,10 +861,10 @@ async fn test_connection(
         .map_err(HostError::Provider)
 }
 
-/// 测 SearXNG 地址通不通。设置页的「测试」按钮走这里。
+/// 测搜索后端通不通。设置页的「测试」按钮走这里。
 ///
 /// 传的是**正在编辑的**地址而不是已保存的配置 —— 用户的期待是"填完点
-/// 测试"，要求先保存再测会让他在两个按钮之间来回跑。
+/// 测试"，要求先保存再测会让他在两个按钮之间来回跑。空地址测内置实例。
 #[tauri::command]
 async fn test_search_backend(base_url: String) -> HostResult<String> {
     web::test_searxng(&base_url)
