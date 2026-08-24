@@ -161,6 +161,10 @@ impl ActiveSandbox {
 /// 装饰器而不是改 `SystemProcessRunner`：venv 那层（改 PATH）也是装饰器，
 /// 两者正交、能自由组合，而"不沙箱"这条路径上一行沙箱代码都不会跑到。
 pub struct SandboxedRunner {
+    // Windows 用令牌自己起进程（WinSandbox::run），不装饰 inner —— 于是
+    // inner 在这个平台无人读。macOS（垫 argv 交 inner 跑）和其它平台
+    // （透传）都读它。按平台豁免，而不是删字段（删了 macOS 就没法跑了）。
+    #[cfg_attr(windows, allow(dead_code))]
     inner: std::sync::Arc<dyn ProcessRunner>,
     sandbox: ActiveSandbox,
 }
