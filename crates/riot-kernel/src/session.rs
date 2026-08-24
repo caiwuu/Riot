@@ -1494,7 +1494,25 @@ impl Session {
         // `[约束]` 两处必须来自**同一次** activate。分别判断的话，一边以为
         // 有边界、另一边其实没套上 —— 那正好是最坏的组合：决策链按"OS 挡着"
         // 放行了命令，而实际上什么都没挡。
-        let sandbox = limits.sandbox.policy(&self.cwd).activate();
+        // Low 标签清单放配置目录，全局一份（标签是全机器状态，孤儿回收
+        // 统一）。macOS 忽略这个 setup。now_ms 走真实时钟：它只进清单做
+        // 诊断，不参与任何黄金回放。
+        let sandbox = {
+            let cfg = crate::config::config_path();
+            let ledger_path = cfg
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join("sandbox-labels.json");
+            #[allow(clippy::disallowed_methods)]
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            limits
+                .sandbox
+                .policy(&self.cwd)
+                .activate(riot_runtime::SandboxSetup { ledger_path, now_ms })
+        };
         if sandbox.is_none() && limits.sandbox != crate::config::SandboxMode::Off {
             // 说一声。静默降级的话，用户以为自己开着沙箱。
             tracing::warn!(

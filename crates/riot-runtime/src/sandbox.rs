@@ -93,51 +93,66 @@ impl SandboxPolicy {
 
     /// 试着让这条策略生效。
     ///
-    /// `None` = 这台机器上做不到（平台不支持、后端不可用）。调用方拿到
-    /// `None` 时**必须**把 `PermissionContext::sandboxed` 保持 false ——
-    /// 谎报会让决策链放行一批本该问用户的命令。
-    pub fn activate(self) -> Option<ActiveSandbox> {
-        match self {
-            Self::Off => None,
-            Self::WorkspaceWrite { .. } if !supported() => None,
-            policy => Some(ActiveSandbox { policy }),
+    /// `None` = 这台机器上做不到（平台不支持、后端不可用、Windows 打标签
+    /// 或建令牌失败）。调用方拿到 `None` 时**必须**把
+    /// `PermissionContext::sandboxed` 保持 false —— 谎报会让决策链放行
+    /// 一批本该问用户的命令。
+    ///
+    /// `setup` 携带 Windows 激活需要的东西（标签清单路径、当前时间）；
+    /// macOS 用不上（seatbelt 不打持久标签），忽略。
+    pub fn activate(self, setup: SandboxSetup) -> Option<ActiveSandbox> {
+        if matches!(self, Self::Off) {
+            return None;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = setup;
+            if !crate::sandbox_macos::supported() {
+                return None;
+            }
+            Some(ActiveSandbox { policy: self })
+        }
+        #[cfg(windows)]
+        {
+            crate::sandbox_win::activate(&self, setup.ledger_path, setup.now_ms)
+                .map(|win| ActiveSandbox { win })
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
+        {
+            let _ = (self, setup);
+            None
         }
     }
 }
 
-/// 已经确认能生效的沙箱。拿到它才有资格说"我沙箱着呢"。
-#[derive(Debug, Clone)]
-pub struct ActiveSandbox {
-    // macOS 读它拼 profile；Windows 的 spawn（M2 未完）会读 writable
-    // 列表。当前只有 macOS 真读到 —— 其它平台 activate() 返回 None，
-    // 根本拿不到 ActiveSandbox，字段就成了"编译得到、跑不到"的死字段。
-    // 留着是给 Windows spawn 用的，那之前按平台豁免 dead_code。
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    policy: SandboxPolicy,
+/// Windows 激活需要、macOS 忽略的上下文。
+///
+/// 打成一包传，而不是给 `activate` 加两个 macOS 用不上的参数 —— 平台
+/// 差异藏在这个结构里，调用点两边一致。
+pub struct SandboxSetup {
+    /// Low 标签清单的落盘位置（`<config>/sandbox-labels.json`）。
+    pub ledger_path: std::path::PathBuf,
+    /// 打标时间（纪元毫秒），进清单做诊断。
+    pub now_ms: u64,
 }
 
-impl ActiveSandbox {
-    /// 生成 macOS seatbelt profile。只在 macOS 上有意义，供该平台的
-    /// 测试与诊断读取；其它平台不提供（它们不用 profile 这套机制）。
+/// 已经确认能生效的沙箱。拿到它才有资格说"我沙箱着呢"。
+///
+/// 后端按平台不同：macOS 持策略（每次 spawn 拼 seatbelt profile 垫
+/// argv），Windows 持一枚受限令牌 + 标签守卫（每次 spawn 用令牌起进程，
+/// Drop 时回滚标签）。其它平台 `activate` 恒返回 None，构造不出它。
+pub struct ActiveSandbox {
     #[cfg(target_os = "macos")]
+    policy: SandboxPolicy,
+    #[cfg(windows)]
+    win: crate::sandbox_win::WinSandbox,
+}
+
+#[cfg(target_os = "macos")]
+impl ActiveSandbox {
+    /// 生成 macOS seatbelt profile，供该平台的测试与诊断读取。
     pub fn profile(&self) -> String {
         crate::sandbox_macos::profile(&self.policy)
-    }
-}
-
-/// 这台机器支持沙箱吗。分派到平台后端。
-fn supported() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        crate::sandbox_macos::supported()
-    }
-    #[cfg(windows)]
-    {
-        crate::sandbox_win::supported()
-    }
-    #[cfg(not(any(target_os = "macos", windows)))]
-    {
-        false
     }
 }
 
@@ -169,11 +184,15 @@ impl ProcessRunner for SandboxedRunner {
             let wrapped = crate::sandbox_macos::wrap(&self.sandbox.policy, spec);
             self.inner.run(wrapped, cancel).await
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
         {
-            // 非 macOS 目前 activate() 返回 None（见 supported），拿不到
-            // ActiveSandbox，这条透传永远跑不到 —— 存在只为能编译。
-            // Windows 的 token spawn 落地后（M2）在这里换成后端调用。
+            // Windows 不装饰 argv，而是用受限令牌自己起进程（inner 用不上）。
+            self.sandbox.win.run(spec, cancel).await
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
+        {
+            // 其它平台 activate 恒返回 None，构造不出 ActiveSandbox，这条
+            // 跑不到 —— 存在只为能编译。
             let _ = &self.sandbox;
             self.inner.run(spec, cancel).await
         }
@@ -217,9 +236,21 @@ fn dedup_existing(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 mod tests {
     use super::*;
 
+    /// 测试用的激活上下文。macOS 忽略它，Windows 会用 ledger_path ——
+    /// 指向临时目录，测试不污染真实配置。
+    fn test_setup() -> SandboxSetup {
+        SandboxSetup {
+            ledger_path: std::env::temp_dir().join(format!(
+                "riot-sbx-labels-{}.json",
+                std::process::id()
+            )),
+            now_ms: 0,
+        }
+    }
+
     #[test]
     fn 关掉的策略拿不到_active() {
-        assert!(SandboxPolicy::Off.activate().is_none());
+        assert!(SandboxPolicy::Off.activate(test_setup()).is_none());
     }
 
     /// 真跑一遍，验证边界确实由 OS 执行。
@@ -240,7 +271,7 @@ mod tests {
             writable: vec![work.canonicalize().expect("规范化")],
             allow_network: true,
         };
-        let Some(active) = policy.activate() else {
+        let Some(active) = policy.activate(test_setup()) else {
             eprintln!("这台机器没有 sandbox-exec，跳过");
             return;
         };

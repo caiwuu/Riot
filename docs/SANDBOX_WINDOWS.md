@@ -172,10 +172,20 @@ CI 驱动开发（mac 上写、CI 上验）。必备用例，全部对照 macOS 
      `sandbox_cmdline`（纯逻辑跨平台单测）。FFI 签名隔离验过，运行时靠
      Windows CI 的冒烟测试 `受限令牌起进程拿得到输出`（起 `cmd /c echo`
      验管道通路）。
-   - ⏳ 待做（接线，下一步）：把 authorize + 令牌 + spawn 串成
-     `SandboxedRunner::run` 的 Windows 分支、temp 子目录重写、
-     `activate()` 接 ledger（要 config 路径，动 session.rs 装配）、
-     `supported()` 转真实探测。然后边界用例 1-6（§6）。
+   - ✅ 端到端边界验收（`e2e_tests`）：Low 进程只能写打了标签的目录，
+     工作区外被 MIC 拦，Windows CI 真机跑过。M2 机制完全成立。
+3. **M3 接线**（✅ 已落地，待 CI 确认真机编译）：
+   - `ActiveSandbox` 按平台持后端：macOS 持策略、Windows 持 `WinSandbox`
+     （受限令牌 + 标签守卫，Drop 回滚）。
+   - `SandboxPolicy::activate(setup)` 接 `SandboxSetup`（ledger 路径 +
+     时间，macOS 忽略）；Windows 分支调 `sandbox_win::activate` 打标签 +
+     建令牌，任一失败回滚并返回 None（不谎报）。
+   - `SandboxedRunner::run` 的 Windows 分支用 `WinSandbox::run`（令牌
+     spawn），macOS 仍垫 argv。
+   - session.rs 装配传入 `<config>/sandbox-labels.json` 作 ledger 路径。
+   - ⏳ 仍缺：temp 子目录重写（§2）、`SandboxedRunner` 经 activate 的
+     集成测试、config 的 `WorkspaceWriteNoNet` 在 Windows 的诚实降级
+     文案（§4）。这些是收尾，不再有 FFI 运行时未知。
 3. **M3 接线**：config 档位映射（含 NoNet 降级文案），用例 6 过，
    双平台 CI 全绿后发布。
 

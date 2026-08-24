@@ -13,13 +13,93 @@
 
 #![allow(clippy::disallowed_methods)]
 
-/// 这台机器支持沙箱吗。
+/// 已激活的 Windows 沙箱：一枚受限 Low 令牌 + 已打标签的目录清单。
 ///
-/// `[约束]` M1 恒 false：令牌能造，但还没接到 spawn 上，没有真实边界。
-/// 返回 true 会让 `activate()` 交出 `ActiveSandbox`，决策链据此放宽 ——
-/// 那就是在没有边界的情况下谎报。M2 接通 spawn 后改成真正的能力探测。
-pub(crate) fn supported() -> bool {
-    false
+/// 拿到它意味着授权序列（打标签 + 建令牌，见 SANDBOX_WINDOWS.md §2）
+/// 全部成功。之后每次 spawn 复用这枚令牌；`Drop` 时把标签回滚干净
+/// （对称于激活时的 `authorize_writable`）。
+pub(crate) struct WinSandbox {
+    token: token::OwnedToken,
+    /// 激活时打了 Low 标签的目录，`Drop` 逐个撤回。
+    labeled: Vec<std::path::PathBuf>,
+    /// 标签清单的落盘位置，回滚时同步清账。
+    ledger_path: std::path::PathBuf,
+}
+
+/// 单条命令输出的内存上限，同 proc.rs 的 DEFAULT_MAX_OUTPUT。
+const MAX_OUTPUT: usize = 8 * 1024 * 1024;
+
+impl WinSandbox {
+    /// 在这枚令牌下起一条命令。语义见 [`spawn::spawn_with_token`]。
+    pub(crate) async fn run(
+        &self,
+        spec: riot_protocol::tool::ProcessSpec,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> std::io::Result<riot_protocol::tool::ProcessOutput> {
+        spawn::spawn_with_token(*self.token.0, spec, MAX_OUTPUT, cancel).await
+    }
+}
+
+impl Drop for WinSandbox {
+    fn drop(&mut self) {
+        // 撤标签 + 清账。尽力而为：untag 失败记日志，交给下次启动的孤儿
+        // 回收兜底（对照 sandbox_labels 的 [约束]）。
+        use crate::sandbox_labels::{DirLabeler, LabelLedger};
+        let labeler = label::WinLabeler;
+        let mut ledger = LabelLedger::load(self.ledger_path.clone());
+        for dir in &self.labeled {
+            if let Err(e) = labeler.untag(dir) {
+                tracing::warn!(dir = %dir.display(), error = %e, "退出时撤标签失败，留给孤儿回收");
+            }
+            let _ = ledger.forget(dir);
+        }
+    }
+}
+
+/// 尝试激活 Windows 沙箱：给可写目录打 Low 标签、建受限令牌。
+///
+/// `None` = 这台机器上做不到（打标签失败：非 NTFS / 组策略锁 / 权限；
+/// 或建令牌失败）。任一环失败都把已打的标签回滚干净再返回 —— 决策链
+/// 据 `sandboxed` 放宽，绝不能在"其实没边界"时谎报成 true。
+pub(crate) fn activate(
+    policy: &crate::sandbox::SandboxPolicy,
+    ledger_path: std::path::PathBuf,
+    now_ms: u64,
+) -> Option<WinSandbox> {
+    use crate::sandbox::SandboxPolicy;
+    use crate::sandbox_labels::{LabelLedger, authorize_writable};
+
+    let SandboxPolicy::WorkspaceWrite { writable, .. } = policy else {
+        return None; // Off 不该走到这里
+    };
+
+    let mut ledger = LabelLedger::load(ledger_path.clone());
+    if let Err(e) = authorize_writable(writable, &label::WinLabeler, &mut ledger, now_ms) {
+        // authorize 内部已回滚它打过的标签。
+        tracing::warn!(error = %e, "沙箱打标签失败，本轮不隔离");
+        return None;
+    }
+
+    let token = match token::create_restricted_low_il() {
+        Ok(t) => t,
+        Err(e) => {
+            // 标签打上了但令牌没建成 —— 手动回滚，别留孤儿。
+            tracing::warn!(error = %e, "沙箱建令牌失败，回滚标签、本轮不隔离");
+            use crate::sandbox_labels::DirLabeler;
+            let labeler = label::WinLabeler;
+            for dir in writable {
+                let _ = labeler.untag(dir);
+                let _ = ledger.forget(dir);
+            }
+            return None;
+        }
+    };
+
+    Some(WinSandbox {
+        token,
+        labeled: writable.clone(),
+        ledger_path,
+    })
 }
 
 // 下面是 M1 的实质产物：受限 Low IL 令牌。M2 的 spawn 会用到它，

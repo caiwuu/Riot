@@ -32,5 +32,5 @@ pub mod web;
 
 pub use fs::{MemoryFileState, SystemFs};
 pub use proc::SystemProcessRunner;
-pub use sandbox::{ActiveSandbox, SandboxPolicy, SandboxedRunner};
+pub use sandbox::{ActiveSandbox, SandboxPolicy, SandboxSetup, SandboxedRunner};
 pub use web::SystemWebClient;
