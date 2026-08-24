@@ -81,19 +81,33 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
+      # Git Bash 的 usr\bin 里也有 link.exe。只要这一节还在 PATH 前面，cargo
+      # 就会拿 GNU link 去链 MSVC 目标，报 extra operand。从 job PATH 里拿掉，
+      # 后面的 pwsh / tauri-action 才用得上刚开的 MSVC。
+      - name: 拿掉 Git 的 link.exe
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $drop = @('Git\usr\bin', 'Git\bin', 'Git\mingw64\bin')
+          $keep = ($env:PATH -split ';' | Where-Object {
+            $p = $_
+            -not ($drop | Where-Object { $p -like "*$_*" })
+          }) -join ';'
+          $env:PATH = $keep
+          Add-Content -Path $env:GITHUB_ENV -Value "PATH=$keep"
+          $link = (Get-Command link.exe -ErrorAction SilentlyContinue).Source
+          Write-Host "link.exe = $link"
+          if (-not $link -or $link -match '(?i)[\\/]Git[\\/]') {
+            throw "PATH 里还是 Git 的 link.exe，cargo 编不过"
+          }
+
       - name: 拉取 CEF
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -d "$CEF_PATH/Chromium Embedded Framework.framework" || -f "$CEF_PATH/libcef.dll" || -f "$CEF_PATH/Release/libcef.dll" ]]; then
+          if [[ -d "$CEF_PATH/Chromium Embedded Framework.framework" ]]; then
             echo "CEF 缓存命中: $CEF_PATH"
-            exit 0
-          fi
-          # Windows 不能在 bash 里 cargo install：Git Bash 的 /usr/bin/link.exe
-          # 会盖掉 MSVC 链接器，编 build script 直接挂。而且 Windows 的 CEF
-          # 本来就由 cef-dll-sys 在编 riot-browser 时下到 CEF_PATH，不必预拉。
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            echo "Windows 上 CEF 由 cef-dll-sys 在下一步下载"
             exit 0
           fi
           if ! command -v export-cef-dir >/dev/null 2>&1; then
@@ -103,14 +117,20 @@ jobs:
           export-cef-dir --force "$CEF_PATH"
 
       - name: 打包内置浏览器
-        shell: bash
+        if: runner.os != 'Windows'
+        run: ./scripts/build-browser.sh
+
+      # 必须 pwsh：同一条 bash 里再调 powershell，子进程仍继承 Git Bash 的 PATH。
+      - name: 打包内置浏览器
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          set -euo pipefail
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            powershell -ExecutionPolicy Bypass -File scripts/build-browser.ps1
-          else
-            ./scripts/build-browser.sh
-          fi
+          $link = (Get-Command link.exe).Source
+          Write-Host "link.exe = $link"
+          if ($link -match '(?i)[\\/]Git[\\/]') {
+            throw "PATH 里还是 Git 的 link.exe，cargo 编不过"
+          }
+          scripts/build-browser.ps1
 
       - run: pnpm install --frozen-lockfile
 
