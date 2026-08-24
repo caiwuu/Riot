@@ -9,18 +9,20 @@
  */
 const RELEASES_PAGE = "https://github.com/caiwuu/Riot/releases/latest";
 const RELEASES_API = "https://api.github.com/repos/caiwuu/Riot/releases/latest";
-const RELEASE_CACHE = "riot.latest-release";
+const RELEASE_CACHE = "riot.latest-release.v2";
 
 const DOWNLOADS = {
   mac: {
     url: RELEASES_PAGE,
     label: "下载 macOS 版",
     meta: ".dmg · 仅 Apple Silicon",
+    size: 0,
   },
   win: {
     url: RELEASES_PAGE,
     label: "下载 Windows 版",
     meta: "NSIS 安装包 · x64",
+    size: 0,
   },
 };
 
@@ -38,6 +40,17 @@ function pickAsset(assets, suffix) {
   return (assets || []).find((a) => typeof a.name === "string" && a.name.endsWith(suffix));
 }
 
+function assetInfo(assets, suffix) {
+  const a = pickAsset(assets, suffix);
+  if (!a) return { url: "", size: 0 };
+  return { url: a.browser_download_url, size: Number(a.size) || 0 };
+}
+
+function formatSize(bytes) {
+  if (!bytes) return "";
+  return `约 ${Math.round(bytes / (1024 * 1024))} MB`;
+}
+
 async function loadLatestRelease() {
   try {
     const cached = sessionStorage.getItem(RELEASE_CACHE);
@@ -52,8 +65,8 @@ async function loadLatestRelease() {
   const data = await res.json();
   const slim = {
     tag: data.tag_name,
-    mac: pickAsset(data.assets, "_aarch64.dmg")?.browser_download_url,
-    win: pickAsset(data.assets, "_x64-setup.exe")?.browser_download_url,
+    mac: assetInfo(data.assets, "_aarch64.dmg"),
+    win: assetInfo(data.assets, "_x64-setup.exe"),
   };
   try {
     sessionStorage.setItem(RELEASE_CACHE, JSON.stringify(slim));
@@ -66,14 +79,21 @@ async function loadLatestRelease() {
 async function initDownloads() {
   try {
     const latest = await loadLatestRelease();
-    if (latest.mac) DOWNLOADS.mac.url = latest.mac;
-    if (latest.win) DOWNLOADS.win.url = latest.win;
+    if (latest.mac?.url) {
+      DOWNLOADS.mac.url = latest.mac.url;
+      DOWNLOADS.mac.size = latest.mac.size;
+    }
+    if (latest.win?.url) {
+      DOWNLOADS.win.url = latest.win.url;
+      DOWNLOADS.win.size = latest.win.size;
+    }
     VERSION = versionLabel(latest.tag);
   } catch {
     /* 没网就停在 Release 页 */
   }
   applyOS();
   initVersion();
+  initDownloadMeta();
 }
 
 const OS_ICONS = {
@@ -597,10 +617,24 @@ function initYear () {
   if (el) el.textContent = String(new Date().getFullYear());
 }
 
-/** 统一注入版本号 */
+/** 统一注入版本号。没拉到 Release 时占位藏着，避免文案里写死某一个版本。 */
 function initVersion () {
   document.querySelectorAll(".js-version").forEach((el) => {
     el.textContent = VERSION;
+  });
+  document.querySelectorAll(".js-ver").forEach((el) => {
+    el.hidden = !VERSION;
+  });
+}
+
+/** 下载卡片底下的「v0.1.1 · 约 158 MB」跟资产走，包变大了不用改文案。 */
+function initDownloadMeta() {
+  document.querySelectorAll(".dl-meta[data-os]").forEach((el) => {
+    const os = el.getAttribute("data-os");
+    const parts = [];
+    if (VERSION) parts.push(VERSION);
+    if (DOWNLOADS[os]?.size) parts.push(formatSize(DOWNLOADS[os].size));
+    el.textContent = parts.join(" · ");
   });
 }
 
