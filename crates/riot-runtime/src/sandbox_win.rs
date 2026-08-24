@@ -611,9 +611,21 @@ mod e2e_tests {
             target: &Path,
             cwd: &Path,
         ) -> (i32, String) {
+            // `cmd /c` 后面每个片段单独成 arg：build_command_line 会原样
+            // 拼回 `cmd /c echo hi > <path>`。**不要**把 `echo hi>"path"`
+            // 拼成一个 arg —— 那样它含空格和 `>`，会被 argv 引用规则整体
+            // 套引号，而 cmd 的 `/c` 不按 argv 规则解析，重定向就坏了
+            // （报 "filename syntax is incorrect"）。target 用无空格的
+            // 临时路径，避免再撞引用。
             let spec = ProcessSpec {
                 program: "cmd".to_owned(),
-                args: vec!["/c".to_owned(), format!("echo hi>\"{}\"", target.display())],
+                args: vec![
+                    "/c".to_owned(),
+                    "echo".to_owned(),
+                    "hi".to_owned(),
+                    ">".to_owned(),
+                    target.display().to_string(),
+                ],
                 cwd: cwd.to_path_buf(),
                 env: Vec::new(),
                 timeout_ms: Some(10_000),
