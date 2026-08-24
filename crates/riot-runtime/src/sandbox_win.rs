@@ -602,32 +602,40 @@ mod e2e_tests {
 
         let tok = super::token::create_restricted_low_il().expect("造受限 Low 令牌");
         let token = *tok.0; // HANDLE 是 Copy，搬进闭包
+        // cwd 用中性的 base（普通 Medium 目录），把「写哪」和「进程 cwd」
+        // 两个变量分开 —— 写目标一律用绝对路径。
+        let cwd = base.clone();
 
-        async fn write_to(token: windows::Win32::Foundation::HANDLE, dir: &Path, name: &str, cwd: &Path) -> i32 {
+        async fn write_to(
+            token: windows::Win32::Foundation::HANDLE,
+            target: &Path,
+            cwd: &Path,
+        ) -> (i32, String) {
             let spec = ProcessSpec {
                 program: "cmd".to_owned(),
-                // 重定向目标加引号：临时路径一般无空格，但不赌。
-                args: vec!["/c".to_owned(), format!("echo hi>\"{}\\{}\"", dir.display(), name)],
+                args: vec!["/c".to_owned(), format!("echo hi>\"{}\"", target.display())],
                 cwd: cwd.to_path_buf(),
                 env: Vec::new(),
                 timeout_ms: Some(10_000),
             };
-            super::spawn::spawn_with_token(token, spec, 1 << 20, CancellationToken::new())
+            let o = super::spawn::spawn_with_token(token, spec, 1 << 20, CancellationToken::new())
                 .await
-                .expect("跑得起来")
-                .exit_code
+                .expect("跑得起来");
+            (o.exit_code, o.stderr)
         }
 
         // 工作区内：打了 Low 标签，低完整性进程写得进。
-        let ec_in = write_to(token, &work, "inside.txt", &work).await;
-        assert_eq!(ec_in, 0, "打了标签的目录该写得进");
-        assert!(work.join("inside.txt").exists(), "文件该真的被创建");
+        let inside = work.join("inside.txt");
+        let (ec_in, err_in) = write_to(token, &inside, &cwd).await;
+        assert_eq!(ec_in, 0, "打了标签的目录该写得进：exit={ec_in} stderr={err_in:?}");
+        assert!(inside.exists(), "文件该真的被创建");
 
         // 工作区外：没打标签（默认 Medium），Low 进程 no-write-up 被 MIC 拦。
-        let ec_out = write_to(token, &outside, "outside.txt", &work).await;
+        let out_file = outside.join("outside.txt");
+        let (ec_out, _) = write_to(token, &out_file, &cwd).await;
         assert_ne!(ec_out, 0, "没打标签的目录，低完整性进程必须写不进");
         assert!(
-            !outside.join("outside.txt").exists(),
+            !out_file.exists(),
             "文件真的不该被创建 —— 边界没生效的话它就在那儿"
         );
 
