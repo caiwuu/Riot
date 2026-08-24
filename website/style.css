@@ -423,7 +423,7 @@ main,
 .agent-field-canvas {
   position: absolute;
   display: block;
-  top: 200px;
+  top: 120px;
   left: 50%;
   width: min(1500px, 100vw);
   height: min(1500px, 100vw);

@@ -382,7 +382,8 @@ function initOrbShader () {
 
     vec4 mainImage(vec2 fragCoord) {
       vec2 center = iResolution.xy * 0.5;
-      float size = min(iResolution.x, iResolution.y);
+      /* 画布边缘留一圈，光环顶峰和 hover 形变才不会被 canvas 切成平头。 */
+      float size = min(iResolution.x, iResolution.y) * 0.86;
       vec2 uv = (fragCoord - center) / size * 2.0;
 
       float angle = rot;
