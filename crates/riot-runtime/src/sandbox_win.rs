@@ -170,3 +170,99 @@ mod token {
         }
     }
 }
+
+// 目录标签：给可写目录打 / 去 Low 完整性标签。清单管理（跨平台、
+// 孤儿回收）在 crate::sandbox_labels，这里只有 Win32 那一下。
+// M2 的激活序列（见 SANDBOX_WINDOWS.md §2）把两者串起来。
+#[cfg(windows)]
+#[allow(dead_code)]
+mod label {
+    use std::path::Path;
+
+    use windows::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows::Win32::Security::Authorization::{
+        ConvertStringSidToSidW, SE_FILE_OBJECT, SetNamedSecurityInfoW,
+    };
+    use windows::Win32::Security::{
+        ACL, ACL_REVISION, AddMandatoryAce, CONTAINER_INHERIT_ACE, GetLengthSid, InitializeAcl,
+        LABEL_SECURITY_INFORMATION, OBJECT_INHERIT_ACE, PSID,
+    };
+    use windows::Win32::System::SystemServices::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP;
+    use windows::core::{HSTRING, w};
+
+    /// 给目录打 Low 完整性标签，`no-write-up` 位让低完整性进程能写它。
+    ///
+    /// 只写 SACL 的 label 部分（`LABEL_SECURITY_INFORMATION`），不碰
+    /// DACL / owner —— 那些不是这层要动的。容器继承（子目录/文件跟着
+    /// 生效）靠 ACE 的继承标志，`AddMandatoryAce` 带 `OBJECT_INHERIT |
+    /// CONTAINER_INHERIT`。
+    pub fn tag_low(dir: &Path) -> windows::core::Result<()> {
+        unsafe {
+            let mut low_sid = PSID::default();
+            ConvertStringSidToSidW(w!("S-1-16-4096"), &mut low_sid)?;
+            let _guard = LocalSid(low_sid);
+
+            // ACL 要能装下 ACL 头 + 一条 mandatory ACE。ACE 大小 =
+            // 固定头 + SID 主体，给足余量按页对齐。
+            let acl_bytes = 256usize + GetLengthSid(low_sid) as usize;
+            let mut buf = vec![0u8; acl_bytes];
+            let acl = buf.as_mut_ptr() as *mut ACL;
+            InitializeAcl(acl, acl_bytes as u32, ACL_REVISION)?;
+
+            // 继承标志让目录下新建的文件和子目录自动带上同一条 Low 标签。
+            AddMandatoryAce(
+                acl,
+                ACL_REVISION,
+                OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
+                SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+                low_sid,
+            )?;
+
+            let wide = HSTRING::from(dir.as_os_str());
+            SetNamedSecurityInfoW(
+                &wide,
+                SE_FILE_OBJECT,
+                LABEL_SECURITY_INFORMATION,
+                None,
+                None,
+                None,
+                Some(acl as *const ACL),
+            )
+            .ok()
+        }
+    }
+
+    /// 去掉 Low 标签：写一个**空** SACL label，对象回到默认完整性
+    /// （Medium）。回滚和孤儿回收都走这条 —— 见 sandbox_labels 里
+    /// 「只记路径不记原状」的取舍。
+    pub fn untag(dir: &Path) -> windows::core::Result<()> {
+        unsafe {
+            let acl_bytes = 256usize;
+            let mut buf = vec![0u8; acl_bytes];
+            let acl = buf.as_mut_ptr() as *mut ACL;
+            InitializeAcl(acl, acl_bytes as u32, ACL_REVISION)?;
+            // 空 label ACL = 没有 mandatory label = 默认 Medium。
+            let wide = HSTRING::from(dir.as_os_str());
+            SetNamedSecurityInfoW(
+                &wide,
+                SE_FILE_OBJECT,
+                LABEL_SECURITY_INFORMATION,
+                None,
+                None,
+                None,
+                Some(acl as *const ACL),
+            )
+            .ok()
+        }
+    }
+
+    /// LocalFree 守卫，同 token 模块。
+    struct LocalSid(PSID);
+    impl Drop for LocalSid {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = LocalFree(Some(HLOCAL(self.0.0)));
+            }
+        }
+    }
+}

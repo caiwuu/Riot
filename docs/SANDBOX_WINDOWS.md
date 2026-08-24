@@ -56,12 +56,19 @@ Low 进程就能写它 —— 这就是 writable 白名单的落地方式。
 
 ```text
 激活序列：
-1. 对 writable 里的每个目录 SetNamedSecurityInfoW 打 Low 标签（记录原状）
-2. 清单落盘 <config>/sandbox-labels.json（目录、原标签、打标时间）
+1. 对 writable 里的每个目录 SetNamedSecurityInfoW 打 Low 标签
+2. 清单落盘 <config>/sandbox-labels.json（目录 + 打标时间）
 3. CreateRestrictedToken（去特权组、Low IL）
 4. CreateProcessAsUserW + 挂进 Job Object（复用现有进程树清理语义）
 任何一步失败 → 回滚已打的标签 → activate() 返回 None
 ```
+
+`[取舍/已实现]` 清单**只记路径 + 打标时间，不记原 SACL**。因为只对
+「当前是默认完整性（无显式 label）」的目录打 Low 标签，回滚 =
+写空 label ACL 回到默认，没有"原状"要保存。本来就带非默认 label 的
+目录（罕见）在步骤 1 检测到就跳过、整条激活降级。这把"记录原状"
+简化成了"记录我动过谁" —— 清单逻辑见 `sandbox_labels.rs`
+（`LabelLedger`，跨平台可测），打/去标签见 `sandbox_win::label`。
 
 `[约束]` **temp 不给系统 `%TEMP%` 打标签**，在其下建 `riot-sbx-<会话>`
 子目录打标签，并给沙箱进程重写 `TMP`/`TEMP` 环境变量指过去。给全局
@@ -152,10 +159,13 @@ CI 驱动开发（mac 上写、CI 上验）。必备用例，全部对照 macOS 
    令牌，Windows CI 单元测试 `受限令牌是低完整性` 读回 RID 断言 0x1000。
    `supported()` 恒 false —— 令牌能造但没接 spawn，不谎报。跨平台
    façade 已拆好（`sandbox.rs` 核心 + `sandbox_macos.rs` 后端）。
-2. **M2 spawn + 授权面**：用 M1 的令牌走 `CreateProcessAsUserW`（自管
-   管道/超时，见 §3），标签管理（打/恢复/孤儿回收）、temp 重写、
-   `workspace_write` 的完整 writable 列表，`supported()` 转真实探测，
-   CI 用例 1-5 过；
+2. **M2 spawn + 授权面**（部分落地）：
+   - ✅ 标签管理：`LabelLedger`（清单持久化 + 孤儿识别，跨平台单测过）
+     与 `sandbox_win::label::{tag_low, untag}`（Win32 FFI，隔离验签名）。
+   - ⏳ 尚未做，且**gate 在 M1 令牌 CI 绿之后**：用令牌走
+     `CreateProcessAsUserW`（自管管道/超时，见 §3）、把 ledger 与 tag
+     串成激活序列、temp 重写、`supported()` 转真实探测。这块最大且强
+     依赖令牌运行时正确性，不在未验证的令牌上抢建。CI 用例 1-5 随此完成。
 3. **M3 接线**：config 档位映射（含 NoNet 降级文案），用例 6 过，
    双平台 CI 全绿后发布。
 

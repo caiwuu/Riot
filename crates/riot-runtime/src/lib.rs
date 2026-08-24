@@ -18,6 +18,9 @@
 pub mod fs;
 pub mod proc;
 pub mod sandbox;
+// 跨平台：Low 标签清单的孤儿回收逻辑，任何平台都能测（见文件头）。
+// 当前只有 Windows 后端会用它，但纯逻辑不门控平台，好让 mac 也跑测试。
+pub mod sandbox_labels;
 #[cfg(target_os = "macos")]
 pub mod sandbox_macos;
 #[cfg(windows)]

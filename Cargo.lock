@@ -3884,6 +3884,8 @@ dependencies = [
  "process-wrap",
  "reqwest 0.12.28",
  "riot-protocol",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-util",
