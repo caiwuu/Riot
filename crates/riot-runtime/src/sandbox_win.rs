@@ -26,6 +26,14 @@ pub(crate) struct WinSandbox {
     ledger_path: std::path::PathBuf,
 }
 
+// 令牌句柄是 `*mut c_void`（HANDLE），裸指针不自动 Send/Sync，于是
+// WinSandbox 也不是 —— 但 SandboxedRunner 要求 `Send + Sync`，且 run 是
+// async、`&self` 要跨 await。手动放行是安全的：Windows 句柄是**内核对象**
+// 的引用，进程内任意线程都能用（CreateProcessAsUserW / CloseHandle 都不
+// 绑线程），我们也从不并发改这枚只读的令牌。其余字段本就 Send + Sync。
+unsafe impl Send for WinSandbox {}
+unsafe impl Sync for WinSandbox {}
+
 /// 单条命令输出的内存上限，同 proc.rs 的 DEFAULT_MAX_OUTPUT。
 const MAX_OUTPUT: usize = 8 * 1024 * 1024;
 
