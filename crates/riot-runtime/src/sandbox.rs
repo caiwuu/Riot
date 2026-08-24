@@ -108,6 +108,11 @@ impl SandboxPolicy {
 /// 已经确认能生效的沙箱。拿到它才有资格说"我沙箱着呢"。
 #[derive(Debug, Clone)]
 pub struct ActiveSandbox {
+    // macOS 读它拼 profile；Windows 的 spawn（M2 未完）会读 writable
+    // 列表。当前只有 macOS 真读到 —— 其它平台 activate() 返回 None，
+    // 根本拿不到 ActiveSandbox，字段就成了"编译得到、跑不到"的死字段。
+    // 留着是给 Windows spawn 用的，那之前按平台豁免 dead_code。
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     policy: SandboxPolicy,
 }
 
