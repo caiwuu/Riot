@@ -63,7 +63,10 @@ export function WebPane({
   // 辅助模型的候选是所有 provider 下已添加的模型。跨 provider 是有意的：
   // 主对话用贵模型、蒸馏用本地小模型，正是这个功能存在的理由。
   const allModels = status.config.providers.flatMap((p) =>
-    p.models.map((m) => ({ value: `${p.id}/${m}`, label: `${p.name} · ${m}` })),
+    p.models.map((m) => ({
+      value: `${p.id}/${m.id}`,
+      label: `${p.name} · ${m.name?.trim() || m.id}`,
+    })),
   );
 
   return (
