@@ -1259,8 +1259,12 @@ mod spawn {
                 program: "cmd".to_owned(),
                 args: vec![
                     "/c".to_owned(),
+                    // 睡觉用 ping 而不是 timeout.exe：后者要控制台 stdin，
+                    // 而这条 spawn 路径的 stdin 一律给 NUL —— timeout 会
+                    // "Input redirection is not supported" 立即退出，进程
+                    // 根本活不到被 drop 的那一刻。
                     format!(
-                        "timeout /t 3 /nobreak > NUL & echo alive > {}",
+                        "ping -n 4 127.0.0.1 > NUL & echo alive > {}",
                         marker.display()
                     ),
                 ],

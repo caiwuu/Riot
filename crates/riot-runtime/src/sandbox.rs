@@ -510,7 +510,9 @@ mod tests {
 
         // 文档 §6 用例 3：TMP/TEMP/TMPDIR 都被重写到会话专属子目录，而且
         // 那里真能写。全局 %TEMP% 没打标签，不重写的话所有临时文件都失败。
-        let tmp = exec("echo %TMP%|%TEMP%|%TMPDIR%").await;
+        // `^|` 转义：args 对 cmd 是裸拼进命令行的，`|` 不转义就是管道，
+        // %TEMP% 展开出来的路径会被当成管道下游的命令去执行。
+        let tmp = exec("echo %TMP%^|%TEMP%^|%TMPDIR%").await;
         assert_eq!(tmp.exit_code, 0, "stderr={}", tmp.stderr);
         for (i, seen) in tmp.stdout.trim().split('|').enumerate() {
             assert!(
