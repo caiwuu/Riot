@@ -371,7 +371,7 @@ main,
   position: relative;
   isolation: isolate;
   overflow: hidden;
-  padding-top: calc(var(--nav-h) + 56px);
+  padding-top: calc(var(--nav-h) + 12px);
   padding-bottom: 8px;
   text-align: center;
 }
@@ -411,21 +411,25 @@ main,
   z-index: 6;
 }
 
-/* 动画 Logo：粒子重构（canvas 绘制）+ 辉光 + 3D 倾斜环 */
+/* 动画 Logo：粒子重构（canvas 绘制）+ 辉光。
+   容器只留极少余量（粒子占 88%），避免上下吃掉首屏空间 */
 .hero-logo {
   position: relative;
-  width: clamp(270px, 30vw, 370px);
+  width: clamp(360px, 38vw, 480px);
   aspect-ratio: 1;
   margin: 0 auto;
-  perspective: 760px;
 }
 
+/* 画布远大于 logo 容器：流星从屏幕边缘飞入，长途划过后穿透粒子团 */
 .hl-canvas {
   position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
+  left: 50%;
+  top: 50%;
+  width: min(96vw, 1320px);
+  height: min(82vh, 740px);
+  transform: translate(-50%, -50%);
   display: block;
+  pointer-events: none;
 }
 
 /* 禁用动效 / 无 canvas 时的静态兜底 */
@@ -463,65 +467,11 @@ main,
   }
 }
 
-.hl-ring {
-  position: absolute;
-  inset: 13%;
-  border-radius: 50%;
-  border: 1px solid rgba(var(--glow-a), 0.2);
-  animation: hl-tilt-spin 16s linear infinite;
-}
-
-@keyframes hl-tilt-spin {
-  from {
-    transform: rotateX(72deg) rotate(0deg);
-  }
-  to {
-    transform: rotateX(72deg) rotate(360deg);
-  }
-}
-
-/* 平面虚线轨道（反向慢转） */
-.hl-orbit {
-  position: absolute;
-  inset: -2%;
-  border-radius: 50%;
-  border: 1px dashed rgba(255, 255, 255, 0.09);
-  animation: hl-spin 46s linear infinite reverse;
-}
-
-@keyframes hl-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-/* 轨道卫星光点 */
-.hl-sat {
-  position: absolute;
-  top: -2.5px;
-  left: 50%;
-  margin-left: -2.5px;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 0 12px 2px rgba(var(--glow-a), 0.9);
-}
-
-/* 小卫星钉在轨道左侧圆周点上，随轨道旋转 */
-.hl-sat-sm {
-  top: 50%;
-  left: -1.75px;
-  margin-left: 0;
-  margin-top: -1.75px;
-  width: 3.5px;
-  height: 3.5px;
-  box-shadow: 0 0 9px 2px rgba(var(--glow-b), 0.8);
-}
+/* 轨道已移除：动效全部由 canvas 粒子系统承担（黑洞 + 陨石穿越） */
 
 /* RIOT 字标 */
 .hero-wordmark {
-  margin-top: 0;
+  margin-top: -12px;
   font-size: clamp(32px, 4.2vw, 54px);
   font-weight: 700;
   line-height: 1;
@@ -550,7 +500,7 @@ main,
 }
 
 .hero-sub {
-  margin: 18px auto 0;
+  margin: 14px auto 0;
   max-width: 560px;
   font-size: clamp(15px, 1.8vw, 16.5px);
   line-height: 1.9;
@@ -558,7 +508,7 @@ main,
 }
 
 .hero-actions {
-  margin-top: 28px;
+  margin-top: 22px;
   display: flex;
   justify-content: center;
   align-items: center;
@@ -567,7 +517,7 @@ main,
 }
 
 .hero-meta {
-  margin-top: 14px;
+  margin-top: 12px;
   font-family: var(--font-mono);
   font-size: 12px;
   letter-spacing: 0.02em;
@@ -1719,10 +1669,10 @@ main,
   }
 
   .hero {
-    padding-top: calc(var(--nav-h) + 40px);
+    padding-top: calc(var(--nav-h) + 10px);
   }
   .hero-logo {
-    width: 256px;
+    width: min(88vw, 340px);
   }
   .hero-shot-wrap {
     margin-top: 60px;
