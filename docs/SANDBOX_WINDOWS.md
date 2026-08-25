@@ -1,9 +1,14 @@
 # Windows 沙箱设计
 
-> 状态：**设计定稿，未实现**。macOS 侧已落地（`riot-runtime/src/sandbox.rs`，
-> seatbelt），本文是同一位置上 Windows 那块的实施方案。读者是实现者。
-> 通用背景（为什么策略层不够、沙箱换来什么）见 ARCHITECTURE §9.6 和
-> sandbox.rs 的模块文档，这里不重复。
+> 状态：**已落地**（M1–M5，见 §7）。macOS 侧同样已落地
+> （`riot-runtime/src/sandbox.rs`，seatbelt）。本文是 Windows 那块的方案
+> 与取舍记录，读者是维护者。通用背景（为什么策略层不够、沙箱换来什么）
+> 见 ARCHITECTURE §9.6 和 sandbox.rs 的模块文档，这里不重复。
+>
+> `[约束]` 沙箱的可写集里有几处「在边界之内、却能换来边界之外执行权」的
+> 目标（`.git/hooks/`、`.riot/hooks.json`、`~/.cargo/config.toml`）。它们
+> 由**策略层**排除在放宽档之外，不是靠这里的边界 —— 理由见 ARCHITECTURE
+> §9.6.1。改这份文档里的可写集之前先读那一节。
 
 ## 0. 要对齐的现状（改这里之前先读）
 
@@ -65,10 +70,24 @@ Low 进程就能写它 —— 这就是 writable 白名单的落地方式。
 
 `[取舍/已实现]` 清单**只记路径 + 打标时间，不记原 SACL**。因为只对
 「当前是默认完整性（无显式 label）」的目录打 Low 标签，回滚 =
-写空 label ACL 回到默认，没有"原状"要保存。本来就带非默认 label 的
-目录（罕见）在步骤 1 检测到就跳过、整条激活降级。这把"记录原状"
+写空 label ACL 回到默认，没有"原状"要保存。这把"记录原状"
 简化成了"记录我动过谁" —— 清单逻辑见 `sandbox_labels.rs`
 （`LabelLedger`，跨平台可测），打/去标签见 `sandbox_win::label`。
+
+`[约束/已实现]` 上一条的**前提是打标签前先体检**，`sandbox_win::label::
+current_label_rid` 读回目录当前的 mandatory label：没有（默认完整性）才
+打；已经是 Low 的放行（要么是我们上次崩溃的残留、要么本来就等于要设的值，
+重打幂等，不然一个收不掉的残留会把沙箱永久卡死）；**任何别的级别一律
+拒绝**，整条激活降级成不隔离。少了这一步，`untag` 会把用户原有的标签
+抹掉，而清单里没有任何信息能还原它 —— 那正是"只记路径"这个简化会翻车的
+唯一情形。读 label 只要 `READ_CONTROL`，不需要 `SE_SECURITY_NAME`
+（那是审计 ACE 才要的特权），普通用户下做得了。
+
+`[约束]` `SetNamedSecurityInfoW` 对容器对象会把可继承 ACE **传播到已有
+子对象**。`~/.cargo` 的 registry 缓存动辄十万文件，所以沙箱按**会话**
+激活一次、跨轮复用（`Session::active_sandbox`），不是每轮打一次撤一次；
+`WinSandbox::drop` 里的归还也挪进 `spawn_blocking`，别把 tokio 的工作
+线程堵在一棵大树上。
 
 `[约束/已实现]` **标签按进程级引用计数管理**（`LabelRegistry`）。沙箱是
 每轮对话激活一次的，而多会话共享一个内核进程（ARCHITECTURE §2.4），
@@ -134,6 +153,45 @@ std/tokio 的 Command，接不进自定义 token。
 （`CommandLineToArgvW` 的反解语义）。写实现前先读 riot-runtime 现有
 spawn 代码的注释。
 
+### 3.1 句柄继承：两个方向，只治得了一个
+
+`CreateProcessAsUserW` 必须 `bInheritHandles=true`（stdio 要传进去），
+而它默认继承**本进程当前所有可继承句柄**。两个方向各有毛病，代价不同：
+
+| 方向 | 后果 | 手段 |
+|---|---|---|
+| 别人的句柄漏进**我们的**子进程 | ① 继承到另一条 spawn 还没关的管道写端 → 它等不到 EOF；② **沙箱漏洞**：MIC 只在 `open` 时检查，一个继承来的、指向 Medium 对象的可写句柄，Low 进程照样能拿它写 | `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 显式白名单，彻底治掉 ✅ |
+| 我们的写端漏进**别人的**子进程 | 我们的读端等不到 EOF，命令挂到超时 | 治不了（见下），靠收输出的宽限期兜底 ✅ |
+
+第二行治不了，因为白名单里的句柄**必须**是可继承的 —— CreateProcess
+期间那两个写端就是敞着的，而同进程里 `std`/`tokio` 的 spawn（hooks、
+MCP、非沙箱会话、终端面板）一律 `bInheritHandles=true` 且不带白名单。
+
+`[约束]` 所以 `create()` 里那把 `SPAWN_LOCK` **只解决一半**：它让我们
+自己的并发 spawn 不互相偷句柄（最常见的情形），对进程里别的 spawn 点
+无能为力。真正的兜底是收输出时的宽限期（`DRAIN_GRACE`）：杀完组之后只
+等有限时间，到点就把已经攒下的输出交出去。最坏情况从"整条命令挂死到
+超时"降级成"丢几行尾巴"。这也是为什么读任务往共享缓冲里写、而不是靠
+`JoinHandle` 的返回值 —— `spawn_blocking` 卡在 `ReadFile` 上取消不了。
+
+### 3.2 清理：所有句柄归 RAII
+
+`[约束]` 进程、Job、管道端全部由带 `Drop` 的结构独占（`spawn::Child` /
+`OwnedHandle`），**包括「外层 future 中途被 drop」那条路径**。调度器用
+`FuturesOrdered` 内联持有工具 future，用户按一次停止就把整批丢掉；
+`proc.rs` 那条路径有 `kill_on_drop(true)` 兜底，这条路径只有 Drop。
+
+漏掉它的三种表现（都发生过或差点发生）：future 被丢弃后 Job 句柄不关 →
+`KILL_ON_JOB_CLOSE` 不触发 → 子进程活到关机；收输出报错早退 → 后面的
+`CloseHandle` 跑不到；超时分支里主流程关句柄而 waiter 线程还卡在
+`WaitForSingleObject` 上 → 未定义行为，且句柄值可能已被另一条 spawn
+复用。最后一条另外靠进程句柄是 `Arc`：waiter 持同一份所有权，最后一个
+放手的才真关。
+
+`Child::drop` 里那次 `TerminateJobObject` 还兼着一个作用：三个
+`spawn_blocking` 线程都取消不了，只能靠"让它们等的东西真的发生"来收 ——
+waiter 等到进程退出，两个 drain 等到管道 EOF。
+
 ## 4. 档位映射
 
 | SandboxMode | macOS | Windows V1 |
@@ -158,19 +216,34 @@ session.rs 里「请求了沙箱但没激活 → System 消息告知」的降级
 ## 6. 验证计划
 
 不需要本地 Windows 机器：**GitHub Actions 的 windows runner 就是真机**，
-CI 驱动开发（mac 上写、CI 上验）。必备用例，全部对照 macOS 版
-`工作区外的写被内核拒绝` 的「真跑」哲学：
+CI 驱动开发（mac 上写、CI 上验）。改完先在本机跑
+`scripts/check-windows-sandbox.sh` —— 它拿一个只依赖 `windows` crate 的
+隔离壳 include 真实源码、`clippy --target x86_64-pc-windows-msvc`
+（整包 check 在 mac 上跑不动，见 §7 实施注记）。它挡的是 FFI 签名写错、
+`cfg(windows)` 分支里类型不匹配这类**在 mac 上改代码时完全看不见**的错；
+运行时行为仍以 CI 为准。
 
-1. **边界真跑**：工作区内写成功、工作区外写被拒、读系统文件成功
-   （照抄 macOS 用例的三段式）；
-2. **HKCU 写被拒**：`reg add HKCU\...` 非零退出 —— Windows 版多出来
-   的持久化防线要有测试钉住；
-3. **temp 重写**：沙箱内 `%TEMP%` 指向会话子目录且可写；
-4. **降级诚实**：FAT32 卷（CI 上 `subst` 一个 VHD）→ activate None，
-   `ctx.sandboxed == false`；
-5. **标签回收**：kill 掉宿主进程 → 重启后清理例程把残留标签收干净
-   （process_lifecycle 风格）；
-6. **NoNet 档**：Windows 上 activate None + 界面标注文案存在。
+必备用例，全部对照 macOS 版 `工作区外的写被内核拒绝` 的「真跑」哲学：
+
+1. ✅ **边界真跑**：工作区内写成功、工作区外写被拒
+   （`sandbox.rs::windows_经装配路径的沙箱边界`，走完整装配；
+   `sandbox_win::e2e_tests` 另有一份手动串底层的）；
+2. ✅ **HKCU 写被拒**：`reg add HKCU\...` 非零退出 —— Windows 版多出来
+   的持久化防线（同上那条集成用例里）；
+3. ✅ **temp 重写**：`TMP`/`TEMP`/`TMPDIR` 三个都指向会话子目录且可写
+   （`TMPDIR` 不能漏：Bash 工具跑的是 Git for Windows 的 bash，MSYS
+   那套先看它）；
+4. ⬜ **降级诚实**：FAT32 卷（CI 上 `subst` 一个 VHD）→ activate None，
+   `ctx.sandboxed == false`。**还没做** —— 需要 CI 上造卷，目前只有
+   `sandbox_labels` 用假 labeler 验了"打标签失败 → 整体回滚"的编排；
+5. ✅ **标签体检与回收**：`label::tests` 验往返、验「已带非默认标签的
+   目录拒绝打标签且原标签不动」、验「残留的 Low 标签可重复打」；
+   `sandbox_labels::tests` 用假 labeler 验清单与孤儿回收的编排。
+   真机上 kill 宿主再重启那条仍是手动清单；
+6. ✅ **NoNet 档**：`activate` 直接返回 None（§4）；
+7. ✅ **进程不逃逸**：`spawn::tests::future_被丢掉时子进程跟着死` ——
+   §3.2 那条约束的回归钉；
+8. ✅ **并发不串扰**：`并发起进程各拿各的输出不串扰` —— §3.1 的回归钉。
 
 手动清单（发布前过一遍）：企业策略机器、OneDrive 重定向目录、
 非管理员账户、杀软共存（低完整性进程常被 EDR 盯上，误报要有说法）。
@@ -231,7 +304,21 @@ CI 驱动开发（mac 上写、CI 上验）。必备用例，全部对照 macOS 
      `Library/Caches` 这类 Windows 上永不存在的路径会让激活 100% 失败，
      两个 bug 互相掩盖）。
 
-`[实施注记]` M1 的 FFI 签名是在 Mac 上用一个只依赖 `windows` crate 的
+5. **M5 正确性加固**（✅ 已落地）：
+   - 装配层次改对：`SandboxedRunner` 从链条最外层挪到**最里层**。
+     Windows 分支用令牌自己起进程、根本不调 `inner`，装外层等于把
+     venv / 能力包两层装饰器整个短路 —— 而沙箱默认开着，表现是
+     「Windows 上会话设的 Python venv 静默失效」。顺带修好了 venv 与
+     能力包的 PATH 先后（`prepend_path` 往队首插，外层先跑，所以 venv
+     必须在里层才排得到前面），并把装配抽成 `session::process_chain`
+     让顺序能被用例钉住。
+   - spawn 清理改成 RAII（§3.2）、句柄白名单 + 收输出宽限期（§3.1）。
+   - 打标签前体检已有 mandatory label（§2）。
+   - 沙箱提到会话级复用、`Drop` 走 `spawn_blocking`（§2）。
+   - 会话 temp 补 `TMPDIR`；清单临时文件名带 pid（同机双开时两个内核
+     会写同一个 `.json.tmp` 再 rename，原子性就没了）。
+
+`[实施注记]` FFI 签名是在 Mac 上用一个只依赖 `windows` crate 的
 临时 crate `cargo check --target x86_64-pc-windows-msvc` 逐个逼出来的
 （reqwest→ring 的 C 交叉编译在 Mac 上跑不起来，整包 check 不通，但
 `windows` 的元数据平台无关，隔离出来能查）。运行时行为仍以 Windows CI

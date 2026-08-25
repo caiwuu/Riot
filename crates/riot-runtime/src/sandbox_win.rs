@@ -46,18 +46,24 @@ const MAX_OUTPUT: usize = 8 * 1024 * 1024;
 impl WinSandbox {
     /// 在这枚令牌下起一条命令。语义见 [`spawn::spawn_with_token`]。
     ///
-    /// 起进程前把 `TMP`/`TEMP` 指到会话专属 temp 子目录 —— 命令写临时
-    /// 文件（编译器中间产物、下载缓存）落在那儿（打了 Low 标签、可写），
+    /// 起进程前把 `TMP`/`TEMP`/`TMPDIR` 指到会话专属 temp 子目录 —— 命令写
+    /// 临时文件（编译器中间产物、下载缓存）落在那儿（打了 Low 标签、可写），
     /// 而不是全局 %TEMP%（没打标签，Low 进程写不进）。build_env_block 按
-    /// 大小写不敏感去重，这两条会覆盖继承来的同名变量。
+    /// 大小写不敏感去重，这几条会覆盖继承来的同名变量。
+    ///
+    /// `[约束]` `TMPDIR` 不能漏。Bash 工具在 Windows 上跑的是 Git for
+    /// Windows 的 bash（见 `tools::bash::shell_program`），而 MSYS 那套
+    /// **先看 `TMPDIR`**：宿主环境里只要有它，`mktemp`、编译器的中间文件
+    /// 就会落回没打标签的目录，然后以 ACCESS_DENIED 收场。
     pub(crate) async fn run(
         &self,
         mut spec: riot_protocol::tool::ProcessSpec,
         cancel: tokio_util::sync::CancellationToken,
     ) -> std::io::Result<riot_protocol::tool::ProcessOutput> {
         let tmp = self.session_temp.to_string_lossy().into_owned();
-        spec.env.push(("TMP".to_owned(), tmp.clone()));
-        spec.env.push(("TEMP".to_owned(), tmp));
+        for key in ["TMP", "TEMP", "TMPDIR"] {
+            spec.env.push((key.to_owned(), tmp.clone()));
+        }
         spawn::spawn_with_token((*self.token.0).0 as isize, spec, MAX_OUTPUT, cancel).await
     }
 }
@@ -68,9 +74,26 @@ impl Drop for WinSandbox {
         // （同项目的工作区、~/.cargo 这类共享缓存），单方面撤会让它们
         // 正在跑的 Low 进程写到一半 ACCESS_DENIED。撤失败的账保留，
         // 交给下次启动的孤儿回收（见 sandbox_labels 的 [约束]）。
-        REGISTRY.release(&self.labeled, &label::WinLabeler, &self.ledger_path);
-        // 会话 temp 是我们建的，整个删掉 —— 里面是本会话命令的临时产物。
-        let _ = std::fs::remove_dir_all(&self.session_temp);
+        //
+        // `[约束]` 这活儿不能就地做。`SetNamedSecurityInfoW` 会把可继承
+        // ACE 传播到已有子对象，`~/.cargo` 那种十万文件的树能走上好几秒，
+        // 后面还跟着一个 `remove_dir_all` —— 而 Drop 往往发生在 tokio 的
+        // 工作线程上（会话被回收时），同步做就是把整个 runtime 堵在那儿。
+        // 挪到 spawn_blocking。
+        let labeled = std::mem::take(&mut self.labeled);
+        let ledger = std::mem::take(&mut self.ledger_path);
+        let temp = std::mem::take(&mut self.session_temp);
+        let cleanup = move || {
+            REGISTRY.release(&labeled, &label::WinLabeler, &ledger);
+            // 会话 temp 是我们建的，整个删掉 —— 里面是本会话命令的临时产物。
+            let _ = std::fs::remove_dir_all(&temp);
+        };
+        match tokio::runtime::Handle::try_current() {
+            // 进程正在退出时这个任务可能压根跑不起来 —— 那就正好落进清单
+            // 的设计意图里：残留标签由下次启动的孤儿回收兜底。
+            Ok(rt) => drop(rt.spawn_blocking(cleanup)),
+            Err(_) => cleanup(),
+        }
     }
 }
 
@@ -343,18 +366,82 @@ mod token {
 #[cfg(windows)]
 #[allow(dead_code)]
 mod label {
+    use std::ffi::c_void;
     use std::path::Path;
 
     use windows::Win32::Foundation::{HLOCAL, LocalFree};
     use windows::Win32::Security::Authorization::{
-        ConvertStringSidToSidW, SE_FILE_OBJECT, SetNamedSecurityInfoW,
+        ConvertStringSidToSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT, SetNamedSecurityInfoW,
     };
     use windows::Win32::Security::{
-        ACL, ACL_REVISION, AddMandatoryAce, CONTAINER_INHERIT_ACE, GetLengthSid, InitializeAcl,
-        LABEL_SECURITY_INFORMATION, OBJECT_INHERIT_ACE, PSID,
+        ACE_HEADER, ACL, ACL_REVISION, AddMandatoryAce, CONTAINER_INHERIT_ACE, GetAce,
+        GetLengthSid, GetSidSubAuthority, GetSidSubAuthorityCount, InitializeAcl,
+        LABEL_SECURITY_INFORMATION, OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR, PSID,
+        SYSTEM_MANDATORY_LABEL_ACE,
     };
-    use windows::Win32::System::SystemServices::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP;
+    use windows::Win32::System::SystemServices::{
+        SYSTEM_MANDATORY_LABEL_ACE_TYPE, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+    };
     use windows::core::{HSTRING, w};
+
+    /// Low 完整性级别的 RID（`S-1-16-4096`）。
+    const LOW_RID: u32 = 0x1000;
+
+    /// 目录当前有没有**显式的**完整性标签。
+    ///
+    /// `None` = 没有，也就是默认完整性（Medium）—— 唯一一种我们敢动的。
+    /// `Some(rid)` = 有一条 mandatory label ACE，rid 是它的级别。
+    ///
+    /// `[约束]` 打标签前必须问一次。清单「只记路径不记原状」那个简化
+    /// （见 [`crate::sandbox_labels`] 模块头）成立的前提，就是我们只对默认
+    /// 完整性的目录下手：回滚 = 写空 label 回到默认，没有"原状"要保存。
+    /// 对一个本来就带标签的目录硬打，`untag` 会把用户的标签直接抹掉，而
+    /// 清单里没有任何信息能把它还原。
+    ///
+    /// 读 label 只要 `READ_CONTROL`，不需要 `SE_SECURITY_NAME` —— 那是审计
+    /// ACE 才要的特权。所以这一步在普通用户下也做得了。
+    pub fn current_label_rid(dir: &Path) -> windows::core::Result<Option<u32>> {
+        unsafe {
+            let wide = HSTRING::from(dir.as_os_str());
+            let mut sacl: *mut ACL = std::ptr::null_mut();
+            let mut sd = PSECURITY_DESCRIPTOR::default();
+            GetNamedSecurityInfoW(
+                &wide,
+                SE_FILE_OBJECT,
+                LABEL_SECURITY_INFORMATION,
+                None,
+                None,
+                None,
+                Some(&mut sacl),
+                &mut sd,
+            )
+            .ok()?;
+            let _free = LocalSd(sd);
+
+            // 没有 SACL = 没有 label = 默认完整性。绝大多数目录都走这条。
+            if sacl.is_null() {
+                return Ok(None);
+            }
+            for i in 0..u32::from((*sacl).AceCount) {
+                let mut ace: *mut c_void = std::ptr::null_mut();
+                if GetAce(sacl, i, &mut ace).is_err() {
+                    continue;
+                }
+                let header = ace as *const ACE_HEADER;
+                if u32::from((*header).AceType) != SYSTEM_MANDATORY_LABEL_ACE_TYPE {
+                    continue;
+                }
+                // SID 紧跟在 ACE 头之后，`SidStart` 就是它的第一个字节。
+                let label = ace as *const SYSTEM_MANDATORY_LABEL_ACE;
+                let sid = PSID(&raw const (*label).SidStart as *mut c_void);
+                let count = *GetSidSubAuthorityCount(sid);
+                // 最后一个 subauthority 才是完整性级别 RID。
+                let rid = *GetSidSubAuthority(sid, u32::from(count.saturating_sub(1)));
+                return Ok(Some(rid));
+            }
+            Ok(None)
+        }
+    }
 
     /// 给目录打 Low 完整性标签，`no-write-up` 位让低完整性进程能写它。
     ///
@@ -362,26 +449,52 @@ mod label {
     /// DACL / owner —— 那些不是这层要动的。容器继承（子目录/文件跟着
     /// 生效）靠 ACE 的继承标志，`AddMandatoryAce` 带 `OBJECT_INHERIT |
     /// CONTAINER_INHERIT`。
+    ///
+    /// `[约束]` 先体检再动手，见 [`current_label_rid`]。已经是 Low 的放行
+    /// （那要么是我们上次崩溃留下的残留、要么本来就等于我们要设的值，重打
+    /// 一次是幂等的）；**任何别的级别一律拒绝**，让整条激活降级成"不隔离"。
+    /// 宁可这台机器上没有沙箱，也不能把用户的标签抹掉又还不回去。
     pub fn tag_low(dir: &Path) -> windows::core::Result<()> {
+        if let Some(rid) = current_label_rid(dir)?
+            && rid != LOW_RID
+        {
+            tracing::warn!(
+                dir = %dir.display(),
+                rid = format!("0x{rid:x}"),
+                "目录已带非默认完整性标签，不动它"
+            );
+            return Err(windows::core::Error::new(
+                windows::Win32::Foundation::E_ACCESSDENIED,
+                "目录已有非默认完整性标签，打标签会抹掉它",
+            ));
+        }
+        set_label(dir, w!("S-1-16-4096"))
+    }
+
+    /// 给目录写一条指定级别的 mandatory label（带容器继承）。
+    ///
+    /// 拆出来是为了让测试能造一个「本来就带非默认标签」的目录 ——
+    /// [`tag_low`] 拒绝那种目录的行为，只能这么验。生产路径只用 Low。
+    pub fn set_label(dir: &Path, sid_str: windows::core::PCWSTR) -> windows::core::Result<()> {
         unsafe {
-            let mut low_sid = PSID::default();
-            ConvertStringSidToSidW(w!("S-1-16-4096"), &mut low_sid)?;
-            let _guard = LocalSid(low_sid);
+            let mut sid = PSID::default();
+            ConvertStringSidToSidW(sid_str, &mut sid)?;
+            let _guard = LocalSid(sid);
 
             // ACL 要能装下 ACL 头 + 一条 mandatory ACE。ACE 大小 =
             // 固定头 + SID 主体，给足余量按页对齐。
-            let acl_bytes = 256usize + GetLengthSid(low_sid) as usize;
+            let acl_bytes = 256usize + GetLengthSid(sid) as usize;
             let mut buf = vec![0u8; acl_bytes];
             let acl = buf.as_mut_ptr() as *mut ACL;
             InitializeAcl(acl, acl_bytes as u32, ACL_REVISION)?;
 
-            // 继承标志让目录下新建的文件和子目录自动带上同一条 Low 标签。
+            // 继承标志让目录下新建的文件和子目录自动带上同一条标签。
             AddMandatoryAce(
                 acl,
                 ACL_REVISION,
                 OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
                 SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
-                low_sid,
+                sid,
             )?;
 
             let wide = HSTRING::from(dir.as_os_str());
@@ -432,6 +545,16 @@ mod label {
         }
     }
 
+    /// `GetNamedSecurityInfoW` 分配的安全描述符，同样由 LocalFree 释放。
+    struct LocalSd(PSECURITY_DESCRIPTOR);
+    impl Drop for LocalSd {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = LocalFree(Some(HLOCAL(self.0.0)));
+            }
+        }
+    }
+
     /// 真实的目录打标签器。把 [`tag_low`] / [`untag`] 接进跨平台的
     /// [`crate::sandbox_labels::DirLabeler`]，好让引用计数与回滚编排
     /// （`LabelRegistry`）用上它 —— 那套编排的正确性在 sandbox_labels
@@ -446,6 +569,64 @@ mod label {
             untag(dir).map_err(|e| std::io::Error::other(e.to_string()))
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn scratch(name: &str) -> std::path::PathBuf {
+            let d = std::env::temp_dir().join(format!("riot-label-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).expect("建目录");
+            d
+        }
+
+        /// 打标签 / 读回 / 撤标签的往返。
+        #[test]
+        fn 打了标签读得回来_撤了就没了() {
+            let d = scratch("roundtrip");
+            assert_eq!(current_label_rid(&d).expect("读"), None, "新目录该是默认完整性");
+
+            tag_low(&d).expect("打 Low 标签");
+            assert_eq!(current_label_rid(&d).expect("读"), Some(0x1000));
+
+            untag(&d).expect("撤标签");
+            assert_eq!(current_label_rid(&d).expect("读"), None, "撤完该回到默认");
+            let _ = std::fs::remove_dir_all(&d);
+        }
+
+        /// `[约束]` 本来就带非默认标签的目录**不许**碰。
+        ///
+        /// 清单只记路径不记原状（见 sandbox_labels 模块头），那个简化的前提
+        /// 就是这条检查存在 —— 少了它，`untag` 会把用户的标签抹掉，而清单里
+        /// 没有任何信息能还原。文档 §2 承诺了这个行为，这条用例钉住它。
+        #[test]
+        fn 已带非默认标签的目录拒绝打标签() {
+            let d = scratch("preexisting");
+            // 显式写一条 Medium（S-1-16-8192）。不用 High：抬到自己级别之上
+            // 要 SeRelabelPrivilege，普通用户下做不到。
+            set_label(&d, w!("S-1-16-8192")).expect("造一个带标签的目录");
+            assert_eq!(current_label_rid(&d).expect("读"), Some(0x2000));
+
+            assert!(tag_low(&d).is_err(), "带别人标签的目录必须拒绝");
+            assert_eq!(
+                current_label_rid(&d).expect("读"),
+                Some(0x2000),
+                "拒绝之后原标签必须原封不动"
+            );
+            let _ = std::fs::remove_dir_all(&d);
+        }
+
+        /// 自己上次崩溃留下的 Low 标签不该把沙箱永久卡死 —— 重打是幂等的。
+        #[test]
+        fn 已经是_low_的目录可以重复打() {
+            let d = scratch("idempotent");
+            tag_low(&d).expect("第一次");
+            tag_low(&d).expect("残留的 Low 标签不该挡住重新激活");
+            assert_eq!(current_label_rid(&d).expect("读"), Some(0x1000));
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
 }
 
 // 用受限令牌起进程。这是 M2 的最后一块，也是 spawn 集成的核心难点。
@@ -458,13 +639,20 @@ mod label {
 #[cfg(windows)]
 #[allow(dead_code)]
 mod spawn {
+    use std::ffi::c_void;
     use std::io::Read;
+    use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::FromRawHandle;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
 
     use riot_protocol::tool::{ProcessOutput, ProcessSpec};
     use tokio_util::sync::CancellationToken;
-    use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE, SetHandleInformation, HANDLE_FLAGS, HANDLE_FLAG_INHERIT};
+    use windows::Win32::Foundation::{
+        CloseHandle, GENERIC_READ, HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAGS,
+        SetHandleInformation,
+    };
     use windows::Win32::Security::SECURITY_ATTRIBUTES;
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
@@ -477,21 +665,107 @@ mod spawn {
     use windows::Win32::System::Pipes::CreatePipe;
     use windows::Win32::System::Threading::{
         CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW,
-        GetExitCodeProcess, INFINITE, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
-        STARTUPINFOW, WaitForSingleObject,
+        DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
+        InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION, ResumeThread,
+        STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, TerminateProcess,
+        UpdateProcThreadAttribute, WaitForSingleObject,
     };
     use windows::core::{PCWSTR, PWSTR};
 
     const EXIT_TIMEOUT: i32 = 124;
     const EXIT_CANCELLED: i32 = 130;
 
-    /// 建好、已在跑的子进程。字段都 `Send`（读端是 `File`，句柄搬成
-    /// `isize`），好 move 进 `spawn_blocking`。
-    struct Spawned {
-        process: isize,
-        job: isize,
-        read_out: std::fs::File,
-        read_err: std::fs::File,
+    /// 杀组之后再等多久 EOF。见 [`spawn_with_token`] 里的说明。
+    const DRAIN_GRACE: Duration = Duration::from_secs(3);
+
+    /// 一枚拥有所有权的内核句柄，`Drop` 时 `CloseHandle`。
+    ///
+    /// 存裸 `isize` 而不是 `HANDLE`：`HANDLE` 是 `*mut c_void`，不是 `Send`，
+    /// 而这些句柄要跨 await、要进 `spawn_blocking`。搬成整数没有安全性损失
+    /// —— Windows 句柄是**内核对象**的引用，进程内任意线程都能用、也都能关。
+    struct OwnedHandle(isize);
+
+    impl OwnedHandle {
+        fn raw(&self) -> HANDLE {
+            HANDLE(self.0 as *mut c_void)
+        }
+    }
+
+    impl Drop for OwnedHandle {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = CloseHandle(self.raw());
+            }
+        }
+    }
+
+    /// 起好的子进程：进程句柄 + 它的 Job。
+    ///
+    /// `[约束]` 内核对象全由它独占，清理全在 `Drop` 里 —— **包括「外层
+    /// future 中途被 drop」那条路径**。调度器用 `FuturesOrdered` 内联持有
+    /// 工具 future，一次中断就把整批丢掉。摊成裸整数手工 CloseHandle 的
+    /// 写法在三处漏东西：
+    ///
+    /// 1. future 被 drop → 谁都不杀、Job 句柄不关 → `KILL_ON_JOB_CLOSE`
+    ///    永远不触发，子进程活到关机（`proc.rs` 那条路径有
+    ///    `kill_on_drop(true)` 兜底，这里什么都没有）；
+    /// 2. 收输出报错早退 → 后面的 CloseHandle 跑不到；
+    /// 3. 超时/取消时主流程 CloseHandle，而 waiter 线程还卡在
+    ///    `WaitForSingleObject` 上 —— 关一个正被等待的句柄是未定义行为，
+    ///    而且句柄值可能已被另一条并发 spawn 复用，那个 waiter 就在等
+    ///    别人的进程。
+    ///
+    /// 第 3 条另外靠 `process` 是 `Arc`：waiter 持有同一份所有权，最后一个
+    /// 放手的才真关。
+    struct Child {
+        process: Arc<OwnedHandle>,
+        job: OwnedHandle,
+    }
+
+    impl Child {
+        /// 杀掉整个进程组。幂等 —— 正常收尾调一次，`Drop` 再兜一次。
+        fn kill_group(&self) {
+            unsafe {
+                let _ = TerminateJobObject(self.job.raw(), 1);
+            }
+        }
+    }
+
+    impl Drop for Child {
+        fn drop(&mut self) {
+            // 无条件杀。正常路径上进程早没了（这里是 no-op），异常路径上这是
+            // 唯一一次机会。它同时把三个 `spawn_blocking` 线程叫醒：waiter 等到
+            // 进程退出，两个 drain 等到管道 EOF —— 那些线程取消不了，只能靠
+            // 「让它们等的东西真的发生」来收。
+            self.kill_group();
+        }
+    }
+
+    /// 输出缓冲：读任务往里塞，主流程随时能把已经攒下的取走。
+    ///
+    /// `[约束]` 不能只靠 `JoinHandle` 的返回值。读任务是 `spawn_blocking`，
+    /// 卡在 `ReadFile` 上时取消不了；万一写端被**别的** spawn 继承走了
+    /// （见 [`create`] 的句柄继承说明），EOF 永远不来，那个任务永远不返回。
+    /// 共享缓冲让主流程能「等一小会儿，然后带着已有的输出走人」。
+    #[derive(Default)]
+    struct Sink {
+        buf: std::sync::Mutex<Vec<u8>>,
+        capped: AtomicBool,
+    }
+
+    impl Sink {
+        fn lock(&self) -> std::sync::MutexGuard<'_, Vec<u8>> {
+            self.buf
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+
+        /// 取走目前攒下的内容。返回 (内容, 是否触上限)。
+        fn take(&self) -> (Vec<u8>, bool) {
+            let buf = std::mem::take(&mut *self.lock());
+            (buf, self.capped.load(Ordering::Relaxed))
+        }
     }
 
     /// 用令牌起 `spec`，接管道/超时/进程组，返回输出。
@@ -506,7 +780,7 @@ mod spawn {
     /// - stdout / stderr **并发**读（串行会死锁，见 proc.rs 注释）；
     /// - 等到「进程退出 / 超时 / 取消」任一，**无条件**杀整个 Job（正常
     ///   退出也杀，清掉可能残留的后台子进程）；
-    /// - 读任务在杀组之后 await —— 写端全关了 EOF 才来。
+    /// - 读任务在杀组之后收 —— 写端全关了 EOF 才来。
     pub(crate) async fn spawn_with_token(
         token_raw: isize,
         spec: ProcessSpec,
@@ -518,13 +792,24 @@ mod spawn {
 
         // 建进程是同步 Win32，快，直接在异步上下文里做。token 在这里用完
         // （create 之后不再引用），NLL 让它在第一个 await 前就结束生命周期。
-        let sp = unsafe { create(HANDLE(token_raw as *mut std::ffi::c_void), &spec) }?;
-        let (process, job) = (sp.process, sp.job);
+        let (child, read_out, read_err) =
+            unsafe { create(HANDLE(token_raw as *mut c_void), &spec) }?;
 
-        let h_out = tokio::task::spawn_blocking(move || drain(sp.read_out, max_output));
-        let h_err = tokio::task::spawn_blocking(move || drain(sp.read_err, max_output));
-        let waiter = tokio::task::spawn_blocking(move || unsafe {
-            WaitForSingleObject(HANDLE(process as *mut _), INFINITE);
+        let out = Arc::new(Sink::default());
+        let err = Arc::new(Sink::default());
+        let h_out = tokio::task::spawn_blocking({
+            let sink = Arc::clone(&out);
+            move || drain(read_out, max_output, &sink)
+        });
+        let h_err = tokio::task::spawn_blocking({
+            let sink = Arc::clone(&err);
+            move || drain(read_err, max_output, &sink)
+        });
+        let waiter = tokio::task::spawn_blocking({
+            let process = Arc::clone(&child.process);
+            move || unsafe {
+                WaitForSingleObject(process.raw(), INFINITE);
+            }
         });
 
         let ended = tokio::select! {
@@ -533,26 +818,38 @@ mod spawn {
             _ = cancel.cancelled() => Ended::Cancelled,
         };
 
-        // 无条件杀整组（对齐 proc.rs：正常退出 ≠ 后台子进程也退了）。
-        unsafe {
-            let _ = TerminateJobObject(HANDLE(job as *mut _), 1);
-        }
-
-        // 杀组之后再收输出：写端此刻全关，drain 才等得到 EOF。
-        let (stdout, out_capped) = h_out.await.map_err(join_err)??;
-        let (stderr, err_capped) = h_err.await.map_err(join_err)??;
-        if out_capped || err_capped {
-            tracing::warn!(program = %spec.program, "沙箱命令输出超上限，已截断");
-        }
-
+        // 退出码在杀组**之前**读。Exited 分支里进程已经退了、值定死了，但
+        // 反过来写的话，"select 刚返回、进程恰好也退了"这一瞬会被
+        // TerminateJobObject 把真实退出码改成我们编的那个。
         let exit_code = match ended {
-            Ended::Exited => unsafe { exit_code_of(process) },
+            Ended::Exited => unsafe { exit_code_of(child.process.raw()) },
             Ended::TimedOut => EXIT_TIMEOUT,
             Ended::Cancelled => EXIT_CANCELLED,
         };
-        unsafe {
-            let _ = CloseHandle(HANDLE(process as *mut _));
-            let _ = CloseHandle(HANDLE(job as *mut _));
+
+        // 无条件杀整组（对齐 proc.rs：正常退出 ≠ 后台子进程也退了）。
+        child.kill_group();
+
+        // 杀组之后再收输出：写端此刻全关，EOF 才来。
+        //
+        // `[约束]` 但不能无条件等。写端有可能被**别的** spawn 继承走
+        // （见 create 里的句柄继承说明，那个窗口关不掉），那样 EOF 永远
+        // 不来。给一个宽限期，到点就把已经攒下的交出去 —— 丢几行尾巴，
+        // 远好过整条命令挂死（而"莫名挂到超时"正是这个竞态过去的表现）。
+        // 正常路径上 EOF 紧跟着杀组就到，这段等待是零成本。
+        let both = async {
+            let _ = tokio::join!(h_out, h_err);
+        };
+        if tokio::time::timeout(DRAIN_GRACE, both).await.is_err() {
+            tracing::warn!(
+                program = %spec.program,
+                "等不到管道 EOF（写端可能被别的进程继承走了），按已收到的输出返回"
+            );
+        }
+        let (stdout, out_capped) = out.take();
+        let (stderr, err_capped) = err.take();
+        if out_capped || err_capped {
+            tracing::warn!(program = %spec.program, "沙箱命令输出超上限，已截断");
         }
 
         Ok(ProcessOutput {
@@ -570,46 +867,100 @@ mod spawn {
         Cancelled,
     }
 
-    /// 同步建进程：建管道、拼命令行/环境、CreateProcessAsUserW、挂 Job、
-    /// 关父进程持有的写端。返回 Send 的句柄束。
-    unsafe fn create(token: HANDLE, spec: &ProcessSpec) -> std::io::Result<Spawned> {
+    /// 同步建进程：建管道、拼命令行/环境、CreateProcessAsUserW、挂 Job。
+    /// 返回 Send 的 [`Child`] 和两个读端。
+    ///
+    /// # 句柄继承：两个方向，只能治一个
+    ///
+    /// `CreateProcessAsUserW` 必须 `bInheritHandles=true`（stdio 要传进去），
+    /// 而它默认继承的是**本进程当前所有可继承句柄**。两个方向各有毛病：
+    ///
+    /// - *别人的句柄漏进我们的子进程*：既是竞态（继承到另一条 spawn 还没
+    ///   关的管道写端，害它等不到 EOF），也是**沙箱漏洞** —— MIC 只在
+    ///   `open` 时检查，一个继承来的、指向 Medium 对象的可写句柄，低完整性
+    ///   进程照样能拿它写。用 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 显式白
+    ///   名单彻底治掉：子进程只拿到下面列出的三个。
+    /// - *我们的写端漏进别人的子进程*：白名单管不了 —— 句柄列表里的句柄
+    ///   **必须**是可继承的，所以 CreateProcess 期间那两个写端就是敞着的，
+    ///   而同进程里 `std`/`tokio` 的 spawn（hooks、MCP、非沙箱会话、终端
+    ///   面板）一律 `bInheritHandles=true` 且不带白名单。这个窗口关不掉。
+    ///
+    /// 所以下面那把锁**只解决一半**：它让我们自己的并发 spawn 不互相偷
+    /// 句柄（最常见的情形），对进程里别的 spawn 点无能为力。真正的兜底是
+    /// [`spawn_with_token`] 里收输出的宽限期 —— 就算写端真被偷走，最坏
+    /// 也只是丢掉几行尾巴，不会挂死。见 SANDBOX_WINDOWS.md §3。
+    unsafe fn create(
+        token: HANDLE,
+        spec: &ProcessSpec,
+    ) -> std::io::Result<(Child, std::fs::File, std::fs::File)> {
+        // 临界区只有同步的建进程段（无 await、无阻塞等待），锁很快就放，
+        // 命令起来之后照样并发跑。锁中毒接着用：临界区里没有会破坏不变量的
+        // panic 点，卡死 spawn 比带毒继续更糟（同 sandbox_labels 的取舍）。
+        static SPAWN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _spawn_guard = SPAWN_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         unsafe {
-            // 写端要能被子进程继承，读端不能（否则子进程持有读端，EOF 不来）。
             let sa = SECURITY_ATTRIBUTES {
                 nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
                 lpSecurityDescriptor: std::ptr::null_mut(),
                 bInheritHandle: true.into(),
             };
+            // 三个句柄从建出来那一刻就有主：读端交给 `File`，写端和 NUL 交给
+            // `OwnedHandle`，全都在本函数结束时释放 —— 也就是「起完就关父进程
+            // 这边的写端」（不关的话读端的 EOF 永远不来），而且任何早退路径
+            // 都自动做到。
             let (read_out, write_out) = pipe(&sa)?;
             let (read_err, write_err) = pipe(&sa)?;
             // stdin 给 NUL：一律立即 EOF —— 读 stdin 的命令（cat、等确认的
             // 脚本）不会挂住。对齐 proc.rs 的 Stdio::null()。
-            let nul = CreateFileW(
-                windows::core::w!("NUL"),
-                GENERIC_READ.0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                Some(&sa),
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                None,
-            )
-            .map_err(win_err)?;
+            let nul = OwnedHandle(
+                CreateFileW(
+                    windows::core::w!("NUL"),
+                    GENERIC_READ.0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    Some(&sa),
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL,
+                    None,
+                )
+                .map_err(win_err)?
+                .0 as isize,
+            );
 
-            let si = STARTUPINFOW {
-                cb: std::mem::size_of::<STARTUPINFOW>() as u32,
-                dwFlags: STARTF_USESTDHANDLES,
-                hStdInput: nul,
-                hStdOutput: write_out,
-                hStdError: write_err,
-                ..Default::default()
+            // 白名单：子进程只继承这三个。它们都是用带 bInheritHandle 的 sa
+            // 建的 —— 列表里出现不可继承的句柄会让 CreateProcess 直接失败。
+            let mut attrs = handle_list(vec![nul.raw(), write_out.raw(), write_err.raw()])?;
+            let si = STARTUPINFOEXW {
+                StartupInfo: STARTUPINFOW {
+                    // 用了 EXTENDED_STARTUPINFO_PRESENT 就要报 EX 结构的大小。
+                    cb: std::mem::size_of::<STARTUPINFOEXW>() as u32,
+                    dwFlags: STARTF_USESTDHANDLES,
+                    hStdInput: nul.raw(),
+                    hStdOutput: write_out.raw(),
+                    hStdError: write_err.raw(),
+                    ..Default::default()
+                },
+                lpAttributeList: attrs.list(),
             };
 
-            let base: Vec<(String, String)> = std::env::vars().collect();
-            let mut env = crate::sandbox_cmdline::build_env_block(&base, &spec.env);
-            let mut cmdline: Vec<u16> = crate::sandbox_cmdline::build_command_line(&spec.program, &spec.args)
-                .encode_utf16()
-                .chain(std::iter::once(0))
+            // vars_os 而不是 vars()：后者在某个环境变量含非法 UTF-8 时直接
+            // panic，一条脏变量就能崩掉整个 spawn。lossy 转换对读环境的子进程
+            // 无害 —— 值本来就要拼进 UTF-16 环境块。
+            let base: Vec<(String, String)> = std::env::vars_os()
+                .map(|(k, v)| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.to_string_lossy().into_owned(),
+                    )
+                })
                 .collect();
+            let mut env = crate::sandbox_cmdline::build_env_block(&base, &spec.env);
+            let mut cmdline: Vec<u16> =
+                crate::sandbox_cmdline::build_command_line(&spec.program, &spec.args)
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect();
             let cwd: Vec<u16> = spec
                 .cwd
                 .as_os_str()
@@ -627,58 +978,141 @@ mod spawn {
                 None,
                 None,
                 true,
-                CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
-                Some(env.as_mut_ptr() as *mut std::ffi::c_void),
+                CREATE_NO_WINDOW
+                    | CREATE_SUSPENDED
+                    | CREATE_UNICODE_ENVIRONMENT
+                    | EXTENDED_STARTUPINFO_PRESENT,
+                Some(env.as_mut_ptr() as *const c_void),
                 PCWSTR(cwd.as_ptr()),
-                &si,
+                &si.StartupInfo,
                 &mut pi,
             )
             .map_err(win_err)?;
 
-            // 起完就关父进程这边的写端和 NUL —— 写端不关，读端 EOF 永远不来。
-            let _ = CloseHandle(write_out);
-            let _ = CloseHandle(write_err);
-            let _ = CloseHandle(nul);
+            // 进程和线程句柄立刻交给 RAII，后面任何早退都不会漏。
+            let process = Arc::new(OwnedHandle(pi.hProcess.0 as isize));
+            let thread = OwnedHandle(pi.hThread.0 as isize);
 
-            let job = CreateJobObjectW(None, PCWSTR::null()).map_err(win_err)?;
-            let mut limit = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-            limit.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                &limit as *const _ as *const std::ffi::c_void,
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            )
-            .map_err(win_err)?;
-            AssignProcessToJobObject(job, pi.hProcess).map_err(win_err)?;
+            let job = match setup_job(process.raw()) {
+                Ok(job) => OwnedHandle(job.0 as isize),
+                Err(e) => {
+                    // 进程此刻是挂起态、又还没进 Job，没有任何东西会收它 ——
+                    // 必须显式杀，否则漏下一个永远挂起的孤儿。句柄本身由
+                    // OwnedHandle 收。
+                    let _ = TerminateProcess(process.raw(), 1);
+                    return Err(e);
+                }
+            };
 
-            ResumeThread(pi.hThread);
-            let _ = CloseHandle(pi.hThread);
+            ResumeThread(thread.raw());
+            drop(thread);
 
-            Ok(Spawned {
-                process: pi.hProcess.0 as isize,
-                job: job.0 as isize,
-                read_out: std::fs::File::from_raw_handle(read_out.0 as std::os::windows::io::RawHandle),
-                read_err: std::fs::File::from_raw_handle(read_err.0 as std::os::windows::io::RawHandle),
-            })
+            Ok((Child { process, job }, read_out, read_err))
         }
     }
 
-    unsafe fn pipe(sa: &SECURITY_ATTRIBUTES) -> std::io::Result<(HANDLE, HANDLE)> {
+    /// `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 属性表，连同它引用的句柄数组。
+    ///
+    /// 两块内存都得活到 `CreateProcess` 返回：`UpdateProcThreadAttribute`
+    /// 只记下句柄数组的**指针**，不拷贝内容。
+    struct AttrList {
+        buf: Vec<u8>,
+        handles: Vec<HANDLE>,
+    }
+
+    impl AttrList {
+        fn list(&mut self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
+            LPPROC_THREAD_ATTRIBUTE_LIST(self.buf.as_mut_ptr().cast())
+        }
+    }
+
+    impl Drop for AttrList {
+        fn drop(&mut self) {
+            unsafe { DeleteProcThreadAttributeList(self.list()) }
+        }
+    }
+
+    unsafe fn handle_list(handles: Vec<HANDLE>) -> std::io::Result<AttrList> {
+        unsafe {
+            // 第一次调用注定失败（ERROR_INSUFFICIENT_BUFFER），只为问出大小。
+            let mut size = 0usize;
+            let _ = InitializeProcThreadAttributeList(None, 1, None, &mut size);
+            if size == 0 {
+                return Err(std::io::Error::other("问不出进程属性表的大小"));
+            }
+            let mut me = AttrList {
+                buf: vec![0u8; size],
+                handles,
+            };
+            // 从 Initialize 成功那一刻起就必须配一次 Delete —— 所以先让
+            // AttrList 接管，再做可能失败的 Update。
+            InitializeProcThreadAttributeList(Some(me.list()), 1, None, &mut size)
+                .map_err(win_err)?;
+            let list = me.list();
+            let ptr: *const c_void = me.handles.as_ptr().cast();
+            let bytes = std::mem::size_of_val(me.handles.as_slice());
+            UpdateProcThreadAttribute(
+                list,
+                0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                Some(ptr),
+                bytes,
+                None,
+                None,
+            )
+            .map_err(win_err)?;
+            Ok(me)
+        }
+    }
+
+    /// 建 Job Object、设 `KILL_ON_JOB_CLOSE`、把进程挂进去。
+    ///
+    /// 失败时把**本函数已建的 Job** 关掉再返回错误；进程的清理留给调用方
+    /// （它知道要不要连带杀进程）。拆出来是为了用 `?` 之外的显式清理收拢
+    /// 三步 Win32 的失败路径 —— 直接用 `?` 的话，中途失败会漏掉已建的 Job。
+    unsafe fn setup_job(process: HANDLE) -> std::io::Result<HANDLE> {
+        unsafe {
+            let job = CreateJobObjectW(None, PCWSTR::null()).map_err(win_err)?;
+            let mut limit = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            limit.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if let Err(e) = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &limit as *const _ as *const c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) {
+                let _ = CloseHandle(job);
+                return Err(win_err(e));
+            }
+            if let Err(e) = AssignProcessToJobObject(job, process) {
+                let _ = CloseHandle(job);
+                return Err(win_err(e));
+            }
+            Ok(job)
+        }
+    }
+
+    /// 一根匿名管道：读端交给 `File`（RAII），写端交给 [`OwnedHandle`]。
+    unsafe fn pipe(sa: &SECURITY_ATTRIBUTES) -> std::io::Result<(std::fs::File, OwnedHandle)> {
         unsafe {
             let mut read = HANDLE::default();
             let mut write = HANDLE::default();
             CreatePipe(&mut read, &mut write, Some(sa), 0).map_err(win_err)?;
-            // 读端清掉继承标志：只让写端进子进程。
+            // 先接管所有权，再做可能失败的事。
+            let file = std::fs::File::from_raw_handle(read.0 as std::os::windows::io::RawHandle);
+            let write = OwnedHandle(write.0 as isize);
+            // 读端清掉继承标志。子进程拿不到它本来就由句柄白名单保证了，
+            // 这一下是防**别的** spawn 点（不带白名单）把它捎带出去 ——
+            // 纯粹的卫生：不该让任何外部进程握着我们的读端。
             SetHandleInformation(read, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)).map_err(win_err)?;
-            Ok((read, write))
+            Ok((file, write))
         }
     }
 
-    unsafe fn exit_code_of(process: isize) -> i32 {
+    unsafe fn exit_code_of(process: HANDLE) -> i32 {
         unsafe {
             let mut code = 0u32;
-            if GetExitCodeProcess(HANDLE(process as *mut _), &mut code).is_ok() {
+            if GetExitCodeProcess(process, &mut code).is_ok() {
                 code as i32
             } else {
                 -1
@@ -686,18 +1120,28 @@ mod spawn {
         }
     }
 
-    /// 同步读到 EOF 或读满上限。返回 (内容, 是否触上限)。
-    fn drain(mut f: std::fs::File, cap: usize) -> std::io::Result<(Vec<u8>, bool)> {
-        let mut buf = Vec::new();
+    /// 同步读到 EOF 或读满上限，边读边往 `sink` 里塞。
+    ///
+    /// 读出错就收工（不往上报）：走到这一步无非是管道断了，而此刻手里已经
+    /// 有部分输出和真实退出码 —— 把它们交出去比让整条命令失败有用得多。
+    fn drain(mut f: std::fs::File, cap: usize, sink: &Sink) {
         let mut chunk = [0u8; 16 * 1024];
         loop {
-            let n = f.read(&mut chunk)?;
-            if n == 0 {
-                return Ok((buf, false));
-            }
+            let n = match f.read(&mut chunk) {
+                Ok(0) => return,
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::debug!(error = %e, "读子进程输出中断");
+                    return;
+                }
+            };
+            let mut buf = sink.lock();
             let room = cap.saturating_sub(buf.len());
             if room == 0 {
-                return Ok((buf, true));
+                sink.capped.store(true, Ordering::Relaxed);
+                // 直接返回，`f` 在这里被 drop —— 读端一关，写端下次写就拿到
+                // broken pipe。这正是 `head -n 10` 让上游停下来的机制。
+                return;
             }
             buf.extend_from_slice(&chunk[..n.min(room)]);
         }
@@ -713,12 +1157,6 @@ mod spawn {
     fn win_err(e: windows::core::Error) -> std::io::Error {
         std::io::Error::other(e.to_string())
     }
-
-    fn join_err(e: tokio::task::JoinError) -> std::io::Error {
-        std::io::Error::other(format!("读取输出的任务异常：{e}"))
-    }
-
-    use std::os::windows::ffi::OsStrExt;
 
     #[cfg(test)]
     mod tests {
@@ -742,6 +1180,110 @@ mod spawn {
                 .expect("跑得起来");
             assert_eq!(out.exit_code, 0, "stderr={}", out.stderr);
             assert!(out.stdout.contains("hi"), "stdout={:?}", out.stdout);
+        }
+
+        /// 并发 spawn：多条命令同时起，每条都要拿到**自己**完整的输出、且都
+        /// 不超时。这是句柄继承竞态（SANDBOX_WINDOWS.md §3 / `create` 里那把
+        /// `SPAWN_LOCK`）的回归钉。
+        ///
+        /// 没有那把锁时：一个 spawn 的子进程会继承到另一个 spawn 刚
+        /// `CreatePipe`、还没来得及 `CloseHandle` 的可继承写端 —— 后者的读端
+        /// 于是永远等不到 EOF，表现是它的 stdout 空、一直挂到超时。断言里
+        /// 「不超时 + 拿到自己的标记」正是对这个失败模式的反面。
+        ///
+        /// `[约束]` 必须 `multi_thread` + `tokio::spawn` 才逼得出竞态：`create`
+        /// 是第一个 await 之前的同步段，单线程 `join!` 会让它一条跑完再跑下
+        /// 一条（临界区从不重叠），那样即便锁没了也测不出问题。真并发下多个
+        /// `create` 落在不同工作线程上，才会去抢那把锁。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn 并发起进程各拿各的输出不串扰() {
+            // 令牌活到所有任务 await 完（`tok` 在函数尾才 drop），各任务只借
+            // 它的裸值（isize，Copy）—— 并发只读同一枚令牌是安全的。
+            let tok = super::super::token::create_restricted_low_il().expect("造令牌");
+            let token = (*tok.0).0 as isize;
+
+            // 起够多条，让临界区有充分重叠机会；每条 echo 一个唯一标记。
+            let mut handles = Vec::new();
+            for i in 0..12u32 {
+                let marker = format!("riot-conc-{i}");
+                let spec = ProcessSpec {
+                    program: "cmd".to_owned(),
+                    args: vec!["/c".to_owned(), format!("echo {marker}")],
+                    cwd: std::env::temp_dir(),
+                    env: Vec::new(),
+                    // 竞态若回归，受影响的那条会挂到这里才失败；正常路径 <1s。
+                    timeout_ms: Some(20_000),
+                };
+                handles.push(tokio::spawn(async move {
+                    let out = spawn_with_token(token, spec, 1 << 20, CancellationToken::new())
+                        .await
+                        .expect("跑得起来");
+                    (marker, out)
+                }));
+            }
+
+            for h in handles {
+                let (marker, out) = h.await.expect("任务正常结束");
+                assert!(
+                    !out.timed_out,
+                    "{marker} 超时了 —— 多半是继承了别的 spawn 的写端，EOF 不来"
+                );
+                assert_eq!(out.exit_code, 0, "{marker} 退出码非零：stderr={}", out.stderr);
+                assert!(
+                    out.stdout.contains(&marker),
+                    "{marker} 没拿到自己的输出：stdout={:?}",
+                    out.stdout
+                );
+            }
+        }
+
+        /// future 被丢掉之后，子进程必须跟着死。
+        ///
+        /// 这是本层「无论怎么死，别往机器上漏东西」在 Windows 侧的落点。
+        /// 调度器用 `FuturesOrdered` **内联**持有工具 future，用户按一次
+        /// 停止就把整批 drop 掉 —— `proc.rs` 那条路径有 `kill_on_drop(true)`
+        /// 兜底，这条路径全靠 [`Child`] 的 Drop。没有它的话 Job 句柄不关、
+        /// `KILL_ON_JOB_CLOSE` 不触发，子进程活到关机。
+        ///
+        /// 验法：让命令睡一会儿再写一个标记文件，中途把 future 丢掉，然后
+        /// 等过那个睡眠时间 —— 标记文件出现就说明进程没被收掉。
+        #[tokio::test]
+        async fn future_被丢掉时子进程跟着死() {
+            let tok = super::super::token::create_restricted_low_il().expect("造令牌");
+            let dir = std::env::temp_dir().join(format!("riot-drop-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("建目录");
+            let marker = dir.join("survived.txt");
+            let _ = std::fs::remove_file(&marker);
+
+            let spec = ProcessSpec {
+                program: "cmd".to_owned(),
+                args: vec![
+                    "/c".to_owned(),
+                    format!(
+                        "timeout /t 3 /nobreak > NUL & echo alive > {}",
+                        marker.display()
+                    ),
+                ],
+                cwd: dir.clone(),
+                env: Vec::new(),
+                timeout_ms: None,
+            };
+
+            {
+                let mut fut =
+                    Box::pin(spawn_with_token((*tok.0).0 as isize, spec, 1 << 20, CancellationToken::new()));
+                // poll 一次把进程真的起起来，然后丢掉 future。
+                let started = tokio::time::timeout(std::time::Duration::from_millis(300), &mut fut).await;
+                assert!(started.is_err(), "这条命令不该这么快就结束");
+            }
+
+            // 睡过命令原本的存活时间，再看标记。
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            assert!(
+                !marker.exists(),
+                "子进程在 future 被丢掉之后还活着并写了文件 —— Job 没被收"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 }

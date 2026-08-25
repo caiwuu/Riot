@@ -65,9 +65,18 @@ impl SandboxPolicy {
     /// 工作区可写 + 一组常见的构建缓存。给生产装配用。
     ///
     /// `[取舍]` 放开 `~/.cargo`、`~/.npm` 这类缓存是可用性让步：不放的话
-    /// 第一条 `cargo build` 就挂在"权限不足"上。代价是模型理论上能改
-    /// 那些目录里的配置（比如 `~/.cargo/config.toml` 里的 build 脚本）。
-    /// 用真实的失败换理论上的攻击面，这一步值得，但要写明白。
+    /// 第一条 `cargo build` 就挂在"权限不足"上。代价是**边界之内还留着
+    /// 几条通往边界之外的路**：`~/.cargo/config.toml` 的 `rustc-wrapper`、
+    /// 工作区里的 `.git/hooks/` 和 `.riot/hooks.json` —— 写了它们，下一次
+    /// 构建 / 提交 / 对话轮就在沙箱**外**执行任意代码。
+    ///
+    /// `[约束]` 所以这张表不能当成唯一防线，决策链的沙箱放宽档必须把这几类
+    /// 目标排除在外（`riot_permissions::bash::write_targets`）。收紧这张表
+    /// 是修不了的：`cargo build` 要写 `~/.cargo/.package-cache` 的锁、
+    /// `rust-toolchain.toml` 会触发 rustup 自动装工具链 —— 猜错一条的表现
+    /// 就是"构建莫名其妙失败"，而那正是用户直接关掉沙箱的理由。
+    /// 也不能在 profile 里给这几条补 `deny`：沙箱按静态策略每轮激活，它不
+    /// 知道用户这一次批准了什么，deny 会造出「点了允许、命令照样失败」。
     pub fn workspace_write(workspace: &Path) -> Self {
         let mut writable = vec![workspace.to_path_buf()];
         // temp 的处理平台不同：macOS/Unix 直接放开全局 temp（seatbelt 的
@@ -134,6 +143,16 @@ impl SandboxPolicy {
             if !crate::sandbox_macos::supported() {
                 return None;
             }
+            // `[约束]` 光有 sandbox-exec 还不够，profile 得真能被它接受。
+            // 一个带换行或怪字符的工作区路径就能让整份 SBPL 解析失败，而
+            // 那时候 `sandboxed` 已经报成 true —— 决策链按"OS 挡着"放行了
+            // 一批命令，然后每一条都死在 "failed to parse"。方向是安全的
+            // （什么都跑不了），但用户看到的是应用坏了。冒烟一次，几毫秒，
+            // 而且只在会话第一次激活时付。
+            if !crate::sandbox_macos::profile_accepted(&self) {
+                tracing::warn!("seatbelt profile 没被 sandbox-exec 接受，本轮不隔离");
+                return None;
+            }
             Some(ActiveSandbox { policy: self })
         }
         #[cfg(windows)]
@@ -184,17 +203,32 @@ impl ActiveSandbox {
 ///
 /// 装饰器而不是改 `SystemProcessRunner`：venv 那层（改 PATH）也是装饰器，
 /// 两者正交、能自由组合，而"不沙箱"这条路径上一行沙箱代码都不会跑到。
+///
+/// `[约束]` 这一层必须装在执行器链条的**最里层**（紧贴真正起进程的那个），
+/// venv / 能力包在它外面。理由是平台不对称：macOS 只改 argv，装哪一层都
+/// 一样；**Windows 换掉的是"谁来起进程"** —— 它用受限令牌自己调
+/// `CreateProcessAsUserW`，压根不会调 `inner`。装在最外层的话，里面那些
+/// 改环境变量的装饰器一个都跑不到，表现是「Windows 上一开沙箱（默认开），
+/// 会话设的 Python venv 和能力包就静默失效」。装在最里层则两个平台一致：
+/// 外层改完 env 的 spec 原样落到这里。
 pub struct SandboxedRunner {
     // Windows 用令牌自己起进程（WinSandbox::run），不装饰 inner —— 于是
     // inner 在这个平台无人读。macOS（垫 argv 交 inner 跑）和其它平台
     // （透传）都读它。按平台豁免，而不是删字段（删了 macOS 就没法跑了）。
     #[cfg_attr(windows, allow(dead_code))]
     inner: std::sync::Arc<dyn ProcessRunner>,
-    sandbox: ActiveSandbox,
+    /// `Arc` 而不是独占：沙箱按**会话**激活一次、跨轮复用。Windows 上
+    /// 激活要给可写目录打 Low 标签，而 `SetNamedSecurityInfoW` 会把可继承
+    /// ACE 传播到已有子对象 —— `~/.cargo` 的 registry 缓存动辄十万文件，
+    /// 每轮打一次撤一次是实打实的卡顿。见 `session.rs` 的沙箱缓存。
+    sandbox: std::sync::Arc<ActiveSandbox>,
 }
 
 impl SandboxedRunner {
-    pub fn new(inner: std::sync::Arc<dyn ProcessRunner>, sandbox: ActiveSandbox) -> Self {
+    pub fn new(
+        inner: std::sync::Arc<dyn ProcessRunner>,
+        sandbox: std::sync::Arc<ActiveSandbox>,
+    ) -> Self {
         Self { inner, sandbox }
     }
 }
@@ -344,8 +378,10 @@ mod tests {
             eprintln!("这台机器没有 sandbox-exec，跳过");
             return;
         };
-        let runner =
-            SandboxedRunner::new(std::sync::Arc::new(SystemProcessRunner::default()), active);
+        let runner = SandboxedRunner::new(
+            std::sync::Arc::new(SystemProcessRunner::default()),
+            std::sync::Arc::new(active),
+        );
 
         let run = |cmd: String| {
             let r = &runner;
@@ -411,7 +447,10 @@ mod tests {
         let Some(active) = policy.activate(setup) else {
             panic!("Windows 上 WorkspaceWrite 该激活成功");
         };
-        let runner = SandboxedRunner::new(std::sync::Arc::new(SystemProcessRunner::default()), active);
+        let runner = SandboxedRunner::new(
+            std::sync::Arc::new(SystemProcessRunner::default()),
+            std::sync::Arc::new(active),
+        );
 
         let run = |target: std::path::PathBuf| {
             let r = &runner;
@@ -447,6 +486,49 @@ mod tests {
         let denied = run(out_file.clone()).await;
         assert_ne!(denied.exit_code, 0, "工作区外必须写不进");
         assert!(!out_file.exists(), "文件不该被创建");
+
+        // 一条自定义命令的小工具，下面几个断言各用各的。
+        let exec = |cmd: &str| {
+            let r = &runner;
+            let cwd = base.clone();
+            let cmd = cmd.to_owned();
+            async move {
+                r.run(
+                    ProcessSpec {
+                        program: "cmd".to_owned(),
+                        args: vec!["/c".to_owned(), cmd],
+                        cwd,
+                        env: Vec::new(),
+                        timeout_ms: Some(10_000),
+                    },
+                    CancellationToken::new(),
+                )
+                .await
+                .expect("跑得起来")
+            }
+        };
+
+        // 文档 §6 用例 3：TMP/TEMP/TMPDIR 都被重写到会话专属子目录，而且
+        // 那里真能写。全局 %TEMP% 没打标签，不重写的话所有临时文件都失败。
+        let tmp = exec("echo %TMP%|%TEMP%|%TMPDIR%").await;
+        assert_eq!(tmp.exit_code, 0, "stderr={}", tmp.stderr);
+        for (i, seen) in tmp.stdout.trim().split('|').enumerate() {
+            assert!(
+                seen.contains("riot-sbx-"),
+                "第 {i} 个 temp 变量没指到会话子目录：{seen:?}"
+            );
+        }
+        let tmp_write = exec("echo hi > %TMP%\\probe.txt && type %TMP%\\probe.txt").await;
+        assert_eq!(
+            tmp_write.exit_code, 0,
+            "会话 temp 必须可写：{}",
+            tmp_write.stderr
+        );
+
+        // 文档 §6 用例 2：HKCU 写被拒。这是 Low IL 比 macOS 档多出来的一层
+        // 持久化防线（Run 键、文件关联），要有测试钉住。
+        let reg = exec("reg add HKCU\\Software\\RiotSandboxProbe /v x /d 1 /f").await;
+        assert_ne!(reg.exit_code, 0, "低完整性进程不该写得动 HKCU");
 
         drop(runner); // 触发 Drop：回滚标签 + 删会话 temp
         let _ = std::fs::remove_dir_all(&base);

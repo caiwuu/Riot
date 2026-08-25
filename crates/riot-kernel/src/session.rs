@@ -232,6 +232,16 @@ pub struct TurnLimits {
     pub sandbox: crate::config::SandboxMode,
 }
 
+/// 会话缓存住的沙箱：激活它的策略 + 激活结果。
+///
+/// 带着策略一起存，是为了能判断"用户是不是换了档" —— 只按
+/// `Option::is_some` 判断的话，用户在设置里从 `WorkspaceWrite` 切到
+/// `Off`，这个会话会一直用着上一档的边界，直到重启。
+struct CachedSandbox {
+    policy: riot_runtime::SandboxPolicy,
+    active: Arc<riot_runtime::ActiveSandbox>,
+}
+
 /// 本轮工具装配的产物：注册表、prompt 上下文、延迟加载池。
 ///
 /// 三者由 run_inner 的同一段装配逻辑产出、时机相同，捆在一起传 ——
@@ -328,6 +338,8 @@ pub struct Session {
     /// 会在**轮次中间**把模式切到执行档，同一轮的下一个工具调用就要按
     /// 新模式判定 —— 快照做不到这一点。
     mode: Arc<Mutex<PermissionMode>>,
+    /// 已激活的 OS 沙箱，跨轮复用。见 [`Self::active_sandbox`]。
+    sandbox: Mutex<Option<CachedSandbox>>,
     /// 用户手动改过的标题。None 时回退到自动标题。
     custom_title: Mutex<Option<String>>,
     /// 自动标题：第一句用户输入的截断。
@@ -475,6 +487,7 @@ impl Session {
             thinking_override: Mutex::new(riot_protocol::ThinkingPolicy::default()),
             rules: Arc::new(Mutex::new(Vec::new())),
             mode: Arc::new(Mutex::new(PermissionMode::Default)),
+            sandbox: Mutex::new(None),
             custom_title: Mutex::new(None),
             auto_title: Mutex::new(None),
             persist,
@@ -521,6 +534,7 @@ impl Session {
             thinking_override: Mutex::new(settings.thinking),
             rules: Arc::new(Mutex::new(Vec::new())),
             mode: Arc::new(Mutex::new(settings.mode)),
+            sandbox: Mutex::new(None),
             custom_title: Mutex::new(settings.custom_title.clone()),
             auto_title: Mutex::new(settings.auto_title.clone()),
             persist,
@@ -1282,6 +1296,58 @@ impl Session {
         out
     }
 
+    /// 这个会话的 OS 沙箱，跨轮复用。`None` = 这台机器上做不到，或者
+    /// 用户关了它。
+    ///
+    /// `[约束]` 不能每轮 activate 一次。Windows 上激活要给可写目录打 Low
+    /// 标签，而 `SetNamedSecurityInfoW` 会把可继承 ACE **传播到已有子对象**
+    /// —— `~/.cargo` 的 registry 缓存动辄十万个文件，每轮打一次撤一次是
+    /// 实打实的卡顿，还在用户文件上反复重写安全描述符。macOS 那侧也有一笔：
+    /// 激活时的 profile 冒烟要 spawn 一次进程。
+    ///
+    /// 策略变了才重新激活（用户在设置里换档）。比较的是 [`SandboxPolicy`]
+    /// 本身而不是 [`crate::config::SandboxMode`]：可写集是按 cwd 和"哪些
+    /// 缓存目录真实存在"算出来的，装完 rustup 之后同一个 Mode 也该重打标签。
+    async fn active_sandbox(
+        &self,
+        mode: crate::config::SandboxMode,
+    ) -> Option<Arc<riot_runtime::ActiveSandbox>> {
+        let policy = mode.policy(&self.cwd);
+        let mut slot = self.sandbox.lock().await;
+
+        if let Some(cached) = slot.as_ref() {
+            if cached.policy == policy {
+                return Some(Arc::clone(&cached.active));
+            }
+            // 策略换了。先把旧的放掉（Drop 会归还标签引用）再激活新的 ——
+            // 反过来的话两套标签会同时挂着，中间那段时间的可写面是两者之和。
+            *slot = None;
+        }
+
+        // Low 标签清单放配置目录，全局一份（标签是全机器状态，孤儿回收
+        // 统一）。macOS 忽略这个 setup。now_ms 走真实时钟：它只进清单做
+        // 诊断，不参与任何黄金回放。
+        let ledger_path = crate::config::sandbox_ledger_path();
+        #[allow(clippy::disallowed_methods)]
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let active = Arc::new(
+            policy
+                .clone()
+                .activate(riot_runtime::SandboxSetup {
+                    ledger_path,
+                    now_ms,
+                })?,
+        );
+        *slot = Some(CachedSandbox {
+            policy,
+            active: Arc::clone(&active),
+        });
+        Some(active)
+    }
+
     /// 装配这一轮的工具调度器。
     ///
     /// 单独提出来是为了能被测到。`with_*` 系列每漏一个都是静默降级 ——
@@ -1294,28 +1360,16 @@ impl Session {
         caps: TurnCapabilities,
         gate: Arc<dyn PermissionGate>,
         python_venv: Option<&str>,
-        sandbox: Option<riot_runtime::ActiveSandbox>,
+        sandbox: Option<Arc<riot_runtime::ActiveSandbox>>,
     ) -> Scheduler {
         // venv 和能力包都每轮现装（和 caps 一个道理）：用户中途在设置里换
         // 环境、或者刚装完文档能力包，下一轮就生效，不用重启。
-        let proc: Arc<dyn riot_protocol::tool::ProcessRunner> =
-            Arc::new(SystemProcessRunner::default());
-        // 能力包套在里层、venv 在外层，所以 venv 的 bin 排在能力包前面：
-        // 用户显式选的环境优先级最高。
-        let proc: Arc<dyn riot_protocol::tool::ProcessRunner> = match crate::packs::doc_runtime() {
-            Some(pack) => Arc::new(DocPackRunner::new(&pack, proc)),
-            None => proc,
-        };
-        let proc: Arc<dyn riot_protocol::tool::ProcessRunner> = match python_venv {
-            Some(v) => Arc::new(VenvRunner::new(v, proc)),
-            None => proc,
-        };
-        // 沙箱套在最外层：它改写的是"跑什么"（前面垫一个 sandbox-exec），
-        // venv 改的是环境变量，两件事互不干涉。
-        let proc: Arc<dyn riot_protocol::tool::ProcessRunner> = match sandbox {
-            Some(sb) => Arc::new(riot_runtime::SandboxedRunner::new(proc, sb)),
-            None => proc,
-        };
+        let proc = process_chain(
+            Arc::new(SystemProcessRunner::default()),
+            sandbox,
+            python_venv,
+            crate::packs::doc_runtime().as_ref(),
+        );
         let file_state: Arc<dyn FileStateCache> = match self.baselines_path() {
             Some(p) => Arc::new(crate::changes::PersistingBaselines::new(
                 Arc::clone(&self.file_state),
@@ -1494,26 +1548,19 @@ impl Session {
         // `[约束]` 两处必须来自**同一次** activate。分别判断的话，一边以为
         // 有边界、另一边其实没套上 —— 那正好是最坏的组合：决策链按"OS 挡着"
         // 放行了命令，而实际上什么都没挡。
-        // Low 标签清单放配置目录，全局一份（标签是全机器状态，孤儿回收
-        // 统一）。macOS 忽略这个 setup。now_ms 走真实时钟：它只进清单做
-        // 诊断，不参与任何黄金回放。
-        let sandbox = {
-            let ledger_path = crate::config::sandbox_ledger_path();
-            #[allow(clippy::disallowed_methods)]
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            limits
-                .sandbox
-                .policy(&self.cwd)
-                .activate(riot_runtime::SandboxSetup { ledger_path, now_ms })
-        };
+        let sandbox = self.active_sandbox(limits.sandbox).await;
         if sandbox.is_none() && limits.sandbox != crate::config::SandboxMode::Off {
             // 说一声。静默降级的话，用户以为自己开着沙箱。
+            //
+            // 不写死原因：降级的现场按平台各不相同（macOS 缺
+            // `sandbox-exec` 或 profile 没通过；Windows 是打标签失败、
+            // 建令牌失败，或 NoNet 档的诚实降级）。真正的原因由
+            // `riot_runtime` 那侧带上下文打日志，这里只负责让用户知道
+            // "你以为开着的那层现在没开"。
             tracing::warn!(
                 session = %self.id.as_str(),
-                "这台机器上沙箱起不来（需要 macOS 的 sandbox-exec），本轮不隔离"
+                mode = ?limits.sandbox,
+                "这台机器上沙箱没能激活，本轮不隔离（决策链回到逐条询问）"
             );
         }
 
@@ -1884,21 +1931,30 @@ impl Session {
 }
 
 /// 压缩后重注入的工作集：最近读过的文件（预算对齐 Claude Code：
-/// 最多 5 个、单文件 ~5k token、总量 ~25k token，字符按 4:1 折算）。
+/// 最多 5 个、单文件 ~5k token、总量 ~25k token）。
+///
+/// 预算统一按**字节**算 —— 和 `estimate_tokens` 的 4 字节/token 同一口径。
+/// 以前单文件按字符数、总量按字节数：中文内容下 20k 字符 ≈ 60k 字节，
+/// 一个文件就吃掉大半总预算，"最多 5 个"实际只进得去一两个。
 fn restored_files(file_state: &dyn riot_protocol::tool::FileStateCache) -> Vec<Attachment> {
     const MAX_FILES: usize = 5;
-    const MAX_CHARS_PER_FILE: usize = 20_000;
-    const MAX_TOTAL_CHARS: usize = 100_000;
+    const MAX_BYTES_PER_FILE: usize = 20_000;
+    const MAX_TOTAL_BYTES: usize = 100_000;
 
     let mut total = 0usize;
     let mut out = Vec::new();
     for (path, st) in file_state.recent(MAX_FILES) {
         let mut content = st.content;
-        if content.chars().count() > MAX_CHARS_PER_FILE {
-            content = content.chars().take(MAX_CHARS_PER_FILE).collect();
+        if content.len() > MAX_BYTES_PER_FILE {
+            // 截在字符边界上：中间劈开一个多字节字符，truncate 直接 panic。
+            let mut cut = MAX_BYTES_PER_FILE;
+            while !content.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            content.truncate(cut);
             content.push_str("\n\n[文件超长已截断，需要完整内容用 Read 重读]");
         }
-        if total + content.len() > MAX_TOTAL_CHARS {
+        if total + content.len() > MAX_TOTAL_BYTES {
             break;
         }
         total += content.len();
@@ -1916,6 +1972,41 @@ fn restored_files(file_state: &dyn riot_protocol::tool::FileStateCache) -> Vec<A
 /// `[约束]` 必须是"接"而不是"没有才设"。venv 和能力包两层装饰器都要改
 /// PATH，谁先跑取决于装配顺序 —— 用"没有才设"的话，先跑的那层会把后跑的
 /// 那层整个吞掉，表现是设了 venv 就找不到 soffice（或者反过来）。
+/// 把 `base`（真正起进程的那个）一层层包成本轮要用的执行器。
+///
+/// 单独提出来是为了**顺序能被测到**。这条链上每一层的位置都有过一次
+/// 真实的 bug，而三种错法全部编译得过、也全部静默：
+///
+/// - 沙箱装在最外层 → Windows 上 `WinSandbox::run` 用受限令牌自己调
+///   `CreateProcessAsUserW`，**根本不会调 inner**，于是下面两层改环境
+///   变量的装饰器一个都跑不到。表现是"一开沙箱（默认开），会话设的 venv
+///   和能力包静默失效，python 拿到的是系统那个"。所以沙箱贴最里层 ——
+///   它替换的是"最终由谁起进程"，不是"跑什么"。
+/// - venv 装在能力包外层 → [`prepend_path`] 是往**队首**插，而外层先跑，
+///   所以后跑的排在前面。venv 在外的话能力包的目录会盖在用户显式选的
+///   venv 前面，一句 `python3 manage.py` 就拿到包里那份、找不到项目依赖。
+///
+/// 结论：`能力包 → venv → 沙箱 → base`，从外到里。
+fn process_chain(
+    base: Arc<dyn riot_protocol::tool::ProcessRunner>,
+    sandbox: Option<Arc<riot_runtime::ActiveSandbox>>,
+    python_venv: Option<&str>,
+    pack: Option<&crate::packs::InstalledPack>,
+) -> Arc<dyn riot_protocol::tool::ProcessRunner> {
+    let proc: Arc<dyn riot_protocol::tool::ProcessRunner> = match sandbox {
+        Some(sb) => Arc::new(riot_runtime::SandboxedRunner::new(base, sb)),
+        None => base,
+    };
+    let proc: Arc<dyn riot_protocol::tool::ProcessRunner> = match python_venv {
+        Some(v) => Arc::new(VenvRunner::new(v, proc)),
+        None => proc,
+    };
+    match pack {
+        Some(p) => Arc::new(DocPackRunner::new(p, proc)),
+        None => proc,
+    }
+}
+
 fn prepend_path(spec: &mut riot_protocol::tool::ProcessSpec, dirs: &[std::path::PathBuf]) {
     if dirs.is_empty() {
         return;
@@ -2429,9 +2520,30 @@ mod tests {
         );
     }
 
-    #[test]
-    fn 能力包注入_runtime_变量并把工具目录放进_path() {
-        let pack = crate::packs::InstalledPack {
+    /// 录下最终落到"真正起进程"那一层的 spec。
+    #[derive(Default)]
+    struct RecordingRunner(std::sync::Mutex<Option<riot_protocol::tool::ProcessSpec>>);
+
+    #[async_trait::async_trait]
+    impl riot_protocol::tool::ProcessRunner for RecordingRunner {
+        async fn run(
+            &self,
+            spec: riot_protocol::tool::ProcessSpec,
+            _cancel: CancellationToken,
+        ) -> std::io::Result<riot_protocol::tool::ProcessOutput> {
+            *self.0.lock().expect("录制锁") = Some(spec);
+            Ok(riot_protocol::tool::ProcessOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+                duration_ms: 0,
+            })
+        }
+    }
+
+    fn doc_pack() -> crate::packs::InstalledPack {
+        crate::packs::InstalledPack {
             root: std::path::PathBuf::from("/packs/doc-runtime"),
             manifest: crate::packs::PackManifest {
                 name: "doc-runtime".into(),
@@ -2445,7 +2557,51 @@ mod tests {
                 mcp_servers: vec![],
                 skills: vec![],
             },
-        };
+        }
+    }
+
+    /// `[约束]` 装配顺序：能力包 → venv → 沙箱 → 真正起进程的那层。
+    ///
+    /// 这条用例钉的是 [`process_chain`] 文档里那两个错法。上面
+    /// `两层装饰器的_path_叠加而不是互相覆盖` 只验了 `prepend_path` 本身
+    /// 叠加得对 —— 而真出过的 bug 是**装配顺序反了**（venv 在能力包外层），
+    /// 那种情况下 prepend_path 每一步都正确，结果照样是错的。所以要走
+    /// 真正的链条，看最里层收到什么。
+    #[tokio::test]
+    async fn 执行器链条的顺序_venv_压过能力包() {
+        let rec = Arc::new(RecordingRunner::default());
+        let chain = process_chain(
+            Arc::clone(&rec) as Arc<dyn riot_protocol::tool::ProcessRunner>,
+            None,
+            Some("/proj/.venv"),
+            Some(&doc_pack()),
+        );
+
+        chain
+            .run(empty_spec(), CancellationToken::new())
+            .await
+            .expect("跑得起来");
+
+        let spec = rec.0.lock().expect("录制锁").clone().expect("录到了");
+        let path = path_of(&spec);
+        let venv = path.find("/proj/.venv/bin").expect("venv 要在 PATH 里");
+        let pack = path.find("/packs/doc-runtime/path").expect("能力包要在");
+        assert!(venv < pack, "用户显式选的 venv 要排在能力包前面：{path}");
+        assert!(
+            spec.env.iter().any(|(k, v)| k == "VIRTUAL_ENV" && v == "/proj/.venv"),
+            "VIRTUAL_ENV 要落到最里层：{:?}",
+            spec.env
+        );
+        assert!(
+            spec.env.iter().any(|(k, _)| k == "RUNTIME_NODE"),
+            "能力包的变量也要落到最里层：{:?}",
+            spec.env
+        );
+    }
+
+    #[test]
+    fn 能力包注入_runtime_变量并把工具目录放进_path() {
+        let pack = doc_pack();
         let runner = DocPackRunner::new(&pack, Arc::new(SystemProcessRunner::default()));
 
         assert_eq!(

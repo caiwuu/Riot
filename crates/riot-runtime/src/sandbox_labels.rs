@@ -102,7 +102,13 @@ impl LabelLedger {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let tmp = self.path.with_extension("json.tmp");
+        // 临时名带 pid：清单是**全机一份**的，同机双开内核时两个进程会各自
+        // flush。共用一个固定的 `.json.tmp` 会让两次「写临时文件 → rename」
+        // 交错，rename 出去的可能是半份别人的内容 —— 而原子 rename 的全部
+        // 意义就是避免这个。回收有独占锁挡双开，落盘没有。
+        let tmp = self
+            .path
+            .with_extension(format!("json.tmp{}", std::process::id()));
         let bytes = serde_json::to_vec_pretty(&self.entries)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         std::fs::write(&tmp, &bytes)?;

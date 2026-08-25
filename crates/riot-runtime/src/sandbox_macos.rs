@@ -36,6 +36,28 @@ pub(crate) fn supported() -> bool {
     Path::new(SANDBOX_EXEC).is_file()
 }
 
+/// 这份 profile 真的能被 `sandbox-exec` 接受吗。
+///
+/// 拿一个立刻成功退出的程序跑一遍，只看退出码。存在的理由是
+/// `sandbox-exec` 的解析错误只有一句 "failed to parse"，而且是在**每条
+/// 命令**上报 —— 不在激活时验一次的话，一个含怪字符的工作区路径会让
+/// `sandboxed` 报成 true、然后所有命令一律失败。
+///
+/// `[约束]` 用 `/usr/bin/true` 而不是 `true`：profile 里没有对 PATH 的
+/// 任何假设，而 `sandbox-exec` 找不到程序时的退出码和 profile 解析失败
+/// 撞在一起，会把"这台机器怪"误判成"profile 坏了"。
+pub(crate) fn profile_accepted(policy: &SandboxPolicy) -> bool {
+    std::process::Command::new(SANDBOX_EXEC)
+        .arg("-p")
+        .arg(profile(policy))
+        .arg("/usr/bin/true")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 /// 生成 seatbelt profile（SBPL）。
 ///
 /// 规则是**后写的覆盖先写的**：先 `allow default` 放开一切，再 `deny
