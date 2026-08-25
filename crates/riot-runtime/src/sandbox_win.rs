@@ -174,6 +174,7 @@ pub(crate) fn recover_orphans(ledger_path: &std::path::Path) {
     match std::fs::OpenOptions::new()
         .create(true)
         .write(true)
+        .truncate(false) // 内容无关紧要，文件只当独占句柄用
         .share_mode(0) // 拒绝一切共享：第二个进程 open 直接失败
         .open(&lock_path)
     {

@@ -371,7 +371,7 @@ main,
   position: relative;
   isolation: isolate;
   overflow: hidden;
-  padding-top: calc(var(--nav-h) + 116px);
+  padding-top: calc(var(--nav-h) + 56px);
   padding-bottom: 8px;
   text-align: center;
 }
@@ -411,59 +411,127 @@ main,
   z-index: 6;
 }
 
-.hero-eyebrow {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  font-weight: 500;
-  letter-spacing: 0.34em;
-  text-indent: 0.34em;
-  color: var(--muted);
-  text-transform: uppercase;
-  padding: 8px 18px 8px 12px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.03);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+/* 动画 Logo：粒子重构（canvas 绘制）+ 辉光 + 3D 倾斜环 */
+.hero-logo {
+  position: relative;
+  width: clamp(270px, 30vw, 370px);
+  aspect-ratio: 1;
+  margin: 0 auto;
+  perspective: 760px;
 }
 
-.hero-eyebrow-logo {
-  width: 18px;
-  height: 18px;
-  flex-shrink: 0;
-}
-
-.hero-title {
-  margin-top: 34px;
-  font-size: clamp(40px, 6.6vw, 86px);
-  font-weight: 700;
-  line-height: 1.12;
-  letter-spacing: 0.005em;
-  color: var(--fg);
-  text-wrap: balance;
-}
-
-.ht-line {
+.hl-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
   display: block;
 }
 
-.hero-title em {
-  font-family: var(--font-serif);
-  font-style: italic;
-  font-weight: 400;
-  font-size: 1.08em;
-  letter-spacing: 0;
-  color: transparent;
-  background: linear-gradient(100deg, #fff 10%, rgba(var(--glow-a), 0.95) 55%, rgba(var(--glow-b), 0.9) 90%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  padding-right: 0.06em;
+/* 禁用动效 / 无 canvas 时的静态兜底 */
+.hl-fallback {
+  display: none;
+  position: absolute;
+  inset: 24%;
+  width: 52%;
+  height: 52%;
+  filter: drop-shadow(0 0 26px rgba(var(--glow-a), 0.38));
 }
 
-/* 标题字符入场（由 JS 拆分） */
+.hl-glow {
+  position: absolute;
+  inset: -14%;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    rgba(var(--glow-a), 0.16),
+    rgba(var(--glow-b), 0.06) 46%,
+    transparent 68%
+  );
+  animation: hl-breathe 6.5s ease-in-out infinite;
+}
+
+@keyframes hl-breathe {
+  0%,
+  100% {
+    opacity: 0.65;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+}
+
+.hl-ring {
+  position: absolute;
+  inset: 13%;
+  border-radius: 50%;
+  border: 1px solid rgba(var(--glow-a), 0.2);
+  animation: hl-tilt-spin 16s linear infinite;
+}
+
+@keyframes hl-tilt-spin {
+  from {
+    transform: rotateX(72deg) rotate(0deg);
+  }
+  to {
+    transform: rotateX(72deg) rotate(360deg);
+  }
+}
+
+/* 平面虚线轨道（反向慢转） */
+.hl-orbit {
+  position: absolute;
+  inset: -2%;
+  border-radius: 50%;
+  border: 1px dashed rgba(255, 255, 255, 0.09);
+  animation: hl-spin 46s linear infinite reverse;
+}
+
+@keyframes hl-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 轨道卫星光点 */
+.hl-sat {
+  position: absolute;
+  top: -2.5px;
+  left: 50%;
+  margin-left: -2.5px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 12px 2px rgba(var(--glow-a), 0.9);
+}
+
+/* 小卫星钉在轨道左侧圆周点上，随轨道旋转 */
+.hl-sat-sm {
+  top: 50%;
+  left: -1.75px;
+  margin-left: 0;
+  margin-top: -1.75px;
+  width: 3.5px;
+  height: 3.5px;
+  box-shadow: 0 0 9px 2px rgba(var(--glow-b), 0.8);
+}
+
+/* RIOT 字标 */
+.hero-wordmark {
+  margin-top: 0;
+  font-size: clamp(32px, 4.2vw, 54px);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.22em;
+  text-indent: 0.22em;
+  color: var(--fg);
+  text-shadow: 0 0 60px rgba(var(--glow-a), 0.3);
+}
+
+/* 字标字符入场（由 JS 拆分） */
 .ht-ch {
   display: inline-block;
   opacity: 0;
@@ -475,22 +543,22 @@ main,
     filter 0.62s cubic-bezier(0.2, 0.6, 0.2, 1);
   transition-delay: var(--ch-delay, 0ms);
 }
-.hero-title.played .ht-ch {
+.hero-wordmark.played .ht-ch {
   opacity: 1;
   transform: translateY(0);
   filter: blur(0);
 }
 
 .hero-sub {
-  margin: 30px auto 0;
-  max-width: 600px;
-  font-size: clamp(15px, 1.8vw, 17px);
-  line-height: 1.95;
+  margin: 18px auto 0;
+  max-width: 560px;
+  font-size: clamp(15px, 1.8vw, 16.5px);
+  line-height: 1.9;
   color: var(--muted);
 }
 
 .hero-actions {
-  margin-top: 42px;
+  margin-top: 28px;
   display: flex;
   justify-content: center;
   align-items: center;
@@ -499,7 +567,7 @@ main,
 }
 
 .hero-meta {
-  margin-top: 18px;
+  margin-top: 14px;
   font-family: var(--font-mono);
   font-size: 12px;
   letter-spacing: 0.02em;
@@ -510,7 +578,7 @@ main,
 .hero-shot-wrap {
   position: relative;
   z-index: 6;
-  margin-top: 84px;
+  margin-top: 64px;
 }
 
 .hero-facts {
@@ -1566,6 +1634,12 @@ main,
   .hero-canvas {
     display: none;
   }
+  .hl-canvas {
+    display: none;
+  }
+  .hl-fallback {
+    display: block;
+  }
   .ht-ch {
     opacity: 1;
     transform: none;
@@ -1645,12 +1719,10 @@ main,
   }
 
   .hero {
-    padding-top: calc(var(--nav-h) + 72px);
+    padding-top: calc(var(--nav-h) + 40px);
   }
-  .hero-eyebrow {
-    letter-spacing: 0.18em;
-    text-indent: 0.18em;
-    font-size: 10.5px;
+  .hero-logo {
+    width: 256px;
   }
   .hero-shot-wrap {
     margin-top: 60px;

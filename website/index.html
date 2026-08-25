@@ -6,12 +6,12 @@
     <title>Riot — 跑在本机的 AI Agent</title>
     <meta
       name="description"
-      content="Riot 是本地桌面 AI Agent。模型走你自己的 API，工具在本机执行，写文件和跑命令默认先问再做。macOS 与 Windows 双平台。"
+      content="Riot 是跑在本机的 AI Agent：读代码、改文件、跑命令、出文档，每一步都在你眼前，动手之前先问你。macOS 与 Windows 双平台，免费且 MIT 开源。"
     />
     <meta property="og:title" content="Riot — 跑在本机的 AI Agent" />
     <meta
       property="og:description"
-      content="模型走你自己的 API，工具在本机执行，写文件和跑命令默认先问再做。"
+      content="读代码、改文件、跑命令、出文档，每一步都在你眼前，动手之前先问你。"
     />
     <meta property="og:type" content="website" />
     <link rel="icon" href="assets/riot-logo.png" />
@@ -87,24 +87,20 @@
         <div class="container hero-inner">
           <div class="hero-logo" data-reveal aria-hidden="true">
             <span class="hl-glow"></span>
-            <span class="hl-ring"><i class="hl-sat hl-sat-ring"></i></span>
-            <span class="hl-orbit hl-orbit-1"><i class="hl-sat"></i></span>
-            <span class="hl-orbit hl-orbit-2"><i class="hl-sat hl-sat-sm"></i></span>
-            <img class="hl-mark" src="assets/riot-logo.png" alt="" />
+            <canvas class="hl-canvas" id="logo-canvas"></canvas>
+            <span class="hl-ring"><i class="hl-sat"></i></span>
+            <span class="hl-orbit"><i class="hl-sat hl-sat-sm"></i></span>
+            <img class="hl-fallback" src="assets/riot-logo.png" alt="" />
           </div>
 
           <h1 class="hero-wordmark" id="hero-title" aria-label="Riot">RIOT</h1>
 
-          <p class="hero-tagline" data-reveal data-reveal-delay="2">
-            跑在本机的 <em>AI Agent</em>
-          </p>
-
-          <p class="hero-sub" data-reveal data-reveal-delay="3">
+          <p class="hero-sub" data-reveal data-reveal-delay="2">
             一个真正在你电脑上干活的 AI 助手——读代码、改文件、跑命令、出文档，
             每一步都在你眼前，动手之前先问你。
           </p>
 
-          <div class="hero-actions" data-reveal data-reveal-delay="4">
+          <div class="hero-actions" data-reveal data-reveal-delay="3">
             <a
               class="btn btn-primary btn-lg js-primary-download"
               href="#download"
@@ -116,7 +112,7 @@
             <a class="btn btn-ghost btn-lg" href="#download">全部下载选项</a>
           </div>
 
-          <p class="hero-meta" data-reveal data-reveal-delay="5">
+          <p class="hero-meta" data-reveal data-reveal-delay="4">
             <span id="hero-download-meta">macOS 与 Windows 双平台</span><span class="js-ver" hidden> · <span class="js-version"></span></span> · 免费且 MIT 开源
           </p>
         </div>
@@ -167,34 +163,34 @@
             <p class="eyebrow">01 / 产品</p>
             <h2>一扇窗口，把活干完</h2>
             <p class="section-sub">
-              Agent
-              读仓库、改代码、写文档、跑命令，全部发生在你的机器上，不把项目交到别人的云端执行环境。
+              打开项目，交代任务，等着验收。整个过程不离开你的电脑，代码和文件也不会被送去任何云端。
             </p>
           </div>
 
           <div class="pillars">
             <article class="pillar" data-reveal>
               <span class="pillar-num">01</span>
-              <h3>独立内核</h3>
-              <p class="pillar-tag">分进程 — 文档产物</p>
+              <h3>稳，是第一位的</h3>
+              <p class="pillar-tag">引擎独立 — 不丢会话</p>
               <p>
-                宿主与内核分进程，Agent 崩溃不拖垮窗口。Word / Excel / PPT / PDF
-                按需装运行时，渲成页面后再交付。
+                Agent 引擎独立于窗口运行，任务再重界面也不卡；就算它出了错，你的工作现场也完好无损。
               </p>
             </article>
             <article class="pillar" data-reveal data-reveal-delay="1">
               <span class="pillar-num">02</span>
-              <h3>权限与扩展</h3>
-              <p class="pillar-tag">先问再做 — 可插拔</p>
-              <p>Skills、斜杠命令、Hooks、MCP、项目记忆。权限默认询问，规划模式先写计划再动手。</p>
+              <h3>权限握在你手里</h3>
+              <p class="pillar-tag">先问再做 — 随时收回</p>
+              <p>
+                每一次写文件、每一条命令，默认都先经过你。信得过了，再一档一档放权。
+              </p>
             </article>
             <article class="pillar" data-reveal data-reveal-delay="2">
               <span class="pillar-num">03</span>
-              <h3>一体工作台</h3>
+              <h3>一个窗口就够了</h3>
               <p class="pillar-tag">对话 — 终端 — 浏览器</p>
               <p>
-                侧栏会话、流式对话、内嵌终端、内置浏览器、Git 改动面板。<code>@</code>
-                引用、拖放与粘贴附件。
+                对话、终端、浏览器、代码改动全在一处。拖个文件、<code>@</code>
+                一下就能把上下文交给它。
               </p>
             </article>
           </div>
@@ -208,8 +204,7 @@
             <p class="eyebrow">02 / 能力</p>
             <h2>交代任务，剩下的交给 Riot</h2>
             <p class="section-sub">
-              打开一个项目，用自然语言交代任务。Riot
-              会搜索、阅读、编辑、执行，并在需要你拍板时停下来。
+              用一句话说清楚你要什么。它自己查、自己做，拿不准的事，回来问你。
             </p>
           </div>
 
@@ -230,10 +225,10 @@
                   <path d="M8 13h8M8 17h5" />
                 </svg>
               </div>
-              <h3>Word、Excel、PPT、PDF，一个都不少</h3>
+              <h3>Word、Excel、PPT、PDF，直接交付</h3>
               <p>
-                表格走真实公式求值；Word / PPT / PDF 渲成页面图，模型逐页看过再交付。机器上不必预装
-                Python、Node 或 LibreOffice——装上文档运行时即可。
+                不止会写代码——报告、表格、幻灯片它都能直接产出：公式真实可算，版式自己逐页检查过才交给你。无需安装
+                Office，开箱即用。
               </p>
               <div class="file-badges" aria-hidden="true">
                 <span class="fb">DOCX</span>
@@ -258,8 +253,8 @@
                   <path d="m15.5 8.5-2 5-5 2 2-5z" />
                 </svg>
               </div>
-              <h3>规划后再动手</h3>
-              <p>规划模式只读侦察并写出计划，你批准后才改代码。</p>
+              <h3>先给方案，再动手</h3>
+              <p>复杂任务先出一份计划，你点头之后，它才会碰你的文件。</p>
               <ol class="plan-steps" aria-hidden="true">
                 <li>只读侦察</li>
                 <li>写出计划</li>
@@ -281,8 +276,8 @@
                   <path d="M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z" />
                 </svg>
               </div>
-              <h3>六档权限，随时切换</h3>
-              <p>默认档位每次询问；需要放开时，可限制命令只在工作区里改文件，或再掐掉联网。</p>
+              <h3>六档权限，收放自如</h3>
+              <p>从「每一步都问我」到「放手去干」，一键切换，随时反悔。</p>
               <div class="perm-pills" aria-hidden="true">
                 <span>每次询问</span><span>自动接受编辑</span><span>规划</span><span>自动判危</span
                 ><span>全部放行</span><span>无人值守</span>
@@ -304,11 +299,9 @@
                   <path d="m6 9 3 3-3 3M12 15h6" />
                 </svg>
               </div>
-              <h3>看见同一份环境</h3>
+              <h3>它做的每一步，你都看得见</h3>
               <p>
-                内嵌终端可共享给
-                Agent；内置浏览器与对话共用同一页，模型点、输、截图时你也能看见；右侧随时切到 Git
-                改动。
+                跑命令、打开网页、截图比对，全都发生在你眼前的终端和浏览器里——没有黑箱，改了什么随时可查。
               </p>
               <div class="terminal" aria-hidden="true">
                 <div class="terminal-bar">
@@ -354,10 +347,9 @@
                   <path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3" />
                 </svg>
               </div>
-              <h3>自带模型，key 不出本机</h3>
+              <h3>你的模型，你的 API</h3>
               <p>
-                OpenAI 兼容或 Anthropic Messages，DeepSeek、Kimi、Qwen、OpenRouter、vLLM、Ollama
-                都能接。API key 单独存在 <code>auth.json</code>（权限 0600），不进普通配置。
+                DeepSeek、Kimi、Qwen、OpenRouter、Ollama……接上你已有的模型服务就能开工。密钥加密存在本机，不经过任何中间服务器。
               </p>
             </article>
 
@@ -375,8 +367,10 @@
                   <path d="M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
                 </svg>
               </div>
-              <h3>改完即生效的扩展体系</h3>
-              <p>Skills、斜杠命令、Hooks、MCP、项目记忆。改完下一轮对话生效，不用重启。</p>
+              <h3>越用越懂你</h3>
+              <p>
+                自定义命令、技能包、项目记忆，让它记住你的项目和习惯；支持 MCP，接上你在用的工具生态。
+              </p>
               <div class="code-chips" aria-hidden="true">
                 <code>/git:pr</code><code>@src/App.tsx</code><code>$ARGUMENTS</code
                 ><code>SKILL.md</code>
@@ -391,23 +385,23 @@
         <div class="container security-grid">
           <div class="security-copy" data-reveal>
             <p class="eyebrow">03 / 设计原则</p>
-            <h2>默认不信任工具，<br />也不把执行权交给远端</h2>
+            <h2>你的代码，<br />不离开你的电脑</h2>
             <ul class="principles">
               <li>
-                <h4>本地执行</h4>
-                <p>读仓库、改文件、跑命令都在本机。云端只发生在你配置的模型 API。</p>
+                <h4>一切都在本地</h4>
+                <p>读写文件、执行命令，全部发生在你的机器上。唯一出门的流量，是发给你自己选的模型服务。</p>
               </li>
               <li>
-                <h4>Fail-closed</h4>
-                <p>工具默认会写、默认需要权限；shell 解析不了就问人。</p>
+                <h4>先问，再动手</h4>
+                <p>写入和执行，默认都要你点头。拿不准的操作，它宁可多问一句，也不自作主张。</p>
               </li>
               <li>
-                <h4>崩溃隔离</h4>
-                <p>内核是独立进程。Agent 卡住或崩溃时，窗口还能提示重启，不会整窗一起掉。</p>
+                <h4>崩了也不丢东西</h4>
+                <p>Agent 引擎独立运行，就算出了问题，窗口照常工作，会话随时找得回来。</p>
               </li>
               <li>
-                <h4>错误回到对话</h4>
-                <p>工具失败会作为结果喂回模型，让它自己纠正，而不是把主循环打断。</p>
+                <h4>出错，自己纠正</h4>
+                <p>命令失败了，它会读懂报错、换个思路再来，而不是停在原地等你救场。</p>
               </li>
             </ul>
           </div>
@@ -443,7 +437,7 @@
         <div class="container">
           <div class="section-head section-head-center" data-reveal>
             <p class="eyebrow">04 / 下载</p>
-            <h2>把 Agent，请回本机</h2>
+            <h2>现在，请它上机</h2>
             <p class="section-sub" id="download-detect">
               macOS 与 Windows 双平台，免费且 MIT 开源。
             </p>
@@ -462,8 +456,7 @@
               <h3>macOS 版</h3>
               <p class="dl-req">macOS 12+ · Apple Silicon 与 Intel</p>
               <p class="dl-desc">
-                下载 .dmg，拖进「应用程序」即可。首次启动选择项目目录，在设置里粘贴 API key
-                就能对话。
+                拖进「应用程序」就能用。填上你的 API key，一分钟内开始第一段对话。
               </p>
               <a
                 class="btn btn-primary btn-block js-dl-mac"
@@ -487,8 +480,7 @@
               <h3>Windows 版</h3>
               <p class="dl-req">Windows 10 / 11 · x64</p>
               <p class="dl-desc">
-                NSIS
-                安装包，下一步到底即可。同样首发全部能力：终端、浏览器、文档运行时与权限管线。
+                标准安装向导，一路下一步。全部能力与 macOS 版完全一致。
               </p>
               <a
                 class="btn btn-primary btn-block js-dl-win"

@@ -262,6 +262,273 @@ function initHeroTitle () {
 }
 
 /**
+ * 动画 Logo：参考产品 logo 用 canvas 粒子重构（Canvas UI「Particle Object」思路）。
+ * 采样 logo 像素生成粒子点阵：花瓣主体为冷蓝紫粒子，字母 R 为亮白粒子。
+ * 粒子带呼吸漂移与闪烁，鼠标靠近被推开，移开后弹性归位；入场时从四散汇聚成形。
+ */
+function initParticleLogo () {
+  const canvas = document.getElementById("logo-canvas");
+  const hero = document.getElementById("hero");
+  if (!canvas || !hero || reduceMotion) return;
+
+  const showFallback = () => {
+    canvas.style.display = "none";
+    const fallback = canvas.parentElement.querySelector(".hl-fallback");
+    if (fallback) fallback.style.display = "block";
+  };
+
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    showFallback();
+    return;
+  }
+
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const BODY_COLORS = ["132,152,220", "158,170,240", "182,172,250", "112,132,198"];
+  const REPEL_RADIUS = 64;
+  const REPEL_FORCE = 4.6;
+
+  let W = 0;
+  let H = 0;
+  let particles = [];
+  let running = false;
+  let built = false;
+  let revealStart = 0;
+  let mouseX = -9999;
+  let mouseY = -9999;
+
+  const img = new Image();
+  img.src = "assets/riot-logo.png";
+
+  const resize = () => {
+    const rect = canvas.getBoundingClientRect();
+    W = Math.max(1, rect.width);
+    H = Math.max(1, rect.height);
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  };
+
+  /** 采样 logo 像素，生成粒子锚点 */
+  const build = () => {
+    resize();
+    particles = [];
+
+    const logoSize = Math.max(40, Math.round(Math.min(W, H) * 0.56));
+    const off = document.createElement("canvas");
+    off.width = logoSize;
+    off.height = logoSize;
+    const octx = off.getContext("2d", { willReadFrequently: true });
+    octx.drawImage(img, 0, 0, logoSize, logoSize);
+
+    let data;
+    try {
+      data = octx.getImageData(0, 0, logoSize, logoSize).data;
+    } catch {
+      return; // 极端环境（file:// 且被视为跨域）下放弃粒子，兜底静态图
+    }
+
+    const idx = (x, y) => (y * logoSize + x) * 4;
+    const lumAt = (x, y) => {
+      const i = idx(x, y);
+      return 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    };
+
+    // 判断图片是否带透明背景
+    let transparentCount = 0;
+    let sampled = 0;
+    for (let i = 3; i < data.length; i += 4 * 89) {
+      sampled += 1;
+      if (data[i] < 10) transparentCount += 1;
+    }
+    const hasAlpha = transparentCount > sampled * 0.08;
+
+    // 白底图：按行/列统计暗像素范围，用于区分「背景白」与「形状内部的白（字母）」
+    const DARK = 130;
+    const LIGHT = 195;
+    let rowMin, rowMax, colMin, colMax;
+    if (!hasAlpha) {
+      rowMin = new Int16Array(logoSize).fill(logoSize);
+      rowMax = new Int16Array(logoSize).fill(-1);
+      colMin = new Int16Array(logoSize).fill(logoSize);
+      colMax = new Int16Array(logoSize).fill(-1);
+      for (let y = 0; y < logoSize; y++) {
+        for (let x = 0; x < logoSize; x++) {
+          if (lumAt(x, y) < DARK) {
+            if (x < rowMin[y]) rowMin[y] = x;
+            if (x > rowMax[y]) rowMax[y] = x;
+            if (y < colMin[x]) colMin[x] = y;
+            if (y > colMax[x]) colMax[x] = y;
+          }
+        }
+      }
+    }
+
+    /** 'body' | 'letter' | null */
+    const classify = (x, y) => {
+      const lum = lumAt(x, y);
+      if (hasAlpha) {
+        if (data[idx(x, y) + 3] < 120) return null;
+        return lum >= LIGHT ? "letter" : "body";
+      }
+      if (lum < DARK) return "body";
+      if (lum >= LIGHT) {
+        // 形状内部的亮像素（左右上下都被暗像素包住）→ 字母
+        const inRow = x > rowMin[y] + 2 && x < rowMax[y] - 2;
+        const inCol = y > colMin[x] + 2 && y < colMax[x] - 2;
+        if (inRow && inCol) return "letter";
+      }
+      return null;
+    };
+
+    const step = Math.max(2, Math.round(logoSize / 66));
+    const offX = (W - logoSize) / 2;
+    const offY = (H - logoSize) / 2;
+
+    for (let y = 0; y < logoSize; y += step) {
+      for (let x = 0; x < logoSize; x += step) {
+        const kind = classify(x, y);
+        if (!kind) continue;
+
+        const hx = offX + x;
+        const hy = offY + y;
+        const angle = Math.random() * Math.PI * 2;
+        const dist = 50 + Math.random() * 130;
+        const letter = kind === "letter";
+
+        particles.push({
+          hx,
+          hy,
+          x: hx + Math.cos(angle) * dist,
+          y: hy + Math.sin(angle) * dist,
+          vx: 0,
+          vy: 0,
+          size: letter ? 1.7 + Math.random() * 1.1 : 1.1 + Math.random() * 1.1,
+          color: letter
+            ? "rgb(244,247,255)"
+            : `rgb(${BODY_COLORS[(Math.random() * BODY_COLORS.length) | 0]})`,
+          alpha: letter ? 0.85 + Math.random() * 0.15 : 0.3 + Math.random() * 0.4,
+          spring: 0.045 + Math.random() * 0.05,
+          phase: Math.random() * Math.PI * 2,
+          speed: 0.35 + Math.random() * 0.75,
+          twinkle: Math.random() < 0.14,
+        });
+      }
+    }
+
+    built = particles.length > 0;
+  };
+
+  const render = (t) => {
+    if (!running || document.hidden) return;
+
+    const time = t * 0.001;
+    if (!revealStart) revealStart = t;
+    const reveal = Math.min(1, (t - revealStart) / 1500);
+
+    ctx.clearRect(0, 0, W, H);
+
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+
+      // 呼吸漂移的锚点
+      const ix = p.hx + Math.sin(time * p.speed + p.phase) * 0.8;
+      const iy = p.hy + Math.cos(time * p.speed * 0.9 + p.phase * 1.7) * 0.8;
+
+      // 弹性归位
+      p.vx += (ix - p.x) * p.spring;
+      p.vy += (iy - p.y) * p.spring;
+
+      // 鼠标排斥
+      const dx = p.x - mouseX;
+      const dy = p.y - mouseY;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < REPEL_RADIUS * REPEL_RADIUS) {
+        const d = Math.sqrt(d2) || 1;
+        const f = (1 - d / REPEL_RADIUS) * REPEL_FORCE;
+        p.vx += (dx / d) * f;
+        p.vy += (dy / d) * f;
+      }
+
+      p.vx *= 0.86;
+      p.vy *= 0.86;
+      p.x += p.vx;
+      p.y += p.vy;
+
+      let a = p.alpha * reveal;
+      if (p.twinkle) a *= 0.55 + 0.45 * Math.sin(time * 2.4 + p.phase * 3.1);
+
+      ctx.globalAlpha = a;
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+    }
+
+    ctx.globalAlpha = 1;
+    requestAnimationFrame(render);
+  };
+
+  const start = () => {
+    if (running || !built) return;
+    running = true;
+    requestAnimationFrame(render);
+  };
+
+  const stop = () => {
+    running = false;
+  };
+
+  const onPointer = (event) => {
+    const rect = canvas.getBoundingClientRect();
+    mouseX = event.clientX - rect.left;
+    mouseY = event.clientY - rect.top;
+  };
+
+  img.onerror = showFallback;
+
+  img.onload = () => {
+    build();
+    if (!built) {
+      showFallback();
+      return;
+    }
+    start();
+
+    hero.addEventListener("pointermove", onPointer, { passive: true });
+    hero.addEventListener("pointerleave", () => {
+      mouseX = -9999;
+      mouseY = -9999;
+    });
+
+    let resizeTimer = 0;
+    window.addEventListener(
+      "resize",
+      () => {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(build, 200);
+      },
+      { passive: true }
+    );
+
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) start();
+    });
+
+    if ("IntersectionObserver" in window) {
+      const observer = new IntersectionObserver(
+        (entries) => {
+          entries.forEach((entry) => {
+            if (entry.isIntersecting) start();
+            else stop();
+          });
+        },
+        { threshold: 0.01 }
+      );
+      observer.observe(canvas);
+    }
+  };
+}
+
+/**
  * Hero 背景：极光光丝 shader（vanilla WebGL，无依赖）。
  * 三条 fbm 扰动的冷色光带缓慢流动，指针带轻微视差；
  * canvas 用 mix-blend-mode: screen 叠在纯黑底上。
@@ -550,6 +817,7 @@ initNav();
 initMobileMenu();
 initReveal();
 initHeroTitle();
+initParticleLogo();
 initAuroraShader();
 initInteractiveHover();
 initYear();
