@@ -243,7 +243,7 @@ fn strip_for_summary(messages: &[Message]) -> Vec<Message> {
                         AssistantContent::Thinking { .. } => None,
                     })
                     .collect(),
-                usage: usage.clone(),
+                usage: *usage,
                 meta: meta.clone(),
             },
             other => other.clone(),
