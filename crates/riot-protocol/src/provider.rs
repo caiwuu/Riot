@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::event::StreamDelta;
-use crate::message::{Message, Usage};
+use crate::message::{Attachment, Message, ToolResultContent, Usage, UserContent};
 
 pub type ProviderStream = Pin<Box<dyn Stream<Item = ProviderEvent> + Send>>;
 
@@ -38,6 +38,10 @@ pub trait Provider: Send + Sync {
     /// 十万的时候，其中四成多是根本不会发出去的图片 base64。代价是用户在
     /// 实际只用掉一半窗口的时候就被压一次，而每次压缩都是一次有损的历史
     /// 改写加一次真实的模型调用。
+    ///
+    /// `[约束]` 但**进了请求的图片按张算，不按 base64 的字节算** —— 见
+    /// [`estimate_image_tokens`] 与 [`wire_images`]。上面那条只管住了"不该
+    /// 发的别算"，而真发出去的图如果跟着走字节口径，一张就够顶穿阈值。
     fn count_tokens(&self, messages: &[Message]) -> u32;
 }
 
@@ -62,6 +66,88 @@ pub const fn estimate_tokens(bytes: usize) -> u32 {
     } else {
         t as u32
     }
+}
+
+/// 一张进了请求的图片折多少 token。
+///
+/// `[约束]` 图片**不能**走 [`estimate_tokens`]。模型按像素给图片计费，和
+/// base64 的长度没有关系，而 base64 每 3 字节原始数据要涨成 4 个字符 ——
+/// 一张 100 KB 的 JPEG 按字节折算是 33,000 token，它真实只值一千多。后果
+/// 不是"多留了点余量"：两三张图就能顶穿压缩阈值，于是每一轮开工前都先做
+/// 一次全量总结，而那是一次真实的模型调用加一次有损的历史改写。
+///
+/// 取值:产出方统一把图压到 115 万像素（`riot-tools` 的 `shrink` 模块）之后，
+/// Anthropic 的 `(宽×高)/750` 口径约 1533，OpenAI 的 32×32 patch 口径约 1123。
+/// 取 1600 比两家都高一点 —— 和 [`BYTES_PER_TOKEN`] 一样宁可偏保守，只是
+/// 这里的"保守"该按几成算，不是按几十倍。
+const IMAGE_TOKENS: u32 = 1_600;
+
+/// 图片张数 → token 估算。
+#[must_use]
+pub const fn estimate_image_tokens(count: u32) -> u32 {
+    count.saturating_mul(IMAGE_TOKENS)
+}
+
+/// 会真发给模型的图片:张数，以及它们的 base64 在报文里占的字节数。
+///
+/// 两个返回值是配套用的:把 base64 的字节数从报文长度里扣掉，再按张加回
+/// [`estimate_image_tokens`]。只给张数的话调用方没法扣，扣不掉就还是字节口径。
+///
+/// `[约束]` 判据是**协议语义**而不是线格式 —— `DescribedImage` 那张图只给
+/// 界面看，两家 provider 都不会发（见 [`ToolResultContent`]）。所以这个函数
+/// 放在这里给两家共用:各写一遍的话，一边改了另一边不会报错，只会表现成
+/// 压缩时机变得莫名其妙，而那正是 [`Provider::count_tokens`] 上两条约束
+/// 反复强调的那种偏差。
+#[must_use]
+pub fn wire_images(messages: &[Message]) -> (u32, usize) {
+    let mut count = 0u32;
+    let mut bytes = 0usize;
+    for m in messages {
+        // System 不进请求，Assistant 产不出图 —— 只有 user 消息带图。
+        let Message::User { content, .. } = m else {
+            continue;
+        };
+        for c in content {
+            // 穷尽匹配而不是 `_`:日后新增一个带图的变体，这里必须编译不过。
+            // 漏掉的表现是它的 base64 悄悄回到字节口径，没有任何报错。
+            let data = match c {
+                UserContent::ToolResult {
+                    content:
+                        ToolResultContent::Image { data, .. }
+                        | ToolResultContent::MarkedImage { data, .. },
+                    ..
+                }
+                | UserContent::Attachment(Attachment::Image { data, .. }) => data,
+
+                // 视觉兼容路径:模型收到的是转述文字，base64 不出报文。
+                UserContent::ToolResult {
+                    content: ToolResultContent::DescribedImage { .. },
+                    ..
+                }
+                | UserContent::Attachment(Attachment::DescribedImage { .. }) => continue,
+
+                // 不带图的:正文、落盘预览、清理占位符、各类文件与提醒附件。
+                UserContent::Text { .. }
+                | UserContent::ToolResult {
+                    content:
+                        ToolResultContent::Text { .. }
+                        | ToolResultContent::Spilled { .. }
+                        | ToolResultContent::Cleared,
+                    ..
+                }
+                | UserContent::Attachment(
+                    Attachment::Memory { .. }
+                    | Attachment::RestoredFile { .. }
+                    | Attachment::UserFile { .. }
+                    | Attachment::Environment { .. }
+                    | Attachment::SystemReminder { .. },
+                ) => continue,
+            };
+            count = count.saturating_add(1);
+            bytes = bytes.saturating_add(data.len());
+        }
+    }
+    (count, bytes)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -296,5 +382,67 @@ mod tests {
             .is_recoverable(),
             "认证失败重试一百次也不会成功"
         );
+    }
+
+    /// 图片按张计价的地基:只数会发出去的图。
+    ///
+    /// Image / MarkedImage / 用户附图要计数并累计 base64 长度（调用方靠它
+    /// 从报文字节里扣掉）；转述路径（DescribedImage）的 base64 不出报文，
+    /// 一张都不能算 —— 算了就回到"凭空多出几万 token"的老问题。
+    #[test]
+    fn wire_images_只数会发出去的图() {
+        use crate::id::{MessageId, ToolUseId};
+        use crate::message::MessageMeta;
+
+        let b64 = "A".repeat(100_000);
+        let tool_result = |content: ToolResultContent| UserContent::ToolResult {
+            tool_use_id: ToolUseId::from_raw("t1"),
+            content,
+            is_error: false,
+        };
+        let messages = vec![Message::User {
+            id: MessageId::from_raw("u1"),
+            content: vec![
+                tool_result(ToolResultContent::Image {
+                    media_type: "image/jpeg".into(),
+                    data: b64.clone(),
+                    path: None,
+                }),
+                tool_result(ToolResultContent::MarkedImage {
+                    media_type: "image/jpeg".into(),
+                    data: b64.clone(),
+                    path: None,
+                    text: "编号清单".into(),
+                }),
+                UserContent::Attachment(Attachment::Image {
+                    media_type: "image/png".into(),
+                    data: b64.clone(),
+                }),
+                // 下面两个是转述路径:图只给界面，不该计。
+                tool_result(ToolResultContent::DescribedImage {
+                    media_type: "image/jpeg".into(),
+                    data: b64.clone(),
+                    path: None,
+                    text: "转述".into(),
+                }),
+                UserContent::Attachment(Attachment::DescribedImage {
+                    media_type: "image/png".into(),
+                    data: b64.clone(),
+                    text: "转述".into(),
+                }),
+            ],
+            meta: MessageMeta::default(),
+        }];
+
+        assert_eq!(wire_images(&messages), (3, b64.len() * 3));
+    }
+
+    /// 回归:字节口径下一张 200 KB 的预览图折五万 token，三四张就顶穿
+    /// 100k 的默认压缩阈值，每轮开工前都白做一次全量总结。按张计价后
+    /// 几十张也到不了阈值的一半。
+    #[test]
+    fn 图片按张计价顶不穿压缩阈值() {
+        assert!(estimate_image_tokens(1) < 10_000, "单张图是千级成本");
+        assert!(estimate_image_tokens(20) < 100_000 / 2);
     }
 }

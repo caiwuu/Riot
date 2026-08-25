@@ -420,6 +420,61 @@ fn 转述图的_base64_不计入估算() {
     assert!(with_image < 200, "只该剩下那句转述：{with_image} 字节");
 }
 
+/// 真视觉路径下的图片按张计价:base64 要能从报文字节里**精确**扣掉。
+///
+/// `count_tokens` 的公式是 `estimate_tokens(wire_bytes - b64) + 按张成本`。
+/// 扣减靠"base64 在报文里原样出现一次"这个前提 —— base64 字符集不含需要
+/// JSON 转义的字符。差一个字节都说明它被转义或者出现了两次，那时扣减
+/// 失效，图片就悄悄回到字节口径（一张 200 KB 的图折五万 token，两三张
+/// 顶穿压缩阈值，正是这组测试盯着的"压缩来得太早"）。
+#[test]
+fn 视觉图的_base64_能从报文字节里精确扣掉() {
+    let with_image = |content: ToolResultContent| {
+        vec![Message::User {
+            id: MessageId::from_raw("u1"),
+            content: vec![UserContent::ToolResult {
+                tool_use_id: ToolUseId::from_raw("call_1"),
+                content,
+                is_error: false,
+            }],
+            meta: MessageMeta::default(),
+        }]
+    };
+    let image = |data: String| {
+        with_image(ToolResultContent::Image {
+            media_type: "image/jpeg".into(),
+            data,
+            path: None,
+        })
+    };
+    let marked = |data: String| {
+        with_image(ToolResultContent::MarkedImage {
+            media_type: "image/jpeg".into(),
+            data,
+            path: None,
+            text: "编号清单".into(),
+        })
+    };
+
+    // 用合法 base64 字符集造两种大小的图
+    let small = "QUFBQQ==".repeat(100);
+    let large = "QUFBQQ==".repeat(50_000);
+
+    for (name, msgs_of) in [
+        ("Image", &image as &dyn Fn(String) -> Vec<Message>),
+        ("MarkedImage", &marked),
+    ] {
+        let (n_small, b_small) = riot_protocol::provider::wire_images(&msgs_of(small.clone()));
+        let (n_large, b_large) = riot_protocol::provider::wire_images(&msgs_of(large.clone()));
+        assert_eq!((n_small, n_large), (1, 1), "{name} 该数出一张图");
+        assert_eq!(
+            wire_bytes(&msgs_of(small.clone())) - b_small,
+            wire_bytes(&msgs_of(large.clone())) - b_large,
+            "{name} 扣掉 base64 后剩的只有固定结构，不该随图片大小变"
+        );
+    }
+}
+
 /// 思考内容不占预算 —— 它按协议要求根本不回传（见 `思考内容不回传`）。
 #[test]
 fn 思考内容不计入估算() {

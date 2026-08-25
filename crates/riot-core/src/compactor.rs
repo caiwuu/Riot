@@ -50,7 +50,7 @@ impl Compactor for ClearOldResults {
         let cutoff = messages.len().saturating_sub(self.keep_recent);
 
         let mut cleared = 0usize;
-        let mut freed_bytes = 0usize;
+        let mut freed_tokens = 0u32;
 
         let out: Vec<Message> = messages
             .into_iter()
@@ -79,7 +79,8 @@ impl Compactor for ClearOldResults {
                                         };
                                     }
                                     cleared += 1;
-                                    freed_bytes += result_bytes(&content);
+                                    freed_tokens =
+                                        freed_tokens.saturating_add(result_tokens(&content));
                                     UserContent::ToolResult {
                                         tool_use_id,
                                         content: ToolResultContent::Cleared,
@@ -105,12 +106,12 @@ impl Compactor for ClearOldResults {
             };
         }
 
-        // 换算走 protocol 里那个共享函数 —— 和 Provider::count_tokens 同一个
-        // 口径。各写一遍 `/ 4` 会漂移，而漂移的表现是"压缩后仍然超预算"这个
-        // 判断时对时错。
-        let after = before.saturating_sub(riot_protocol::provider::estimate_tokens(freed_bytes));
+        // 换算在 result_tokens 里走 protocol 那两个共享函数 —— 和
+        // Provider::count_tokens 同一个口径。各写一遍会漂移，而漂移的表现是
+        // "压缩后仍然超预算"这个判断时对时错。
+        let after = before.saturating_sub(freed_tokens);
 
-        tracing::info!(cleared, freed_bytes, before, after, "清理了旧工具结果");
+        tracing::info!(cleared, freed_tokens, before, after, "清理了旧工具结果");
 
         CompactResult::Compacted {
             messages: out,
@@ -212,16 +213,25 @@ impl Compactor for Layered {
     }
 }
 
-fn result_bytes(c: &ToolResultContent) -> usize {
+/// 清掉这个结果能省下多少 token。
+///
+/// `[约束]` 和 [`riot_protocol::provider::Provider::count_tokens`] 同一个口径:
+/// 文本按字节折算，图片按张（[`riot_protocol::provider::estimate_image_tokens`]）。
+/// 图按 base64 长度算的话这里会虚报几十倍，而 [`Layered`] 正是拿它推出来的
+/// `after_tokens` 跟 `target_tokens` 比，来决定够不够、要不要升级到总结。
+fn result_tokens(c: &ToolResultContent) -> u32 {
+    use riot_protocol::provider::{estimate_image_tokens, estimate_tokens};
     match c {
-        ToolResultContent::Text { text } => text.len(),
-        ToolResultContent::Spilled { preview, .. } => preview.len(),
-        ToolResultContent::Image { data, .. } => data.len(),
+        ToolResultContent::Text { text } => estimate_tokens(text.len()),
+        ToolResultContent::Spilled { preview, .. } => estimate_tokens(preview.len()),
+        ToolResultContent::Image { .. } => estimate_image_tokens(1),
         // 模型只收到转述文字（provider 不发图），上下文占用按文字算。
         // 图片的 base64 只活在本地 transcript 里，不占模型预算。
-        ToolResultContent::DescribedImage { text, .. } => text.len(),
-        // 模型两路都收:图（data）+ 编号清单（text），都算进预算。
-        ToolResultContent::MarkedImage { data, text, .. } => data.len() + text.len(),
+        ToolResultContent::DescribedImage { text, .. } => estimate_tokens(text.len()),
+        // 模型两路都收:图 + 编号清单，都算进预算。图按张，不按 base64 长度。
+        ToolResultContent::MarkedImage { text, .. } => {
+            estimate_image_tokens(1) + estimate_tokens(text.len())
+        }
         ToolResultContent::Cleared => 0,
     }
 }
@@ -519,5 +529,50 @@ mod tests {
             panic!("应该成功");
         };
         assert!(after_tokens < before_tokens);
+    }
+
+    /// 钉住图片的口径:清掉一张图省下的是"按张计价"的那份，不是它 base64
+    /// 长度的四分之一。按字节算会虚报几十倍的降幅，[`Layered`] 拿虚高的
+    /// `after_tokens` 一比 `target_tokens` 就误判"清够了"，该升级总结时
+    /// 不升级 —— 下一次请求照样溢出。
+    #[tokio::test]
+    async fn 清掉图片按张计不按字节() {
+        let msgs = vec![Message::User {
+            id: MessageId::from_raw("u0"),
+            content: vec![UserContent::ToolResult {
+                tool_use_id: ToolUseId::from_raw("t0"),
+                content: ToolResultContent::Image {
+                    media_type: "image/jpeg".into(),
+                    // 字节口径下这张图会虚报出 10 万 token 的"节省"
+                    data: "A".repeat(400_000),
+                    path: None,
+                },
+                is_error: false,
+            }],
+            meta: MessageMeta::default(),
+        }];
+
+        let CompactResult::Compacted {
+            before_tokens,
+            after_tokens,
+            ..
+        } = ClearOldResults::keeping(0)
+            .compact(
+                msgs,
+                CompactBudget {
+                    target_tokens: 100,
+                    current_tokens: 200_000,
+                },
+            )
+            .await
+        else {
+            panic!("应该压缩成功");
+        };
+
+        assert_eq!(
+            before_tokens - after_tokens,
+            riot_protocol::provider::estimate_image_tokens(1),
+            "降幅该是一张图的按张成本"
+        );
     }
 }

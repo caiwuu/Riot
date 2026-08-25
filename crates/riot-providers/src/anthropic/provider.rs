@@ -250,7 +250,12 @@ impl Provider for AnthropicProvider {
         // 但那是一次额外的网络往返 —— 只在压缩决策临界时才值得。
         //
         // 量的是**发出去的那份**，见 trait 上那条约束。
-        riot_protocol::provider::estimate_tokens(wire_bytes(messages))
+        //
+        // 图片按张计价：先把它的 base64 从报文长度里扣掉，再按张加回来。
+        // 不扣就还是字节口径，而那个口径下一张图能报出几万 token。
+        let (images, b64) = riot_protocol::provider::wire_images(messages);
+        riot_protocol::provider::estimate_tokens(wire_bytes(messages).saturating_sub(b64))
+            + riot_protocol::provider::estimate_image_tokens(images)
     }
 }
 
