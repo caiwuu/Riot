@@ -1,0 +1,326 @@
+import { useRef, useState } from "react";
+
+import {
+  type ConfigStatus,
+  type PermissionMode,
+  type SandboxMode,
+  setConfig,
+} from "../../bridge";
+import { FieldNumber } from "../FieldNumber";
+import { HintTip } from "../HintTip";
+import { type AskConfirm, FormError, blurOnEnter } from "./shared";
+
+/** 和宿主侧 config::normalize 的夹紧区间保持一致。 */
+const MIN_TIMEOUT = 5;
+const MAX_TIMEOUT = 3600;
+const MIN_TURNS = 1;
+const MAX_TURNS = 1000;
+const DEFAULT_TURNS = 48;
+/** 和宿主的 MIN/MAX_COMPACT_THRESHOLD 一致。 */
+const MIN_COMPACT_AT = 8_000;
+const MAX_COMPACT_AT = 1_000_000;
+const DEFAULT_COMPACT_AT = 100_000;
+
+const SANDBOX_MODES: { id: SandboxMode; name: string; desc: string; danger?: boolean }[] = [
+  {
+    id: "workspaceWrite",
+    name: "隔离（推荐）",
+    desc: "只能改工作区和构建缓存，读和联网不受限。",
+  },
+  {
+    id: "workspaceWriteNoNet",
+    name: "隔离并断网",
+    desc: "另外掐掉命令的网络。npm、cargo 拉依赖会失败。",
+  },
+  {
+    id: "off",
+    name: "不隔离",
+    desc: "命令能改任何文件，只剩规则判断拦着。",
+    danger: true,
+  },
+];
+
+const MODES: { id: PermissionMode; name: string; desc: string; danger?: boolean }[] = [
+  { id: "default", name: "每次询问", desc: "写文件、执行命令前询问。" },
+  { id: "acceptEdits", name: "自动接受编辑", desc: "文件修改放行，命令仍询问。" },
+  {
+    id: "plan",
+    name: "规划模式",
+    desc: "只读侦察并产出计划，批准后才动手。",
+  },
+  {
+    id: "auto",
+    name: "自动判危",
+    // 不写"自动放行安全操作"就完了 —— 用户会以为它替他做了全部判断。
+    // 要点出两件事：靠的是小模型（所以要配便宜档），以及它压不过安全检查。
+    desc: "小模型先判一遍，明确安全的不再问；安全检查与你写的规则仍然拦。需要配「子 agent 便宜档」。",
+  },
+  {
+    id: "bypassPermissions",
+    name: "全部放行",
+    // 必须点出"仍会拦"。写成"所有操作不再询问"是假承诺：用户照着这句话
+    // 挂机走人，回来发现任务停在一个弹窗上。
+    desc: "常规操作不再询问，危险操作仍会拦。",
+    danger: true,
+  },
+  {
+    id: "unattended",
+    name: "无人值守",
+    desc: "全部放行，包括危险操作。仅限一次性环境。",
+    danger: true,
+  },
+];
+
+export function PermissionPane({
+  status,
+  onStatus,
+  askConfirm,
+  onSaved,
+}: {
+  status: ConfigStatus;
+  onStatus: (s: ConfigStatus) => void;
+  askConfirm: AskConfirm;
+  onSaved: () => void;
+}) {
+  const [error, setError] = useState("");
+  const current = status.config.defaultMode ?? "default";
+  // 编辑期间存字符串：绑成 number 的话，用户删到空输入框会立刻变成 0，
+  // 而 0 在这里的含义是"每个弹窗瞬间超时"。等失焦再解析并夹紧。
+  const [timeout, setTimeout_] = useState(String(status.config.askTimeoutSecs));
+  // 轮数默认 48，老配置里可能没有这个字段（后端有默认，但前端要兜一下）。
+  const [turns, setTurns] = useState(String(status.config.maxTurns ?? DEFAULT_TURNS));
+  const [compactAt, setCompactAt] = useState(
+    String(status.config.compactThresholdTokens ?? DEFAULT_COMPACT_AT),
+  );
+
+  // 夹紧发生时在字段旁说一声 —— 不说的话，99999 无声变 3600 像是输入被吞了。
+  const [clamp, setClamp] = useState<{ key: string; text: string } | null>(null);
+  const clampTimer = useRef(0);
+  const noteClamp = (key: string, raw: number, v: number) => {
+    if (raw === v) return;
+    setClamp({ key, text: raw > v ? `已调整为最大值 ${v}` : `已调整为最小值 ${v}` });
+    window.clearTimeout(clampTimer.current);
+    clampTimer.current = window.setTimeout(() => setClamp(null), 2500);
+  };
+
+  const saved = (s: ConfigStatus) => {
+    onStatus(s);
+    onSaved();
+  };
+
+  const commitTimeout = () => {
+    const n = Number.parseInt(timeout, 10);
+    const v = Number.isFinite(n) ? Math.min(Math.max(n, MIN_TIMEOUT), MAX_TIMEOUT) : status.config.askTimeoutSecs;
+    if (Number.isFinite(n)) noteClamp("timeout", n, v);
+    setTimeout_(String(v));
+    if (v === status.config.askTimeoutSecs) return;
+    setError("");
+    setConfig({ ...status.config, askTimeoutSecs: v })
+      .then(saved)
+      .catch((e: unknown) => setError(String(e)));
+  };
+
+  const commitTurns = () => {
+    const cur = status.config.maxTurns ?? DEFAULT_TURNS;
+    const n = Number.parseInt(turns, 10);
+    const v = Number.isFinite(n) ? Math.min(Math.max(n, MIN_TURNS), MAX_TURNS) : cur;
+    if (Number.isFinite(n)) noteClamp("turns", n, v);
+    setTurns(String(v));
+    if (v === cur) return;
+    setError("");
+    setConfig({ ...status.config, maxTurns: v })
+      .then(saved)
+      .catch((e: unknown) => setError(String(e)));
+  };
+
+  const commitCompactAt = () => {
+    const cur = status.config.compactThresholdTokens ?? DEFAULT_COMPACT_AT;
+    const n = Number.parseInt(compactAt, 10);
+    const v = Number.isFinite(n) ? Math.min(Math.max(n, MIN_COMPACT_AT), MAX_COMPACT_AT) : cur;
+    if (Number.isFinite(n)) noteClamp("compactAt", n, v);
+    setCompactAt(String(v));
+    if (v === cur) return;
+    setError("");
+    setConfig({ ...status.config, compactThresholdTokens: v })
+      .then(saved)
+      .catch((e: unknown) => setError(String(e)));
+  };
+
+  const apply = async (mode: PermissionMode) => {
+    setError("");
+    try {
+      saved(await setConfig({ ...status.config, defaultMode: mode }));
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const sandbox = status.config.sandbox ?? "workspaceWrite";
+  const pickSandbox = (mode: SandboxMode) => {
+    // 关沙箱要确认一次。它和"无人值守"是同一类决定：关掉之后唯一挡在
+    // 危险命令前面的就只剩规则判断了，而判断是会错的。
+    const commit = () => {
+      setError("");
+      setConfig({ ...status.config, sandbox: mode })
+        .then(saved)
+        .catch((e: unknown) => setError(String(e)));
+    };
+    if (mode === "off" && sandbox !== "off") {
+      askConfirm({
+        title: "关掉命令隔离？",
+        body: "之后命令能改工作区以外的任何文件，只剩规则判断拦着。规则读不懂「python -c \"...\"」里的代码。",
+        confirmLabel: "确认关闭",
+        action: commit,
+      });
+      return;
+    }
+    commit();
+  };
+
+  const pick = (mode: PermissionMode) => {
+    // 无人值守要额外确认一次。它是唯一一个连安全检查都关掉的模式，
+    // 而且这里设的是**新会话的默认值** —— 手滑点中的话，之后每个新
+    // 会话都不设防，且没有任何弹窗会再提醒。
+    if (mode === "unattended" && current !== "unattended") {
+      askConfirm({
+        title: "把默认模式设为无人值守？",
+        body: "之后新建的会话都会跳过全部权限检查，包括危险操作。",
+        confirmLabel: "确认",
+        action: () => void apply(mode),
+      });
+      return;
+    }
+    void apply(mode);
+  };
+
+  return (
+    <>
+      <section>
+        <h2>
+          新会话的默认模式
+          <HintTip>只影响之后创建的会话。当前会话在输入框左下角切换。</HintTip>
+        </h2>
+        <div className="mode-cards" role="radiogroup" aria-label="新会话的默认模式">
+          {MODES.map((m) => (
+            <button
+              key={m.id}
+              role="radio"
+              aria-checked={current === m.id}
+              className={current === m.id ? "mode-card active" : "mode-card"}
+              onClick={() => pick(m.id)}
+            >
+              <span className="mode-card-name">
+                {m.name}
+                {m.danger ? <span className="mode-card-flag">高风险</span> : null}
+              </span>
+              <span className="mode-card-desc">{m.desc}</span>
+            </button>
+          ))}
+        </div>
+      </section>
+      <section>
+        <h2>
+          命令隔离
+          <HintTip>
+            由操作系统限制命令能改什么。开着时，没有规则命中、也不是只读的命令可以直接放行 ——
+            边界由内核守着。目前只有 macOS 能真正生效。
+          </HintTip>
+        </h2>
+        <div className="mode-cards" role="radiogroup" aria-label="命令隔离">
+          {SANDBOX_MODES.map((m) => (
+            <button
+              key={m.id}
+              role="radio"
+              aria-checked={sandbox === m.id}
+              className={sandbox === m.id ? "mode-card active" : "mode-card"}
+              onClick={() => pickSandbox(m.id)}
+            >
+              <span className="mode-card-name">
+                {m.name}
+                {m.danger ? <span className="mode-card-flag">高风险</span> : null}
+              </span>
+              <span className="mode-card-desc">{m.desc}</span>
+            </button>
+          ))}
+        </div>
+      </section>
+      <section>
+        <h2>
+          等待授权的时间
+          <HintTip>
+            弹窗多久没人回应就放弃，超时按拒绝处理。范围 {MIN_TIMEOUT}–{MAX_TIMEOUT} 秒。
+          </HintTip>
+        </h2>
+        <label className="field-inline">
+          <FieldNumber
+            value={timeout}
+            onChange={(e) => setTimeout_(e.target.value)}
+            onBlur={commitTimeout}
+            onKeyDown={blurOnEnter}
+          />
+          <span className="field-unit">秒</span>
+          {clamp?.key === "timeout" ? (
+            <span className="clamp-note" role="status">
+              {clamp.text}
+            </span>
+          ) : null}
+        </label>
+      </section>
+      <section>
+        <h2>
+          单轮最大步数
+          <HintTip>
+            一句话之内模型最多自主往返多少步。到顶就停下等你再说，不是报错。浏览器自动化、渗透这类多步任务容易吃满，可以调高。范围{" "}
+            {MIN_TURNS}–{MAX_TURNS} 步。
+          </HintTip>
+        </h2>
+        <label className="field-inline">
+          <FieldNumber
+            value={turns}
+            onChange={(e) => setTurns(e.target.value)}
+            onBlur={commitTurns}
+            onKeyDown={blurOnEnter}
+          />
+          <span className="field-unit">步</span>
+          {clamp?.key === "turns" ? (
+            <span className="clamp-note" role="status">
+              {clamp.text}
+            </span>
+          ) : null}
+        </label>
+      </section>
+      <section>
+        <h2>
+          上下文压缩阈值
+          <HintTip>
+            会话历史估算超过这个 token 数时自动摘要压缩。默认适配 128k 窗口，更小的模型请调低。范围{" "}
+            {MIN_COMPACT_AT.toLocaleString()}–{MAX_COMPACT_AT.toLocaleString()}。
+          </HintTip>
+        </h2>
+        <label className="field-inline">
+          <FieldNumber
+            value={compactAt}
+            onChange={(e) => setCompactAt(e.target.value)}
+            onBlur={commitCompactAt}
+            onKeyDown={blurOnEnter}
+          />
+          <span className="field-unit">token</span>
+          {clamp?.key === "compactAt" ? (
+            <span className="clamp-note" role="status">
+              {clamp.text}
+            </span>
+          ) : null}
+        </label>
+      </section>
+      <section>
+        <h2>
+          会话内规则
+          <HintTip>
+            点「总是允许」记住的规则（如 <code>Bash(npm run *)</code>）只在当前会话有效。
+          </HintTip>
+        </h2>
+      </section>
+      {error ? <FormError text={error} /> : null}
+    </>
+  );
+}
