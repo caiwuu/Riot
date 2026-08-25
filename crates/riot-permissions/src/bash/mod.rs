@@ -5,6 +5,7 @@
 pub mod ast;
 pub mod decide;
 pub mod readonly;
+pub mod write_targets;
 
 pub use ast::{Analysis, ComplexReason, Complexity, SubCommand, analyze};
 pub use decide::decide;

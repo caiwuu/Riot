@@ -145,7 +145,7 @@ pub fn is_read_only(subs: &[SubCommand]) -> bool {
     !subs.is_empty() && subs.iter().all(sub_is_read_only)
 }
 
-fn sub_is_read_only(sub: &SubCommand) -> bool {
+pub(crate) fn sub_is_read_only(sub: &SubCommand) -> bool {
     // 未加引号的 glob 或波浪号:执行时展开成什么不知道。
     // `python *` 可能变成 `python evil.py`,`cat ~/*` 可能读到围栏外。
     if sub.has_unquoted_glob {

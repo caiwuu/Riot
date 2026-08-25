@@ -227,6 +227,14 @@ pub enum SafetyKind {
     ShellRc,
     /// 本应用自己的配置目录。
     AgentConfig,
+    /// 构建工具链的配置与可执行目录（`~/.cargo/config.toml`、`.envrc`……）。
+    ///
+    /// 和 [`SafetyKind::ShellRc`] 同类:写它等于取得持久化执行权,只是触发
+    /// 点从"下次开终端"变成"下次构建"。单独成一档是因为它有一个 ShellRc
+    /// 没有的性质 —— 这些目录**在沙箱的可写集里**（不放开的话第一条
+    /// `cargo build` 就死在写不了缓存上），于是 OS 边界指望不上,只能靠
+    /// 这一层拦。见 `riot_permissions::bash::write_targets`。
+    ToolchainConfig,
     /// 疑似凭证文件。
     Credentials,
     /// 命令里检测到注入模式。

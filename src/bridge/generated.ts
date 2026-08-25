@@ -385,6 +385,7 @@ export type SafetyKind =
   | "ssh_config"
   | "shell_rc"
   | "agent_config"
+  | "toolchain_config"
   | "credentials"
   | "command_injection"
   | "unparseable_command"

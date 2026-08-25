@@ -153,7 +153,30 @@ impl Tool for Bash {
                 },
             };
         };
-        bash::decide(cmd, ctx, &RuleSet::new(ctx.rules.clone()))
+
+        let rules = RuleSet::new(ctx.rules.clone());
+
+        // `[约束]` background 命令不经过沙箱。它走 spawn_service → 宿主终端
+        // 面板(见 `call`),而 `SandboxedRunner` 只套在 `ctx.proc` 上 —— 对这
+        // 条命令而言 OS 边界根本不存在。若仍按 `ctx.sandboxed` 放行,决策链
+        // 就会基于"OS 挡着文件系统和网络"放行一批写命令,而它们实际在无沙箱
+        // 的宿主上裸跑(正是 sandbox.rs 模块头 [约束] 说的:谎报 sandboxed 会
+        // 静默放行本该询问的命令)。所以 background 命令按"无沙箱"判定:抹掉
+        // sandboxed,让它退回逐条询问 / 通用决策链。
+        //
+        // 用 as_bool().unwrap_or(false):非法的 background 值(如字符串)当成
+        // 非后台,不误放宽 —— 真要执行时 `call` 的 serde 解析会先拒掉它。
+        let background = input
+            .get("background")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if background && ctx.sandboxed {
+            let mut ctx = ctx.clone();
+            ctx.sandboxed = false;
+            return bash::decide(cmd, &ctx, &rules);
+        }
+
+        bash::decide(cmd, ctx, &rules)
     }
 
     async fn validate_input(

@@ -141,6 +141,23 @@ fn decide_subs(subs: &[SubCommand], ctx: &PermissionContext, rules: &RuleSet) ->
         return ask;
     }
 
+    // 参数里点了名的敏感写目标。排在 allow 规则**前面**,和决策链第 4 步
+    // 一个道理:安全检查压过放行,`Bash(cp *)` 这条规则不该顺带把
+    // `cp evil .git/hooks/pre-commit` 一起放了。
+    //
+    // `[约束]` 这一步不能只在 `ctx.sandboxed` 里做。它同时补着两个洞:
+    // 沙箱放宽档（下面那个分支）会把这类命令直接 Allow;而即使没有沙箱,
+    // 「全部放行」也会在决策链第 5 步放行它 —— 因为通用的
+    // `safety::check` 走 `target_path`,对 Bash 完全不生效。理由见
+    // `write_targets` 的模块文档。
+    if let Some(risk) = super::write_targets::scan(subs) {
+        return PermissionResult::Ask {
+            message: risk.message,
+            suggestions: vec![allow_suggestion(&risk.sub.matchable)],
+            reason: DecisionReason::SafetyCheck { safety: risk.kind },
+        };
+    }
+
     if all_allowed {
         return PermissionResult::Allow {
             updated_input: None,
@@ -170,6 +187,11 @@ fn decide_subs(subs: &[SubCommand], ctx: &PermissionContext, rules: &RuleSet) ->
     // `[约束]` 只放宽走到这里的 —— 也就是"没有任何规则命中、不是只读"
     // 的那部分。上面已经 return 的 Deny 和 Ask 不受影响:沙箱挡不住
     // "这条命令干的事和用户以为的不一样",而那正是 Ask 存在的理由。
+    //
+    // `[约束]` 也不放宽上面 `write_targets::scan` 拦下的那些。放宽的前提
+    // 是"OS 真的挡得住",而可写集里躺着 `.git/hooks/`、`.riot/hooks.json`、
+    // `~/.cargo/config.toml` 这几处能换来**沙箱外**执行权的目标 —— 对它们
+    // 而言边界形同虚设,放宽就是静默交出持久执行权。
     if ctx.sandboxed {
         return PermissionResult::Allow {
             updated_input: None,
@@ -391,6 +413,76 @@ mod tests {
         // `Bash(git commit *)` 应该匹配整条,而不是被 `&&` 切成两半
         let rs = rules(vec![("git commit *", RuleDecision::Allow)]);
         assert_eq!(verdict("git commit -m 'fix && cleanup'", &rs), "allow");
+    }
+
+    /// 沙箱放宽档不许覆盖「能拿到沙箱外执行权」的写。
+    ///
+    /// 这是一次真实的回归：沙箱默认开着，于是
+    /// `cp payload .riot/hooks.json` 从"要问"变成了"静默放行" —— 而下一轮
+    /// `HookEngine` 会把那个文件里的命令用 `sh -c` 裸跑在宿主上。沙箱本该
+    /// 只在"OS 真的挡得住"的地方放宽，这几个目标恰好在边界之内。
+    #[test]
+    fn 沙箱不放宽指向执行面的写() {
+        let mut ctx = ctx_with(PermissionMode::Default);
+        ctx.sandboxed = true;
+        let rs = RuleSet::default();
+
+        for cmd in [
+            "cp payload .riot/hooks.json",
+            "cp payload .git/hooks/pre-commit",
+            "cp payload /Users/u/.cargo/config.toml",
+            "git config core.hooksPath /tmp/evil",
+            // 绝对路径 / sudo / env 前缀不能绕过 —— 精确等值匹配会把它们
+            // 直接送进沙箱放宽档静默放行。
+            "/usr/bin/git config core.hooksPath /tmp/evil",
+            "sudo git config core.hooksPath /tmp/evil",
+            "env git config core.hooksPath /tmp/evil",
+        ] {
+            match decide(cmd, &ctx, &rs) {
+                PermissionResult::Ask { reason, .. } => assert!(
+                    !reason.yields_to_bypass(),
+                    "{cmd} 的 ask 必须对「全部放行」免疫：{reason:?}"
+                ),
+                other => panic!("{cmd} 该问而不是 {other:?}"),
+            }
+        }
+
+        // 反面：沙箱确实要放宽普通的写命令，否则这一档就白做了。
+        assert_eq!(
+            behavior(&decide("rm -rf build", &ctx, &rs)),
+            "allow",
+            "普通的写命令在沙箱里还是该直接放行"
+        );
+    }
+
+    /// allow 规则压不过安全检查 —— 和决策链第 4 步一个道理。
+    #[test]
+    fn allow_规则压不过参数里的敏感目标() {
+        let rs = rules(vec![("cp *", RuleDecision::Allow)]);
+        assert_eq!(verdict("cp evil .git/hooks/pre-commit", &rs), "ask");
+        assert_eq!(verdict("cp a.rs b.rs", &rs), "allow", "普通拷贝照常放行");
+    }
+
+    /// 只读命令读敏感文件不该被 `write_targets::scan` 拦成 Ask。
+    ///
+    /// scan 曾经硬编码 `read_only=false`,`cat .git/config` 这种读操作被拦成
+    /// 一个对 bypass 免疫、又不给「总是允许」建议的 Ask —— 而同一个读走
+    /// Write 工具是放行的。只读命令必须走到下面的 is_read_only 分支放行。
+    #[test]
+    fn 只读命令读敏感文件不被拦() {
+        let rs = RuleSet::default();
+        for cmd in ["cat .git/config", "cat /home/u/.zshrc", "grep foo .git/config"] {
+            assert_eq!(verdict(cmd, &rs), "allow", "{cmd}");
+        }
+    }
+
+    fn behavior(r: &PermissionResult) -> &'static str {
+        match r {
+            PermissionResult::Allow { .. } => "allow",
+            PermissionResult::Ask { .. } => "ask",
+            PermissionResult::Deny { .. } => "deny",
+            PermissionResult::Passthrough => "passthrough",
+        }
     }
 
     #[test]

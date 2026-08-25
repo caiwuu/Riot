@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use pretty_assertions::assert_eq;
 use riot_protocol::permission::{
-    PermissionContext, PermissionModeState, PermissionResult, PermissionRule, RuleDecision,
-    RuleSource,
+    DecisionReason, PermissionContext, PermissionModeState, PermissionResult, PermissionRule,
+    RuleDecision, RuleSource,
 };
 use riot_protocol::tool::{Tool, ToolContext, ToolOutcome};
 use tokio_util::sync::CancellationToken;
@@ -475,6 +475,50 @@ async fn 没有_command_时拒绝而不是放行() {
     // schema 校验会先拦住这种输入。走到这里说明有人绕过了管线。
     let got = Bash.check_permissions(&serde_json::json!({}), &perm_ctx(vec![]));
     assert!(matches!(got, PermissionResult::Deny { .. }), "{got:?}");
+}
+
+#[tokio::test]
+async fn 沙箱内前台写命令由_os_兜底放行() {
+    // 无规则命中、非只读的普通写命令,在沙箱内直接放行 —— OS 挡着文件系统,
+    // 这正是沙箱这层换来的"少打断人"。是下一条测试的对照组。
+    let input = serde_json::json!({ "command": "touch foo.txt" });
+    let mut ctx = perm_ctx(vec![]);
+    ctx.sandboxed = true;
+
+    let got = Bash.check_permissions(&input, &ctx);
+    assert!(
+        matches!(
+            got,
+            PermissionResult::Allow {
+                reason: DecisionReason::Sandbox,
+                ..
+            }
+        ),
+        "沙箱内的普通写命令应由 OS 兜底放行：{got:?}"
+    );
+}
+
+#[tokio::test]
+async fn 后台命令不吃沙箱放行() {
+    // 同一条命令加 background:true —— 它走 spawn_service → 宿主终端面板,
+    // 不经过 SandboxedRunner,对它而言沙箱边界不存在。决不能因为 sandboxed
+    // 就放行,否则等于凭"OS 挡着"的假前提放行一条在宿主上裸跑的写命令。
+    // 想逃逸沙箱只要加一个 background:true —— 这条测试钉死那个洞。
+    let input = serde_json::json!({ "command": "touch foo.txt", "background": true });
+    let mut ctx = perm_ctx(vec![]);
+    ctx.sandboxed = true;
+
+    let got = Bash.check_permissions(&input, &ctx);
+    assert!(
+        !matches!(
+            got,
+            PermissionResult::Allow {
+                reason: DecisionReason::Sandbox,
+                ..
+            }
+        ),
+        "后台命令不经过沙箱,不能吃沙箱放行：{got:?}"
+    );
 }
 
 // ── 参数校验 ──────────────────────────────────────────

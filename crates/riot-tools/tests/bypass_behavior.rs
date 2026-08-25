@@ -95,6 +95,32 @@ fn 放行模式压不过写向敏感文件的重定向() {
 }
 
 #[test]
+fn 放行模式压不过参数里点名的执行面() {
+    // 上面那条只覆盖了重定向。shell 里写文件的方式远不止 `>` ——
+    // `cp` / `mv` / `install` / `sed -i` 一个都不经过重定向节点，于是
+    // 曾经整类漏过去：Bash 的 `target_path()` 是 None，通用路径检查看不见，
+    // 命令分析器又只盯着重定向目标。
+    //
+    // 这批目标的共同点是**写了就能拿到本进程之外的执行权**：hooks 下次
+    // commit 跑、`.riot/hooks.json` 下一轮由内核 `sh -c` 跑、
+    // `~/.cargo/config.toml` 下次构建跑。
+    for cmd in [
+        "cp payload .git/hooks/pre-commit",
+        "install -m 755 payload .git/hooks/pre-commit",
+        "cp payload .riot/hooks.json",
+        "cp payload /Users/u/.cargo/config.toml",
+        "git config core.hooksPath /tmp/evil",
+        "sed -i s/a/b/ /home/u/.ssh/config",
+    ] {
+        assert_eq!(
+            verdict(cmd, PermissionMode::BypassPermissions),
+            "ask",
+            "{cmd:?} 写的是执行面，放行模式也必须问"
+        );
+    }
+}
+
+#[test]
 fn 放行模式压不过动态执行和链接器劫持() {
     // 这两类精确、指向明确：执行运行时才确定的内容、改变动态链接行为。
     // 和"看不懂"不同，它们是真的发现了危险。

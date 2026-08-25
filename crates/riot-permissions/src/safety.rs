@@ -55,17 +55,22 @@ pub fn check(
     })
 }
 
-/// 往这个路径**写**东西算不算碰了敏感目标。
+/// Bash 的参数/重定向目标碰没碰到敏感路径。
 ///
-/// 存在的理由是 Bash 的重定向。`safety::check` 走 [`Tool::target_path`]，
-/// 而 Bash 没有单一目标路径（返回 `None`），于是整个路径检查对它不生效 ——
+/// 存在的理由是 Bash 没有单一目标路径:`safety::check` 走
+/// [`Tool::target_path`] 返回 `None`,整个路径检查对它不生效 ——
 /// `echo evil >> ~/.zshrc` 里那个 `~/.zshrc` 没有任何一层看得见。
 ///
+/// `read_only` 透传给 [`classify_path`],语义和 `safety::check` 完全一致:
+/// 凭证类读到即泄露,读写都拦;其余几类只有**写**才换来执行权,只读放行。
+/// 少了这个参数,`cat .git/config`(只读)会被当成写 `.git/` 拦成 Ask,
+/// 而同一个读操作走 Write 工具却是放行的 —— 同一条不变量两处给出相反答案。
+///
 /// `[约束]` 这就是为什么 Bash 的重定向不能整类交给「全部放行」。命令
-/// 分析器把重定向目标交到这里分级：敏感的仍然拦，普通的（`> /tmp/out.log`）
+/// 分析器把重定向目标交到这里分级:敏感的仍然拦,普通的（`> /tmp/out.log`）
 /// 才算作单纯的不确定性。见 `bash/ast.rs` 的 `redirect_target_risk`。
-pub fn write_target_risk(path: &Path) -> Option<SafetyKind> {
-    classify_path(path, false)
+pub fn write_target_risk(path: &Path, read_only: bool) -> Option<SafetyKind> {
+    classify_path(path, read_only)
 }
 
 fn classify_path(path: &Path, read_only: bool) -> Option<SafetyKind> {
@@ -94,7 +99,53 @@ fn classify_path(path: &Path, read_only: bool) -> Option<SafetyKind> {
     if contains_segment(&normalized, ".riot") || contains_segment(&normalized, ".claude") {
         return Some(SafetyKind::AgentConfig);
     }
+    if is_toolchain_exec_surface(&normalized) {
+        return Some(SafetyKind::ToolchainConfig);
+    }
 
+    None
+}
+
+/// 构建工具链里「写了就等于让下次构建执行任意代码」的位置。
+///
+/// `[约束]` 这几条**必须**在这里拦住，因为 OS 沙箱指望不上:
+/// `~/.cargo`、`~/.rustup` 本来就在可写集里（不放开的话第一条
+/// `cargo build` 就死在写不了缓存上，见 `riot_runtime::sandbox` 的取舍）。
+/// 也就是说边界之内还藏着一条通往边界之外的路,只有这一层看得见。
+///
+/// 按「谁会被自动执行」筛:
+/// - `.cargo/config.toml` 的 `[build] rustc-wrapper`、`[target.*] runner`、
+///   `[alias]` 都在 `cargo build` 时被 spawn；
+/// - `.cargo/bin`、`.rustup` 下面放的就是 `cargo` / `rustc` 本身；
+/// - `.envrc` 是 direnv 的钩子,`cd` 进目录就执行。
+///
+/// 项目内的 `.cargo/config.toml` 和主目录下的同样危险,所以按**路径分量**
+/// 匹配而不是绑定主目录。
+fn is_toolchain_exec_surface(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or_default();
+    if name == ".envrc" {
+        return true;
+    }
+    if contains_segment(path, ".rustup") {
+        return true;
+    }
+    matches!(
+        segment_after(path, ".cargo"),
+        Some("config.toml" | "config" | "bin")
+    )
+}
+
+/// 紧跟在 `segment` 后面的那一段路径分量。
+///
+/// 用它而不是 `contains_segment`:`~/.cargo/registry/src/…/bin/main.rs`
+/// 里那个 `bin` 只是某个 crate 的源码目录,和 `~/.cargo/bin` 不是一回事。
+fn segment_after<'a>(path: &'a str, segment: &str) -> Option<&'a str> {
+    let mut it = path.split('/');
+    while let Some(s) = it.next() {
+        if s == segment {
+            return it.next();
+        }
+    }
     None
 }
 
@@ -164,7 +215,12 @@ fn looks_like_credentials(path: &str) -> bool {
         && name != "config.example"
 }
 
-fn describe(kind: SafetyKind, path: &Path) -> String {
+/// 弹窗里那句「为什么拦你」。
+///
+/// `pub` 是给 Bash 用的:它没有单一目标路径，走的是
+/// [`crate::bash::write_targets`] 那条参数扫描,但拦下来之后要说的话
+/// 和这里完全一样 —— 两处各写一份迟早漂移，而漂移的那侧不会报错。
+pub fn describe(kind: SafetyKind, path: &Path) -> String {
     let p = path.display();
     match kind {
         SafetyKind::GitInternals => {
@@ -179,6 +235,10 @@ fn describe(kind: SafetyKind, path: &Path) -> String {
         SafetyKind::AgentConfig => {
             format!("这会修改本应用自己的配置 {p}，可能影响后续的权限判断。")
         }
+        SafetyKind::ToolchainConfig => format!(
+            "这会修改构建工具链的配置或可执行文件 {p}。改这个等于取得持久化执行权 —— \
+             下次构建就会运行，而那次构建不在沙箱里。"
+        ),
         SafetyKind::Credentials => format!("{p} 看起来是凭证文件。"),
         SafetyKind::CommandInjection => format!("命令里检测到注入模式：{p}"),
         SafetyKind::UnparseableCommand => format!("无法解析这个命令：{p}"),

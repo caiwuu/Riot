@@ -459,7 +459,8 @@ fn redirect_target_risk(redirect: tree_sitter::Node, src: &[u8]) -> Option<Safet
         }
         let raw = c.utf8_text(src).ok()?;
         // `~` 不展开也能判 —— is_shell_rc 之类看的是最后一段文件名。
-        if let Some(k) = crate::safety::write_target_risk(std::path::Path::new(raw)) {
+        // 重定向就是写,`read_only = false`。
+        if let Some(k) = crate::safety::write_target_risk(std::path::Path::new(raw), false) {
             return Some(k);
         }
     }
