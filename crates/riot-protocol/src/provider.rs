@@ -68,6 +68,43 @@ pub const fn estimate_tokens(bytes: usize) -> u32 {
     }
 }
 
+/// 从哪儿开始需要粗估，以及在那之前的**真实**计数。
+///
+/// 返回 `(起始下标, 基准 token 数)`：下标之前的内容由基准值代表，从下标起
+/// 的消息才需要按字节估。没有任何一条带 usage 时返回 `(0, 0)` —— 退化成
+/// 全量粗估，也就是这个机制存在之前的行为。
+///
+/// 为什么要它：粗估按 4 字节/token 折算，对代码和英文偏低（实测一个真实
+/// 会话里差了一成半）。偏低的表现不是"数字不好看"，而是**该压的时候没压**，
+/// 然后撞上服务方的硬上限 —— 那时反应式压缩要花一次总结的钱才能救回来。
+/// 服务方回报的 usage 是那一刻上下文的准确尺寸，拿它打底，误差就只剩最后
+/// 几条新消息那一小段。
+///
+/// `[约束]` 只认主 agent（`agent_id` 为空）的消息。子 agent 有自己的上下文，
+/// 它的 usage 描述的是另一个窗口的大小 —— 拿来给主历史打底会差出一整个
+/// 数量级，而且是往小了差。
+///
+/// `[取舍]` 历史被**改写过**（轻档压缩把旧工具结果清成占位符）之后，基准值
+/// 仍然是改写前那次请求的大小，于是偏大。接受这个偏差：偏大只会让压缩早来
+/// 一轮，而偏小是撞上限；何况压缩之后紧接着就会发一次请求，新的 usage 立刻
+/// 把基准顶掉，窗口只有一轮。方向和 [`BYTES_PER_TOKEN`] 那条注释是一致的。
+#[must_use]
+pub fn last_usage_checkpoint(messages: &[Message]) -> (usize, u32) {
+    messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(i, m)| match m {
+            Message::Assistant {
+                usage: Some(u),
+                meta,
+                ..
+            } if meta.agent_id.is_none() => Some((i + 1, u.total())),
+            _ => None,
+        })
+        .unwrap_or((0, 0))
+}
+
 /// 一张进了请求的图片折多少 token。
 ///
 /// `[约束]` 图片**不能**走 [`estimate_tokens`]。模型按像素给图片计费，和
@@ -435,6 +472,96 @@ mod tests {
         }];
 
         assert_eq!(wire_images(&messages), (3, b64.len() * 3));
+    }
+
+    mod checkpoint {
+        use super::*;
+        use crate::id::MessageId;
+        use crate::message::{AssistantContent, MessageMeta, Usage};
+
+        fn user(id: &str) -> Message {
+            Message::User {
+                id: MessageId::from_raw(id),
+                content: vec![UserContent::Text { text: "话".into() }],
+                meta: MessageMeta::default(),
+            }
+        }
+
+        fn assistant(id: &str, usage: Option<Usage>, agent: Option<&str>) -> Message {
+            Message::Assistant {
+                id: MessageId::from_raw(id),
+                content: vec![AssistantContent::Text { text: "答".into() }],
+                usage,
+                meta: MessageMeta {
+                    agent_id: agent.map(crate::id::AgentId::from_raw),
+                    ..MessageMeta::default()
+                },
+            }
+        }
+
+        fn usage(input: u32, cache_read: u32, output: u32) -> Option<Usage> {
+            Some(Usage {
+                input_tokens: input,
+                cache_read_tokens: cache_read,
+                cache_creation_tokens: 0,
+                output_tokens: output,
+            })
+        }
+
+        /// 一条 usage 都没有（全新会话、或压缩把历史换成了一条总结）时
+        /// 退化成全量粗估 —— 也就是这个机制存在之前的行为。
+        #[test]
+        fn 没有用量时退化成全量粗估() {
+            assert_eq!(last_usage_checkpoint(&[]), (0, 0));
+            assert_eq!(
+                last_usage_checkpoint(&[user("u1"), assistant("a1", None, None)]),
+                (0, 0)
+            );
+        }
+
+        /// 基准取**最后一条**，而且四项都算进去：input 是那次请求发出去的
+        /// 全部（含缓存命中，两家的口径已在 provider 侧统一），output 是它
+        /// 写回历史的部分，下一次请求要连着一起发。
+        #[test]
+        fn 取最后一条并把四项都算上() {
+            let msgs = vec![
+                user("u1"),
+                assistant("a1", usage(1_000, 0, 100), None),
+                user("u2"),
+                assistant("a2", usage(20_000, 80_000, 500), None),
+            ];
+            assert_eq!(last_usage_checkpoint(&msgs), (4, 100_500));
+        }
+
+        /// 起点是 checkpoint 的**下一条**。含进它自己的话，那条 assistant
+        /// 会被算两遍（一次在 usage 的 output 里，一次在字节里）。
+        #[test]
+        fn 起点在基准之后() {
+            let msgs = vec![
+                user("u1"),
+                assistant("a1", usage(5_000, 0, 200), None),
+                user("u2"),
+            ];
+            let (from, base) = last_usage_checkpoint(&msgs);
+            assert_eq!((from, base), (2, 5_200));
+            assert!(matches!(&msgs[from..], [Message::User { .. }]), "只剩新来的那条");
+        }
+
+        /// `[约束]` 子 agent 的 usage 描述的是**另一个窗口**。拿它给主历史
+        /// 打底会差出一个数量级，而且是往小了差 —— 主历史看起来一直很空，
+        /// 压缩永远不触发，直到撞上服务方的硬上限。
+        #[test]
+        fn 子_agent_的用量不能给主历史打底() {
+            let msgs = vec![
+                user("u1"),
+                assistant("a1", usage(90_000, 0, 1_000), None),
+                user("u2"),
+                assistant("sub", usage(300, 0, 50), Some("agent-1")),
+            ];
+            let (from, base) = last_usage_checkpoint(&msgs);
+            assert_eq!(base, 91_000, "该用主 agent 那条，不是子 agent 的 350");
+            assert_eq!(from, 2);
+        }
     }
 
     /// 回归:字节口径下一张 200 KB 的预览图折五万 token，三四张就顶穿

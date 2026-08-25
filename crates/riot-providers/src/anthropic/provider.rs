@@ -246,15 +246,18 @@ impl Provider for AnthropicProvider {
     }
 
     fn count_tokens(&self, messages: &[Message]) -> u32 {
-        // 本地粗估。真实计数要调 /v1/messages/count_tokens，
-        // 但那是一次额外的网络往返 —— 只在压缩决策临界时才值得。
+        // 服务方报过的真实计数打底，只有它之后的新消息才粗估。真实计数要
+        // 主动调 /v1/messages/count_tokens 得再花一次网络往返，而上一轮的
+        // 响应里已经免费带回来了。
         //
         // 量的是**发出去的那份**，见 trait 上那条约束。
         //
         // 图片按张计价：先把它的 base64 从报文长度里扣掉，再按张加回来。
         // 不扣就还是字节口径，而那个口径下一张图能报出几万 token。
-        let (images, b64) = riot_protocol::provider::wire_images(messages);
-        riot_protocol::provider::estimate_tokens(wire_bytes(messages).saturating_sub(b64))
+        let (from, base) = riot_protocol::provider::last_usage_checkpoint(messages);
+        let tail = &messages[from..];
+        let (images, b64) = riot_protocol::provider::wire_images(tail);
+        base + riot_protocol::provider::estimate_tokens(wire_bytes(tail).saturating_sub(b64))
             + riot_protocol::provider::estimate_image_tokens(images)
     }
 }

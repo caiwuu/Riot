@@ -1014,7 +1014,10 @@ impl AppState {
             limits: riot_protocol::TurnLimits {
                 ask_timeout_secs: config.ask_timeout_secs,
                 max_turns: config.max_turns,
-                compact_threshold_tokens: config.compact_threshold_tokens,
+                // 这个模型填了窗口就按窗口推，没填才用设置页那个全局数。
+                // 内核只认最终的阈值 —— 窗口是宿主这边的配置概念，换算完
+                // 就没必要再往下传一层。
+                compact_threshold_tokens: model.compact_threshold(config.compact_threshold_tokens),
                 sandbox: sandbox_kind(config.sandbox),
             },
             mode,

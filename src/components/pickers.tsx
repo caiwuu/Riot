@@ -34,12 +34,6 @@ export function modelLabel(p: ProviderConfig | null, id: string): string {
   return p?.models.find((m) => m.id === id)?.name?.trim() || id;
 }
 
-export function fmtTokens(n: number): string {
-  if (n < 1000) return String(n);
-  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
-  return `${(n / 1_000_000).toFixed(2)}M`;
-}
-
 /**
  * 上拉菜单的公共行为：点外面关、Esc 关（焦点还给 pill）、上下键在
  * 菜单项间移动。三个 pill 菜单（模式/服务方/模型）共用，键盘模型
@@ -156,6 +150,44 @@ export interface PickerItem {
   vision?: boolean;
 }
 
+/**
+ * 主列表下方的第二组选项，带分隔线和小标题。
+ *
+ * 模型菜单用它放当前模型的上下文窗口档位。做成同一层的分组而不是二级
+ * 弹出菜单：菜单项是 `button`，嵌一个能展开子菜单的按钮进去就成了嵌套
+ * `button`（HTML 非法），而绕开它要把整行改成 `div` 自己实现键盘语义。
+ * 分组的代价只是菜单长几行，换来的是上下键和读屏行为都不用重写。
+ */
+export interface PickerSection {
+  title: string;
+  items: PickerItem[];
+  onPick: (id: string) => void;
+}
+
+function PickerRow({ item, onPick }: { item: PickerItem; onPick: () => void }) {
+  return (
+    <button
+      type="button"
+      role="menuitemradio"
+      aria-checked={Boolean(item.active)}
+      className={item.active ? "menu-item picker-item active" : "menu-item picker-item"}
+      onClick={onPick}
+    >
+      <span className="pick-main">
+        <span className="pick-label">{item.label}</span>
+        {item.vision ? (
+          <span className="cap-icon" role="img" aria-label="能收图片" title="能收图片">
+            <EyeIcon />
+          </span>
+        ) : null}
+      </span>
+      {item.note ? (
+        <span className={item.warn ? "menu-warn" : "menu-hint"}>{item.note}</span>
+      ) : null}
+    </button>
+  );
+}
+
 export function Picker({
   label,
   title,
@@ -163,6 +195,7 @@ export function Picker({
   onPick,
   emptyHint,
   onEmpty,
+  section,
 }: {
   label: string;
   title?: string;
@@ -171,6 +204,7 @@ export function Picker({
   /** 列表为空时点 pill 的提示与去向（一般是打开设置补模型）。 */
   emptyHint?: string;
   onEmpty?: () => void;
+  section?: PickerSection;
 }) {
   const [open, setOpen] = useState(false);
   const isEmpty = items.length === 0;
@@ -192,30 +226,31 @@ export function Picker({
       {open && !isEmpty ? (
         <div className="menu" role="menu">
           {items.map((it) => (
-            <button
+            <PickerRow
               key={it.id}
-              type="button"
-              role="menuitemradio"
-              aria-checked={Boolean(it.active)}
-              className={it.active ? "menu-item picker-item active" : "menu-item picker-item"}
-              onClick={() => {
+              item={it}
+              onPick={() => {
                 onPick(it.id);
                 setOpen(false);
               }}
-            >
-              <span className="pick-main">
-                <span className="pick-label">{it.label}</span>
-                {it.vision ? (
-                  <span className="cap-icon" role="img" aria-label="能收图片" title="能收图片">
-                    <EyeIcon />
-                  </span>
-                ) : null}
-              </span>
-              {it.note ? (
-                <span className={it.warn ? "menu-warn" : "menu-hint"}>{it.note}</span>
-              ) : null}
-            </button>
+            />
           ))}
+          {section && section.items.length ? (
+            <>
+              <div className="menu-sep" role="separator" />
+              <div className="menu-group-title">{section.title}</div>
+              {section.items.map((it) => (
+                <PickerRow
+                  key={it.id}
+                  item={it}
+                  onPick={() => {
+                    section.onPick(it.id);
+                    setOpen(false);
+                  }}
+                />
+              ))}
+            </>
+          ) : null}
         </div>
       ) : null}
     </div>

@@ -6,6 +6,12 @@ import {
   type Sampling,
   testConnection,
 } from "../bridge";
+import {
+  MAX_CONTEXT_WINDOW,
+  MIN_CONTEXT_WINDOW,
+  compactThresholdForWindow,
+  fmtTokens,
+} from "../lib/contextWindow";
 import { FieldNumber } from "./FieldNumber";
 import { HintTip } from "./HintTip";
 import { Modal } from "./Modal";
@@ -62,6 +68,7 @@ export function ModelDialog({
   const [id, setId] = useState(model?.id ?? "");
   const [name, setName] = useState(model?.name ?? "");
   const [vision, setVision] = useState(model?.vision ?? false);
+  const [ctxWindow, setCtxWindow] = useState(model?.contextWindow?.toString() ?? "");
   // 数字字段走字符串草稿:输入过程中会经过 "0."、"-" 这种还不是合法数字的
   // 中间态，直接绑成 number 的话那些字符会被吃掉，表现是"打不出小数点"。
   const [samp, setSamp] = useState<Record<string, string>>(() =>
@@ -90,16 +97,36 @@ export function ModelDialog({
     return out;
   };
 
+  /** 留空 = 不填这个字段，压缩阈值走设置里的全局值。 */
+  const contextWindow = (): number | undefined => {
+    const n = Number.parseInt(ctxWindow.trim(), 10);
+    if (!Number.isFinite(n)) return undefined;
+    return Math.min(Math.max(n, MIN_CONTEXT_WINDOW), MAX_CONTEXT_WINDOW);
+  };
+
   const save = () => {
     if (!trimmedId || duplicate) return;
+    const win = contextWindow();
     onSave({
       id: trimmedId,
       name: name.trim(),
       vision,
+      // 没填就整个不带这个键（`exactOptionalPropertyTypes`），跟宿主侧
+      // `skip_serializing_if` 对上 —— 存量配置不会平白多出一堆 null。
+      ...(win === undefined ? {} : { contextWindow: win }),
       sampling: sampling(),
     });
     onClose();
   };
+
+  // 把窗口换算成"大概什么时候会压"给用户看。填 200000 本身不说明任何
+  // 事情 —— 用户想知道的是这个数会让压缩早一点还是晚一点发生。
+  const windowNote = (() => {
+    const w = contextWindow();
+    if (w === undefined) return "留空 = 跟随设置里的全局压缩阈值。";
+    const maxOut = sampling().maxOutputTokens ?? provider.sampling?.maxOutputTokens ?? undefined;
+    return `历史约 ${fmtTokens(compactThresholdForWindow(w, maxOut))} 时自动压缩（窗口减去回复和摘要的预留）。`;
+  })();
 
   const doTest = async () => {
     setTesting(true);
@@ -170,6 +197,21 @@ export function ModelDialog({
             </span>
             <span>视觉（能收图片）</span>
           </button>
+
+          <div className="field-row">
+            <label>
+              上下文窗口
+              <HintTip>
+                模型文档上写的窗口大小。填了它，压缩时机就按这个模型算；留空则用设置里的全局阈值。
+              </HintTip>
+            </label>
+            <FieldNumber
+              value={ctxWindow}
+              onChange={(e) => setCtxWindow(e.target.value)}
+              placeholder="如 128000"
+            />
+          </div>
+          <p className="hint model-dialog-note">{windowNote}</p>
 
           <h3 className="model-dialog-section">
             采样参数

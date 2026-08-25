@@ -101,6 +101,20 @@ pub struct ModelConfig {
     /// 都被服务方拒，而报错不指向这个开关。
     #[serde(default, skip_serializing_if = "is_false")]
     pub vision: bool,
+    /// 上下文窗口有多大（token）。`None` = 没填，压缩阈值走全局那个数
+    /// （[`AppConfig::compact_threshold_tokens`]）。
+    ///
+    /// `[取舍]` 让用户填**窗口**而不是直接填压缩阈值。窗口是模型文档第一页
+    /// 就写着的客观数字，用户查得到也记得住；阈值要先知道"得给回复留多少、
+    /// 给总结留多少、压完还要再跑一轮"才填得对 —— 那是内部机制，不该让用户
+    /// 去推。填了窗口，阈值由 [`compact_threshold_for_window`] 算出来。
+    ///
+    /// 按模型记的理由和 [`vision`] 一样:同一家的窗口能差一个数量级，
+    /// 按服务方记就得取最小的那个，于是大窗口模型白白早压好几轮。
+    ///
+    /// [`vision`]: ModelConfig::vision
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
     /// 这个模型的采样参数。空字段继承 provider 的设置。
     #[serde(default, skip_serializing_if = "Sampling::is_empty")]
     pub sampling: Sampling,
@@ -112,6 +126,7 @@ impl ModelConfig {
             id: id.into(),
             name: String::new(),
             vision: false,
+            context_window: None,
             sampling: Sampling::default(),
         }
     }
@@ -142,6 +157,8 @@ impl<'de> Deserialize<'de> for ModelConfig {
             #[serde(default)]
             vision: bool,
             #[serde(default)]
+            context_window: Option<u32>,
+            #[serde(default)]
             sampling: Sampling,
         }
 
@@ -159,6 +176,7 @@ impl<'de> Deserialize<'de> for ModelConfig {
                 id: f.id,
                 name: f.name,
                 vision: f.vision,
+                context_window: f.context_window,
                 sampling: f.sampling,
             },
         })
@@ -708,11 +726,45 @@ pub const fn default_ask_timeout_secs() -> u32 {
 
 /// 主动压缩的默认阈值：100k token。
 ///
-/// 128k 窗口减去输出预留（~16k）和总结本身要占的空间，再留一点余量。
+/// 给**没填窗口**的模型兜底。128k 窗口减去输出预留（~16k）和总结本身要占的
+/// 空间，再留一点余量 —— 也就是把 [`compact_threshold_for_window`] 对着 128k
+/// 手算了一遍。填了窗口的模型不看这个数（见 [`ResolvedModel::compact_threshold`]）。
+///
 /// 窗口更大的模型晚点压也无妨（压缩是省钱不是保命，保命有 413 兜底）；
-/// 窗口更小的模型需要用户在设置里调低。
+/// 窗口更小的模型需要用户填窗口，或在设置里调低这个默认值。
 pub const fn default_compact_threshold_tokens() -> u32 {
     100_000
+}
+
+/// 单次回复要留出的空间上限。
+///
+/// 窗口不是全给历史的 —— 模型还得把这一轮的回复写进去。按模型自己配的
+/// `max_output_tokens` 留，但不超过这个数：留得再多也只是白扔窗口。
+///
+/// 没配 `max_output_tokens` 时按上限留。两种猜错的代价不对等：多留了只是
+/// 早压一轮（花一次总结的钱），少留了是回复写到一半撞上下文上限 —— 那一轮
+/// 的输出直接废掉，而且压缩已经跑过了，反应式重试没牌可打。
+const OUTPUT_RESERVE_CAP: u32 = 20_000;
+
+/// 阈值到窗口上限之间留的缓冲。
+///
+/// 阈值是**开工前**判的，判完这一轮还要继续往里塞工具结果。缓冲太小的话，
+/// 压缩刚跑完的那一轮就能把窗口顶穿，而这次溢出发生在压缩之后 —— 已经没有
+/// 更轻的手段可用了。
+const COMPACT_BUFFER: u32 = 13_000;
+
+/// 从上下文窗口推主动压缩的阈值：窗口 − 输出预留 − 缓冲。
+///
+/// `[约束]` 结果不低于窗口的一半。小窗口模型（32k 及以下）减完两笔预留会
+/// 归零，那等于每轮都压 —— 压缩本身要花一次模型调用，比不压更贵，而且压完
+/// 立刻又超，会在压缩和重试之间转圈。
+pub fn compact_threshold_for_window(window: u32, max_output: Option<u32>) -> u32 {
+    let reserve = max_output.unwrap_or(OUTPUT_RESERVE_CAP).min(OUTPUT_RESERVE_CAP);
+    window
+        .saturating_sub(reserve)
+        .saturating_sub(COMPACT_BUFFER)
+        .max(window / 2)
+        .clamp(MIN_COMPACT_THRESHOLD, MAX_COMPACT_THRESHOLD)
 }
 
 /// 单轮默认最多 48 次往返。
@@ -885,6 +937,7 @@ impl AppConfig {
             )));
         }
         let model = model.trim();
+        let mc = p.model(model);
         Ok(ResolvedModel {
             protocol: p.protocol,
             base_url: p.base_url.clone(),
@@ -892,14 +945,15 @@ impl AppConfig {
             api_key_env: p.api_key_env.clone(),
             model: model.to_owned(),
             fallback_model: p.fallback_model.clone(),
+            // 没配就是 None，压缩阈值那边会退回全局设置。窗口没有"服务方
+            // 级默认"可继承 —— 同一家的模型窗口能差一个数量级。
+            context_window: mc.and_then(|m| m.context_window),
             // 模型级参数叠在服务方之上，只盖用户在模型上动过的字段。
             //
             // 顺序是 模型 → 服务方 → 服务端默认。会话覆盖再叠在这之上（见
             // state.rs 的 send_turn）—— 越具体的赢，这条链任何一环反了都
             // 会表现为"我明明设了 temperature，它没生效"。
-            sampling: p
-                .model(model)
-                .map_or(p.sampling, |m| m.sampling.or(p.sampling)),
+            sampling: mc.map_or(p.sampling, |m| m.sampling.or(p.sampling)),
         })
     }
 
@@ -925,10 +979,24 @@ pub struct ResolvedModel {
     pub api_key_env: String,
     pub model: String,
     pub fallback_model: Option<String>,
+    /// 这个模型的上下文窗口。`None` = 用户没填。
+    pub context_window: Option<u32>,
     pub sampling: Sampling,
 }
 
 impl ResolvedModel {
+    /// 这一轮主动压缩的阈值。
+    ///
+    /// 填了窗口就按窗口推，没填就用 `fallback`（设置页那个全局数）。老配置
+    /// 里一个模型都没填窗口，于是每一个都走 `fallback` —— 行为和加这个字段
+    /// 之前逐字节一致。
+    pub fn compact_threshold(&self, fallback: u32) -> u32 {
+        self.context_window
+            .map_or(fallback, |w| {
+                compact_threshold_for_window(w, self.sampling.max_output_tokens)
+            })
+    }
+
     pub fn api_key(&self) -> Result<String, ConfigError> {
         let auth = load_auth(&auth_path());
         if let Ok(k) = std::env::var(&self.api_key_env)
@@ -1278,13 +1346,20 @@ fn normalize(mut c: AppConfig) -> AppConfig {
     // 表现是"截图突然又不给模型看了"。铺开之后如果有纯文本模型被误标，
     // 他在模型行上取消一下就行，那个位置本来就是现在该看的地方。
     for p in &mut c.providers {
-        if !p.vision {
-            continue;
+        if p.vision {
+            for m in &mut p.models {
+                m.vision = true;
+            }
+            p.vision = false;
         }
+        // 窗口夹在合理区间。config.json 用户能手改，而少打一个 0 的表现是
+        // "每轮都在压缩"，多打一个 0 是"压缩再也不触发、直接撞 413"——
+        // 两种都不指向这个字段。
         for m in &mut p.models {
-            m.vision = true;
+            m.context_window = m
+                .context_window
+                .map(|w| w.clamp(MIN_CONTEXT_WINDOW, MAX_CONTEXT_WINDOW));
         }
-        p.vision = false;
     }
 
     // active 指向空/幽灵 provider 而列表非空时，吸附到第一家。
@@ -1326,6 +1401,11 @@ fn normalize(mut c: AppConfig) -> AppConfig {
 const MIN_COMPACT_THRESHOLD: u32 = 8_000;
 /// 上限 1M：超过现有一切模型的窗口，等于"永不主动压"。
 const MAX_COMPACT_THRESHOLD: u32 = 1_000_000;
+
+/// 窗口下限沿用阈值下限 8k —— 比这更小的窗口装不下一次正经的工具输出。
+const MIN_CONTEXT_WINDOW: u32 = 8_000;
+/// 上限 10M：比现有任何模型都大一个数量级，只用来兜住手滑多打的那个 0。
+const MAX_CONTEXT_WINDOW: u32 = 10_000_000;
 
 /// 弹窗至少要留 5 秒 —— 再短用户根本来不及读完就没了。
 const MIN_ASK_TIMEOUT_SECS: u32 = 5;
@@ -1577,6 +1657,115 @@ mod tests {
             Some(1000),
             "模型没动的字段要继承服务方，而不是被清掉"
         );
+    }
+
+    /// `[约束]` 没填窗口的模型必须原样走全局阈值。
+    ///
+    /// 这条守的是升级路径：老配置里一个模型都没填窗口，如果这里改用推导值，
+    /// 所有存量用户的压缩时机会在升级当天集体变化 —— 而他们什么都没改。
+    #[test]
+    fn 没填窗口就走全局阈值() {
+        let c = one_provider();
+        let r = c.resolve().expect("解析");
+        assert_eq!(r.context_window, None);
+        assert_eq!(r.compact_threshold(100_000), 100_000);
+        assert_eq!(r.compact_threshold(31_337), 31_337, "兜底就是原样透传");
+    }
+
+    #[test]
+    fn 填了窗口就按窗口推阈值() {
+        let mut c = one_provider();
+        c.providers[0].models = vec![ModelConfig {
+            context_window: Some(200_000),
+            ..ModelConfig::new("m1")
+        }];
+
+        let r = c.resolve().expect("解析");
+        // 200k − 20k 输出预留 − 13k 缓冲。全局那个 100k 不再参与。
+        assert_eq!(r.compact_threshold(100_000), 167_000);
+    }
+
+    /// 模型自己声明的最大输出比上限小时，按它留 —— 省下来的都是可用窗口。
+    #[test]
+    fn 输出预留按模型的最大输出算() {
+        let mut c = one_provider();
+        c.providers[0].models = vec![ModelConfig {
+            context_window: Some(200_000),
+            sampling: Sampling {
+                max_output_tokens: Some(4_096),
+                ..Sampling::default()
+            },
+            ..ModelConfig::new("m1")
+        }];
+
+        let r = c.resolve().expect("解析");
+        assert_eq!(r.compact_threshold(100_000), 200_000 - 4_096 - 13_000);
+    }
+
+    /// `[约束]` 小窗口模型不能被推出"每轮都压"。
+    ///
+    /// 32k 窗口减完两笔预留就归零了。阈值为 0 意味着每一轮开工前都要跑一次
+    /// 总结（一次真实的模型调用），压完立刻又超 —— 比不压更贵。
+    #[test]
+    fn 小窗口不会被推成每轮都压() {
+        // 32k：32000 − 20000 − 13000 < 0，要被窗口一半兜住。
+        assert_eq!(compact_threshold_for_window(32_000, None), 16_000);
+        // 64k：64000 − 33000 = 31000，比一半（32000）还小，同样走一半。
+        assert_eq!(compact_threshold_for_window(64_000, None), 32_000);
+        // 128k：减完仍高于一半，用减出来的值。
+        assert_eq!(compact_threshold_for_window(128_000, None), 95_000);
+        // 再小的窗口不能低于阈值下限，否则一次工具输出就触发压缩。
+        assert_eq!(compact_threshold_for_window(8_000, None), MIN_COMPACT_THRESHOLD);
+    }
+
+    /// 手改 config.json 少打或多打一个 0，要在加载时被夹回来。
+    ///
+    /// 不夹的话，1_280（少打一个 0）会让每轮都压，而报错里没有任何东西
+    /// 指向这个字段。
+    #[test]
+    fn 手改的离谱窗口会被夹回区间() {
+        let json = r#"{
+            "providers": [{
+                "id": "acme", "name": "Acme", "protocol": "openai",
+                "baseUrl": "https://api.acme.test", "apiKeyEnv": "K",
+                "models": [
+                    { "id": "tiny", "contextWindow": 12 },
+                    { "id": "huge", "contextWindow": 999999999 }
+                ]
+            }],
+            "activeProvider": "acme",
+            "activeModel": "tiny"
+        }"#;
+        let c = parse(json);
+        assert_eq!(c.providers[0].models[0].context_window, Some(MIN_CONTEXT_WINDOW));
+        assert_eq!(c.providers[0].models[1].context_window, Some(MAX_CONTEXT_WINDOW));
+    }
+
+    /// 没有 `contextWindow` 字段的配置（也就是所有存量配置）要照常读，
+    /// 而且读出来是 `None` 而不是 0 —— 0 会被当成"填了个 0 的窗口"。
+    #[test]
+    fn 老配置缺窗口字段读成未填() {
+        let json = r#"{
+            "providers": [{
+                "id": "acme", "name": "Acme", "protocol": "openai",
+                "baseUrl": "https://api.acme.test", "apiKeyEnv": "K",
+                "models": [{ "id": "m1", "vision": true }]
+            }],
+            "activeProvider": "acme",
+            "activeModel": "m1"
+        }"#;
+        let c = parse(json);
+        assert_eq!(c.providers[0].models[0].context_window, None);
+    }
+
+    /// 没填窗口时不该往 config.json 里写 `"contextWindow": null`。
+    ///
+    /// 写了的话每个存量用户的配置在下一次保存时都会多出一堆 null 字段 ——
+    /// 那份文件是用户会手改、会贴进 issue 的东西。
+    #[test]
+    fn 未填的窗口不进配置文件() {
+        let json = serde_json::to_string(&one_provider()).expect("序列化");
+        assert!(!json.contains("contextWindow"), "没填就不该出现这个键：{json}");
     }
 
     /// 主模型自己能看图时不该再走兼容模型。

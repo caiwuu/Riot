@@ -1284,17 +1284,25 @@ Rust 这里有生态优势:`tree-sitter` 和 `tree-sitter-bash` 都是原生 cra
 ### 10.1 token 计数
 
 ```rust
-fn estimate_tokens(messages: &[Message]) -> u32 {
+fn count_tokens(messages: &[Message]) -> u32 {
     // 最近一条带 usage 的 assistant 消息的真实 API 计数
-    let (idx, base) = last_usage_checkpoint(messages);
+    let (from, base) = last_usage_checkpoint(messages);
     // 加上其后新增消息的粗估
-    base + messages[idx+1..].iter().map(rough_estimate).sum::<u32>()
+    base + rough_estimate(&messages[from..])
 }
 ```
 
-粗估规则:普通文本 4 字节/token,JSON 2 字节/token,图片固定 ~2000。
+粗估规则:文本按 4 字节/token(`estimate_tokens`),图片**按张** 1600(`estimate_image_tokens`,先把 base64 从报文字节里扣掉再加回来)。
 
 `[约束]` 不要每轮调 countTokens API(延迟和费用),也不要累加各轮 output(会双计)。
+
+`[约束]` 基准只认**主 agent** 的 usage。子 agent 有自己的窗口,拿它打底会差出一个数量级,而且是往小了差 —— 主历史看起来一直很空,压缩永远不触发,直到撞上硬上限。
+
+`[约束]` 两家协议的 usage 字段语义是**反的**,必须在 provider 侧统一后再存进 `Usage`:Anthropic 的 `input_tokens` 是未命中缓存的部分,OpenAI/DeepSeek 的 `prompt_tokens` 是**总输入**(已含命中部分)。不统一的话,任何"总量 = input + cache_read"的求和在 OpenAI 侧都会把缓存算两遍 —— DeepSeek 这种命中率常年九成的,报出来能是真实值的两倍。统一到 Anthropic 那套(三项相加 = 总输入),`openai::decode::merge_usage` 里做扣减。
+
+`[取舍]` 纯字节粗估对代码和英文**偏低**(实测一个真实会话差了一成半),而偏低的表现是该压的时候没压、直接撞上限。拿服务方回报的真实计数打底,误差就只剩最后几条新消息那一段。代价是历史被轻档压缩改写之后基准会偏大一轮(旧 usage 描述的是改写前的尺寸)—— 偏大只让压缩早来一轮,方向上和 `BYTES_PER_TOKEN` 的保守取舍一致,且压缩后紧接着的请求会立刻用新 usage 顶掉基准。
+
+UI 的上下文占用环用的是同一个口径(最后一条 usage 的 `total()`),所以"环满"和"要压了"说的是同一件事。
 
 ### 10.2 触发阈值
 
@@ -1304,6 +1312,12 @@ fn estimate_tokens(messages: &[Message]) -> u32 {
 ```
 
 `[约束]` **必须为压缩本身预留输出空间**,否则压缩请求自己也会溢出。这个 bug 只在接近上限时触发,很难在开发中遇到。
+
+`context_window` 由**用户按模型填**(`ModelConfig::context_window`——输入框的模型菜单里选常用档位,或在「设置 → 服务方 → 模型」里填精确值)。Riot 猜不到窗口:配置里的模型名对不上任何一张公开价目表(中转、自建、微调名都在改名字)。没填的模型退回全局 `compact_threshold_tokens`(默认 100k,正是对 128k 窗口套上面这个公式的结果),于是**存量配置的行为一字不变**。
+
+换算在宿主侧(`riot-kernel/src/config.rs::compact_threshold_for_window`,由 `ResolvedModel::compact_threshold` 调用)做完,内核只收最终阈值 —— 窗口是配置概念,不值得在协议里多传一层。
+
+`[约束]` 结果不低于窗口的一半。32k 及以下的窗口减完两笔预留会归零,那等于每轮开工前都跑一次总结(一次真实的模型调用),压完立刻又超 —— 比不压更贵。
 
 ### 10.3 分层压缩管道
 

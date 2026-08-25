@@ -36,11 +36,18 @@ import {
   segsText,
   segsToPrompt,
 } from "../lib/promptText";
+import {
+  DEFAULT_COMPACT_THRESHOLD,
+  WINDOW_PRESETS,
+  compactThresholdForWindow,
+  fmtTokens,
+} from "../lib/contextWindow";
 import { basename } from "../pathDisplay";
 import { Chevron } from "./Chevron";
 import { ConfirmDialog, type ConfirmRequest } from "./ConfirmDialog";
+import { ContextRing } from "./ContextRing";
 import { ArrowUpIcon, PencilIcon, PlusIcon, StopIcon, TrashIcon } from "./icons";
-import { ModeMenu, Picker, fmtTokens, modelLabel } from "./pickers";
+import { ModeMenu, Picker, type PickerSection, modelLabel } from "./pickers";
 import { CmdChip, FileChip } from "./Transcript";
 
 const drafts = new Map<string, Seg[]>();
@@ -581,7 +588,7 @@ export function Composer({
   initialMode: PermissionMode;
   /** 宿主主动切的模式（批准计划）。null = 没发生过。 */
   hostMode: PermissionMode | null;
-  tokens: { input: number; output: number };
+  tokens: { input: number; output: number; context: number };
   /** 排队面板：跑轮中发的、还没注入对话的插话。 */
   queued: QueuedItem[];
   onQueueDelete: (id: string) => void;
@@ -690,6 +697,69 @@ export function Composer({
       .then(onConfig)
       .catch(() => {});
   };
+
+  // 当前模型的上下文窗口。改它改的是这个模型的压缩时机，写回 ModelConfig
+  // 持久化 —— 窗口是模型的固有属性，不是这次对话的临时偏好，下次选中它
+  // 还该是这个值。
+  const activeModelCfg = activeProvider?.models.find((m) => m.id === cfg.activeModel);
+  const switchWindow = (raw: string) => {
+    if (!activeProvider || !activeModelCfg) return;
+    const next = raw ? Number(raw) : undefined;
+    if (next === activeModelCfg.contextWindow) return;
+    const models = activeProvider.models.map((m) => {
+      if (m.id !== activeModelCfg.id) return m;
+      // 选「跟随设置」要把键**删掉**而不是写 undefined：配置会被序列化
+      // 发给宿主，显式的 null 在那边是"填了个空窗口"，不是"没填"。
+      const { contextWindow: _cleared, ...rest } = m;
+      return next === undefined ? rest : { ...rest, contextWindow: next };
+    });
+    void saveConfig({
+      ...cfg,
+      providers: cfg.providers.map((p) => (p.id === activeProvider.id ? { ...p, models } : p)),
+    })
+      .then(onConfig)
+      .catch(() => {});
+  };
+
+  // 这一轮实际会在哪儿触发压缩。和宿主侧同一条规则：填了窗口按窗口推，
+  // 没填用设置里的全局值。占用环拿它当分母 —— 环满就是"下一轮要压了"。
+  const compactAt = activeModelCfg?.contextWindow
+    ? compactThresholdForWindow(
+        activeModelCfg.contextWindow,
+        activeModelCfg.sampling?.maxOutputTokens ??
+          activeProvider?.sampling?.maxOutputTokens ??
+          undefined,
+      )
+    : (cfg.compactThresholdTokens ?? DEFAULT_COMPACT_THRESHOLD);
+
+  const windowSection: PickerSection | undefined = activeModelCfg
+    ? {
+        title: "上下文窗口",
+        items: [
+          {
+            id: "",
+            label: "跟随设置",
+            active: !activeModelCfg.contextWindow,
+            note: fmtTokens(cfg.compactThresholdTokens ?? DEFAULT_COMPACT_THRESHOLD),
+          },
+          // 在设置里填过的非档位值（比如 256000）也要列出来，否则用户打开
+          // 菜单会看到一项都没亮 —— 像是那个设置没生效。
+          ...[
+            ...new Set([
+              ...WINDOW_PRESETS,
+              ...(activeModelCfg.contextWindow ? [activeModelCfg.contextWindow] : []),
+            ]),
+          ]
+            .sort((a, b) => a - b)
+            .map((w) => ({
+              id: String(w),
+              label: fmtTokens(w),
+              active: activeModelCfg.contextWindow === w,
+            })),
+        ],
+        onPick: switchWindow,
+      }
+    : undefined;
 
   // 技能也在这份清单里 —— 宿主那边把命令和技能并成了一条发现管道
   // （`slash::discover`）。这里曾经自己拉一次 skillsList 再合并，那是
@@ -1497,7 +1567,9 @@ export function Composer({
                   label: m.name?.trim() || m.id,
                   active: m.id === cfg.activeModel,
                   ...(m.vision ? { vision: true } : {}),
+                  ...(m.contextWindow ? { note: fmtTokens(m.contextWindow) } : {}),
                 }))}
+                {...(windowSection ? { section: windowSection } : {})}
                 emptyHint="这个服务方还没有模型"
                 onEmpty={onOpenSettings}
                 onPick={switchModel}
@@ -1506,10 +1578,14 @@ export function Composer({
           </div>
           <div className="composer-actions">
             {tokens.input + tokens.output > 0 ? (
-              // "a / b" 会被读成"已用 / 上限"，箭头形式没有歧义
-              <span className="usage" title="本会话累计 token：↑输入 ↓输出">
-                ↑{fmtTokens(tokens.input)} ↓{fmtTokens(tokens.output)}
-              </span>
+              <ContextRing
+                used={tokens.context}
+                threshold={compactAt}
+                totals={{ input: tokens.input, output: tokens.output }}
+                {...(activeModelCfg?.contextWindow
+                  ? { window: activeModelCfg.contextWindow }
+                  : {})}
+              />
             ) : null}
             {/* 停止常驻：只要在忙就显示，不再被"打了字"的发送按钮顶掉 ——
                 想中止不必先清空输入。有草稿时它和发送并排，各司其职。 */}

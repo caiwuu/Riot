@@ -6,6 +6,11 @@ import {
   type SandboxMode,
   setConfig,
 } from "../../bridge";
+import {
+  DEFAULT_COMPACT_THRESHOLD as DEFAULT_COMPACT_AT,
+  MAX_COMPACT_THRESHOLD as MAX_COMPACT_AT,
+  MIN_COMPACT_THRESHOLD as MIN_COMPACT_AT,
+} from "../../lib/contextWindow";
 import { FieldNumber } from "../FieldNumber";
 import { HintTip } from "../HintTip";
 import { type AskConfirm, FormError, blurOnEnter } from "./shared";
@@ -16,10 +21,6 @@ const MAX_TIMEOUT = 3600;
 const MIN_TURNS = 1;
 const MAX_TURNS = 1000;
 const DEFAULT_TURNS = 48;
-/** 和宿主的 MIN/MAX_COMPACT_THRESHOLD 一致。 */
-const MIN_COMPACT_AT = 8_000;
-const MAX_COMPACT_AT = 1_000_000;
-const DEFAULT_COMPACT_AT = 100_000;
 
 const SANDBOX_MODES: { id: SandboxMode; name: string; desc: string; danger?: boolean }[] = [
   {
@@ -291,9 +292,10 @@ export function PermissionPane({
       </section>
       <section>
         <h2>
-          上下文压缩阈值
+          默认压缩阈值
           <HintTip>
-            会话历史估算超过这个 token 数时自动摘要压缩。默认适配 128k 窗口，更小的模型请调低。范围{" "}
+            会话历史估算超过这个 token 数时自动摘要压缩。只对<b>没填上下文窗口</b>的模型生效 ——
+            填了窗口的按窗口算（在输入框的模型菜单里选，或在「服务方 → 模型」里填）。范围{" "}
             {MIN_COMPACT_AT.toLocaleString()}–{MAX_COMPACT_AT.toLocaleString()}。
           </HintTip>
         </h2>

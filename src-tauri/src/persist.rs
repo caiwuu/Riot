@@ -83,7 +83,7 @@ pub fn load(sessions_dir: &Path, transcripts: &riot_store::Transcripts) -> Sessi
     #[allow(clippy::disallowed_methods)]
     match std::fs::read_to_string(&p) {
         Ok(raw) => match serde_json::from_str::<SessionIndex>(&raw) {
-            Ok(idx) => idx,
+            Ok(idx) => adopt_orphans(idx, transcripts),
             Err(e) => {
                 // 和 config.json 同一条线：损坏的原文件必须先挪走再重建，
                 // 否则下一次保存就把它覆盖了，而它里面可能还有能捞的标题。
@@ -125,28 +125,76 @@ fn rebuild(transcripts: &riot_store::Transcripts) -> SessionIndex {
     }
     scanned.sort_by_key(|s| s.meta.created_at_ms);
 
-    let sessions = scanned
-        .into_iter()
-        .enumerate()
-        .map(|(i, s)| PersistedSession {
-            id: s.meta.id.as_str().to_owned(),
-            root: s.meta.root.display().to_string(),
-            seq: i as u64,
-            created_at_ms: s.meta.created_at_ms,
-            custom_title: None,
-            auto_title: s
-                .first_prompt
-                .as_deref()
-                .and_then(crate::session::title_excerpt),
-            mode: PermissionMode::Default,
-            sampling: Sampling::default(),
-            python_venv: None,
-            system_prompt: None,
-            thinking: riot_protocol::ThinkingPolicy::default(),
-        })
-        .collect();
+    let sessions = scanned.into_iter().map(from_scan).collect();
     tracing::info!("会话索引已从 transcript 重建");
-    SessionIndex { sessions }
+    reseq(SessionIndex { sessions })
+}
+
+/// 把盘上有、索引里却没有的 transcript 收编回来。
+///
+/// `[约束]` 索引读得懂**不等于**它是全的。索引是全量覆盖写的，而 transcript
+/// 是随对话增量落盘的:一次崩溃（或没轮到写索引就退出）会留下一个盘上完整、
+/// 索引里查无此人的会话。而 [`load`] 只要索引能解析就直接采信，于是那个会话
+/// 再也不会被扫出来 —— 之后每一次 [`save`] 都按内存里的 map 全量覆盖，把它
+/// 永久排除。真实发生过:一次崩溃丢掉 21 个会话共 7.5 MB，对话一条没少，
+/// 全都在界面上消失了，而且不可逆。
+///
+/// 收编来的会话只能恢复到 transcript 里有的那些（标题从首条用户消息提取），
+/// 可变状态回默认值 —— 和 [`rebuild`] 同一条线：对话本身一条不少。
+fn adopt_orphans(idx: SessionIndex, transcripts: &riot_store::Transcripts) -> SessionIndex {
+    let known: std::collections::HashSet<String> =
+        idx.sessions.iter().map(|s| s.id.clone()).collect();
+    let mut found: Vec<_> = transcripts
+        .scan()
+        .into_iter()
+        .filter(|s| !known.contains(s.meta.id.as_str()))
+        .collect();
+    if found.is_empty() {
+        return idx;
+    }
+
+    tracing::warn!(
+        count = found.len(),
+        "有会话在盘上但不在索引里，已收编（多半是上次异常退出丢了索引更新）"
+    );
+    found.sort_by_key(|s| s.meta.created_at_ms);
+
+    let mut sessions = idx.sessions;
+    sessions.extend(found.into_iter().map(from_scan));
+    reseq(SessionIndex { sessions })
+}
+
+/// 扫描结果 → 索引条目。`seq` 先占位，由 [`reseq`] 统一分配。
+fn from_scan(s: riot_store::ScannedTranscript) -> PersistedSession {
+    PersistedSession {
+        id: s.meta.id.as_str().to_owned(),
+        root: s.meta.root.display().to_string(),
+        seq: 0,
+        created_at_ms: s.meta.created_at_ms,
+        custom_title: None,
+        auto_title: s
+            .first_prompt
+            .as_deref()
+            .and_then(crate::session::title_excerpt),
+        mode: PermissionMode::Default,
+        sampling: Sampling::default(),
+        python_venv: None,
+        system_prompt: None,
+        thinking: riot_protocol::ThinkingPolicy::default(),
+    }
+}
+
+/// 按创建时间重排 `seq`。
+///
+/// 收编进来的多半是**老**会话，直接续在末尾会让它们顶到侧边栏最前面装成最新的。
+/// seq 的语义本来就是创建顺序（见 [`rebuild`]），统一重排既放对了位置，也不会
+/// 打乱原有会话的相对次序。
+fn reseq(mut idx: SessionIndex) -> SessionIndex {
+    idx.sessions.sort_by_key(|s| s.created_at_ms);
+    for (i, s) in idx.sessions.iter_mut().enumerate() {
+        s.seq = i as u64;
+    }
+    idx
 }
 
 /// 把读不懂的索引挪到旁边。挪不动就保留原文件（下次启动还有机会捞）。
@@ -256,6 +304,130 @@ mod tests {
             d.path().join("index.json.bak").exists(),
             "损坏的索引要备份，不能直接扔"
         );
+    }
+
+    async fn write_transcript(
+        t: &riot_store::Transcripts,
+        id: &str,
+        created_at_ms: u64,
+        first: &str,
+    ) {
+        let log = t.open(riot_store::TranscriptMeta {
+            id: SessionId::from_raw(id),
+            root: "/tmp/proj".into(),
+            created_at_ms,
+        });
+        log.append(&Message::User {
+            id: MessageId::from_raw("m1"),
+            content: vec![UserContent::Text { text: first.into() }],
+            meta: MessageMeta::default(),
+        });
+        log.flush().await;
+    }
+
+    /// `[约束]` 索引能解析 ≠ 索引是全的。
+    ///
+    /// 索引全量覆盖写、transcript 增量落盘，一次崩溃就能留下"盘上完整、索引
+    /// 里查无此人"的会话。不在这里捞回来的话它再也不会出现 —— 下一次 save
+    /// 按内存里的 map 全量覆盖，等于把它永久删了（真实发生过，21 个会话）。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn 盘上有而索引里没有的会话要收编回来() {
+        let d = dir();
+        let t = riot_store::Transcripts::new(d.path());
+        write_transcript(&t, "known", 1_000, "索引里有的").await;
+        write_transcript(&t, "orphan", 2_000, "崩溃时丢掉的").await;
+
+        let mut known = one("known", 0);
+        known.created_at_ms = 1_000;
+        save(
+            d.path(),
+            &SessionIndex {
+                sessions: vec![known],
+            },
+        )
+        .expect("保存");
+
+        let idx = load(d.path(), &t);
+        let ids: Vec<&str> = idx.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["known", "orphan"], "孤儿要被收编");
+        assert_eq!(
+            idx.sessions[1].auto_title.as_deref(),
+            Some("崩溃时丢掉的"),
+            "标题从 transcript 首条用户消息重建"
+        );
+    }
+
+    /// 收编进来的多半是**老**会话，seq 直接续在末尾会让它们冒充最新的
+    /// 排到侧边栏最前面。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn 收编的老会话不会冒充最新的() {
+        let d = dir();
+        let t = riot_store::Transcripts::new(d.path());
+        write_transcript(&t, "ancient", 100, "很久以前").await;
+        write_transcript(&t, "recent", 9_000, "刚聊的").await;
+
+        let mut recent = one("recent", 0);
+        recent.created_at_ms = 9_000;
+        save(
+            d.path(),
+            &SessionIndex {
+                sessions: vec![recent],
+            },
+        )
+        .expect("保存");
+
+        let idx = load(d.path(), &t);
+        let by_seq: Vec<&str> = idx.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(by_seq, vec!["ancient", "recent"], "按创建时间排，老的在前");
+        assert!(idx.sessions[0].seq < idx.sessions[1].seq, "seq 要跟着重排");
+    }
+
+    /// 收编是**补**不是**重建**：已有条目上那些只存在于索引里的东西
+    /// （自定义标题、权限模式、采样）不能被扫描结果盖掉。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn 收编不能重置已有条目的可变状态() {
+        let d = dir();
+        let t = riot_store::Transcripts::new(d.path());
+        write_transcript(&t, "known", 1_000, "首句会变成自动标题").await;
+        write_transcript(&t, "orphan", 2_000, "孤儿").await;
+
+        let mut known = one("known", 0);
+        known.created_at_ms = 1_000;
+        known.custom_title = Some("我自己起的名字".into());
+        known.mode = PermissionMode::AcceptEdits;
+        save(
+            d.path(),
+            &SessionIndex {
+                sessions: vec![known],
+            },
+        )
+        .expect("保存");
+
+        let idx = load(d.path(), &t);
+        let kept = idx
+            .sessions
+            .iter()
+            .find(|s| s.id == "known")
+            .expect("已有条目还在");
+        assert_eq!(kept.custom_title.as_deref(), Some("我自己起的名字"));
+        assert_eq!(kept.mode, PermissionMode::AcceptEdits);
+    }
+
+    /// 没有孤儿时不该有任何动静 —— 每次启动都走这条路。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn 索引已经是全的就原样返回() {
+        let d = dir();
+        let t = riot_store::Transcripts::new(d.path());
+        write_transcript(&t, "s1", 1_000, "唯一一个").await;
+
+        let mut s1 = one("s1", 0);
+        s1.created_at_ms = 1_000;
+        let idx = SessionIndex {
+            sessions: vec![s1],
+        };
+        save(d.path(), &idx).expect("保存");
+
+        assert_eq!(load(d.path(), &t).sessions, idx.sessions);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import type { AgentError, DecisionReason, ToolResultContent } from "../bridge/generated";
+import type { AgentError, DecisionReason, ToolResultContent, Usage } from "../bridge/generated";
 import {
   type AgentEvent,
   type ImageInput,
@@ -128,8 +128,15 @@ export interface SessionState {
    * 转圈、没有任何弹窗。
    */
   asks: { requestId: string; detail: PermissionAsk }[];
-  /** 本会话累计 token 用量。花的是用户的钱，应该让他看得见。 */
-  tokens: { input: number; output: number };
+  /**
+   * 本会话的 token 用量。花的是用户的钱，应该让他看得见。
+   *
+   * `input`/`output` 是**累计**（每轮相加，只增不减）；`context` 是
+   * **当前占用**的快照 —— 最近一次请求真实发出去的量，压缩之后会掉下来。
+   * 两个口径混用会让人以为"聊了半天上下文才用了 5%"（累计 ÷ 窗口），
+   * 或者"压缩完怎么还是这么多"（快照当累计看）。
+   */
+  tokens: { input: number; output: number; context: number };
   /**
    * 宿主主动切换的权限模式（批准计划时用户选的执行档）。null = 没发生过。
    * Composer 靠它同步显示 —— 不同步的话界面还写着「规划模式」，
@@ -195,7 +202,7 @@ const EMPTY_STATE: SessionState = {
   busy: false,
   compacting: false,
   asks: [],
-  tokens: { input: 0, output: 0 },
+  tokens: { input: 0, output: 0, context: 0 },
   hostMode: null,
   queued: [],
   withdrawn: null,
@@ -520,6 +527,14 @@ export function useSession(
             compacting: false,
             items: [...s.items, { kind: "compact", id: `compact-${Date.now()}` }],
           }));
+          // 和宿主对一次账。长压缩（>12s 静默）期间看门狗拉过快照，把
+          // running 被占的 busy=true 吸了进来 —— 而手动压缩结束没有 Done，
+          // 这个 busy 没有别的事件会来清，状态行卡在假的"正在生成"直到下
+          // 一个看门狗周期。内核保证发这个事件时 running 已释放（见
+          // compact_now），所以空闲场景快照回 busy=false、这里立刻清干净；
+          // 轮内场景快照回 busy=true，catchUp=false 只换出口不盖正在流的
+          // 内容 —— 两种场景以宿主为准，前端不猜。
+          void ensureLive({ catchUp: false });
           break;
 
         case "prompt_withdrawn":
@@ -1462,6 +1477,7 @@ function applyMessage(s: SessionState, event: Extract<AgentEvent, { type: "messa
       ? {
           input: s.tokens.input + u.input_tokens + u.cache_read_tokens + u.cache_creation_tokens,
           output: s.tokens.output + u.output_tokens,
+          context: contextOf(u),
         }
       : s.tokens;
     return { ...s, items, streaming: "", thinking: "", tokens };
@@ -1680,15 +1696,24 @@ function findLast<T>(arr: T[], pred: (x: T) => boolean): number {
   return -1;
 }
 
-/** 重建历史时恢复累计用量，和实时路径的口径一致。 */
-function sumUsage(msgs: Message[]): { input: number; output: number } {
+/** 重建历史时恢复用量，和实时路径的口径一致。 */
+function sumUsage(msgs: Message[]): { input: number; output: number; context: number } {
   let input = 0;
   let output = 0;
+  // 每遇到一条就整个覆盖，循环结束后剩的就是最后一条 —— 那一次请求发出去
+  // 的量就是此刻上下文的真实大小（服务方报的数，不是估的）。
+  let context = 0;
   for (const m of msgs) {
     if (m.role === "assistant" && m.usage) {
       input += m.usage.input_tokens + m.usage.cache_read_tokens + m.usage.cache_creation_tokens;
       output += m.usage.output_tokens;
+      context = contextOf(m.usage);
     }
   }
-  return { input, output };
+  return { input, output, context };
+}
+
+/** 一次请求占了多少上下文：发进去的（含命中缓存的）加上吐出来的。 */
+function contextOf(u: Usage): number {
+  return u.input_tokens + u.cache_read_tokens + u.cache_creation_tokens + u.output_tokens;
 }

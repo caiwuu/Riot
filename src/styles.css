@@ -2803,8 +2803,8 @@ pre {
 
 .send {
   flex: none;
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
   padding: 0;
   display: grid;
@@ -2814,14 +2814,32 @@ pre {
   color: #111;
 }
 
-.send:hover:not(:disabled) {
+/* 按钮收窄了，图标跟着收 —— 只收这里的，`ArrowUpIcon` 在排队面板里
+   还是原尺寸，那边的按钮没变。 */
+.send svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* hover 变白只属于"发送"态：busy 时这个按钮是停止键（.send.stop），
+   有自己的底色语义，不能跟着一起变白。 */
+.send:hover:not(:disabled):not(.stop) {
   background: #fff;
 }
 
+/* 停止键：浅灰底 + 深色方块，和发送键的"浅底深图标"同一套语言 ——
+   图标不用白色，白方块在浅灰底上对比低，也跟发送键的深箭头不一致。 */
 .send.stop {
-  background: var(--bg-hover);
+  background: #fff;
   border-color: var(--border-strong);
-  color: var(--text);
+  color: #111;
+}
+
+/* 停止键常态已是抬亮过的底色（别人的 hover 态），自己悬停再抬一档、
+   边框跟着亮一点 —— 否则它像个没反应的死按钮。 */
+.send.stop:hover:not(:disabled) {
+  background: #a0a0a0;
+  border-color: #555;
 }
 
 /* 权限模式菜单 */
@@ -2899,6 +2917,24 @@ pre {
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
+}
+
+/* 下拉里的第二组选项（模型菜单底部的上下文窗口档位）。分隔线 + 小标题，
+   让它一眼看出来不是"另一个模型"。 */
+.menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
+
+.menu-group-title {
+  padding: 4px 10px 2px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  pointer-events: none;
 }
 
 .cap-icon {
@@ -4423,6 +4459,16 @@ pre {
   text-transform: none;
 }
 
+/* 字段下面那行换算说明（"历史约 167K 时自动压缩"）。贴着输入框，
+   缩进对齐右侧的控件列，不要和左边的标签列混在一起。 */
+.model-dialog-note {
+  margin: 4px 0 0 auto;
+  max-width: 62%;
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: right;
+}
+
 .model-dialog .editor-foot {
   flex-shrink: 0;
   margin: 0;
@@ -5325,12 +5371,155 @@ pre {
 
 /* ── 输入框附属 ─────────────────────────────── */
 
-.usage {
+/* ── 上下文占用环 ───────────────────────────── */
+
+.ctx-ring-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.ctx-ring {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+/* SVG 的 0° 在 3 点方向。掰到 12 点，进度才是"从顶上顺时针长"。转 svg
+   而不是按钮：转按钮的话焦点框也跟着转。 */
+.ctx-ring svg {
+  transform: rotate(-90deg);
+}
+
+.ctx-ring:hover:not(:disabled),
+.ctx-ring:focus-visible {
+  color: var(--text-dim);
+  /* 环是按钮，会吃到全局 button:hover 的底色（特异性还压不过），
+     这里显式压回透明 —— hover 只变环的亮暗，不该多出一块灰底。 */
+  background: none;
+}
+
+.ctx-ring-track {
+  stroke: var(--border);
+}
+
+.ctx-ring-fill {
+  stroke: currentColor;
+  transition: stroke-dashoffset 0.3s ease;
+}
+
+/* 两道坎和内核的环境档位对齐（70 / 85），界面变色时模型也正好收到提示。 */
+.ctx-ring.warn {
+  color: var(--warn);
+}
+
+.ctx-ring.danger {
+  color: var(--danger);
+}
+
+.ctx-panel {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: var(--z-menu);
+  width: 232px;
+  padding: 10px 12px 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--bg-card);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+}
+
+.ctx-panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+.ctx-panel-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.ctx-panel-pct {
   font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.ctx-panel-pct.warn {
+  color: var(--warn);
+}
+
+.ctx-panel-pct.danger {
+  color: var(--danger);
+}
+
+.ctx-bar {
+  height: 4px;
+  margin-bottom: 9px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.ctx-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--text-dim);
+  transition: width 0.3s ease;
+}
+
+.ctx-bar-fill.warn {
+  background: var(--warn);
+}
+
+.ctx-bar-fill.danger {
+  background: var(--danger);
+}
+
+.ctx-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+}
+
+.ctx-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ctx-row dt {
   font-size: 11px;
   color: var(--text-faint);
-  cursor: default;
+}
+
+.ctx-row dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
   white-space: nowrap;
+}
+
+.ctx-note {
+  margin: 9px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-faint);
 }
 
 /* 窄列（开抽屉或窗口本身窄）按对话列宽度收，不看窗口 ——

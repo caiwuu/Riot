@@ -781,9 +781,14 @@ fn 用量被记录() {
         _ => None,
     });
     let u = usage.expect("要有用量");
-    assert_eq!(u.input_tokens, 100);
+    // `[约束]` 线上的 prompt_tokens=100 是**总输入**，其中 80 命中缓存。
+    // 存进 Usage 时要扣成 20 —— 和 Anthropic 的 input_tokens 同一个语义
+    // （未命中的部分），这样 input + cache_read 才等于总输入。存 100 的话
+    // 每一处求和都会把那 80 算两遍。
+    assert_eq!(u.input_tokens, 20, "prompt_tokens 含缓存，要扣掉再存");
     assert_eq!(u.output_tokens, 20);
     assert_eq!(u.cache_read_tokens, 80);
+    assert_eq!(u.total(), 120, "三项相加要等于服务方报的总量");
 }
 
 #[test]

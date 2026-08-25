@@ -101,6 +101,14 @@ export interface ModelConfig {
   name?: string;
   /** 能收图片。 */
   vision?: boolean;
+  /**
+   * 上下文窗口有多大（token）。省略 = 没填，压缩阈值走设置里那个全局数。
+   *
+   * 填的是**窗口**而不是压缩阈值：窗口是模型文档上查得到的客观数字，阈值
+   * 要先知道内部给回复和总结各留了多少才推得出来。宿主拿窗口减去这两笔
+   * 预留算出阈值。
+   */
+  contextWindow?: number;
   /** 这个模型的采样参数。空字段继承 provider 的。 */
   sampling?: Sampling;
 }

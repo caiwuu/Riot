@@ -214,6 +214,15 @@ pub struct TurnCapabilities {
     pub extra_tools: Vec<Arc<dyn Tool>>,
 }
 
+/// 一次压缩的产物。事件由调用方按各自的时机发（见
+/// [`Session::compact_history`] 上的约束），所以规模数字要一起带出来。
+struct CompactOutcome {
+    /// 压缩后的完整历史（一条续接消息）。
+    history: Vec<Message>,
+    before_tokens: u32,
+    after_tokens: u32,
+}
+
 /// 一轮的数值上限，每轮从配置现取。
 ///
 /// 打成一包而不是各自当参数，理由和 [`TurnCapabilities`] 一样:取值时机相同，
@@ -1398,12 +1407,19 @@ impl Session {
         }
     }
 
-    /// 把一段历史压成摘要：LLM 总结 + 记忆/工作集重注 + 边界落盘 + 事件。
-    /// 返回 `Some(新历史)`；总结失败返回 None（调用方决定要不要声张）。
+    /// 把一段历史压成摘要：LLM 总结 + 记忆/工作集重注 + 边界落盘。
+    /// 总结失败返回 None（调用方决定要不要声张）。
     ///
     /// `shape` 是本轮主循环请求的形状（system + tools）：轮内的主动压缩传
     /// 得出来 —— 总结请求同形状才能吃前缀缓存；手动 /compact 在空闲时跑、
     /// 没有轮次装配，传 None 走瘦身路径（慢一点、贵一点，但不常用）。
+    ///
+    /// `[约束]` `Compacted` 事件由**调用方**发，这里只发 `Compacting`。
+    /// 手动 `/compact` 必须先把 `running` 放掉再宣布完成 —— 顺序反了的话，
+    /// 前端收到事件去拉快照，看到的还是 busy=true（`running` 被压缩占着，
+    /// 见 [`Self::compact_now`]），状态行从"正在压缩上下文"变成一个假的
+    /// "正在生成"，挂到下一个看门狗周期才消失（真实发生过，12 秒）。
+    /// 轮内压缩则相反，要求原地立发。两种时机只有调用方分得清。
     async fn compact_history(
         &self,
         provider: &Arc<dyn Provider>,
@@ -1412,7 +1428,7 @@ impl Session {
         shape: Option<&riot_core::summarize::RequestShape>,
         sink: &SessionSink,
         cancel: CancellationToken,
-    ) -> Option<Vec<Message>> {
+    ) -> Option<CompactOutcome> {
         let before = provider.count_tokens(history);
         // 先说一声再动手。下面那次总结是一个真实的模型调用，几十秒 ——
         // 期间界面上只有那三个点在动，和"模型正在回答"分不出来。
@@ -1470,12 +1486,11 @@ impl Session {
         tracing::info!(before, after, "历史压缩完成");
         self.ui_archive.lock().await.extend(history.iter().cloned());
         self.compacting.store(false, Ordering::Relaxed);
-        let _ = sink.send(AgentEvent::Compacted {
+        Some(CompactOutcome {
+            history: vec![msg],
             before_tokens: before,
             after_tokens: after,
-            strategy: riot_protocol::event::CompactStrategy::FullSummary,
-        });
-        Some(vec![msg])
+        })
     }
 
     /// 手动压缩（`/compact`）。空闲时才能做 —— 压缩改写历史，
@@ -1504,15 +1519,25 @@ impl Session {
                 .compact_history(&provider, &model.model, &history, None, &sink, cancel)
                 .await
             {
-                Some(new_history) => {
-                    *self.history.lock().await = new_history;
-                    Ok(())
+                Some(o) => {
+                    *self.history.lock().await = o.history;
+                    Ok((o.before_tokens, o.after_tokens))
                 }
                 None => Err("压缩失败，历史保持原样。稍后再试。".to_owned()),
             }
         };
         *self.running.lock().await = None;
-        result
+        // `[约束]` 宣布完成必须在 running 释放**之后**。前端收到 Compacted
+        // 会去拉快照对齐状态 —— 此刻快照必须已经是空闲，否则它把 busy=true
+        // 吸进去，没有下一个事件会来清（手动压缩不是轮次，没有 Done），
+        // 只能等 12 秒的看门狗兜底。
+        result.map(|(before_tokens, after_tokens)| {
+            let _ = sink.send(AgentEvent::Compacted {
+                before_tokens,
+                after_tokens,
+                strategy: riot_protocol::event::CompactStrategy::FullSummary,
+            });
+        })
     }
 
     /// 工具产物（截图原图等）的落盘目录，会话专属。
@@ -1799,9 +1824,16 @@ impl Session {
                     )
                     .await
                 {
-                    Some(compacted) => {
-                        history = compacted;
+                    Some(o) => {
+                        history = o.history;
                         *self.history.lock().await = history.clone();
+                        // 轮内原地宣布：轮子接着跑，busy 本来就该保持，
+                        // 而且 Compacted 后紧跟 RequestStart 的顺序有回放钉着。
+                        let _ = sink.send(AgentEvent::Compacted {
+                            before_tokens: o.before_tokens,
+                            after_tokens: o.after_tokens,
+                            strategy: riot_protocol::event::CompactStrategy::FullSummary,
+                        });
                     }
                     // 失败不拦路：继续用完整历史，真溢出时反应式路径兜底。
                     None => tracing::warn!("主动压缩失败，本轮用完整历史"),
@@ -3173,6 +3205,27 @@ mod tests {
             s.pending_user.lock().await.is_none(),
             "失败路径没有清理准备中的用户消息"
         );
+    }
+
+    /// `/compact` 失败（空历史）也要把 running 放掉。
+    ///
+    /// `[约束]` 手动压缩借 `running` 挡并发轮次，于是它的每条退出路径都欠
+    /// 一次释放。漏掉的表现和轮子失败不清 running 一样：会话从此永远"忙"，
+    /// 发消息、再压缩全被拒，只能重启。
+    #[tokio::test]
+    async fn 手动压缩失败也要释放_running() {
+        let s = Session::new(
+            SessionId::from_raw("s1"),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        );
+        let r = s.compact_now(test_model(), test_sink()).await;
+        assert!(r.is_err(), "空历史没什么可压缩的");
+        assert!(
+            s.running.lock().await.is_none(),
+            "失败路径没有释放 running，会话卡死"
+        );
+        assert!(!s.is_compacting(), "compacting 标志不能残留");
     }
 
     /// 还没定稿的用户消息也要出现在历史快照里。

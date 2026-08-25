@@ -254,7 +254,18 @@ impl StreamDecoder {
         // `>0` 守卫：兼容实现常常在中间的 chunk 里发一个全零的 usage，
         // 直接覆盖会把最后那个真实的数字冲掉。
         if u.prompt_tokens > 0 {
-            self.usage.input_tokens = u.prompt_tokens;
+            // `[约束]` 扣掉缓存命中再存。两家的同名字段语义是反的：
+            // OpenAI 的 `prompt_tokens` 是**总输入**（已经含了命中缓存的
+            // 那部分），Anthropic 的 `input_tokens` 是**未命中**的部分。
+            // 统一到 Anthropic 那套 —— 三个字段相加正好是总输入，谁拿去
+            // 加都不会把缓存算两遍。
+            //
+            // 不统一的后果是任何"总量 = input + cache_read"的地方在两种
+            // 协议下差出整整一个缓存命中量，而命中率越高错得越离谱：
+            // DeepSeek 这种命中率常年九成的，报出来的数能是真实值的两倍。
+            self.usage.input_tokens = u
+                .prompt_tokens
+                .saturating_sub(u.prompt_cache_hit_tokens.unwrap_or(0));
         }
         if u.completion_tokens > 0 {
             self.usage.output_tokens = u.completion_tokens;
