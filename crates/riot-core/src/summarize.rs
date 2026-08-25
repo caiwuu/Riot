@@ -7,8 +7,13 @@
 //!   「全部用户原话」—— 意图漂移是压缩最大的风险，原话是锚。
 //! - **analysis / summary 分离**：先让模型在 `<analysis>` 里自查遗漏，再产出
 //!   `<summary>`。入库前剥掉 analysis —— 它是脚手架，不是产物。
-//! - **禁工具前后夹击**：总结请求不带 tools，提示词开头结尾都写明只输出
-//!   文本。总结模型调工具等于烧掉它唯一的一轮。
+//! - **同形状请求吃前缀缓存**：能拿到主循环请求形状（[`RequestShape`]）时，
+//!   总结请求带同样的 system 和 tools、消息原样不动 —— provider 的前缀缓存
+//!   按 tools → system → messages 逐字节匹配，同形状的话 ~100k token 的历史
+//!   几乎全走 cache_read（价格约 1/10，prefill 快一个量级）。禁工具靠提示词
+//!   前后夹击 + 失败防线（模型真调了工具 → 没有 summary → 报失败，不写坏
+//!   任何东西）。拿不到形状的调用方（手动 /compact）退回瘦身路径：图片换
+//!   占位、工具块转文本、不带 tools。
 //! - **续接包装**：总结以合成 user 消息回到历史，措辞要求模型"像中断从未
 //!   发生过一样继续"，不要复述、不要再次确认。
 //!
@@ -24,8 +29,28 @@ use futures::StreamExt;
 use riot_protocol::message::{
     AssistantContent, Attachment, Message, MessageMeta, ToolResultContent, UserContent,
 };
-use riot_protocol::provider::{Provider, ProviderEvent, ProviderRequest, ThinkingConfig};
+use riot_protocol::provider::{Provider, ProviderEvent, ProviderRequest, ThinkingConfig, ToolSpec};
 use tokio_util::sync::CancellationToken;
+
+/// 主循环请求的形状：system 和 tools 原样一份。
+///
+/// 总结请求带上它，前缀（tools → system → messages）就和主循环上一次请求
+/// 逐字节一致，provider 的 prompt cache 直接命中 —— 压缩的输入恰恰是主循环
+/// 刚发过的那 ~100k token。形状差一点（精简 system、去掉 tools、改写消息）
+/// 都会让这部分每次全量重算：时间多十几秒，费用差约 10 倍。
+///
+/// `[约束]` 两个字段必须**原样**取自本轮主循环的请求，不能"看起来差不多"。
+/// 缓存是字节级前缀匹配，差一个字节，之后全部 miss 且没有任何报错 ——
+/// 表现只是"压缩怎么又变慢了"。
+///
+/// 开着 thinking 的会话，总结请求（thinking off）与主循环的 thinking 配置
+/// 不同，messages 层缓存照样 miss（Anthropic 把 thinking 配置渲染进 prompt）。
+/// 这是已接受的退化：不比不带形状更差，且总结任务本就不该开思考。
+#[derive(Debug, Clone)]
+pub struct RequestShape {
+    pub system: String,
+    pub tools: Vec<ToolSpec>,
+}
 
 /// 总结输出的预算。CC 用 20k；对齐它 —— 长会话的九节总结真能写到
 /// 上万 token，砍太狠丢的是"文件与代码段"那节的完整片段。撞上这个
@@ -59,15 +84,27 @@ const SUMMARY_SYSTEM: &str = "你是负责精确总结对话的助手。你只�
 
 /// 调 LLM 总结一段历史。返回剥好的总结正文。
 ///
+/// `shape` 是本轮主循环请求的形状（见 [`RequestShape`]）：给了就发同形状
+/// 请求吃前缀缓存 —— 消息**原样**（图片、工具块都不动，动一个字节缓存就
+/// 断在那里）；没给（手动 /compact 拿不到轮次装配）退回瘦身路径。
+///
 /// 失败返回人话（进日志/熔断计数用）。取消时返回 Err —— 调用方本来
 /// 就在被取消的路径上，任何返回值都不会被用。
 pub async fn summarize_history(
     provider: &Arc<dyn Provider>,
     model: &str,
     messages: &[Message],
+    shape: Option<&RequestShape>,
     cancel: CancellationToken,
 ) -> Result<String, String> {
-    let mut request_messages = strip_for_summary(messages);
+    let mut request_messages = match shape {
+        Some(_) => messages
+            .iter()
+            .filter(|m| m.goes_to_model())
+            .cloned()
+            .collect(),
+        None => strip_for_summary(messages),
+    };
     request_messages.push(Message::User {
         id: riot_protocol::id::MessageId::from_raw("msg_compact_prompt"),
         content: vec![UserContent::Text {
@@ -82,21 +119,35 @@ pub async fn summarize_history(
     let request = ProviderRequest {
         model: model.to_owned(),
         messages: request_messages,
-        system: SUMMARY_SYSTEM.into(),
-        // 不带工具：总结模型调工具等于烧掉它唯一的一轮。
-        tools: Vec::new(),
+        system: match shape {
+            Some(s) => s.system.clone(),
+            None => SUMMARY_SYSTEM.into(),
+        },
+        // 同形状路径带主循环的 tools —— 不是为了让它调（提示词前后夹击
+        // 禁着），是为了前缀缓存：tools 是缓存层级的第一层，抽掉它整个
+        // 请求从第 0 字节开始 miss。刻意不设 tool_choice 之类的硬禁 ——
+        // Anthropic 对 tool_choice 变化的处理是把 messages 层缓存作废，
+        // 等于为了防一个低概率事件放弃全部收益。模型真调了工具：没有
+        // summary → 下面报失败，有防线。
+        tools: match shape {
+            Some(s) => s.tools.clone(),
+            None => Vec::new(),
+        },
         max_output_tokens: Some(SUMMARY_MAX_OUTPUT_TOKENS),
         thinking: ThinkingConfig::Off,
     };
 
     let mut stream = provider.stream(request, cancel);
     let mut text = String::new();
+    let mut called_tools = false;
     while let Some(ev) = stream.next().await {
         match ev {
             ProviderEvent::Message(Message::Assistant { content, .. }) => {
                 for c in content {
-                    if let riot_protocol::message::AssistantContent::Text { text: t } = c {
-                        text.push_str(&t);
+                    match c {
+                        AssistantContent::Text { text: t } => text.push_str(&t),
+                        AssistantContent::ToolUse { .. } => called_tools = true,
+                        AssistantContent::Thinking { .. } => {}
                     }
                 }
             }
@@ -107,6 +158,11 @@ pub async fn summarize_history(
 
     let summary = extract_summary(&text);
     if summary.trim().is_empty() {
+        // 分开报：两种失败的处置不同 ——"调了工具"该查提示词/换模型，
+        // "没产出"多半是截断或空响应。
+        if called_tools {
+            return Err("总结模型调用了工具而不是输出总结".into());
+        }
         return Err("总结模型没有产出 <summary> 内容".into());
     }
     Ok(summary)
@@ -172,7 +228,11 @@ pub fn extract_summary(raw: &str) -> String {
 /// 为总结请求瘦身：图片换占位符（视觉内容进不了文本总结，白占请求体），
 /// tool_use / tool_result 块降级成纯文本，思考块丢弃。
 ///
-/// `[约束]` 工具块必须**转成文字而不是保留**。总结请求不带 `tools`，而
+/// **只用于拿不到 [`RequestShape`] 的退回路径**（手动 /compact）。同形状
+/// 路径的消息必须原样发 —— 前缀缓存按字节匹配，这里的每一处改写在那条
+/// 路上都是缓存杀手。
+///
+/// `[约束]` 工具块必须**转成文字而不是保留**。这条路径的请求不带 `tools`，而
 /// Anthropic 对"消息里有 tool_use/tool_result 块但请求没定义 tools"直接 400
 /// （"Requests which include `tool_use` or `tool_result` blocks must define
 /// tools"）—— 带工具调用的会话（几乎所有真实会话）总结必失败，压缩阶梯的
@@ -409,6 +469,88 @@ mod tests {
             "调了什么工具、什么参数要留在文字里：{debug}"
         );
         assert!(debug.contains("fn main"), "工具结果的内容要留在文字里");
+    }
+
+    /// 同形状 = 吃前缀缓存的前提。消息改一个字节、system/tools 差一点，
+    /// ~100k token 的历史就从那里开始全量重算，且没有任何报错。
+    #[tokio::test]
+    async fn 同形状路径原样发_退回路径才改写() {
+        use crate::testing::ScriptedProvider;
+        use riot_protocol::id::ToolUseId;
+        use riot_protocol::provider::ProviderEvent;
+
+        let history = vec![
+            Message::Assistant {
+                id: MessageId::from_raw("a1"),
+                content: vec![AssistantContent::ToolUse {
+                    id: ToolUseId::from_raw("t1"),
+                    name: "read_file".into(),
+                    input: serde_json::json!({"path": "/p/a.rs"}),
+                }],
+                usage: None,
+                meta: MessageMeta::default(),
+            },
+            Message::User {
+                id: MessageId::from_raw("m1"),
+                content: vec![UserContent::ToolResult {
+                    tool_use_id: ToolUseId::from_raw("t1"),
+                    content: ToolResultContent::text("fn main() {}"),
+                    is_error: false,
+                }],
+                meta: MessageMeta::default(),
+            },
+        ];
+        let ok = || {
+            vec![ProviderEvent::Message(Message::Assistant {
+                id: MessageId::from_raw("s"),
+                content: vec![AssistantContent::Text {
+                    text: "<summary>1. 总结</summary>".into(),
+                }],
+                usage: None,
+                meta: MessageMeta::default(),
+            })]
+        };
+        let provider = std::sync::Arc::new(ScriptedProvider::new(vec![ok(), ok()]));
+        let arc: std::sync::Arc<dyn Provider> = std::sync::Arc::clone(&provider) as _;
+
+        let shape = RequestShape {
+            system: "主循环的完整 system".into(),
+            tools: vec![ToolSpec {
+                name: "read_file".into(),
+                description: "读文件".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }],
+        };
+        summarize_history(
+            &arc,
+            "m",
+            &history,
+            Some(&shape),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("同形状路径成功");
+        summarize_history(&arc, "m", &history, None, CancellationToken::new())
+            .await
+            .expect("退回路径成功");
+
+        let reqs = provider.requests();
+        // 同形状：system/tools 透传，消息里的工具块原样保留。
+        assert_eq!(reqs[0].system, "主循环的完整 system");
+        assert_eq!(reqs[0].tools.len(), 1, "tools 是缓存层级第一层，必须带");
+        let shaped = format!("{:?}", reqs[0].messages);
+        assert!(
+            shaped.contains("ToolUse") && shaped.contains("ToolResult"),
+            "同形状路径不许改写消息：{shaped}"
+        );
+        // 退回：精简 system、无 tools、工具块转文本。
+        assert_eq!(reqs[1].system, SUMMARY_SYSTEM);
+        assert!(reqs[1].tools.is_empty());
+        let stripped = format!("{:?}", reqs[1].messages);
+        assert!(
+            !stripped.contains("ToolUse") && !stripped.contains("ToolResult"),
+            "退回路径必须转文本（无 tools 的请求带工具块，Anthropic 400）：{stripped}"
+        );
     }
 
     #[test]

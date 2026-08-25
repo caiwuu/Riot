@@ -408,6 +408,10 @@ impl Tool for TaskTool {
         .with_gate(Arc::clone(&self.deps.gate))
         .with_artifacts_dir(self.deps.artifacts_dir.clone());
 
+        let tools_runner: Arc<dyn riot_core::state::ToolRunner> = Arc::new(scheduler);
+        // 子 agent 的 system 也提前定：总结请求同形状（见 RequestShape）。
+        let system = system_prompt_for(kind, &self.deps.cwd);
+
         let sub_session = SessionId::from_raw(agent_id.as_str().to_owned());
         let deps = AgentDeps {
             provider: Arc::clone(&provider),
@@ -416,12 +420,16 @@ impl Tool for TaskTool {
             compactor: Arc::new(riot_core::Layered::new(
                 Arc::clone(&provider),
                 model.clone(),
+                riot_core::summarize::RequestShape {
+                    system: system.clone(),
+                    tools: tools_runner.specs(),
+                },
                 Arc::clone(&self.deps.ids),
                 ctx.cancel.child_token(),
             )),
             clock: Arc::clone(&self.deps.clock),
             ids: Arc::clone(&self.deps.ids),
-            tools: Arc::new(scheduler),
+            tools: Arc::clone(&tools_runner),
             // 子 agent 没有"用户插话"一说 —— 插话进主 agent 的队列。
             queue: Arc::new(riot_core::state::NoQueue),
             // Stop hooks 只管主 agent 的产出。挂到子 agent 上，一次 Task
@@ -439,10 +447,7 @@ impl Tool for TaskTool {
         let state = AgentState::new(sub_session.clone(), model.clone())
             .with_messages(vec![user_msg.clone()])
             .with_max_turns(max_turns);
-        let state = AgentState {
-            system: system_prompt_for(kind, &self.deps.cwd),
-            ..state
-        };
+        let state = AgentState { system, ..state };
 
         // transcript：独立文件，和主会话隔开。
         let log = self.deps.transcripts.as_ref().map(|t| {

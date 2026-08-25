@@ -128,13 +128,20 @@ impl Compactor for ClearOldResults {
 /// 反应式路径上（413 溢出重试）：清结果是无损的，够用就不动用总结；
 /// 总结有损而且要花一次真实调用，是最后手段。
 ///
-/// `[约束]` 总结的输入是**原始消息**，不是轻档清理后的产物 —— 清掉的
-/// 工具结果里可能有总结需要的细节（"文件与代码段"那一节）。反正总结
-/// 请求本身是一次性的，输入大一点没关系；输出才是要控的。
+/// `[约束]` 总结的输入是**原始消息**，不是轻档清理后的产物 —— 两个理由：
+/// 清掉的工具结果里可能有总结需要的细节（"文件与代码段"那一节）；而且
+/// 原始消息就是主循环刚发过的前缀，配合同形状请求（[`RequestShape`]）能
+/// 走 provider 的前缀缓存 —— 清理后的产物字节变了，缓存从第一处改动开始
+/// 全 miss。输入大一点没关系（走的是 cache_read）；输出才是要控的。
+///
+/// [`RequestShape`]: crate::summarize::RequestShape
 pub struct Layered {
     light: ClearOldResults,
     provider: std::sync::Arc<dyn riot_protocol::provider::Provider>,
     model: String,
+    /// 主循环请求的形状（system + tools）。总结请求按它原样组包，
+    /// 前缀和主循环刚发过的请求逐字节一致 —— ~100k 的输入走 cache_read。
+    shape: crate::summarize::RequestShape,
     ids: std::sync::Arc<dyn riot_protocol::id::IdGenerator>,
     /// 本轮的取消令牌（子令牌）。用户按停止时总结请求跟着断。
     cancel: tokio_util::sync::CancellationToken,
@@ -144,6 +151,7 @@ impl Layered {
     pub fn new(
         provider: std::sync::Arc<dyn riot_protocol::provider::Provider>,
         model: impl Into<String>,
+        shape: crate::summarize::RequestShape,
         ids: std::sync::Arc<dyn riot_protocol::id::IdGenerator>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Self {
@@ -151,6 +159,7 @@ impl Layered {
             light: ClearOldResults::new(),
             provider,
             model: model.into(),
+            shape,
             ids,
             cancel,
         }
@@ -173,6 +182,7 @@ impl Compactor for Layered {
             &self.provider,
             &self.model,
             &messages,
+            Some(&self.shape),
             self.cancel.child_token(),
         )
         .await;
@@ -266,6 +276,17 @@ mod layered_tests {
         Arc::new(riot_protocol::id::NanoIdGenerator)
     }
 
+    fn shape() -> crate::summarize::RequestShape {
+        crate::summarize::RequestShape {
+            system: "主循环的完整 system".into(),
+            tools: vec![riot_protocol::provider::ToolSpec {
+                name: "Read".into(),
+                description: "读文件".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }],
+        }
+    }
+
     #[tokio::test]
     async fn 对话本身超预算时升级到总结() {
         // 没有可清理的工具结果（全是对话文本）→ 轻档报"压不动" →
@@ -276,6 +297,7 @@ mod layered_tests {
         let layered = Layered::new(
             Arc::clone(&provider) as Arc<dyn riot_protocol::provider::Provider>,
             "test-model",
+            shape(),
             ids(),
             tokio_util::sync::CancellationToken::new(),
         );
@@ -303,13 +325,13 @@ mod layered_tests {
             format!("{:?}", messages[0]).contains("聊了很多"),
             "总结正文要进续接消息"
         );
-        // 总结请求本身不带工具
+        // 总结请求与主循环同形状（system/tools 一致）—— 前缀缓存按字节
+        // 匹配，形状不同的话 ~100k 的历史每次总结都全量重算。禁调工具
+        // 靠提示词 + 失败防线（真调了 → 没有 summary → Failed）。
         let reqs = provider.requests();
         assert_eq!(reqs.len(), 1);
-        assert!(
-            reqs[0].tools.is_empty(),
-            "总结模型调工具等于烧掉它唯一的一轮"
-        );
+        assert_eq!(reqs[0].system, "主循环的完整 system");
+        assert_eq!(reqs[0].tools.len(), 1, "tools 要和主循环一致，不是空");
     }
 
     #[tokio::test]
@@ -323,6 +345,7 @@ mod layered_tests {
         let layered = Layered::new(
             Arc::clone(&provider) as Arc<dyn riot_protocol::provider::Provider>,
             "test-model",
+            shape(),
             ids(),
             tokio_util::sync::CancellationToken::new(),
         );
@@ -367,6 +390,7 @@ mod layered_tests {
         let layered = Layered::new(
             Arc::clone(&provider) as Arc<dyn riot_protocol::provider::Provider>,
             "test-model",
+            shape(),
             ids(),
             tokio_util::sync::CancellationToken::new(),
         );

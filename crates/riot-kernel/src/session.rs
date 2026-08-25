@@ -1400,11 +1400,16 @@ impl Session {
 
     /// 把一段历史压成摘要：LLM 总结 + 记忆/工作集重注 + 边界落盘 + 事件。
     /// 返回 `Some(新历史)`；总结失败返回 None（调用方决定要不要声张）。
+    ///
+    /// `shape` 是本轮主循环请求的形状（system + tools）：轮内的主动压缩传
+    /// 得出来 —— 总结请求同形状才能吃前缀缓存；手动 /compact 在空闲时跑、
+    /// 没有轮次装配，传 None 走瘦身路径（慢一点、贵一点，但不常用）。
     async fn compact_history(
         &self,
         provider: &Arc<dyn Provider>,
         model: &str,
         history: &[Message],
+        shape: Option<&riot_core::summarize::RequestShape>,
         sink: &SessionSink,
         cancel: CancellationToken,
     ) -> Option<Vec<Message>> {
@@ -1413,15 +1418,18 @@ impl Session {
         // 期间界面上只有那三个点在动，和"模型正在回答"分不出来。
         self.compacting.store(true, Ordering::Relaxed);
         let _ = sink.send(AgentEvent::Compacting);
-        let summary =
-            match riot_core::summarize::summarize_history(provider, model, history, cancel).await {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(error = %e, "历史总结失败");
-                    self.compacting.store(false, Ordering::Relaxed);
-                    return None;
-                }
-            };
+        let summary = match riot_core::summarize::summarize_history(
+            provider, model, history, shape, cancel,
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "历史总结失败");
+                self.compacting.store(false, Ordering::Relaxed);
+                return None;
+            }
+        };
         // 记忆重注：压缩把带着 AGENTS.md 的首条消息吞了，
         // 不重注的话项目约定从此消失（CC 的 postCompactCleanup 同款）。
         let mut memory: Vec<Attachment> = crate::memory::collect(&self.cwd)
@@ -1493,7 +1501,7 @@ impl Session {
             Err("还没有对话内容，没什么可压缩的。".to_owned())
         } else {
             match self
-                .compact_history(&provider, &model.model, &history, &sink, cancel)
+                .compact_history(&provider, &model.model, &history, None, &sink, cancel)
                 .await
             {
                 Some(new_history) => {
@@ -1716,6 +1724,27 @@ impl Session {
             scheduler
         };
 
+        let tools_runner: Arc<dyn riot_core::state::ToolRunner> = Arc::new(scheduler);
+
+        // system prompt 在这里就定下来，而不是 run_agent 前夕 —— 主动/反应式
+        // 压缩的总结请求要用**同一份**：同形状（system + tools 逐字节一致）
+        // 的总结请求才能吃到 provider 的前缀缓存，~100k 的输入走 cache_read。
+        let system = crate::prompt::system_prompt(
+            &self.cwd,
+            &today,
+            python_venv.as_deref(),
+            self.system_prompt_extra().await.as_deref(),
+            hook_engine.has_pre_tool_use()
+                || hook_engine.has_post_tool_use()
+                || hook_engine.has_stop(),
+        );
+        // specs 取轮首快照。轮中 ToolSearch 发现新工具时主循环的 tools 会变
+        //（那本来就会断缓存），总结形状不跟 —— 只影响命中率，不影响正确性。
+        let summary_shape = riot_core::summarize::RequestShape {
+            system: system.clone(),
+            tools: tools_runner.specs(),
+        };
+
         let deps = AgentDeps {
             provider: Arc::clone(&provider),
             // 反应式（413）路径的完整阶梯：清旧工具结果 → LLM 总结。
@@ -1723,12 +1752,13 @@ impl Session {
             compactor: Arc::new(riot_core::Layered::new(
                 Arc::clone(&provider),
                 model.model.clone(),
+                summary_shape.clone(),
                 Arc::clone(&self.ids) as Arc<dyn IdGenerator>,
                 cancel.child_token(),
             )),
             clock: Arc::clone(&clock),
             ids: Arc::clone(&self.ids) as Arc<dyn IdGenerator>,
-            tools: Arc::new(scheduler),
+            tools: Arc::clone(&tools_runner),
             queue: Arc::clone(&self.queue) as Arc<dyn riot_core::state::InputQueue>,
             // Stop hooks 接在这里（每轮现装，配置中途改了下一轮生效）。
             // 没配置任何 Stop hook 时给 NoStopGate —— 收尾零开销。
@@ -1763,6 +1793,7 @@ impl Session {
                         &provider,
                         &model.model,
                         &history,
+                        Some(&summary_shape),
                         &sink,
                         cancel.child_token(),
                     )
@@ -1830,16 +1861,8 @@ impl Session {
                     .clamp(*MAX_TURNS_RANGE.start(), *MAX_TURNS_RANGE.end()),
             );
 
-        let system = crate::prompt::system_prompt(
-            &self.cwd,
-            &today,
-            python_venv.as_deref(),
-            self.system_prompt_extra().await.as_deref(),
-            hook_engine.has_pre_tool_use()
-                || hook_engine.has_post_tool_use()
-                || hook_engine.has_stop(),
-        );
         let state = AgentState {
+            // 构建提前到了工具装配之后（见 summary_shape），这里只是接住。
             system,
             max_output_tokens_override: model.sampling.max_output_tokens,
             thinking: self.thinking().await,
