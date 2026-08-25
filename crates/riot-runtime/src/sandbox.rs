@@ -65,18 +65,25 @@ impl SandboxPolicy {
     /// 工作区可写 + 一组常见的构建缓存。给生产装配用。
     ///
     /// `[取舍]` 放开 `~/.cargo`、`~/.npm` 这类缓存是可用性让步：不放的话
-    /// 第一条 `cargo build` 就挂在"权限不足"上。代价是**边界之内还留着
-    /// 几条通往边界之外的路**：`~/.cargo/config.toml` 的 `rustc-wrapper`、
-    /// 工作区里的 `.git/hooks/` 和 `.riot/hooks.json` —— 写了它们，下一次
-    /// 构建 / 提交 / 对话轮就在沙箱**外**执行任意代码。
+    /// 第一条 `cargo build` 就挂在"权限不足"上。**整表收窄成"只列 cargo
+    /// 真实要写的子路径"是修不了的**：cargo 的锁文件家族一直在长
+    /// （`.package-cache`、`.package-cache-mutate`、`.global-cache`……），
+    /// 猜漏一条的表现就是"构建莫名其妙失败"，而那正是用户直接关掉沙箱的
+    /// 理由。所以方向反过来 —— 表保持放宽，把**敏感面**排除掉（见
+    /// [`cargo_protected`]）：macOS 翻成 profile 末尾的 deny 子句，Windows
+    /// 翻成打标签前的保护洞。排除清单是有限且稳定的（config/bin/凭证），
+    /// 写路径清单是开放且会长的 —— 排除式站在稳定的那一边。
     ///
-    /// `[约束]` 所以这张表不能当成唯一防线，决策链的沙箱放宽档必须把这几类
-    /// 目标排除在外（`riot_permissions::bash::write_targets`）。收紧这张表
-    /// 是修不了的：`cargo build` 要写 `~/.cargo/.package-cache` 的锁、
-    /// `rust-toolchain.toml` 会触发 rustup 自动装工具链 —— 猜错一条的表现
-    /// 就是"构建莫名其妙失败"，而那正是用户直接关掉沙箱的理由。
-    /// 也不能在 profile 里给这几条补 `deny`：沙箱按静态策略每轮激活，它不
-    /// 知道用户这一次批准了什么，deny 会造出「点了允许、命令照样失败」。
+    /// `[约束]` 边界之内仍留着通往边界之外的路：**工作区里**的
+    /// `.git/hooks/` 和 `.riot/hooks.json` —— 写了它们，下一次提交 / 对话
+    /// 轮就在沙箱外执行任意代码。它们不能进 OS 排除面：装 husky、写
+    /// hooks 是高频合法操作，OS 级 deny 会造出「用户点了允许、命令照样
+    /// 失败」。这几类只能靠决策链挡明写
+    /// （`riot_permissions::bash::write_targets`），间接写入是接受的残余
+    /// 风险。cargo 敏感面则相反 —— 让 agent 改全局 cargo 配置的合法场景
+    /// 近乎不存在，批准后沙箱内失败的报错清晰（带路径的权限错误），
+    /// 用户有出路（自己改/关沙箱），所以值得用 OS 挡住**间接写**这条
+    /// 没有任何确认机会的静默路径。
     pub fn workspace_write(workspace: &Path) -> Self {
         let mut writable = vec![workspace.to_path_buf()];
         // temp 的处理平台不同：macOS/Unix 直接放开全局 temp（seatbelt 的
@@ -93,6 +100,9 @@ impl SandboxPolicy {
         // 包的那个进程生效，放宽 `.rustup` 对宿主机零影响；Windows 的 Low
         // 标签是对象属性，对所有进程生效（见下方 Windows 表的约束）。
         // 表可以放心列宽：dedup_existing 只保留真实存在的目录。
+        // `.cargo` 整树进表，但它的敏感面（bin、config、凭证 —— 见
+        // cargo_protected）在 macOS 由 profile 末尾的 deny 子句压掉：
+        // 写它们换到的是**沙箱外**的执行权，放行等于边界自己开门。
         #[cfg(not(windows))]
         const HOME_CACHES: &[&str] = &[
             ".cargo",
@@ -121,8 +131,8 @@ impl SandboxPolicy {
         //   store（默认在 pnpm\store）会失败 —— 已知限制，等文件级豁免
         //   机制再收编。
         // - `.cargo` 必须进表（构建要写 registry 和 .package-cache 锁），
-        //   它的 `bin`（rustup shim 全家）由 WinLabeler 打"保护洞"豁免，
-        //   见 sandbox_win::label。
+        //   它的敏感面（bin、config、凭证、env，见 cargo_protected）由
+        //   WinLabeler 打"保护洞"豁免，见 sandbox_win::label。
         #[cfg(windows)]
         const HOME_CACHES: &[&str] = &[
             ".cargo",
@@ -296,6 +306,73 @@ fn temp_dirs() -> Vec<PathBuf> {
     out
 }
 
+/// `~/.cargo` 边界内的**敏感面**：可写区之内、但写它等于换取**沙箱外**
+/// 执行权的路径。macOS 翻成 profile 末尾的 deny 子句
+/// （`sandbox_macos::profile`），Windows 翻成打标签前的保护洞
+/// （`sandbox_win` 的 `WinLabeler`）。返回 `(cargo home, 敏感子路径)`；
+/// 机器上没有 `~/.cargo` 就是 `None`。
+///
+/// `[约束]` 清单按「写它能换到什么」筛，不是按「听起来重要」筛：
+/// - `bin`：用户 PATH 上的 cargo/rustc（rustup shim 全家）。可写 = 顶一个
+///   假 `cargo` 等用户在沙箱外执行；Windows 上还叠加「Low 标签启动即降权」
+///   （见 `sandbox_win::label`）。
+/// - `config.toml` / `config`（旧名，cargo 至今兼容读）：
+///   `build.rustc-wrapper`、`[target].runner`、`[source]` 源替换 ——
+///   写一行，用户下次在沙箱外 `cargo build` 就执行任意代码。
+/// - `credentials.toml` / `credentials`（旧名）：发布凭证。
+/// - `env`：rustup 生成、被 shell rc `source`，写它等于写 shell rc。
+///
+/// `[取舍]` `registry/` 不排除：构建要往里下载解压，排除它等于沙箱内装
+/// 不了新依赖，主用例直接废掉。代价是 **src 缓存投毒**（改解压后的源码，
+/// 等用户沙箱外构建时执行）仍然开着 —— cargo 对解压产物不做完整性校验，
+/// 这条在下游堵不干净，记档见 docs/SANDBOX_WINDOWS.md §2 残余风险。
+/// `.crates.toml`/`.crates2.json`（install 记账）同理不收：写它们骗不来
+/// 执行权。
+///
+/// 只在有沙箱后端的平台编译（macOS 的 profile、Windows 的洞）——
+/// 其它平台没有调用方，留着就是死代码告警。
+#[cfg(any(target_os = "macos", windows))]
+pub(crate) fn cargo_protected() -> Option<(PathBuf, Vec<ProtectedPath>)> {
+    // canonicalize 对齐 dedup_existing 的形态 —— Windows 的洞靠
+    // 「父目录路径逐字节相等」匹配（`WinLabeler::holes_of`），一边规范化
+    // 一边不规范化的话，洞永远匹配不上且没有任何报错。
+    let cargo = home_dir()?.join(".cargo").canonicalize().ok()?;
+    let protected = vec![
+        ProtectedPath::dir(cargo.join("bin")),
+        ProtectedPath::file(cargo.join("config.toml")),
+        ProtectedPath::file(cargo.join("config")),
+        ProtectedPath::file(cargo.join("credentials.toml")),
+        ProtectedPath::file(cargo.join("credentials")),
+        ProtectedPath::file(cargo.join("env")),
+    ];
+    Some((cargo, protected))
+}
+
+/// [`cargo_protected`] 清单里的一条。
+///
+/// `is_dir` 是**约定的**类型而不是现场 stat 出来的：Windows 侧对不存在的
+/// 路径要先预建再打洞（洞对不存在的对象没处打标，而"不存在"本身就是
+/// 缺口 —— 沙箱进程可以在 Low 的 `.cargo` 里创建 `config.toml`，内容照样
+/// 被沙箱外的 cargo 读走），预建时必须知道建空目录还是空文件。
+#[cfg(any(target_os = "macos", windows))]
+pub(crate) struct ProtectedPath {
+    pub path: PathBuf,
+    /// macOS 用不上（deny 按路径匹配、不要求存在，subpath 通吃文件和目录），
+    /// 只有 Windows 的预建读它。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub is_dir: bool,
+}
+
+#[cfg(any(target_os = "macos", windows))]
+impl ProtectedPath {
+    fn dir(path: PathBuf) -> Self {
+        Self { path, is_dir: true }
+    }
+    fn file(path: PathBuf) -> Self {
+        Self { path, is_dir: false }
+    }
+}
+
 /// 用户主目录。Windows 的约定是 `USERPROFILE`；`HOME` 是 Unix 的，
 /// GUI 启动的 Windows 进程环境里通常没有它（Git Bash 会设，但从宿主
 /// 起的内核继承不到）—— 读错变量的后果是缓存目录一条都进不了
@@ -373,6 +450,40 @@ mod tests {
         assert_eq!(out.len(), 1, "重复的合一条、不存在的丢掉：{out:?}");
         assert!(!out.contains(&missing));
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 敏感面清单是两平台共用的单一来源（macOS 的 deny 段 / Windows 的
+    /// 保护洞）。钉住内容：少一条，对应的注入路径就静默重开。
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn cargo_敏感面清单覆盖执行权路径() {
+        let Some((cargo, protected)) = cargo_protected() else {
+            eprintln!("这台机器没有 ~/.cargo，跳过");
+            return;
+        };
+        let names: Vec<_> = protected
+            .iter()
+            .filter_map(|p| p.path.file_name().and_then(|n| n.to_str()))
+            .collect();
+        for required in [
+            "bin",
+            "config.toml",
+            "config",
+            "credentials.toml",
+            "credentials",
+            "env",
+        ] {
+            assert!(names.contains(&required), "清单少了 {required}：{names:?}");
+        }
+        for p in &protected {
+            // bin 是目录、其余是文件 —— Windows 预建靠这个约定。
+            let is_bin = p.path.file_name().is_some_and(|n| n == "bin");
+            assert_eq!(p.is_dir, is_bin, "{} 的类型约定错了", p.path.display());
+            assert!(
+                p.path.starts_with(&cargo),
+                "洞必须在 .cargo 之内，否则 Windows 的 holes_of 匹配不上"
+            );
+        }
     }
 
     /// 真跑一遍，验证边界确实由 OS 执行。

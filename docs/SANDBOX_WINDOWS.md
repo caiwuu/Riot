@@ -125,14 +125,29 @@ ACCESS_DENIED（2026-08-25 真实事故：宿主机 cargo 全局 os error 5，
   读不受 MIC 限制；代价是沙箱内 rustup 自动装工具链、`pnpm add -g` 会
   失败 —— 报错清晰，比全机静默降权好接受。
 - `.cargo` 移不得（构建要写 registry 和 `.package-cache` 锁），给它的
-  `bin` 打**保护洞**（`WinLabeler` 的 holes）：打 `.cargo` 之前先给
-  `bin` 写一条**显式 Medium 标签** —— 自动继承的传播不顶显式 label，
-  子树保持默认级别；撤 `.cargo` 之后再撤洞恢复出厂。首选本来是
-  「PROTECTED_SACL + 空标签」，但设 protected 位要 `SeSecurityPrivilege`，
-  普通用户下直接 0x80070522（实测），显式 Medium 是普通用户做得到的
-  等效物。洞顺带堵一个逃逸面：沙箱进程写不进 `bin`，就没法往用户 PATH
-  里顶一个假 `cargo.exe` 等着在沙箱外被执行。行为由
-  `保护洞子目录不吃父目录的_low_标签` 在真机钉住。
+  **敏感面**打保护洞（`WinLabeler` 的 holes，清单在
+  `sandbox::cargo_protected`，与 macOS 的 profile deny 段共用一份）：
+  `bin`（PATH 上的 rustup shim，Low 标签启动即降权 + 顶假 exe 两重问题）、
+  `config.toml`/`config`（`rustc-wrapper` 一行 = 用户下次沙箱外构建执行
+  任意代码）、`credentials.toml`/`credentials`、`env`。打 `.cargo` 之前先给
+  它们写**显式 Medium 标签** —— 自动继承的传播不顶显式 label，这些路径
+  保持默认级别；撤 `.cargo` 之后再撤洞恢复出厂。文件洞**不存在时先预建**
+  （空文件，对 cargo 语义零差异）——"不存在"本身就是缺口：沙箱进程在
+  Low 的 `.cargo` 里创建 `config.toml`，内容照样被沙箱外的 cargo 读走。
+  首选本来是「PROTECTED_SACL + 空标签」，但设 protected 位要
+  `SeSecurityPrivilege`，普通用户下直接 0x80070522（实测），显式 Medium
+  是普通用户做得到的等效物。行为由 `保护洞子目录不吃父目录的_low_标签`
+  与 `保护洞文件同样不吃标签_且不存在时预建` 在真机钉住。
+
+`[残余风险/已记档]` **registry src 缓存投毒**：`.cargo/registry` 必须
+可写（构建要往里下载解压），而 cargo 对解压后的 `src/` 不做完整性校验
+（checksum 只管 `.crate` 压缩包）—— 沙箱进程可以改缓存里的 crate 源码，
+等用户下次在沙箱外构建时执行（`git/` checkout 同理，index 缓存还能配合
+伪造 checksum）。这条在下游堵不干净：排除 registry 等于沙箱内装不了
+依赖，主用例直接废掉。真正闭合的方案是给沙箱内命令注入独立的
+`CARGO_HOME`（宿主 `.cargo` 整个移出可写面），代价是用户全局配置
+（镜像源、私有 registry）失效、首次冷缓存，需要 config 复制预热等配套，
+且该跨平台一起做 —— 进 backlog，暂以记档接受。
 
 `[约束/已实现]` 标签是持久的文件系统状态，**必须有孤儿回收**：正常退出
 时归还引用（归零即撤）；崩溃留下的残留由下次内核启动的

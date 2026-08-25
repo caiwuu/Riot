@@ -87,10 +87,32 @@ pub(crate) fn profile(policy: &SandboxPolicy) -> String {
     }
     p.push_str(")\n");
 
+    // cargo 敏感面：可写区之内、写了等于换取沙箱外执行权的路径
+    // （config 的 rustc-wrapper、PATH 上的 bin……见 cargo_protected）。
+    // 排在 allow 之后 —— SBPL 后写覆盖先写，这段必须压住上面的放行。
+    // deny 按路径匹配，不要求文件存在：连"创建一个新的 config.toml"
+    // 一并挡住（实测），所以 macOS 不需要 Windows 那样的预建。
+    if let Some((_, protected)) = crate::sandbox::cargo_protected() {
+        p.push_str(&deny_section(protected.iter().map(|pp| pp.path.as_path())));
+    }
+
     if !allow_network {
         p.push_str("(deny network*)\n");
     }
     p
+}
+
+/// 敏感面的 deny 段。`subpath` 对文件路径同样生效（匹配它自身，实测），
+/// 不用按类型分 `literal`/`subpath` 两种子句。
+fn deny_section<'a>(paths: impl Iterator<Item = &'a Path>) -> String {
+    let mut s = String::from("(deny file-write*\n");
+    for p in paths {
+        s.push_str("  (subpath ");
+        s.push_str(&sbpl_str(&p.to_string_lossy()));
+        s.push_str(")\n");
+    }
+    s.push_str(")\n");
+    s
 }
 
 /// 把一条命令改写成"在沙箱里跑这条命令"。
@@ -157,6 +179,41 @@ mod tests {
             allow_network: false,
         });
         assert!(p.contains("(deny network*)"));
+    }
+
+    /// cargo 敏感面的 deny 段。真机行为（build 正常、写 config/bin 被拒、
+    /// **创建不存在的文件也被拒**）已人工验证；这里钉住 profile 的形状。
+    #[test]
+    fn cargo_敏感面的_deny_段在_allow_之后() {
+        let s = deny_section(
+            [
+                Path::new("/h/.cargo/bin"),
+                Path::new("/h/.cargo/config.toml"),
+            ]
+            .into_iter(),
+        );
+        assert_eq!(
+            s,
+            "(deny file-write*\n  (subpath \"/h/.cargo/bin\")\n  (subpath \"/h/.cargo/config.toml\")\n)\n"
+        );
+
+        // 有 ~/.cargo 的机器上（开发机与 CI 都是 Rust 环境），deny 段要
+        // 真进 profile，且排在 allow 段之后 —— SBPL 后写覆盖先写，顺序
+        // 反了 allow 会把 deny 盖掉，敏感面静默重新可写。
+        if let Some((cargo, _)) = crate::sandbox::cargo_protected() {
+            let dir = tempfile::tempdir().expect("临时目录");
+            let p = profile(&policy_for(dir.path()));
+            let allow_pos = p.find("(allow file-write*\n").expect("有 allow 段");
+            let deny_pos = p.rfind("(deny file-write*\n").expect("有敏感面 deny 段");
+            assert!(deny_pos > allow_pos, "deny 必须写在 allow 之后：{p}");
+            assert!(
+                p.contains(&format!(
+                    "(subpath {})",
+                    sbpl_str(&cargo.join("config.toml").to_string_lossy())
+                )),
+                "config.toml 要在 deny 段里：{p}"
+            );
+        }
     }
 
     /// 带空格和引号的路径不能把 profile 撑破。sandbox-exec 的解析错误

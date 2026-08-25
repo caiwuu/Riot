@@ -471,10 +471,10 @@ mod label {
         set_label(dir, w!("S-1-16-4096"))
     }
 
-    /// 给目录写一条指定级别的 mandatory label（带容器继承）。
+    /// 给目录或文件写一条指定级别的 mandatory label（目录带容器继承）。
     ///
-    /// 拆出来是为了让测试能造一个「本来就带非默认标签」的目录 ——
-    /// [`tag_low`] 拒绝那种目录的行为，只能这么验。生产路径只用 Low。
+    /// 拆出来是为了让测试能造一个「本来就带非默认标签」的对象 ——
+    /// [`tag_low`] 拒绝那种对象的行为，只能这么验。生产路径只用 Low。
     pub fn set_label(dir: &Path, sid_str: windows::core::PCWSTR) -> windows::core::Result<()> {
         unsafe {
             let mut sid = PSID::default();
@@ -489,10 +489,17 @@ mod label {
             InitializeAcl(acl, acl_bytes as u32, ACL_REVISION)?;
 
             // 继承标志让目录下新建的文件和子目录自动带上同一条标签。
+            // 文件对象（config.toml 这类文件洞）上继承位没有语义 ——
+            // 显式给 0，明确胜过依赖"Windows 会忽略它"。
+            let flags = if dir.is_dir() {
+                OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+            } else {
+                windows::Win32::Security::ACE_FLAGS(0)
+            };
             AddMandatoryAce(
                 acl,
                 ACL_REVISION,
-                OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
+                flags,
                 SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
                 sid,
             )?;
@@ -538,16 +545,17 @@ mod label {
     /// Medium 完整性级别的 RID（`S-1-16-8192`，即默认完整性的显式形态）。
     const MEDIUM_RID: u32 = 0x2000;
 
-    /// 给洞子目录打**显式 Medium 标签**（带继承）：父目录随后打 Low 时，
-    /// 自动继承的传播不会顶掉子对象上已有的显式 label —— 效果是「父目录
-    /// 整树 Low，这棵子树保持 Medium」。行为由测试
-    /// `保护洞子目录不吃父目录的_low_标签` 在真机上钉住。
+    /// 给洞（子目录或文件）打**显式 Medium 标签**（目录带继承）：父目录
+    /// 随后打 Low 时，自动继承的传播不会顶掉子对象上已有的显式 label ——
+    /// 效果是「父目录整树 Low，这些子路径保持 Medium」。行为由测试
+    /// `保护洞子目录不吃父目录的_low_标签` 与 `保护洞文件同样不吃标签`
+    /// 在真机上钉住。
     ///
-    /// 这是 `.cargo\bin` 那类**装着用户 PATH 可执行文件**的子目录的豁免
-    /// 手段（"保护洞"）：从带 Low 标签的 exe 启动的进程会被降到 Low，
-    /// 给 `.cargo` 整树打标等于把用户终端里的 cargo（rustup shim）一并
-    /// 降权。Medium+NW 顺带保住一个逃逸面 —— 沙箱的 Low 进程写不进 bin，
-    /// 就没法往 PATH 里顶一个假 cargo.exe 等用户在沙箱外执行。
+    /// 洞覆盖 `.cargo` 的整个敏感面（清单见 `sandbox::cargo_protected`）：
+    /// `bin` 是「Low exe 启动即降权」+「顶假 cargo.exe」双重问题；
+    /// `config.toml` 等文件是「写一行 rustc-wrapper，用户下次沙箱外构建
+    /// 即执行任意代码」—— Medium+NW 让沙箱的 Low 进程写不进这些路径，
+    /// 而对用户自己的一切进程零行为差异。
     ///
     /// `[取舍]` 首选其实是"受保护的空标签"（`PROTECTED_SACL` 挡继承、
     /// 自身无标签），但设置 SACL 的 protected 位要 `SeSecurityPrivilege`，
@@ -596,62 +604,89 @@ mod label {
     /// （`LabelRegistry`）用上它 —— 那套编排的正确性在 sandbox_labels
     /// 里跨平台测过，这里只负责把 Win32 错误转成 io 错误接上去。
     ///
-    /// 带一张**保护洞**清单（`(父目录, 洞)` 对）：打某个父目录的标签前，
-    /// 先给它的洞设 [`protect_default`]；撤标签后再 [`unprotect_default`]。
+    /// 带一张**保护洞**清单（[`Hole`]）：打某个父目录的标签前，先给它的
+    /// 洞设显式 Medium（[`hole_medium`]）；撤标签后再撤洞。
     /// 洞放在 labeler 里而不是打标编排里，是因为激活（`LabelRegistry::
     /// acquire`）和孤儿回收（`sandbox_labels::recover_orphans`）两条路都
-    /// 要经过它 —— 编排层各织一遍，漏一处的表现就是回收后 bin 恢复吃标签。
+    /// 要经过它 —— 编排层各织一遍，漏一处的表现就是回收后洞恢复吃标签。
     pub struct WinLabeler {
-        /// `(被打标的父目录, 保持默认完整性的子目录)`，都已 canonicalize。
-        holes: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+        holes: Vec<Hole>,
+    }
+
+    /// 一个保护洞：打 `parent` 的 Low 标签前，先给 `path` 设显式 Medium。
+    pub struct Hole {
+        /// 被打标的父目录。**必须是 canonicalize 形态** —— [`WinLabeler::
+        /// holes_of`] 靠路径逐字节相等匹配，而 `tag` 收到的目录来自
+        /// `dedup_existing`（同样 canonicalize）。一边规范化一边不规范化，
+        /// 洞永远匹配不上且没有任何报错，表现回到"激活一次废一次工具链"。
+        pub parent: std::path::PathBuf,
+        /// 保持默认完整性的子路径（目录或文件）。
+        pub path: std::path::PathBuf,
+        /// 约定类型：`tag` 预建时建空目录还是空文件（见预建注释）。
+        pub is_dir: bool,
     }
 
     impl WinLabeler {
-        /// 生产装配：唯一的洞是 `~/.cargo` 下的 `bin`（rustup shim 全家，
-        /// 用户 PATH 上的 cargo/rustc 就是它们 —— 吃了 Low 标签等于全机
-        /// Rust 工具链启动即降权）。`.rustup` 和 pnpm 全局目录不在这里，
-        /// 它们整条不打标（见 `sandbox::workspace_write` 的表）。
+        /// 生产装配：洞清单 = `~/.cargo` 的敏感面（bin、config、凭证、
+        /// env）。清单和逐条理由见 `sandbox::cargo_protected` —— macOS 的
+        /// profile deny 段共用同一份，两平台不会漂移。`.rustup` 和 pnpm
+        /// 全局目录不在这里，它们整条不打标（见 `sandbox::workspace_write`
+        /// 的表）。
         pub fn standard() -> Self {
-            let holes = std::env::var_os("USERPROFILE")
-                .map(std::path::PathBuf::from)
-                .into_iter()
-                .filter_map(|home| {
-                    // canonicalize 顺带过滤不存在的：`.cargo` 或 bin 不在，
-                    // 洞清单就是空的，行为退回"整树打标"。
-                    let cargo = home.join(".cargo").canonicalize().ok()?;
-                    let bin = cargo.join("bin").canonicalize().ok()?;
-                    Some((cargo, bin))
+            let holes = crate::sandbox::cargo_protected()
+                .map(|(cargo, protected)| {
+                    protected
+                        .into_iter()
+                        .map(|p| Hole {
+                            parent: cargo.clone(),
+                            path: p.path,
+                            is_dir: p.is_dir,
+                        })
+                        .collect()
                 })
-                .collect();
+                .unwrap_or_default();
             Self { holes }
         }
 
         /// 测试用：显式给洞清单，不读环境。
         #[cfg(test)]
-        pub fn with_holes(holes: Vec<(std::path::PathBuf, std::path::PathBuf)>) -> Self {
+        pub fn with_holes(holes: Vec<Hole>) -> Self {
             Self { holes }
         }
 
-        fn holes_of<'a>(
-            &'a self,
-            dir: &'a std::path::Path,
-        ) -> impl Iterator<Item = &'a std::path::Path> {
-            self.holes
-                .iter()
-                .filter(move |(parent, _)| parent == dir)
-                .map(|(_, hole)| hole.as_path())
+        fn holes_of<'a>(&'a self, dir: &'a std::path::Path) -> impl Iterator<Item = &'a Hole> {
+            self.holes.iter().filter(move |h| h.parent == dir)
         }
     }
 
     impl crate::sandbox_labels::DirLabeler for WinLabeler {
         fn tag(&self, dir: &std::path::Path) -> std::io::Result<()> {
-            // 洞先设：显式 Medium 压住随后打标那一刻的继承传播，bin 子树
+            // 洞先设：显式 Medium 压住随后打标那一刻的继承传播，洞子树
             // 全程不吃 Low。设洞失败就让整次 tag 失败 —— 编排层会回滚、
-            // activate 返回 None 诚实降级，绝不能带着"bin 也被降权"的
+            // activate 返回 None 诚实降级，绝不能带着"敏感面也被降权"的
             // 副作用继续激活。
             for hole in self.holes_of(dir) {
-                hole_medium(hole).map_err(|e| {
-                    std::io::Error::other(format!("给 {} 设保护洞失败：{e}", hole.display()))
+                // 预建：洞对不存在的对象没处打标，而"不存在"本身就是
+                // 缺口 —— 沙箱进程可以在 Low 的 .cargo 里**创建**
+                // config.toml，内容照样被沙箱外的 cargo 读走。空文件 /
+                // 空目录对 cargo 语义零差异（空 TOML 合法，bin 空目录
+                // 正常）。macOS 不需要这步：seatbelt 的 deny 按路径匹配，
+                // 连创建一并挡（见 sandbox_macos::profile）。
+                let ensured = if hole.is_dir {
+                    std::fs::create_dir_all(&hole.path)
+                } else {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(false)
+                        .open(&hole.path)
+                        .map(|_| ())
+                };
+                ensured.map_err(|e| {
+                    std::io::Error::other(format!("预建保护洞 {} 失败：{e}", hole.path.display()))
+                })?;
+                hole_medium(&hole.path).map_err(|e| {
+                    std::io::Error::other(format!("给 {} 设保护洞失败：{e}", hole.path.display()))
                 })?;
             }
             tag_low(dir).map_err(|e| std::io::Error::other(e.to_string()))
@@ -664,9 +699,9 @@ mod label {
             // 幂等覆盖。上抛反而会让编排层把这条账保留，孤儿回收永远
             // 重试一个无害状态。
             for hole in self.holes_of(dir) {
-                if let Err(e) = untag(hole) {
+                if let Err(e) = untag(&hole.path) {
                     tracing::warn!(
-                        hole = %hole.display(),
+                        hole = %hole.path.display(),
                         error = %e,
                         "撤保护洞失败（无害残留，下次打标幂等覆盖）"
                     );
@@ -716,7 +751,11 @@ mod label {
             let exe = bin.join("tool.exe");
             std::fs::write(&exe, b"stub").expect("造 exe");
 
-            let labeler = WinLabeler::with_holes(vec![(d.clone(), bin.clone())]);
+            let labeler = WinLabeler::with_holes(vec![Hole {
+                parent: d.clone(),
+                path: bin.clone(),
+                is_dir: true,
+            }]);
 
             labeler.tag(&d).expect("打标签");
             assert_eq!(current_label_rid(&d).expect("读父"), Some(0x1000));
@@ -744,6 +783,44 @@ mod label {
                 "撤保护后要恢复继承"
             );
             untag(&d).expect("清场");
+            let _ = std::fs::remove_dir_all(&d);
+        }
+
+        /// 文件洞（config.toml 那类）：**不存在时要先预建再打**。
+        /// 不预建的话"不存在"本身就是缺口 —— 沙箱进程在 Low 的父目录里
+        /// 创建 config.toml，内容照样被沙箱外的 cargo 读走。
+        #[test]
+        fn 保护洞文件同样不吃标签_且不存在时预建() {
+            use crate::sandbox_labels::DirLabeler as _;
+
+            let d = scratch("hole-file");
+            let cfg = d.join("config.toml");
+            assert!(!cfg.exists(), "测试前提：文件不存在");
+
+            let labeler = WinLabeler::with_holes(vec![Hole {
+                parent: d.clone(),
+                path: cfg.clone(),
+                is_dir: false,
+            }]);
+
+            labeler.tag(&d).expect("打标签");
+            assert!(cfg.exists(), "文件洞该被预建出来");
+            assert_eq!(
+                std::fs::metadata(&cfg).expect("读元数据").len(),
+                0,
+                "预建的是空文件，不许带内容"
+            );
+            assert_eq!(current_label_rid(&d).expect("读父"), Some(0x1000));
+            assert_eq!(
+                current_label_rid(&cfg).expect("读文件洞"),
+                Some(0x2000),
+                "文件洞该是显式 Medium —— 吃了 Low 就意味着沙箱进程可写它"
+            );
+
+            labeler.untag(&d).expect("撤标签");
+            assert_eq!(current_label_rid(&d).expect("读父"), None);
+            assert_eq!(current_label_rid(&cfg).expect("读文件洞"), None);
+
             let _ = std::fs::remove_dir_all(&d);
         }
 
