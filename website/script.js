@@ -262,11 +262,15 @@ function initHeroTitle () {
 }
 
 /**
- * 动画 Logo：「黑洞与陨石群」。
- * 花瓣形的粒子云是宇宙陨石群；字母 R 不放粒子，作为粒子云中的黑洞剪影，
- * 洞口边缘的陨石被引力撕扯，位置散乱、忽明忽暗。
- * 星空中时常有流星拖着尾迹击穿粒子团，被撞飞的陨石在引力作用下缓缓归位。
- * 鼠标靠近同样会推开陨石。
+ * 动画 Logo：「星云中的 RIOT」。
+ * 离屏画布上写出字标「RIOT」，细密的炽白光点拼出字形；云朵是由
+ * 「到文字的距离场」生成的胶囊状星云雾，贴字最浓，颜色随距离由青蓝过渡
+ * 到深紫，向外密度/亮度连续衰减、位置弥散，天然没有轮廓线。
+ * 宇宙中的星尘被引力捕获，绕着字标同向公转、一圈圈螺旋靠近：
+ * 白色星尘真正落到笔画上时闪亮一下汇入字形；云朵色的星尘则落到
+ * 云带的不同深度，融进对应色带的雾里。汇入后从远处的星空重生，川流不息。
+ * 流星拖着尾迹横穿星空，轨迹被字标的引力弯折，击穿处的光点被撞飞，
+ * 随后在引力作用下缓缓归位。鼠标靠近同样会推开光点。
  * 画布挂在 .hero-sky 内铺满整个首屏：流星横穿全屏，星云锚定在 .hero-logo 容器处成形。
  */
 function initParticleLogo () {
@@ -290,11 +294,12 @@ function initParticleLogo () {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const REPEL_RADIUS = 60;
   const REPEL_FORCE = 4.6;
-  const METEOR_HIT_RADIUS = 28; // 流星冲击半径
-  const METEOR_FORCE = 8.5;
+  const METEOR_HIT_RADIUS = 22; // 流星冲击半径
+  const METEOR_FORCE = 5.5; // 冲击柔和一些，击穿时字形不至于整个散架
   const METEOR_TAIL = 96; // 尾迹长度（px）
-  const METEOR_G = 2600000; // 黑洞引力常数：流星轨迹被星云中心弯折
-  const METEOR_MAX_AGE = 26; // 秒，被引力俘获绕圈的流星最终回收
+  const METEOR_G = 2600000; // 引力常数：流星轨迹被 R 的中心弯折
+  const METEOR_MAX_AGE = 18; // 秒，被引力俘获绕圈的流星最终回收，避免反复切割字形
+  const WORD = "RIOT"; // 粒子字标内容
 
   /** 预渲染辉光光点：加大实心亮核占比、收紧光晕衰减——光点更「实」，成形的 logo 更清晰 */
   const makeSprite = (r, g, b) => {
@@ -314,7 +319,7 @@ function initParticleLogo () {
     return s;
   };
 
-  /* 能量色带：0 吸积盘白 → 1 青蓝 → 2 紫 → 3 外缘深紫 */
+  /* 能量色带：0 炽白核心 → 1 青蓝 → 2 紫 → 3 外缘深紫 */
   const SPRITES = [
     makeSprite(244, 248, 255),
     makeSprite(168, 200, 255),
@@ -324,12 +329,16 @@ function initParticleLogo () {
 
   let W = 0;
   let H = 0;
-  let holeX = 0; // 星云 / 黑洞中心（画布坐标）：锚定在 .hero-logo 容器中心
+  let holeX = 0; // 字标引力中心（画布坐标）：锚定在 .hero-logo 容器中心
   let holeY = 0;
   let particles = [];
-  let dust = []; // 吸积流星尘：被引力捕获，螺旋内落汇入 R 轮廓
+  let dust = []; // 星尘：绕字标公转、螺旋内落，白色汇入笔画，云朵色融进云带
   let nebulaR = 100;
-  let captureR = 60;
+  let cloudBandPx = 90; // 云带宽度（px）：给云朵色星尘挑落点深度
+  let capField = null; // 「到字形的距离」场：星尘判断是否触到笔画 / 云层
+  let capSize = 0;
+  let capOffX = 0;
+  let capOffY = 0;
   let meteors = [];
   let nextMeteorAt = 0;
   let lastFrame = 0;
@@ -338,9 +347,6 @@ function initParticleLogo () {
   let revealStart = 0;
   let mouseX = -9999;
   let mouseY = -9999;
-
-  const img = new Image();
-  img.src = "assets/riot-logo.png";
 
   const resize = () => {
     const rect = canvas.getBoundingClientRect();
@@ -351,181 +357,123 @@ function initParticleLogo () {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   };
 
-  /** 星尘重生：回到远处，重新开始被引力捕获的漂流 */
+  /** 星尘重生：回到远处星空，重新开始被引力捕获的螺旋内落 */
   const respawnDust = (d) => {
-    d.r = nebulaR * (1.3 + Math.random() * 1.1);
+    d.r = nebulaR * (1.15 + Math.random() * 1.45);
     d.a = Math.random() * Math.PI * 2;
-    d.w = 0.015 + Math.random() * 0.028; // 同向公转（rad/s），星系盘的旋转场
-    d.rate = 1.1 + Math.random() * 2.1; // 内落速度（px/s），非常缓慢
+    d.w = 0.05 + Math.random() * 0.09; // 全部同向公转（rad/s），旋转趋势肉眼可辨
+    d.rate = 4 + Math.random() * 6; // 内落速度（px/s）：一点一点靠近
     d.fade = 1;
-    d.sprite = Math.random() < 0.55 ? 1 : Math.random() < 0.6 ? 2 : 3;
-    d.alpha = 0.14 + Math.random() * 0.24;
-    d.draw = 2.4 + Math.random() * 3.6;
+    /* capture 的语义是「到字形的距离阈值」，配合距离场判断落点 */
+    if (d.kind === 0) {
+      /* 白色星尘 → 一路落到笔画边上，汇入字形 */
+      d.capture = 3 + Math.random() * 5;
+      d.sprite = 0;
+      d.alpha = 0.3 + Math.random() * 0.25;
+      d.draw = 2.2 + Math.random() * 2.6;
+    } else {
+      /* 云朵色星尘 → 落到云带的随机深度融入；落点深浅不一，不会积出一圈隐形边界。
+         颜色跟落点处的云朵色带一致：落得越深越偏青蓝，浅处是深紫 */
+      d.capture = cloudBandPx * (0.12 + Math.random() * 0.68);
+      d.sprite = d.capture < cloudBandPx * 0.33 ? 1 : d.capture < cloudBandPx * 0.62 ? 2 : 3;
+      d.alpha = 0.22 + Math.random() * 0.2;
+      d.draw = 2 + Math.random() * 2.4;
+    }
   };
 
-  /** 采样 logo 像素，生成粒子锚点（logo 位置/尺寸跟随 .hero-logo 容器，画布铺满整个首屏） */
+  /** 把字标「RIOT」画进离屏画布并采样，生成粒子锚点（位置/尺寸跟随 .hero-logo 容器） */
   const build = () => {
     resize();
     particles = [];
 
     const box = logoBox.getBoundingClientRect();
     const canvasBox = canvas.getBoundingClientRect();
-    const logoSize = Math.max(40, Math.round(Math.min(box.width, box.height) * 0.88));
+    // 离屏画布放大到容器的 1.75 倍：横排字标要铺开，四周还得给云带留溶解余量
+    const logoSize = Math.max(40, Math.round(Math.min(box.width, box.height) * 1.75));
     const off = document.createElement("canvas");
     off.width = logoSize;
     off.height = logoSize;
     const octx = off.getContext("2d", { willReadFrequently: true });
-    octx.drawImage(img, 0, 0, logoSize, logoSize);
+
+    // 黑底白字居中写出字标，字宽拟合到画布的 52%（两侧留出云带 + 弥散的空间）
+    octx.fillStyle = "#000";
+    octx.fillRect(0, 0, logoSize, logoSize);
+    octx.fillStyle = "#fff";
+    octx.textAlign = "center";
+    octx.textBaseline = "middle";
+    const family = '"Geist", "Helvetica Neue", Arial, sans-serif';
+    const setFont = (px) => {
+      octx.font = `700 ${px}px ${family}`;
+      octx.letterSpacing = `${(px * 0.08).toFixed(1)}px`;
+    };
+    let fontPx = Math.round(logoSize * 0.24);
+    setFont(fontPx);
+    const measured = octx.measureText(WORD).width || 1;
+    fontPx = Math.max(10, Math.round((fontPx * logoSize * 0.52) / measured));
+    setFont(fontPx);
+    octx.fillText(WORD, logoSize / 2, logoSize / 2);
 
     let data;
     try {
       data = octx.getImageData(0, 0, logoSize, logoSize).data;
     } catch {
-      return; // 极端环境（file:// 且被视为跨域）下放弃粒子，兜底静态图
+      return; // 极端环境下放弃粒子，兜底静态图
     }
 
-    const idx = (x, y) => (y * logoSize + x) * 4;
-    const lumAt = (x, y) => {
-      const i = idx(x, y);
-      return 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-    };
-
-    // 判断图片是否带透明背景
-    let transparentCount = 0;
-    let sampled = 0;
-    for (let i = 3; i < data.length; i += 4 * 89) {
-      sampled += 1;
-      if (data[i] < 10) transparentCount += 1;
-    }
-    const hasAlpha = transparentCount > sampled * 0.08;
-
-    // 白底图：按行/列统计暗像素范围，用于区分「背景白」与「形状内部的白（字母）」
-    const DARK = 130;
-    const LIGHT = 195;
-    let rowMin, rowMax, colMin, colMax;
-    if (!hasAlpha) {
-      rowMin = new Int16Array(logoSize).fill(logoSize);
-      rowMax = new Int16Array(logoSize).fill(-1);
-      colMin = new Int16Array(logoSize).fill(logoSize);
-      colMax = new Int16Array(logoSize).fill(-1);
-      for (let y = 0; y < logoSize; y++) {
-        for (let x = 0; x < logoSize; x++) {
-          if (lumAt(x, y) < DARK) {
-            if (x < rowMin[y]) rowMin[y] = x;
-            if (x > rowMax[y]) rowMax[y] = x;
-            if (y < colMin[x]) colMin[x] = y;
-            if (y > colMax[x]) colMax[x] = y;
-          }
-        }
-      }
-    }
-
-    /** 'body' | 'letter' | null */
-    const classify = (x, y) => {
-      const lum = lumAt(x, y);
-      if (hasAlpha) {
-        if (data[idx(x, y) + 3] < 120) return null;
-        return lum >= LIGHT ? "letter" : "body";
-      }
-      if (lum < DARK) return "body";
-      if (lum >= LIGHT) {
-        // 形状内部的亮像素（左右上下都被暗像素包住）→ 字母
-        const inRow = x > rowMin[y] + 2 && x < rowMax[y] - 2;
-        const inCol = y > colMin[x] + 2 && y < colMax[x] - 2;
-        if (inRow && inCol) return "letter";
-      }
-      return null;
-    };
-
-    // 字母掩码：R 区域是黑洞，不放粒子，只用来找「洞口边缘」。
+    // 字母掩码：黑底白字，取亮像素即字形
     const letterMask = new Uint8Array(logoSize * logoSize);
-    for (let y = 0; y < logoSize; y++) {
-      for (let x = 0; x < logoSize; x++) {
-        if (classify(x, y) === "letter") letterMask[y * logoSize + x] = 1;
-      }
+    for (let i = 0; i < letterMask.length; i++) {
+      if (data[i * 4] >= 150) letterMask[i] = 1;
     }
 
-    /*
-     * 亮区里除了字母还有花瓣的 3D 高光。做连通域分析，
-     * 只保留质心最靠近图像中心的那一块——那就是 R，高光全部剔除。
-     */
-    {
-      const labels = new Int32Array(logoSize * logoSize).fill(-1);
-      const stack = [];
-      const regions = []; // { label, count, cx, cy }
-      let label = 0;
-      for (let start = 0; start < letterMask.length; start++) {
-        if (!letterMask[start] || labels[start] !== -1) continue;
-        let count = 0;
-        let sumX = 0;
-        let sumY = 0;
-        labels[start] = label;
-        stack.push(start);
-        while (stack.length) {
-          const j = stack.pop();
-          const jx = j % logoSize;
-          const jy = (j / logoSize) | 0;
-          count += 1;
-          sumX += jx;
-          sumY += jy;
-          if (jx > 0 && letterMask[j - 1] && labels[j - 1] === -1) {
-            labels[j - 1] = label;
-            stack.push(j - 1);
-          }
-          if (jx < logoSize - 1 && letterMask[j + 1] && labels[j + 1] === -1) {
-            labels[j + 1] = label;
-            stack.push(j + 1);
-          }
-          if (jy > 0 && letterMask[j - logoSize] && labels[j - logoSize] === -1) {
-            labels[j - logoSize] = label;
-            stack.push(j - logoSize);
-          }
-          if (jy < logoSize - 1 && letterMask[j + logoSize] && labels[j + logoSize] === -1) {
-            labels[j + logoSize] = label;
-            stack.push(j + logoSize);
-          }
-        }
-        regions.push({ label, count, cx: sumX / count, cy: sumY / count });
-        label += 1;
-      }
-
-      const half = logoSize / 2;
-      const minCount = logoSize * logoSize * 0.002; // 过小的亮斑直接忽略
-      let keep = -1;
-      let bestDist = Infinity;
-      for (const region of regions) {
-        if (region.count < minCount) continue;
-        const dist = Math.hypot(region.cx - half, region.cy - half);
-        if (dist < bestDist) {
-          bestDist = dist;
-          keep = region.label;
+    /** 多源 BFS 距离场（4 邻域，单位：像素） */
+    const distField = (isSource, walkable) => {
+      const dist = new Int32Array(logoSize * logoSize).fill(-1);
+      const queue = new Uint32Array(logoSize * logoSize);
+      let head = 0;
+      let tail = 0;
+      for (let i = 0; i < dist.length; i++) {
+        if (isSource(i)) {
+          dist[i] = 0;
+          queue[tail++] = i;
         }
       }
-      for (let i = 0; i < letterMask.length; i++) {
-        if (letterMask[i] && labels[i] !== keep) letterMask[i] = 0;
-      }
-    }
-
-    /** 到黑洞（R）的最小距离，用于能量分带：越靠近吸积盘越亮 */
-    const SCAN = 17;
-    const holeDist = (x, y) => {
-      let best = Infinity;
-      for (let dy = -SCAN; dy <= SCAN; dy++) {
-        const ny = y + dy;
-        if (ny < 0 || ny >= logoSize) continue;
-        for (let dx = -SCAN; dx <= SCAN; dx++) {
-          const nx = x + dx;
-          if (nx < 0 || nx >= logoSize) continue;
-          if (letterMask[ny * logoSize + nx]) {
-            const d2 = dx * dx + dy * dy;
-            if (d2 < best) best = d2;
-          }
+      while (head < tail) {
+        const j = queue[head++];
+        const jx = j % logoSize;
+        const d = dist[j] + 1;
+        if (jx > 0 && dist[j - 1] === -1 && walkable(j - 1)) {
+          dist[j - 1] = d;
+          queue[tail++] = j - 1;
+        }
+        if (jx < logoSize - 1 && dist[j + 1] === -1 && walkable(j + 1)) {
+          dist[j + 1] = d;
+          queue[tail++] = j + 1;
+        }
+        if (j >= logoSize && dist[j - logoSize] === -1 && walkable(j - logoSize)) {
+          dist[j - logoSize] = d;
+          queue[tail++] = j - logoSize;
+        }
+        if (j < dist.length - logoSize && dist[j + logoSize] === -1 && walkable(j + logoSize)) {
+          dist[j + logoSize] = d;
+          queue[tail++] = j + logoSize;
         }
       }
-      return Math.sqrt(best);
+      return dist;
     };
 
-    const step = Math.max(2, Math.round(logoSize / 74));
+    // dLet：每个像素到字形的距离。云朵形状、颜色分带、星尘落点全由这一个距离场驱动
+    const dLet = distField(
+      (i) => letterMask[i] === 1,
+      () => true
+    );
+
+    /* 云朵 = 距文字 cloudBand 以内的雾带：贴字是浓核，向外连续衰减，天然无轮廓 */
+    const cloudBand = Math.max(24, logoSize * 0.22);
+    const coreBand = cloudBand * 0.35; // 浓核带：这圈内密度/亮度不衰减
+    const nearBand = logoSize * 0.055; // 离字形这么近 → 青蓝
+    const midBand = logoSize * 0.105; // 再远 → 紫，其余深紫
+
     // logo 在画布坐标系中的落点：两个矩形同帧测量，与滚动位置无关
     const offX = box.left - canvasBox.left + (box.width - logoSize) / 2;
     const offY = box.top - canvasBox.top + (box.height - logoSize) / 2;
@@ -533,73 +481,27 @@ function initParticleLogo () {
     holeX = offX + logoR;
     holeY = offY + logoR;
 
-    for (let y = 0; y < logoSize; y += step) {
-      for (let x = 0; x < logoSize; x += step) {
-        const cls = classify(x, y);
-        if (cls === null) continue; // 背景不放粒子
+    /* —— 字标 RIOT：独立的细网格采样，光点小而密，字形「像素」更高 —— */
+    const stepL = Math.max(2, Math.round(logoSize / 170));
+    for (let y = 0; y < logoSize; y += stepL) {
+      for (let x = 0; x < logoSize; x += stepL) {
+        if (!letterMask[y * logoSize + x]) continue;
 
-        const isLetter = letterMask[y * logoSize + x] === 1;
-        const dHole = isLetter ? 0 : holeDist(x, y);
-
-        /* 能量分带：实心 R（炽白恒星）→ 近旁青蓝辉光 → 中盘紫 → 外缘深紫 */
-        let sprite;
-        let alpha;
-        let size;
-        const disk = isLetter;
-        if (isLetter) {
-          sprite = 0;
-          alpha = 0.9 + Math.random() * 0.1;
-          size = 1.5 + Math.random() * 0.9;
-        } else if (dHole <= 7) {
-          sprite = 1;
-          alpha = 0.55 + Math.random() * 0.28;
-          size = 1.25 + Math.random() * 0.85;
-        } else if (dHole <= 15) {
-          sprite = 1;
-          alpha = 0.58 + Math.random() * 0.32;
-          size = 1.2 + Math.random() * 0.9;
-        } else if (dHole <= 28) {
-          sprite = 2;
-          alpha = 0.5 + Math.random() * 0.3;
-          size = 1.1 + Math.random() * 0.85;
-        } else {
-          sprite = 3;
-          alpha = 0.42 + Math.random() * 0.26;
-          size = 1.0 + Math.random() * 0.8;
-        }
-
-        /* 花瓣外缘渐暗，星云边界融进黑底 */
-        const dc = Math.hypot(x - logoR, y - logoR) / logoR;
-        const dimEdge = 1 - 0.32 * Math.min(1, Math.max(0, (dc - 0.5) / 0.5));
-
-        /* 实心 R 加密：恒星矩阵生成两颗，密实闪耀 */
-        const copies = disk ? 2 : 1;
-        for (let c = 0; c < copies; c++) {
+        /* 每个采样点三颗：两颗炽白核心错位补缝，一颗贴着笔画的青蓝辉光 */
+        for (let c = 0; c < 3; c++) {
+          const isGlow = c === 2;
           /* 景深：z 越大越近 → 更大更亮 */
           const z = 0.55 + Math.random() * 0.9;
-          let a0 = alpha * dimEdge * (0.58 + 0.42 * ((z - 0.55) / 0.9));
+          const size = isGlow ? 0.9 + Math.random() * 0.5 : 0.85 + Math.random() * 0.55;
+          const alpha = isGlow ? 0.13 + Math.random() * 0.11 : 0.88 + Math.random() * 0.12;
+          const a0 = alpha * (0.58 + 0.42 * ((z - 0.55) / 0.9));
 
-          // R 内部只轻微抖动保持密实，副本颗错位补缝
-          const spread = disk ? (c === 0 ? 2 : 4) : 0;
-          const jx = (Math.random() - 0.5) * spread;
-          const jy = (Math.random() - 0.5) * spread;
-          const hx = offX + x + jx;
-          const hy = offY + y + jy;
+          // 抖动幅度跟着细网格收小，笔画边缘不发毛
+          const spread = c === 1 ? 2 : 1;
+          const hx = offX + x + (Math.random() - 0.5) * spread;
+          const hy = offY + y + (Math.random() - 0.5) * spread;
           const angle = Math.random() * Math.PI * 2;
           const dist = 70 + Math.random() * 180;
-
-          /* 外圈尘埃绕黑洞极缓慢公转（避开 R 外接圆，公转不会盖住黑洞剪影）；
-             0.72–0.87 半径带角速度渐增，内外过渡无剪切缝 */
-          const orbitR = Math.hypot(hx - holeX, hy - holeY);
-          const wf = Math.min(1, Math.max(0, (orbitR / logoR - 0.72) / 0.15));
-          const orbit =
-            wf > 0
-              ? {
-                r: orbitR,
-                a: Math.atan2(hy - holeY, hx - holeX),
-                w: (0.014 + Math.random() * 0.018) * wf,
-              }
-              : null;
 
           particles.push({
             hx,
@@ -608,33 +510,106 @@ function initParticleLogo () {
             y: hy + Math.sin(angle) * dist,
             vx: 0,
             vy: 0,
-            draw: size * 5.4 * z, // 辉光绘制直径（亮核更实、光晕更收，成形更清晰）
-            sprite,
+            draw: size * (isGlow ? 6.4 : 4.1) * z, // 辉光颗更大更淡，贴着笔画晕开
+            sprite: isGlow ? 1 : 0,
             alpha: a0,
-            orbit,
+            orbit: null,
             spring: 0.02 + Math.random() * 0.025,
             springScale: 1, // 被流星击中后骤降，随时间缓慢恢复 → 「引力慢慢拉回」
             phase: Math.random() * Math.PI * 2,
-            speed: disk ? 0.1 + Math.random() * 0.18 : 0.06 + Math.random() * 0.14,
-            drift: disk ? 1.1 : 0.8,
-            twinkle: disk ? Math.random() < 0.4 : Math.random() < 0.14,
+            speed: 0.1 + Math.random() * 0.18,
+            drift: 1.1,
+            twinkle: !isGlow && Math.random() < 0.4,
           });
         }
       }
     }
 
-    /*
-     * 吸积流星尘：散落在星空中的微尘被黑洞引力捕获，
-     * 一边极缓慢公转一边螺旋内落，抵达 R 轮廓时亮起、融入吸积盘，再于远处重生。
-     */
+    const step = Math.max(2, Math.round(logoSize / 74));
+    for (let y = 0; y < logoSize; y += step) {
+      for (let x = 0; x < logoSize; x += step) {
+        const i = y * logoSize + x;
+        if (letterMask[i]) continue;
+        const d2r = dLet[i];
+        if (d2r > cloudBand) continue; // 云带之外是纯星空
+
+        /* —— 云朵本体：安静的星云雾 ——
+           边缘溶解三件套：密度随溶解度递减到零、亮度随之压暗、位置向外弥散，
+           所以云朵没有可辨认的轮廓线，只是渐渐消失在黑底里 */
+        const f0 = Math.min(1, (cloudBand - d2r) / (cloudBand - coreBand));
+        const fade = f0 * f0 * (3 - 2 * f0); // smoothstep：溶解过渡更顺滑
+        if (Math.random() > fade) continue;
+        let sprite;
+        let alpha;
+        if (d2r <= nearBand) {
+          sprite = 1;
+          alpha = 0.42 + Math.random() * 0.18;
+        } else if (d2r <= midBand) {
+          sprite = 2;
+          alpha = 0.33 + Math.random() * 0.15;
+        } else {
+          sprite = 3;
+          alpha = 0.25 + Math.random() * 0.12;
+        }
+
+        const z = 0.55 + Math.random() * 0.9;
+        const size = 0.95 + Math.random() * 0.75;
+        // 亮度受景深影响收窄（0.7–1.0），云雾均匀不出脏斑
+        const a0 = alpha * (0.35 + 0.65 * fade) * (0.7 + 0.3 * ((z - 0.55) / 0.9));
+
+        // 越靠边缘散得越开：外飘约一个云带的宽度，边缘雾圈显著外扩
+        const scatter = 1.5 + (1 - fade) * cloudBand * 0.9;
+        const hx = offX + x + (Math.random() - 0.5) * scatter;
+        const hy = offY + y + (Math.random() - 0.5) * scatter;
+        const angle = Math.random() * Math.PI * 2;
+        const dist = 70 + Math.random() * 180;
+
+        /* 边缘的雾沿切向缓慢往复环流：幅度有限（渲染时正弦摆动），
+           横排字形的胶囊云不会被持续公转搅散，只看到云边在流动 */
+        const w = (0.02 + Math.random() * 0.03) * (1 - fade);
+        const orbit =
+          w > 0.001
+            ? {
+              r: Math.hypot(hx - holeX, hy - holeY),
+              a: Math.atan2(hy - holeY, hx - holeX),
+              w,
+            }
+            : null;
+
+        particles.push({
+          hx,
+          hy,
+          x: hx + Math.cos(angle) * dist,
+          y: hy + Math.sin(angle) * dist,
+          vx: 0,
+          vy: 0,
+          draw: size * (5.2 + (1 - fade) * 2.4) * z, // 边缘颗更大更淡，像雾一样晕开
+          sprite,
+          alpha: a0,
+          orbit,
+          spring: 0.02 + Math.random() * 0.025,
+          springScale: 1,
+          phase: Math.random() * Math.PI * 2,
+          speed: 0.12 + Math.random() * 0.2,
+          drift: 0.8 + (1 - fade) * 2.8,
+          twinkle: Math.random() < 0.06,
+        });
+      }
+    }
+
+    /* 星尘两队：白色落到笔画上汇入 RIOT，云朵色落进云带的随机深度。
+       初始就散布在螺旋内落途中的不同半径，画面一开始就是进行中的汇入流 */
     nebulaR = logoR;
-    captureR = logoSize * 0.34; // R 外接圆附近 = 「落到 R 的轮廓上」
+    cloudBandPx = cloudBand;
+    capField = dLet;
+    capSize = logoSize;
+    capOffX = offX;
+    capOffY = offY;
     dust = [];
-    for (let i = 0; i < 130; i++) {
-      const d = {};
+    for (let i = 0; i < 150; i++) {
+      const d = { kind: i < 60 ? 0 : 1 };
       respawnDust(d);
-      // 初始就散布在内落途中的不同半径，画面一开始就是进行中的吸积流
-      d.r = captureR + (nebulaR * 2.2 - captureR) * Math.random();
+      d.r = nebulaR * (0.55 + Math.random() * 2.05);
       dust.push(d);
     }
 
@@ -644,7 +619,7 @@ function initParticleLogo () {
 
   /**
    * 生成一颗流星：从画布外随机方向射入，路径随机——
-   * 不一定穿过星云，但轨迹会被黑洞引力弯折，擦得足够近才会击穿粒子团。
+   * 不一定穿过字形，但轨迹会被 R 的引力弯折，擦得足够近才会击穿粒子团。
    */
   const spawnMeteor = () => {
     const ang = Math.random() * Math.PI * 2;
@@ -683,7 +658,7 @@ function initParticleLogo () {
       nextMeteorAt = t + 1750 + Math.random() * 2250;
     }
 
-    // 更新流星：受黑洞（星云中心）引力弯折轨迹；出界或过久（被俘获绕圈）回收
+    // 更新流星：受 R 中心的引力弯折轨迹；出界或过久（被俘获绕圈）回收
     const gcx = holeX;
     const gcy = holeY;
     const margin = 140;
@@ -713,7 +688,7 @@ function initParticleLogo () {
     ctx.clearRect(0, 0, W, H);
     ctx.globalCompositeOperation = "lighter"; // 加色混合：光点重叠即增亮
 
-    /* 整个星云极缓慢地摇摆与呼吸（绕星云自身中心，而非画布中心） */
+    /* 整个字形极缓慢地摇摆与呼吸（绕 R 自身中心，而非画布中心） */
     const cx = holeX;
     const cy = holeY;
     const sway = Math.sin(time * 0.05) * 0.04;
@@ -724,42 +699,47 @@ function initParticleLogo () {
     ctx.scale(breath, breath);
     ctx.translate(-cx, -cy);
 
-    /* 吸积流星尘：公转 + 螺旋内落，抵达 R 轮廓时亮起融入吸积盘，然后在远处重生 */
+    /* 星尘：绕 R 同向公转 + 螺旋内落；白色触到 R 外接圆、云朵色落到各自深度时，
+       放大增亮闪一下汇入目标，再从远处重生 */
     for (let i = 0; i < dust.length; i++) {
       const d = dust[i];
       d.a += d.w * dt;
       if (d.fade < 1) {
-        d.fade -= dt / 0.9;
+        d.fade -= dt / 0.7;
         if (d.fade <= 0) {
           respawnDust(d);
           continue;
         }
       } else {
         d.r -= d.rate * dt;
-        if (d.r <= captureR) d.fade = 0.999; // 触达 R 轮廓：开始「融入」
+        // 查距离场：真正落到笔画（白尘）或云层深度（云尘）才开始「汇入」
+        const px = Math.round(cx + Math.cos(d.a) * d.r - capOffX);
+        const py = Math.round(cy + Math.sin(d.a) * d.r - capOffY);
+        let near = Infinity;
+        if (capField && px >= 0 && py >= 0 && px < capSize && py < capSize) {
+          near = capField[py * capSize + px];
+        }
+        if (near <= d.capture || d.r <= 6) d.fade = 0.999;
       }
       const dx = cx + Math.cos(d.a) * d.r;
       const dy = cy + Math.sin(d.a) * d.r;
-      const falling = d.fade < 1;
-      // 融入瞬间换白色并短暂增亮，像物质落入吸积盘的闪光
-      ctx.globalAlpha = (falling ? Math.min(0.85, d.alpha * 2.6) * d.fade : d.alpha) * reveal;
-      ctx.drawImage(
-        SPRITES[falling ? 0 : d.sprite],
-        dx - d.draw / 2,
-        dy - d.draw / 2,
-        d.draw,
-        d.draw
-      );
+      const merging = d.fade < 1;
+      const ds = merging ? d.draw * (1 + (1 - d.fade) * 0.9) : d.draw;
+      // 汇入 R 的白点闪得亮，融进云朵的低调些
+      const glow = d.kind === 0 ? 2.2 : 1.6;
+      ctx.globalAlpha = (merging ? Math.min(0.9, d.alpha * glow) * d.fade : d.alpha) * reveal;
+      ctx.drawImage(SPRITES[d.sprite], dx - ds / 2, dy - ds / 2, ds, ds);
     }
 
     for (let i = 0; i < particles.length; i++) {
       const p = particles[i];
 
-      // 外圈尘埃绕黑洞极缓慢公转：锚点本身在圆轨道上移动
+      // 云朵边缘的雾沿切向缓慢往复环流（内部粒子 orbit 为 null，静止；
+      // 幅度有限的摆动让横排字形的胶囊云不会被搅散）
       let bx = p.hx;
       let by = p.hy;
       if (p.orbit) {
-        const oa = p.orbit.a + p.orbit.w * time;
+        const oa = p.orbit.a + Math.sin(time * p.orbit.w * 5 + p.phase) * 0.09;
         bx = cx + Math.cos(oa) * p.orbit.r;
         by = cy + Math.sin(oa) * p.orbit.r;
       }
@@ -775,7 +755,7 @@ function initParticleLogo () {
       p.vx += (ix - p.x) * k;
       p.vy += (iy - p.y) * k;
       if (p.springScale < 1) {
-        p.springScale = Math.min(1, p.springScale + 0.0012);
+        p.springScale = Math.min(1, p.springScale + 0.0032);
       }
 
       // 鼠标排斥
@@ -801,7 +781,7 @@ function initParticleLogo () {
           const mv = Math.hypot(m.vx, m.vy) || 1;
           p.vx += (mdx / md) * f + (m.vx / mv) * f * 0.45;
           p.vy += (mdy / md) * f + (m.vy / mv) * f * 0.45;
-          p.springScale = Math.min(p.springScale, 0.07);
+          p.springScale = Math.min(p.springScale, 0.16);
         }
       }
 
@@ -824,7 +804,7 @@ function initParticleLogo () {
 
     ctx.restore();
 
-    // 绘制流星（亮头 + 渐隐尾迹，不随星云摇摆）
+    // 绘制流星（亮头 + 渐隐尾迹，不随字形摇摆）
     for (let i = 0; i < meteors.length; i++) {
       const m = meteors[i];
       const mv = Math.hypot(m.vx, m.vy) || 1;
@@ -870,49 +850,52 @@ function initParticleLogo () {
     mouseY = event.clientY - rect.top;
   };
 
-  img.onerror = showFallback;
+  build();
+  if (!built) {
+    showFallback();
+    return;
+  }
+  start();
 
-  img.onload = () => {
-    build();
-    if (!built) {
-      showFallback();
-      return;
-    }
-    start();
-
-    hero.addEventListener("pointermove", onPointer, { passive: true });
-    hero.addEventListener("pointerleave", () => {
-      mouseX = -9999;
-      mouseY = -9999;
+  // Web 字体就绪后重采样一次，字标用上正式字体（字体已就绪时立即 resolve，几乎无感）
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(() => {
+      if (built) build();
     });
+  }
 
-    let resizeTimer = 0;
-    window.addEventListener(
-      "resize",
-      () => {
-        clearTimeout(resizeTimer);
-        resizeTimer = setTimeout(build, 200);
+  hero.addEventListener("pointermove", onPointer, { passive: true });
+  hero.addEventListener("pointerleave", () => {
+    mouseX = -9999;
+    mouseY = -9999;
+  });
+
+  let resizeTimer = 0;
+  window.addEventListener(
+    "resize",
+    () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(build, 200);
+    },
+    { passive: true }
+  );
+
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) start();
+  });
+
+  if ("IntersectionObserver" in window) {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) start();
+          else stop();
+        });
       },
-      { passive: true }
+      { threshold: 0.01 }
     );
-
-    document.addEventListener("visibilitychange", () => {
-      if (!document.hidden) start();
-    });
-
-    if ("IntersectionObserver" in window) {
-      const observer = new IntersectionObserver(
-        (entries) => {
-          entries.forEach((entry) => {
-            if (entry.isIntersecting) start();
-            else stop();
-          });
-        },
-        { threshold: 0.01 }
-      );
-      observer.observe(canvas);
-    }
-  };
+    observer.observe(canvas);
+  }
 }
 
 /**

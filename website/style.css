@@ -105,6 +105,7 @@ main,
 /* ------------------------------------------------------------
    导航
    ------------------------------------------------------------ */
+/* 顶部时完全透明，让星空一直铺到屏幕最上沿；滚离顶部才垫上深色毛玻璃 */
 .nav {
   position: fixed;
   top: 0;
@@ -112,18 +113,20 @@ main,
   right: 0;
   z-index: 100;
   color: var(--fg);
-  background: rgba(4, 4, 4, 0.5);
+  background: transparent;
   border-bottom: 1px solid transparent;
-  backdrop-filter: blur(16px) saturate(130%);
-  -webkit-backdrop-filter: blur(16px) saturate(130%);
   transition:
     background 0.35s,
-    border-color 0.35s;
+    border-color 0.35s,
+    backdrop-filter 0.35s,
+    -webkit-backdrop-filter 0.35s;
 }
 
 .nav.scrolled {
   background: rgba(4, 4, 4, 0.78);
   border-bottom-color: var(--line);
+  backdrop-filter: blur(16px) saturate(130%);
+  -webkit-backdrop-filter: blur(16px) saturate(130%);
 }
 
 .nav-inner {

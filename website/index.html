@@ -21,7 +21,8 @@
       href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@600&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="style.css" />
+    <!-- 带版本参数防缓存：改样式/脚本后浏览器立刻拿到新文件，调整 v 值即可 -->
+    <link rel="stylesheet" href="style.css?v=2" />
   </head>
   <body id="top">
     <!-- 全站背景质感层 -->
@@ -91,7 +92,7 @@
             <img class="hl-fallback" src="assets/riot-logo.png" alt="" />
           </div>
 
-          <h1 class="hero-wordmark" id="hero-title" aria-label="Riot">RIOT</h1>
+          <!-- <h1 class="hero-wordmark" id="hero-title" aria-label="Riot">RIOT</h1> -->
 
           <p class="hero-sub" data-reveal data-reveal-delay="2">
             一个真正在你电脑上干活的 AI 助手——读代码、改文件、跑命令、出文档
@@ -552,6 +553,6 @@
       <div class="footer-watermark" aria-hidden="true">RIOT</div>
     </footer>
 
-    <script src="script.js"></script>
+    <script src="script.js?v=2"></script>
   </body>
 </html>
