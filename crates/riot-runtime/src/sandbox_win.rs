@@ -84,7 +84,7 @@ impl Drop for WinSandbox {
         let ledger = std::mem::take(&mut self.ledger_path);
         let temp = std::mem::take(&mut self.session_temp);
         let cleanup = move || {
-            REGISTRY.release(&labeled, &label::WinLabeler, &ledger);
+            REGISTRY.release(&labeled, &label::WinLabeler::standard(), &ledger);
             // 会话 temp 是我们建的，整个删掉 —— 里面是本会话命令的临时产物。
             let _ = std::fs::remove_dir_all(&temp);
         };
@@ -140,7 +140,7 @@ pub(crate) fn activate(
     let mut dirs = writable.clone();
     dirs.push(session_temp.clone());
 
-    if let Err(e) = REGISTRY.acquire(&dirs, &label::WinLabeler, &ledger_path, now_ms) {
+    if let Err(e) = REGISTRY.acquire(&dirs, &label::WinLabeler::standard(), &ledger_path, now_ms) {
         // acquire 内部已退回本次的引用；temp 子目录还没进标签体系，删掉。
         tracing::warn!(error = %e, "沙箱打标签失败，本轮不隔离");
         let _ = std::fs::remove_dir_all(&session_temp);
@@ -152,7 +152,7 @@ pub(crate) fn activate(
         Err(e) => {
             // 标签已授权但令牌没建成 —— 归还引用（归零的会被真撤）。
             tracing::warn!(error = %e, "沙箱建令牌失败，回滚标签、本轮不隔离");
-            REGISTRY.release(&dirs, &label::WinLabeler, &ledger_path);
+            REGISTRY.release(&dirs, &label::WinLabeler::standard(), &ledger_path);
             let _ = std::fs::remove_dir_all(&session_temp);
             return None;
         }
@@ -203,7 +203,7 @@ pub(crate) fn recover_orphans(ledger_path: &std::path::Path) {
     {
         Ok(f) => {
             std::mem::forget(f);
-            crate::sandbox_labels::recover_orphans(&label::WinLabeler, ledger_path);
+            crate::sandbox_labels::recover_orphans(&label::WinLabeler::standard(), ledger_path);
         }
         Err(e) => {
             tracing::info!(error = %e, "沙箱标签清单被另一个内核进程独占，跳过孤儿回收");
@@ -511,9 +511,9 @@ mod label {
         }
     }
 
-    /// 去掉 Low 标签：写一个**空** SACL label，对象回到默认完整性
-    /// （Medium）。回滚和孤儿回收都走这条 —— 见 sandbox_labels 里
-    /// 「只记路径不记原状」的取舍。
+    /// 去掉标签：写一个**空** SACL label，对象回到默认完整性
+    /// （Medium）。回滚、孤儿回收、撤保护洞都走这条 —— 见 sandbox_labels
+    /// 里「只记路径不记原状」的取舍。
     pub fn untag(dir: &Path) -> windows::core::Result<()> {
         unsafe {
             let acl_bytes = 256usize;
@@ -533,6 +533,42 @@ mod label {
             )
             .ok()
         }
+    }
+
+    /// Medium 完整性级别的 RID（`S-1-16-8192`，即默认完整性的显式形态）。
+    const MEDIUM_RID: u32 = 0x2000;
+
+    /// 给洞子目录打**显式 Medium 标签**（带继承）：父目录随后打 Low 时，
+    /// 自动继承的传播不会顶掉子对象上已有的显式 label —— 效果是「父目录
+    /// 整树 Low，这棵子树保持 Medium」。行为由测试
+    /// `保护洞子目录不吃父目录的_low_标签` 在真机上钉住。
+    ///
+    /// 这是 `.cargo\bin` 那类**装着用户 PATH 可执行文件**的子目录的豁免
+    /// 手段（"保护洞"）：从带 Low 标签的 exe 启动的进程会被降到 Low，
+    /// 给 `.cargo` 整树打标等于把用户终端里的 cargo（rustup shim）一并
+    /// 降权。Medium+NW 顺带保住一个逃逸面 —— 沙箱的 Low 进程写不进 bin，
+    /// 就没法往 PATH 里顶一个假 cargo.exe 等用户在沙箱外执行。
+    ///
+    /// `[取舍]` 首选其实是"受保护的空标签"（`PROTECTED_SACL` 挡继承、
+    /// 自身无标签），但设置 SACL 的 protected 位要 `SeSecurityPrivilege`，
+    /// 普通用户下 `SetNamedSecurityInfoW` 直接报 0x80070522（实测）。
+    /// 显式 Medium 是普通用户做得到的等效物：Medium 就是默认级别，对
+    /// 一切非沙箱进程零行为差异。
+    ///
+    /// `[约束]` 打洞前体检，同 [`tag_low`]：默认、Medium（我们的残留，
+    /// 重打幂等）、Low（上次父标签传播的残留，覆盖掉正是目的）都放行；
+    /// 其它级别一律拒绝 —— 那是用户自己的标签，抹掉就还不回去了。
+    pub fn hole_medium(dir: &Path) -> windows::core::Result<()> {
+        if let Some(rid) = current_label_rid(dir)?
+            && rid != MEDIUM_RID
+            && rid != LOW_RID
+        {
+            return Err(windows::core::Error::new(
+                windows::Win32::Foundation::E_ACCESSDENIED,
+                "洞目录已有非默认完整性标签，打洞会抹掉它",
+            ));
+        }
+        set_label(dir, w!("S-1-16-8192"))
     }
 
     /// LocalFree 守卫，同 token 模块。
@@ -559,14 +595,84 @@ mod label {
     /// [`crate::sandbox_labels::DirLabeler`]，好让引用计数与回滚编排
     /// （`LabelRegistry`）用上它 —— 那套编排的正确性在 sandbox_labels
     /// 里跨平台测过，这里只负责把 Win32 错误转成 io 错误接上去。
-    pub struct WinLabeler;
+    ///
+    /// 带一张**保护洞**清单（`(父目录, 洞)` 对）：打某个父目录的标签前，
+    /// 先给它的洞设 [`protect_default`]；撤标签后再 [`unprotect_default`]。
+    /// 洞放在 labeler 里而不是打标编排里，是因为激活（`LabelRegistry::
+    /// acquire`）和孤儿回收（`sandbox_labels::recover_orphans`）两条路都
+    /// 要经过它 —— 编排层各织一遍，漏一处的表现就是回收后 bin 恢复吃标签。
+    pub struct WinLabeler {
+        /// `(被打标的父目录, 保持默认完整性的子目录)`，都已 canonicalize。
+        holes: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+    }
+
+    impl WinLabeler {
+        /// 生产装配：唯一的洞是 `~/.cargo` 下的 `bin`（rustup shim 全家，
+        /// 用户 PATH 上的 cargo/rustc 就是它们 —— 吃了 Low 标签等于全机
+        /// Rust 工具链启动即降权）。`.rustup` 和 pnpm 全局目录不在这里，
+        /// 它们整条不打标（见 `sandbox::workspace_write` 的表）。
+        pub fn standard() -> Self {
+            let holes = std::env::var_os("USERPROFILE")
+                .map(std::path::PathBuf::from)
+                .into_iter()
+                .filter_map(|home| {
+                    // canonicalize 顺带过滤不存在的：`.cargo` 或 bin 不在，
+                    // 洞清单就是空的，行为退回"整树打标"。
+                    let cargo = home.join(".cargo").canonicalize().ok()?;
+                    let bin = cargo.join("bin").canonicalize().ok()?;
+                    Some((cargo, bin))
+                })
+                .collect();
+            Self { holes }
+        }
+
+        /// 测试用：显式给洞清单，不读环境。
+        #[cfg(test)]
+        pub fn with_holes(holes: Vec<(std::path::PathBuf, std::path::PathBuf)>) -> Self {
+            Self { holes }
+        }
+
+        fn holes_of<'a>(
+            &'a self,
+            dir: &'a std::path::Path,
+        ) -> impl Iterator<Item = &'a std::path::Path> {
+            self.holes
+                .iter()
+                .filter(move |(parent, _)| parent == dir)
+                .map(|(_, hole)| hole.as_path())
+        }
+    }
 
     impl crate::sandbox_labels::DirLabeler for WinLabeler {
         fn tag(&self, dir: &std::path::Path) -> std::io::Result<()> {
+            // 洞先设：显式 Medium 压住随后打标那一刻的继承传播，bin 子树
+            // 全程不吃 Low。设洞失败就让整次 tag 失败 —— 编排层会回滚、
+            // activate 返回 None 诚实降级，绝不能带着"bin 也被降权"的
+            // 副作用继续激活。
+            for hole in self.holes_of(dir) {
+                hole_medium(hole).map_err(|e| {
+                    std::io::Error::other(format!("给 {} 设保护洞失败：{e}", hole.display()))
+                })?;
+            }
             tag_low(dir).map_err(|e| std::io::Error::other(e.to_string()))
         }
         fn untag(&self, dir: &std::path::Path) -> std::io::Result<()> {
-            untag(dir).map_err(|e| std::io::Error::other(e.to_string()))
+            untag(dir).map_err(|e| std::io::Error::other(e.to_string()))?;
+            // 洞后撤（父目录的 Low 先清，洞恢复默认时才不会吃到回灌的
+            // 继承）。失败只告警不上抛：标签本体已撤干净，残留的显式
+            // Medium 就是默认级别的显式形态，对一切行为零影响，下次打洞
+            // 幂等覆盖。上抛反而会让编排层把这条账保留，孤儿回收永远
+            // 重试一个无害状态。
+            for hole in self.holes_of(dir) {
+                if let Err(e) = untag(hole) {
+                    tracing::warn!(
+                        hole = %hole.display(),
+                        error = %e,
+                        "撤保护洞失败（无害残留，下次打标幂等覆盖）"
+                    );
+                }
+            }
+            Ok(())
         }
     }
 
@@ -592,6 +698,52 @@ mod label {
 
             untag(&d).expect("撤标签");
             assert_eq!(current_label_rid(&d).expect("读"), None, "撤完该回到默认");
+            let _ = std::fs::remove_dir_all(&d);
+        }
+
+        /// 保护洞：打父目录 Low 时，洞子目录（`.cargo\bin` 那类装着用户
+        /// PATH 可执行文件的地方）必须保持默认完整性 —— 从 Low 标签的 exe
+        /// 启动的进程会被降到 Low，全机工具链跟着报废（2026-08-25 真实
+        /// 事故：`.rustup` 整树被标，宿主机 cargo 全局 os error 5）。
+        /// 撤完标签后洞要恢复出厂：无标签、重新接受继承。
+        #[test]
+        fn 保护洞子目录不吃父目录的_low_标签() {
+            use crate::sandbox_labels::DirLabeler as _;
+
+            let d = scratch("hole");
+            let bin = d.join("bin");
+            std::fs::create_dir_all(&bin).expect("建 bin");
+            let exe = bin.join("tool.exe");
+            std::fs::write(&exe, b"stub").expect("造 exe");
+
+            let labeler = WinLabeler::with_holes(vec![(d.clone(), bin.clone())]);
+
+            labeler.tag(&d).expect("打标签");
+            assert_eq!(current_label_rid(&d).expect("读父"), Some(0x1000));
+            assert_eq!(
+                current_label_rid(&bin).expect("读洞"),
+                Some(0x2000),
+                "洞该是显式 Medium（默认级别的显式形态）"
+            );
+            assert_ne!(
+                current_label_rid(&exe).expect("读洞内文件"),
+                Some(0x1000),
+                "洞里的 exe 吃到 Low 就是启动降权"
+            );
+
+            labeler.untag(&d).expect("撤标签");
+            assert_eq!(current_label_rid(&d).expect("读父"), None);
+            assert_eq!(current_label_rid(&bin).expect("读洞"), None);
+
+            // 恢复出厂 = 重新接受继承：裸打父目录（不带洞），bin 该跟着
+            // 变 Low —— 撤保护没做干净的话，洞会变成永久的。
+            tag_low(&d).expect("裸打");
+            assert_eq!(
+                current_label_rid(&bin).expect("读洞"),
+                Some(0x1000),
+                "撤保护后要恢复继承"
+            );
+            untag(&d).expect("清场");
             let _ = std::fs::remove_dir_all(&d);
         }
 
@@ -1317,7 +1469,7 @@ mod e2e_tests {
         // 注册表实例，不碰进程级 REGISTRY。
         let ledger_path = base.join("labels.json");
         let reg = LabelRegistry::new();
-        let labeler = super::label::WinLabeler;
+        let labeler = super::label::WinLabeler::standard();
         reg.acquire(std::slice::from_ref(&work), &labeler, &ledger_path, 0)
             .expect("给 work 打标签");
 

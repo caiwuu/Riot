@@ -87,9 +87,11 @@ impl SandboxPolicy {
         #[cfg(not(windows))]
         writable.extend(temp_dirs());
 
-        // 相对主目录的构建缓存，按平台各一张表 —— 路径约定不同：Unix 系
-        // 工具直接在 ~ 下建点目录，Windows 的 npm/pip/pnpm 走
-        // %LOCALAPPDATA%（.cargo/.rustup/go 例外，跨平台都在主目录下）。
+        // 相对主目录的构建缓存，按平台各一张表。差异有两层：一是路径约定
+        // 不同（Unix 系工具直接在 ~ 下建点目录，Windows 的 npm/pip/pnpm 走
+        // %LOCALAPPDATA%）；二是**授权模型不同** —— seatbelt 的授权只对被
+        // 包的那个进程生效，放宽 `.rustup` 对宿主机零影响；Windows 的 Low
+        // 标签是对象属性，对所有进程生效（见下方 Windows 表的约束）。
         // 表可以放心列宽：dedup_existing 只保留真实存在的目录。
         #[cfg(not(windows))]
         const HOME_CACHES: &[&str] = &[
@@ -102,15 +104,32 @@ impl SandboxPolicy {
             "Library/Caches",
             "go/pkg",
         ];
+        // `[约束]` Windows 的表**不收含用户 PATH 可执行文件的目录**。Low
+        // 标签是对象属性：从带 Low 标签的 exe 启动的进程，令牌会被降到
+        // Low，之后写任何默认完整性的位置都被 MIC 拒绝 —— 也就是说给
+        // `~/.rustup` 打标签的瞬间，用户自己终端里的 cargo/rustc 就全废了
+        // （2026-08-25 真实事故：沙箱一激活，宿主机 cargo 全局 os error 5，
+        // 残留后重启、重装 rustup 都救不回来）。这和 §2 里 temp 不打全局
+        // 标签是同一条原则，只是后果从"扩大攻击面"升级成"启动即降权"。
+        //
+        // 逐条说明：
+        // - `.rustup` 不进表：正常构建对它只读，读不受 MIC 限制。代价是
+        //   沙箱内 rust-toolchain.toml 触发的 rustup 自动装工具链会失败，
+        //   报错清晰、模型会转告用户 —— 比全机工具链静默降权好接受。
+        // - `pnpm`（%LOCALAPPDATA%\pnpm）不进表：它的根目录就是全局 bin
+        //   （pnpm.exe 在 PATH 上）。代价是沙箱内 `pnpm add -g` 和写
+        //   store（默认在 pnpm\store）会失败 —— 已知限制，等文件级豁免
+        //   机制再收编。
+        // - `.cargo` 必须进表（构建要写 registry 和 .package-cache 锁），
+        //   它的 `bin`（rustup shim 全家）由 WinLabeler 打"保护洞"豁免，
+        //   见 sandbox_win::label。
         #[cfg(windows)]
         const HOME_CACHES: &[&str] = &[
             ".cargo",
-            ".rustup",
             ".bun/install/cache",
             "go/pkg",
             "AppData/Local/npm-cache",
             "AppData/Local/pip/Cache",
-            "AppData/Local/pnpm",
             "AppData/Local/pnpm-cache",
         ];
         if let Some(home) = home_dir() {
