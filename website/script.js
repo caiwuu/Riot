@@ -160,15 +160,10 @@ function applyOS () {
   }
 }
 
-/**
- * 导航滚动状态。
- * Hero 顶部是浅色天光渐变（导航透明 + 黑字），
- * 滚过亮区后切换为黑底白字。
- */
+/** 导航滚动状态：滚离顶部后加深底色并显出细线 */
 function initNav () {
   const nav = document.getElementById("nav");
-  const LIGHT_ZONE = 380;
-  const onScroll = () => nav.classList.toggle("scrolled", window.scrollY > LIGHT_ZONE);
+  const onScroll = () => nav.classList.toggle("scrolled", window.scrollY > 32);
   window.addEventListener("scroll", onScroll, { passive: true });
   onScroll();
 }
@@ -217,28 +212,81 @@ function initReveal () {
   items.forEach((el) => observer.observe(el));
 }
 
-/** ReactBits Orb shader port: same GLSL, vanilla WebGL instead of React/OGL. */
-function initOrbShader () {
+/** Hero 大标题：逐字符浮现（保留 <em> 等内联标签） */
+function initHeroTitle () {
+  const title = document.getElementById("hero-title");
+  if (!title) return;
+
+  if (reduceMotion) {
+    title.classList.add("played");
+    return;
+  }
+
+  let index = 0;
+  const STEP_MS = 26;
+
+  const splitNode = (node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const frag = document.createDocumentFragment();
+      for (const ch of node.textContent) {
+        if (ch.trim() === "") {
+          frag.appendChild(document.createTextNode(ch));
+          continue;
+        }
+        const span = document.createElement("span");
+        span.className = "ht-ch";
+        span.style.setProperty("--ch-delay", `${index * STEP_MS}ms`);
+        span.textContent = ch;
+        frag.appendChild(span);
+        index += 1;
+      }
+      node.replaceWith(frag);
+      return;
+    }
+    // <em> 用 background-clip: text 做渐变字，拆开会丢背景——整体作为一个动画单元
+    if (node.nodeType === Node.ELEMENT_NODE && node.tagName === "EM") {
+      node.classList.add("ht-ch");
+      node.style.setProperty("--ch-delay", `${index * STEP_MS}ms`);
+      index += Math.max(1, node.textContent.length);
+      return;
+    }
+    // 其他元素节点：递归处理子节点（快照，避免遍历中变更）
+    [...node.childNodes].forEach(splitNode);
+  };
+
+  [...title.childNodes].forEach(splitNode);
+
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => title.classList.add("played"));
+  });
+}
+
+/**
+ * Hero 背景：极光光丝 shader（vanilla WebGL，无依赖）。
+ * 三条 fbm 扰动的冷色光带缓慢流动，指针带轻微视差；
+ * canvas 用 mix-blend-mode: screen 叠在纯黑底上。
+ */
+function initAuroraShader () {
   if (reduceMotion) return;
 
   const hero = document.getElementById("hero");
-  const canvas = document.getElementById("agent-field");
+  const canvas = document.getElementById("hero-canvas");
   if (!hero || !canvas) return;
 
   const gl = canvas.getContext("webgl", {
-    alpha: true,
-    premultipliedAlpha: false,
-    antialias: true,
+    alpha: false,
+    antialias: false,
+    depth: false,
+    stencil: false,
+    powerPreference: "low-power",
   });
   if (!gl) return;
 
   const vert = `
-    precision highp float;
     attribute vec2 position;
-    attribute vec2 uv;
     varying vec2 vUv;
     void main() {
-      vUv = uv;
+      vUv = position * 0.5 + 0.5;
       gl_Position = vec4(position, 0.0, 1.0);
     }
   `;
@@ -247,169 +295,80 @@ function initOrbShader () {
     precision highp float;
 
     uniform float iTime;
-    uniform vec3 iResolution;
-    uniform float hue;
-    uniform float hover;
-    uniform float rot;
-    uniform float hoverIntensity;
-    uniform vec3 backgroundColor;
+    uniform vec2 iResolution;
+    uniform vec2 uPointer;
     varying vec2 vUv;
 
-    vec3 rgb2yiq(vec3 c) {
-      float y = dot(c, vec3(0.299, 0.587, 0.114));
-      float i = dot(c, vec3(0.596, -0.274, -0.322));
-      float q = dot(c, vec3(0.211, -0.523, 0.312));
-      return vec3(y, i, q);
+    float hash(vec2 p) {
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
     }
 
-    vec3 yiq2rgb(vec3 c) {
-      float r = c.x + 0.956 * c.y + 0.621 * c.z;
-      float g = c.x - 0.272 * c.y - 0.647 * c.z;
-      float b = c.x - 1.106 * c.y + 1.703 * c.z;
-      return vec3(r, g, b);
-    }
-
-    vec3 adjustHue(vec3 color, float hueDeg) {
-      float hueRad = hueDeg * 3.14159265 / 180.0;
-      vec3 yiq = rgb2yiq(color);
-      float cosA = cos(hueRad);
-      float sinA = sin(hueRad);
-      float i = yiq.y * cosA - yiq.z * sinA;
-      float q = yiq.y * sinA + yiq.z * cosA;
-      yiq.y = i;
-      yiq.z = q;
-      return yiq2rgb(yiq);
-    }
-
-    vec3 hash33(vec3 p3) {
-      p3 = fract(p3 * vec3(0.1031, 0.11369, 0.13787));
-      p3 += dot(p3, p3.yxz + 19.19);
-      return -1.0 + 2.0 * fract(vec3(
-        p3.x + p3.y,
-        p3.x + p3.z,
-        p3.y + p3.z
-      ) * p3.zyx);
-    }
-
-    float snoise3(vec3 p) {
-      const float K1 = 0.333333333;
-      const float K2 = 0.166666667;
-      vec3 i = floor(p + (p.x + p.y + p.z) * K1);
-      vec3 d0 = p - (i - (i.x + i.y + i.z) * K2);
-      vec3 e = step(vec3(0.0), d0 - d0.yzx);
-      vec3 i1 = e * (1.0 - e.zxy);
-      vec3 i2 = 1.0 - e.zxy * (1.0 - e);
-      vec3 d1 = d0 - (i1 - K2);
-      vec3 d2 = d0 - (i2 - K1);
-      vec3 d3 = d0 - 0.5;
-      vec4 h = max(0.6 - vec4(
-        dot(d0, d0),
-        dot(d1, d1),
-        dot(d2, d2),
-        dot(d3, d3)
-      ), 0.0);
-      vec4 n = h * h * h * h * vec4(
-        dot(d0, hash33(i)),
-        dot(d1, hash33(i + i1)),
-        dot(d2, hash33(i + i2)),
-        dot(d3, hash33(i + 1.0))
+    float noise(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      vec2 u = f * f * (3.0 - 2.0 * f);
+      return mix(
+        mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
+        mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x),
+        u.y
       );
-      return dot(vec4(31.316), n);
     }
 
-    vec4 extractAlpha(vec3 colorIn) {
-      float a = max(max(colorIn.r, colorIn.g), colorIn.b);
-      return vec4(colorIn.rgb / (a + 1e-5), a);
+    float fbm(vec2 p) {
+      float v = 0.0;
+      float a = 0.5;
+      for (int i = 0; i < 5; i++) {
+        v += a * noise(p);
+        p = p * 2.04 + vec2(13.7, 7.1);
+        a *= 0.55;
+      }
+      return v;
     }
 
-    const vec3 baseColor1 = vec3(0.611765, 0.262745, 0.996078);
-    const vec3 baseColor2 = vec3(0.298039, 0.760784, 0.913725);
-    const vec3 baseColor3 = vec3(0.062745, 0.078431, 0.600000);
-    const float innerRadius = 0.6;
-    const float noiseScale = 0.65;
-
-    float light1(float intensity, float attenuation, float dist) {
-      return intensity / (1.0 + dist * attenuation);
-    }
-
-    float light2(float intensity, float attenuation, float dist) {
-      return intensity / (1.0 + dist * dist * attenuation);
-    }
-
-    vec4 draw(vec2 uv) {
-      vec3 color1 = adjustHue(baseColor1, hue);
-      vec3 color2 = adjustHue(baseColor2, hue);
-      vec3 color3 = adjustHue(baseColor3, hue);
-
-      float ang = atan(uv.y, uv.x);
-      float len = length(uv);
-      float invLen = len > 0.0 ? 1.0 / len : 0.0;
-      float bgLuminance = dot(backgroundColor, vec3(0.299, 0.587, 0.114));
-
-      float n0 = snoise3(vec3(uv * noiseScale, iTime * 0.5)) * 0.5 + 0.5;
-      float r0 = mix(mix(innerRadius, 1.0, 0.4), mix(innerRadius, 1.0, 0.6), n0);
-      float d0 = distance(uv, (r0 * invLen) * uv);
-      float v0 = light1(1.0, 10.0, d0);
-
-      v0 *= smoothstep(r0 * 1.05, r0, len);
-      float innerFade = smoothstep(r0 * 0.8, r0 * 0.95, len);
-      v0 *= mix(innerFade, 1.0, bgLuminance * 0.7);
-      float cl = cos(ang + iTime * 2.0) * 0.5 + 0.5;
-
-      float a = iTime * -1.0;
-      vec2 pos = vec2(cos(a), sin(a)) * r0;
-      float d = distance(uv, pos);
-      float v1 = light2(1.5, 5.0, d);
-      v1 *= light1(1.0, 50.0, d0);
-
-      float v2 = smoothstep(1.0, mix(innerRadius, 1.0, n0 * 0.5), len);
-      float v3 = smoothstep(innerRadius, mix(innerRadius, 1.0, 0.5), len);
-
-      vec3 colBase = mix(color1, color2, cl);
-      float fadeAmount = mix(1.0, 0.1, bgLuminance);
-
-      vec3 darkCol = mix(color3, colBase, v0);
-      darkCol = (darkCol + v1) * v2 * v3;
-      darkCol = clamp(darkCol, 0.0, 1.0);
-
-      vec3 lightCol = (colBase + v1) * mix(1.0, v2 * v3, fadeAmount);
-      lightCol = mix(backgroundColor, lightCol, v0);
-      lightCol = clamp(lightCol, 0.0, 1.0);
-
-      vec3 finalCol = mix(darkCol, lightCol, bgLuminance);
-      return extractAlpha(finalCol);
-    }
-
-    vec4 mainImage(vec2 fragCoord) {
-      vec2 center = iResolution.xy * 0.5;
-      /* 画布边缘留一圈，光环顶峰和 hover 形变才不会被 canvas 切成平头。 */
-      float size = min(iResolution.x, iResolution.y) * 0.86;
-      vec2 uv = (fragCoord - center) / size * 2.0;
-
-      float angle = rot;
-      float s = sin(angle);
-      float c = cos(angle);
-      uv = vec2(c * uv.x - s * uv.y, s * uv.x + c * uv.y);
-
-      float h = smoothstep(0.0, 1.0, hover);
-      float warp = h * hoverIntensity;
-      uv *= mix(1.0, 1.08 + sin(iTime * 0.55) * 0.025, h);
-      uv.x += warp * (
-        0.18 * sin(uv.y * 5.2 + iTime * 1.45) +
-        0.08 * sin((uv.x + uv.y) * 10.0 - iTime * 0.7)
-      );
-      uv.y += warp * (
-        0.16 * sin(uv.x * 5.6 - iTime * 1.15) +
-        0.07 * cos((uv.x - uv.y) * 11.0 + iTime * 0.85)
-      );
-
-      return draw(uv);
+    /* 一条被 fbm 揉皱的水平光丝 */
+    float ribbon(vec2 p, float center, float amp, float sharp, float drift, float seed) {
+      float w = fbm(vec2(p.x * 1.1 + seed * 11.0 + drift, seed * 5.0 + drift * 0.55));
+      float y = p.y - center - (w - 0.5) * amp;
+      return exp(-abs(y) * sharp);
     }
 
     void main() {
-      vec2 fragCoord = vUv * iResolution.xy;
-      vec4 col = mainImage(fragCoord);
-      gl_FragColor = vec4(col.rgb * col.a, col.a);
+      float aspect = iResolution.x / max(iResolution.y, 1.0);
+      vec2 p = vUv - 0.5;
+      p.x *= aspect;
+
+      /* 指针视差：非常轻，只是让画面「活着」 */
+      p += (uPointer - 0.5) * vec2(0.05, 0.028);
+
+      float t = iTime * 0.05;
+
+      vec3 cCyan   = vec3(0.42, 0.62, 1.00);
+      vec3 cViolet = vec3(0.64, 0.54, 1.00);
+      vec3 cWhite  = vec3(0.86, 0.92, 1.00);
+
+      float r1 = ribbon(p, 0.21, 0.30, 16.0, t,             1.0);
+      float r2 = ribbon(p, 0.08, 0.38, 11.0, t * 1.25 + 3.0, 2.0);
+      float r3 = ribbon(p, 0.30, 0.22, 22.0, t * 0.8 + 7.0,  3.0);
+
+      vec3 col = vec3(0.0);
+      col += cCyan   * r1 * 0.30;
+      col += cViolet * r2 * 0.20;
+      col += cWhite  * r3 * 0.22;
+
+      /* 一层极淡的大尺度雾，垫住三条光丝 */
+      float haze = fbm(p * 1.7 + vec2(t * 0.6, 0.0));
+      col += mix(cViolet, cCyan, haze) * haze * haze * 0.05;
+
+      /* 光集中在画面上部：向下与向顶部两侧渐隐 */
+      col *= smoothstep(-0.30, 0.14, p.y);
+      col *= 1.0 - smoothstep(0.36, 0.52, p.y);
+      /* 左右两端轻微收口 */
+      col *= smoothstep(1.35, 0.5, abs(p.x));
+
+      /* 抖动防色带 */
+      col += (hash(vUv * iResolution) - 0.5) * 0.012;
+
+      gl_FragColor = vec4(max(col, 0.0), 1.0);
     }
   `;
 
@@ -435,106 +394,63 @@ function initOrbShader () {
       throw new Error(gl.getProgramInfoLog(program) || "Shader link failed");
     }
   } catch (error) {
-    console.warn("Orb shader skipped:", error);
+    console.warn("Aurora shader skipped:", error);
     return;
   }
 
-  const vertices = new Float32Array([
-    -1, -1, 0, 0,
-    3, -1, 2, 0,
-    -1, 3, 0, 2,
-  ]);
   const buffer = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-  gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
 
   const position = gl.getAttribLocation(program, "position");
-  const uv = gl.getAttribLocation(program, "uv");
-  const stride = 4 * Float32Array.BYTES_PER_ELEMENT;
   gl.enableVertexAttribArray(position);
-  gl.vertexAttribPointer(position, 2, gl.FLOAT, false, stride, 0);
-  gl.enableVertexAttribArray(uv);
-  gl.vertexAttribPointer(uv, 2, gl.FLOAT, false, stride, 2 * Float32Array.BYTES_PER_ELEMENT);
+  gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
 
   const uniforms = {
     iTime: gl.getUniformLocation(program, "iTime"),
     iResolution: gl.getUniformLocation(program, "iResolution"),
-    hue: gl.getUniformLocation(program, "hue"),
-    hover: gl.getUniformLocation(program, "hover"),
-    rot: gl.getUniformLocation(program, "rot"),
-    hoverIntensity: gl.getUniformLocation(program, "hoverIntensity"),
-    backgroundColor: gl.getUniformLocation(program, "backgroundColor"),
+    uPointer: gl.getUniformLocation(program, "uPointer"),
   };
 
-  let width = 0;
-  let height = 0;
-  let hover = 0;
-  let targetHover = 0;
-  let currentRot = 0;
-  let lastTime = 0;
+  let pointerX = 0.5;
+  let pointerY = 0.5;
+  let targetX = 0.5;
+  let targetY = 0.5;
   let lastDrawTime = 0;
   let running = false;
-  const rotationSpeed = 0.58;
-  const FRAME_MS = 33; // 约 30fps：背景装饰不需要 60fps，节流省一半 shader 执行
+  const FRAME_MS = 33; // 约 30fps：氛围背景不需要 60fps
 
   const resize = () => {
     const rect = canvas.getBoundingClientRect();
-    // DPR 上限 1.5：Retina 上把 backing store 从 3200×3200 压到 1500×1500，
-    // shader 每帧要算的像素量直接降七成以上，肉眼几乎看不出差别。
-    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
-    width = Math.max(1, rect.width);
-    height = Math.max(1, rect.height);
-    canvas.width = Math.round(width * dpr);
-    canvas.height = Math.round(height * dpr);
-    canvas.style.width = `${width}px`;
-    canvas.style.height = `${height}px`;
+    // 氛围光没有锐利细节，DPR 限 1.25 就足够，省大量像素填充
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.25);
+    canvas.width = Math.max(1, Math.round(rect.width * dpr));
+    canvas.height = Math.max(1, Math.round(rect.height * dpr));
     gl.viewport(0, 0, canvas.width, canvas.height);
   };
 
-  const updateHover = (event) => {
-    const heroRect = hero.getBoundingClientRect();
-    const heroX = event.clientX - heroRect.left;
-    const heroY = event.clientY - heroRect.top;
-    const hotZoneCenterX = heroRect.width * 0.5;
-    const hotZoneCenterY = heroRect.height * 0.82;
-    const hotZoneRadius = Math.min(heroRect.width * 0.6, heroRect.height * 0.6);
-    const dx = heroX - hotZoneCenterX;
-    const dy = heroY - hotZoneCenterY;
-    const insideHotSemiCircle = dy <= 0 && dx * dx + dy * dy <= hotZoneRadius * hotZoneRadius;
-    targetHover = insideHotSemiCircle ? 1 : 0;
-    document.documentElement.style.setProperty("--pointer-x", `${heroX}px`);
-    document.documentElement.style.setProperty("--pointer-y", `${heroY}px`);
+  const onPointer = (event) => {
+    const rect = hero.getBoundingClientRect();
+    targetX = (event.clientX - rect.left) / rect.width;
+    targetY = 1 - (event.clientY - rect.top) / rect.height;
   };
 
   const render = (time) => {
-    // 离屏或切后台：直接停掉，不再调度下一帧。
-    if (!running || document.hidden) {
-      lastTime = time;
-      return;
-    }
+    if (!running || document.hidden) return;
 
-    const dt = (time - lastTime) * 0.001;
-    lastTime = time;
-    hover += (targetHover - hover) * 0.1;
-    if (hover > 0.5) currentRot += dt * rotationSpeed;
-
-    // 状态（hover/rot）每帧更新保持平滑；昂贵的 shader 绘制节流到约 30fps。
     if (time - lastDrawTime < FRAME_MS) {
       requestAnimationFrame(render);
       return;
     }
     lastDrawTime = time;
 
+    pointerX += (targetX - pointerX) * 0.05;
+    pointerY += (targetY - pointerY) * 0.05;
+
     gl.useProgram(program);
-    gl.clearColor(0, 0, 0, 0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
     gl.uniform1f(uniforms.iTime, time * 0.001);
-    gl.uniform3f(uniforms.iResolution, canvas.width, canvas.height, canvas.width / canvas.height);
-    gl.uniform1f(uniforms.hue, 0);
-    gl.uniform1f(uniforms.hover, hover);
-    gl.uniform1f(uniforms.rot, currentRot);
-    gl.uniform1f(uniforms.hoverIntensity, 1.55);
-    gl.uniform3f(uniforms.backgroundColor, 0, 0, 0);
+    gl.uniform2f(uniforms.iResolution, canvas.width, canvas.height);
+    gl.uniform2f(uniforms.uPointer, pointerX, pointerY);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
     requestAnimationFrame(render);
@@ -543,25 +459,22 @@ function initOrbShader () {
   const start = () => {
     if (running) return;
     running = true;
-    lastTime = 0;
     requestAnimationFrame(render);
   };
 
   const stop = () => {
     running = false;
-    lastTime = 0;
   };
 
   window.addEventListener("resize", resize, { passive: true });
-  hero.addEventListener("pointermove", updateHover, { passive: true });
-  hero.addEventListener("pointerleave", () => {
-    targetHover = 0;
+  hero.addEventListener("pointermove", onPointer, { passive: true });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) start();
   });
 
   resize();
 
-  // hero 滚出视口就完全停止渲染（解决「滑到第二屏还空转、往回滑卡顿」），
-  // 回到视口再重启。离屏时 orb 零开销。
+  // hero 滚出视口就停止渲染，回来再重启，离屏零开销
   if ("IntersectionObserver" in window) {
     const observer = new IntersectionObserver(
       (entries) => {
@@ -578,11 +491,11 @@ function initOrbShader () {
   }
 }
 
-/** 卡片与按钮的局部高光 / 轻微倾斜 */
+/** 卡片与按钮的指针跟随高光 */
 function initInteractiveHover () {
   if (reduceMotion) return;
 
-  const items = document.querySelectorAll(".btn, .nav-github, .trio-card, .bento-card, .dl-card, .hero-shot");
+  const items = document.querySelectorAll(".btn, .bento-card, .dl-card");
 
   items.forEach((el) => {
     el.addEventListener(
@@ -591,14 +504,8 @@ function initInteractiveHover () {
         const rect = el.getBoundingClientRect();
         const px = ((event.clientX - rect.left) / rect.width) * 100;
         const py = ((event.clientY - rect.top) / rect.height) * 100;
-        const dx = px / 100 - 0.5;
-        const dy = py / 100 - 0.5;
-        const tilt = el.classList.contains("hero-shot") ? 5 : 3.5;
-
         el.style.setProperty("--mouse-x", `${px.toFixed(2)}%`);
         el.style.setProperty("--mouse-y", `${py.toFixed(2)}%`);
-        el.style.setProperty("--tilt-rx", `${(-dy * tilt).toFixed(2)}deg`);
-        el.style.setProperty("--tilt-ry", `${(dx * tilt).toFixed(2)}deg`);
       },
       { passive: true }
     );
@@ -606,8 +513,6 @@ function initInteractiveHover () {
     el.addEventListener("pointerleave", () => {
       el.style.removeProperty("--mouse-x");
       el.style.removeProperty("--mouse-y");
-      el.style.removeProperty("--tilt-rx");
-      el.style.removeProperty("--tilt-ry");
     });
   });
 }
@@ -644,6 +549,7 @@ initDownloads();
 initNav();
 initMobileMenu();
 initReveal();
-initOrbShader();
+initHeroTitle();
+initAuroraShader();
 initInteractiveHover();
 initYear();

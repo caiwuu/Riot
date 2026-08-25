@@ -24,8 +24,8 @@
 //! 三个平台共用。真正把命令关进边界的代码按平台分居后端模块：
 //!
 //! - macOS：[`crate::sandbox_macos`]（seatbelt / `sandbox-exec`，已落地）
-//! - Windows：[`crate::sandbox_win`]（Restricted Token + Low IL，见
-//!   docs/SANDBOX_WINDOWS.md；当前 M1，`supported()` 尚未放行）
+//! - Windows：[`crate::sandbox_win`]（Restricted Token + Low IL，已落地，
+//!   见 docs/SANDBOX_WINDOWS.md）
 //! - Linux：未排期
 
 #![allow(clippy::disallowed_methods)]
@@ -77,17 +77,35 @@ impl SandboxPolicy {
         // 现建现打标签、退出即删。
         #[cfg(not(windows))]
         writable.extend(temp_dirs());
+
+        // 相对主目录的构建缓存，按平台各一张表 —— 路径约定不同：Unix 系
+        // 工具直接在 ~ 下建点目录，Windows 的 npm/pip/pnpm 走
+        // %LOCALAPPDATA%（.cargo/.rustup/go 例外，跨平台都在主目录下）。
+        // 表可以放心列宽：dedup_existing 只保留真实存在的目录。
+        #[cfg(not(windows))]
+        const HOME_CACHES: &[&str] = &[
+            ".cargo",
+            ".rustup",
+            ".npm",
+            ".cache",
+            ".pnpm-store",
+            ".bun/install/cache",
+            "Library/Caches",
+            "go/pkg",
+        ];
+        #[cfg(windows)]
+        const HOME_CACHES: &[&str] = &[
+            ".cargo",
+            ".rustup",
+            ".bun/install/cache",
+            "go/pkg",
+            "AppData/Local/npm-cache",
+            "AppData/Local/pip/Cache",
+            "AppData/Local/pnpm",
+            "AppData/Local/pnpm-cache",
+        ];
         if let Some(home) = home_dir() {
-            for cache in [
-                ".cargo",
-                ".rustup",
-                ".npm",
-                ".cache",
-                ".pnpm-store",
-                ".bun/install/cache",
-                "Library/Caches",
-                "go/pkg",
-            ] {
+            for cache in HOME_CACHES {
                 writable.push(home.join(cache));
             }
         }
@@ -225,24 +243,47 @@ fn temp_dirs() -> Vec<PathBuf> {
     out
 }
 
+/// 用户主目录。Windows 的约定是 `USERPROFILE`；`HOME` 是 Unix 的，
+/// GUI 启动的 Windows 进程环境里通常没有它（Git Bash 会设，但从宿主
+/// 起的内核继承不到）—— 读错变量的后果是缓存目录一条都进不了
+/// writable，沙箱下第一条 `cargo build` 就死在"写不了缓存"上。
 fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    return std::env::var_os("USERPROFILE").map(PathBuf::from);
+    #[cfg(not(windows))]
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-/// 去重 + 丢掉不存在的。
+/// 去重 + 丢掉不存在的（canonicalize 失败即视为不存在）。
 ///
-/// 不存在的目录留在 profile 里不会报错，但会让它变长而且难读；真正的理由
-/// 是**符号链接**：canonicalize 顺带把 `/var` → `/private/var` 这类解开，
-/// 而 seatbelt 匹配的是解开之后的路径。
+/// 丢不存在的不是洁癖：Windows 给目录打 Low 标签
+/// （SetNamedSecurityInfoW）对不存在的路径直接失败，而授权是全有或
+/// 全无 —— 一条不存在的缓存路径就能让整个沙箱永远激活不了。macOS
+/// 无所谓（profile 里多几条不存在的路径不报错），但两个平台走同一条
+/// 装配，按严的那个来。canonicalize 还顺带把符号链接解开
+/// （`/var` → `/private/var`），seatbelt 匹配的是解开之后的路径。
 fn dedup_existing(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::with_capacity(paths.len());
     for p in paths {
-        let real = p.canonicalize().unwrap_or(p);
+        let Ok(real) = p.canonicalize() else { continue };
         if !out.contains(&real) {
             out.push(real);
         }
     }
     out
+}
+
+/// 启动时回收上次进程残留的沙箱标签。非 Windows 空操作（seatbelt 不留
+/// 持久状态）。
+///
+/// `[约束]` 在**任何会话激活之前**调一次 —— 此刻本进程没有活跃引用，
+/// 撤残留标签是安全的。跨进程互斥（同机双开内核）由
+/// `sandbox_win::recover_orphans` 的独占锁保证。
+pub fn recover_orphan_labels(ledger_path: &Path) {
+    #[cfg(windows)]
+    crate::sandbox_win::recover_orphans(ledger_path);
+    #[cfg(not(windows))]
+    let _ = ledger_path;
 }
 
 #[cfg(test)]
@@ -264,6 +305,21 @@ mod tests {
     #[test]
     fn 关掉的策略拿不到_active() {
         assert!(SandboxPolicy::Off.activate(test_setup()).is_none());
+    }
+
+    /// 不存在的路径必须被丢掉 —— Windows 上给不存在的目录打标签直接
+    /// 失败，授权全有或全无，留着它 = 沙箱永远激活不了。
+    #[test]
+    fn dedup_existing_丢掉不存在的并去重() {
+        let base = std::env::temp_dir().join(format!("riot-dedup-{}", std::process::id()));
+        std::fs::create_dir_all(&base).expect("建目录");
+        let missing = base.join("并不存在的子目录");
+
+        let out = dedup_existing(vec![base.clone(), missing.clone(), base.clone()]);
+
+        assert_eq!(out.len(), 1, "重复的合一条、不存在的丢掉：{out:?}");
+        assert!(!out.contains(&missing));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// 真跑一遍，验证边界确实由 OS 执行。

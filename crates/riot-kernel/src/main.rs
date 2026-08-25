@@ -32,6 +32,11 @@ async fn main() {
 
     install_panic_hook();
 
+    // 上次崩溃可能留下带 Low 标签的目录(Windows 沙箱;非 Windows 空操作)。
+    // 必须赶在任何会话激活之前收干净 —— 残留标签让全机所有低完整性进程
+    // 都能写那些目录。同机双开时由独占锁跳过,不会踩活着的那个。
+    riot_runtime::recover_orphan_labels(&riot_kernel::config::sandbox_ledger_path());
+
     // 会话 transcript 的落盘目录。宿主 spawn 内核时通过 RIOT_SESSIONS_DIR 传入
     // (决策:配置/路径由宿主定)。缺省给一个临时目录,只用于脱离宿主的调试。
     let sessions_dir = std::env::var_os("RIOT_SESSIONS_DIR")

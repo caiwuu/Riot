@@ -1498,11 +1498,7 @@ impl Session {
         // 统一）。macOS 忽略这个 setup。now_ms 走真实时钟：它只进清单做
         // 诊断，不参与任何黄金回放。
         let sandbox = {
-            let cfg = crate::config::config_path();
-            let ledger_path = cfg
-                .parent()
-                .unwrap_or(std::path::Path::new("."))
-                .join("sandbox-labels.json");
+            let ledger_path = crate::config::sandbox_ledger_path();
             #[allow(clippy::disallowed_methods)]
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

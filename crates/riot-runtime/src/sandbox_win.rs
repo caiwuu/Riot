@@ -1,23 +1,26 @@
 //! Windows 沙箱后端：Restricted Token + Low 完整性级别。
 //!
-//! 设计与取舍见 docs/SANDBOX_WINDOWS.md。这里是 **M1 骨架**：
-//! 只做整条链路的地基 —— 造一个"去掉全部特权、完整性级别压到 Low"的
-//! 令牌。用这个令牌起进程（M2）、给可写目录打 Low 标签（M2）尚未接入，
-//! 所以 [`supported`] 仍返回 false：拿不到 `ActiveSandbox`，
-//! `ctx.sandboxed` 保持 false，决策链行为不变 —— 半成品绝不谎报。
-//!
-//! 为什么先啃令牌：它是后续所有步骤的前提，且**能独立验证**（造完读回
-//! 它的完整性级别断言是 Low），不像 spawn 集成要连着管道/超时一起才测
-//! 得动。M1 在 Windows CI 上把这块的 FFI 签名和运行时行为都钉死，M2
-//! 接 spawn 时就不必再怀疑令牌这一环。
+//! 设计与取舍见 docs/SANDBOX_WINDOWS.md。四块拼成整条链路：
+//! [`token`]（受限 Low 令牌）、[`label`]（目录标签的 Win32 那一下）、
+//! [`spawn`]（CreateProcessAsUserW 起进程）、[`activate`]（激活序列
+//! 编排）。标签的引用计数与清单记账在跨平台的
+//! [`crate::sandbox_labels`]，这里通过进程级 [`REGISTRY`] 使用它。
 
 #![allow(clippy::disallowed_methods)]
+
+/// 进程级标签注册表：跨会话共享目录的引用计数 + 清单单写者。
+///
+/// 必须是进程级单例 —— 多会话共享一个内核进程，每轮各激活一次沙箱，
+/// 共享目录（工作区、构建缓存）的标签谁都不能单方面撤。见
+/// [`crate::sandbox_labels::LabelRegistry`] 的文档。
+static REGISTRY: crate::sandbox_labels::LabelRegistry =
+    crate::sandbox_labels::LabelRegistry::new();
 
 /// 已激活的 Windows 沙箱：一枚受限 Low 令牌 + 已打标签的目录清单。
 ///
 /// 拿到它意味着授权序列（打标签 + 建令牌，见 SANDBOX_WINDOWS.md §2）
-/// 全部成功。之后每次 spawn 复用这枚令牌；`Drop` 时把标签回滚干净
-/// （对称于激活时的 `authorize_writable`）。
+/// 全部成功。之后每次 spawn 复用这枚令牌；`Drop` 时归还标签引用
+/// （对称于激活时的 `REGISTRY.acquire`）。
 pub(crate) struct WinSandbox {
     token: token::OwnedToken,
     /// 激活时打了 Low 标签的目录，`Drop` 逐个撤回。含 [`session_temp`]。
@@ -61,17 +64,11 @@ impl WinSandbox {
 
 impl Drop for WinSandbox {
     fn drop(&mut self) {
-        // 撤标签 + 清账。尽力而为：untag 失败记日志，交给下次启动的孤儿
-        // 回收兜底（对照 sandbox_labels 的 [约束]）。
-        use crate::sandbox_labels::{DirLabeler, LabelLedger};
-        let labeler = label::WinLabeler;
-        let mut ledger = LabelLedger::load(self.ledger_path.clone());
-        for dir in &self.labeled {
-            if let Err(e) = labeler.untag(dir) {
-                tracing::warn!(dir = %dir.display(), error = %e, "退出时撤标签失败，留给孤儿回收");
-            }
-            let _ = ledger.forget(dir);
-        }
+        // 归还标签引用：归零才真撤 —— 别的会话可能正用着同一个目录
+        // （同项目的工作区、~/.cargo 这类共享缓存），单方面撤会让它们
+        // 正在跑的 Low 进程写到一半 ACCESS_DENIED。撤失败的账保留，
+        // 交给下次启动的孤儿回收（见 sandbox_labels 的 [约束]）。
+        REGISTRY.release(&self.labeled, &label::WinLabeler, &self.ledger_path);
         // 会话 temp 是我们建的，整个删掉 —— 里面是本会话命令的临时产物。
         let _ = std::fs::remove_dir_all(&self.session_temp);
     }
@@ -88,7 +85,6 @@ pub(crate) fn activate(
     now_ms: u64,
 ) -> Option<WinSandbox> {
     use crate::sandbox::SandboxPolicy;
-    use crate::sandbox_labels::{LabelLedger, authorize_writable};
 
     let SandboxPolicy::WorkspaceWrite {
         writable,
@@ -121,9 +117,8 @@ pub(crate) fn activate(
     let mut dirs = writable.clone();
     dirs.push(session_temp.clone());
 
-    let mut ledger = LabelLedger::load(ledger_path.clone());
-    if let Err(e) = authorize_writable(&dirs, &label::WinLabeler, &mut ledger, now_ms) {
-        // authorize 内部已回滚它打过的标签；temp 子目录还没进标签体系，删掉。
+    if let Err(e) = REGISTRY.acquire(&dirs, &label::WinLabeler, &ledger_path, now_ms) {
+        // acquire 内部已退回本次的引用；temp 子目录还没进标签体系，删掉。
         tracing::warn!(error = %e, "沙箱打标签失败，本轮不隔离");
         let _ = std::fs::remove_dir_all(&session_temp);
         return None;
@@ -132,14 +127,9 @@ pub(crate) fn activate(
     let token = match token::create_restricted_low_il() {
         Ok(t) => t,
         Err(e) => {
-            // 标签打上了但令牌没建成 —— 手动回滚，别留孤儿。
+            // 标签已授权但令牌没建成 —— 归还引用（归零的会被真撤）。
             tracing::warn!(error = %e, "沙箱建令牌失败，回滚标签、本轮不隔离");
-            use crate::sandbox_labels::DirLabeler;
-            let labeler = label::WinLabeler;
-            for dir in &dirs {
-                let _ = labeler.untag(dir);
-                let _ = ledger.forget(dir);
-            }
+            REGISTRY.release(&dirs, &label::WinLabeler, &ledger_path);
             let _ = std::fs::remove_dir_all(&session_temp);
             return None;
         }
@@ -165,6 +155,36 @@ fn make_session_temp() -> std::io::Result<std::path::PathBuf> {
     let dir = std::env::temp_dir().join(format!("riot-sbx-{}-{}", std::process::id(), nonce));
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+/// 启动时回收上次进程残留的孤儿标签。**必须在任何会话激活之前调。**
+///
+/// `[约束]` 只在独占拿到 `<清单>.lock` 时才动手：拿不到 = 同机还有另
+/// 一个内核进程活着（双开），它的会话可能正引用着清单里的目录 ——
+/// 此时批量撤标签等于踩它正在跑的构建。锁柄故意不关（`mem::forget`），
+/// 独占随本进程存亡，后来的进程据此让路。进程内的并发由 [`REGISTRY`]
+/// 管，这把锁只管跨进程的回收互斥。
+pub(crate) fn recover_orphans(ledger_path: &std::path::Path) {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let lock_path = ledger_path.with_extension("lock");
+    if let Some(parent) = lock_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .share_mode(0) // 拒绝一切共享：第二个进程 open 直接失败
+        .open(&lock_path)
+    {
+        Ok(f) => {
+            std::mem::forget(f);
+            crate::sandbox_labels::recover_orphans(&label::WinLabeler, ledger_path);
+        }
+        Err(e) => {
+            tracing::info!(error = %e, "沙箱标签清单被另一个内核进程独占，跳过孤儿回收");
+        }
+    }
 }
 
 // 下面是 M1 的实质产物：受限 Low IL 令牌。M2 的 spawn 会用到它，
@@ -412,8 +432,8 @@ mod label {
     }
 
     /// 真实的目录打标签器。把 [`tag_low`] / [`untag`] 接进跨平台的
-    /// [`crate::sandbox_labels::DirLabeler`]，好让激活序列的回滚编排
-    /// （`authorize_writable`）用上它 —— 那套编排的正确性在 sandbox_labels
+    /// [`crate::sandbox_labels::DirLabeler`]，好让引用计数与回滚编排
+    /// （`LabelRegistry`）用上它 —— 那套编排的正确性在 sandbox_labels
     /// 里跨平台测过，这里只负责把 Win32 错误转成 io 错误接上去。
     pub struct WinLabeler;
 
@@ -736,7 +756,7 @@ mod e2e_tests {
     use riot_protocol::tool::ProcessSpec;
     use tokio_util::sync::CancellationToken;
 
-    use crate::sandbox_labels::{DirLabeler, LabelLedger, authorize_writable};
+    use crate::sandbox_labels::LabelRegistry;
 
     #[tokio::test]
     async fn 低完整性进程只能写打了标签的目录() {
@@ -746,10 +766,12 @@ mod e2e_tests {
         std::fs::create_dir_all(&work).expect("建工作区");
         std::fs::create_dir_all(&outside).expect("建外部目录");
 
-        // 只给 work 打 Low 标签；outside 保持默认（Medium）。
-        let mut ledger = LabelLedger::load(base.join("labels.json"));
+        // 只给 work 打 Low 标签；outside 保持默认（Medium）。用测试自己的
+        // 注册表实例，不碰进程级 REGISTRY。
+        let ledger_path = base.join("labels.json");
+        let reg = LabelRegistry::new();
         let labeler = super::label::WinLabeler;
-        authorize_writable(std::slice::from_ref(&work), &labeler, &mut ledger, 0)
+        reg.acquire(std::slice::from_ref(&work), &labeler, &ledger_path, 0)
             .expect("给 work 打标签");
 
         let tok = super::token::create_restricted_low_il().expect("造受限 Low 令牌");
@@ -800,8 +822,8 @@ mod e2e_tests {
             "文件真的不该被创建 —— 边界没生效的话它就在那儿"
         );
 
-        // 回滚标签 + 清理临时目录。
-        let _ = labeler.untag(&work);
+        // 归还引用（归零即真撤）+ 清理临时目录。
+        reg.release(std::slice::from_ref(&work), &labeler, &ledger_path);
         let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -55,12 +55,12 @@ MIC 的规则是「进程 IL < 对象 IL 时拒写」。对象缺省 Medium，�
 Low 进程就能写它 —— 这就是 writable 白名单的落地方式。
 
 ```text
-激活序列：
-1. 对 writable 里的每个目录 SetNamedSecurityInfoW 打 Low 标签
-2. 清单落盘 <config>/sandbox-labels.json（目录 + 打标时间）
+激活序列（经 LabelRegistry，逐目录）：
+1. 记账落盘 <config>/sandbox-labels.json（目录 + 打标时间）
+2. SetNamedSecurityInfoW 打 Low 标签（首个引用才真打，已有引用只 +1）
 3. CreateRestrictedToken（去特权组、Low IL）
 4. CreateProcessAsUserW + 挂进 Job Object（复用现有进程树清理语义）
-任何一步失败 → 回滚已打的标签 → activate() 返回 None
+任何一步失败 → 退回本次引用（归零即撤标签）→ activate() 返回 None
 ```
 
 `[取舍/已实现]` 清单**只记路径 + 打标时间，不记原 SACL**。因为只对
@@ -70,6 +70,23 @@ Low 进程就能写它 —— 这就是 writable 白名单的落地方式。
 简化成了"记录我动过谁" —— 清单逻辑见 `sandbox_labels.rs`
 （`LabelLedger`，跨平台可测），打/去标签见 `sandbox_win::label`。
 
+`[约束/已实现]` **标签按进程级引用计数管理**（`LabelRegistry`）。沙箱是
+每轮对话激活一次的，而多会话共享一个内核进程（ARCHITECTURE §2.4），
+writable 里有跨会话共享的目录（同项目工作区、`~/.cargo` 这类缓存）——
+各自打/撤的话，会话 A 一轮结束就把 B 正用着的目录撤了标签，B 的 Low
+进程构建到一半 ACCESS_DENIED。首个引用打标签、归零才撤；注册表同时是
+清单的**单写者**（全部记账在同一把锁里），否则两个会话并发激活时全量
+覆盖写会互相盖掉记录（lost update），崩溃后清单缺的那条就是永远收不到
+的孤儿。记账顺序是**先记账、再打标签**：两步间崩溃留下的是"记了账没
+打成"，回收空撤一次无害；反过来是"打了没记"，回收永远找不到。
+
+`[约束/已实现]` writable 只收**存在的目录**（`dedup_existing` 过滤）：
+`SetNamedSecurityInfoW` 对不存在的路径直接失败，而授权全有或全无 ——
+一条不存在的缓存路径（没装 Rust 的机器上的 `~/.cargo`）就会让沙箱永远
+激活不了。缓存表按平台各一张：Unix 系工具在 `~` 下建点目录，Windows
+的 npm/pip/pnpm 走 `%LOCALAPPDATA%`；主目录读 `USERPROFILE`（`HOME`
+是 Unix 约定，GUI 启动的进程环境里没有）。
+
 `[约束]` **temp 不给系统 `%TEMP%` 打标签**，在其下建 `riot-sbx-<会话>`
 子目录打标签，并给沙箱进程重写 `TMP`/`TEMP` 环境变量指过去。给全局
 temp 打标签影响的是整台机器上所有 Low 进程的攻击面，为一个会话动
@@ -77,11 +94,16 @@ temp 打标签影响的是整台机器上所有 Low 进程的攻击面，为一�
 被包的那个进程生效 —— 标签是**对象**属性，对所有进程生效，两边的
 授权模型不同，不能照抄。
 
-`[约束]` 标签是持久的文件系统状态，**必须有孤儿回收**：正常退出时恢复
-原标签；崩溃留下的残留由下次启动的清理例程按 `sandbox-labels.json`
-兜底（对照 process_lifecycle 的哲学：无论怎么死，别往机器上漏东西）。
-残留标签的实际危害很小 —— Medium 用户进程写 Low 目录不受 MIC 约束，
-只是「其它 Low 进程也能写它」—— 但小不是零，要收。
+`[约束/已实现]` 标签是持久的文件系统状态，**必须有孤儿回收**：正常退出
+时归还引用（归零即撤）；崩溃留下的残留由下次内核启动的
+`recover_orphan_labels` 按 `sandbox-labels.json` 兜底（对照
+process_lifecycle 的哲学：无论怎么死，别往机器上漏东西）。回收只在
+**独占**拿到 `sandbox-labels.lock` 时动手 —— 拿不到说明同机还有另一个
+内核活着，它的会话可能正引用这些标签，批量撤等于踩它（锁柄持有到进程
+退出）。撤失败/目录被占的账**保留**，下次启动再试。残留标签的实际危害
+很小 —— Medium 用户进程写 Low 目录不受 MIC 约束，只是「其它 Low 进程
+也能写它」—— 但小不是零，要收。双开内核时激活/释放的跨进程互踩是
+接受的残余风险（计数在各自进程内存里），正常部署一宿主一内核。
 
 `[约束]` 打标签失败的常见现场要逐个确认过再发布：非 NTFS 卷（FAT32/
 exFAT 没有 ACL）、OneDrive 重定向的用户目录、企业组策略锁 SACL、
@@ -163,9 +185,10 @@ CI 驱动开发（mac 上写、CI 上验）。必备用例，全部对照 macOS 
    - ✅ 标签管理：`LabelLedger`（清单持久化 + 孤儿识别）、
      `sandbox_win::label::{tag_low, untag}`（Win32 FFI，隔离验签名 +
      Windows CI 编译过）、`WinLabeler`（接进跨平台 trait）。
-   - ✅ 授权编排：`authorize_writable`（逐个打标签 + 记账，任一失败
-     全部回滚），回滚正确性用假 labeler 跨平台单测过 —— 这是「激活
-     任一步失败 → 回滚 → activate None」那条 §2 约束的落地。
+   - ✅ 授权编排：`LabelRegistry`（进程级引用计数 + 清单单写者；首个
+     引用打标签、归零才撤、任一失败退回本次引用），回滚/计数/并发
+     正确性用假 labeler 跨平台单测过 —— 这是「激活任一步失败 → 回滚 →
+     activate None」和「多会话共享目录不互踩」两条 §2 约束的落地。
    - ✅ spawn 机制：`sandbox_win::spawn::spawn_with_token` —— 用令牌走
      `CreateProcessAsUserW`，建管道、Job Object（KILL_ON_JOB_CLOSE）、
      并发读、超时/取消，语义对齐 `proc.rs`。命令行 / 环境块拼接是
@@ -194,8 +217,19 @@ CI 驱动开发（mac 上写、CI 上验）。必备用例，全部对照 macOS 
        e2e 手动串底层）。sandbox_win 的生产代码本地用隔离 crate 的
        windows clippy 验过，集成测试的运行时靠 CI host。
    - M3 全部完成。Windows 沙箱从设计到接线闭环。
-3. **M3 接线**：config 档位映射（含 NoNet 降级文案），用例 6 过，
-   双平台 CI 全绿后发布。
+4. **M4 并发与回收加固**（✅ 已落地）：
+   - 标签生命周期从"每轮各自打/撤"改成进程级 `LabelRegistry` 引用
+     计数（见 §2）：修多会话并发下的清单 lost update 和共享目录
+     （工作区、构建缓存）的撤标签互踩。
+   - 孤儿回收例程落地：内核启动时（`main.rs`，任何会话激活之前）
+     `recover_orphan_labels` 按清单撤残留，`sandbox-labels.lock`
+     独占锁挡同机双开。
+   - `home_dir` 按平台取 `USERPROFILE`/`HOME`（原来 Windows 恒 None，
+     缓存目录进不了 writable）；缓存表按平台分两张（Windows 的
+     npm/pip/pnpm 在 `%LOCALAPPDATA%`）；`dedup_existing` 真过滤
+     不存在的路径（原来只是名字这么叫 —— 不修的话上一条修完，
+     `Library/Caches` 这类 Windows 上永不存在的路径会让激活 100% 失败，
+     两个 bug 互相掩盖）。
 
 `[实施注记]` M1 的 FFI 签名是在 Mac 上用一个只依赖 `windows` crate 的
 临时 crate `cargo check --target x86_64-pc-windows-msvc` 逐个逼出来的
