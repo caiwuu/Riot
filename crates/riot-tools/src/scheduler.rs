@@ -474,6 +474,10 @@ async fn run_one(
         };
     }
 
+    // 落盘（spill_oversized）在 ctx 把 deps 拆走之后还要用这两样。
+    let spill_fs = Arc::clone(&deps.fs);
+    let spill_dir = deps.artifacts_dir.clone();
+
     let ctx = ToolContext {
         session_id,
         tool_use_id: call.id.clone(),
@@ -496,6 +500,10 @@ async fn run_one(
     let hook_input = deps.hooks.enabled().then(|| input.clone());
 
     let outcome = execute_guarded(tool, input, ctx, &call.name).await;
+    // 第 1 层压缩（ARCHITECTURE §10.3）：超大文本结果落盘，消息里换成
+    // 路径 + 预览。放在 hooks 之前 —— hook 是 shell 脚本，几 MB 的
+    // stdin 对它和对上下文一样是灾难。
+    let outcome = spill_oversized(outcome, &call.name, spill_fs.as_ref(), &spill_dir, &call.id).await;
     let is_error = !matches!(outcome, ToolOutcome::Ok { .. });
 
     // PostToolUse hooks：执行完了让用户配置的检查点看一眼。
@@ -562,6 +570,124 @@ async fn execute_guarded(
             ))
         }
     }
+}
+
+/// 单个文本结果直接进上下文的字节上限，超过就落盘。
+///
+/// 内置工具各有自己的截断（Read 256KiB、Bash/Grep 30k 字符），这层
+/// 真正接住的是**没有任何上限的外部结果** —— MCP 工具的文本。一条
+/// 几 MB 的结果原样进上下文，一次调用就能吃掉窗口的大半，然后只能
+/// 靠最贵、损失最大的 LLM 总结去救。64 KiB ≈ 1.6 万 token，已经是
+/// "一个结果占掉窗口一大块"的量级。
+const SPILL_THRESHOLD_BYTES: usize = 64 * 1024;
+
+/// 落盘预览留头尾各这么多字节：清单类输出的关键在头部，构建日志的
+/// 报错在尾部 —— 只取一头必丢一种。
+const SPILL_PREVIEW_BYTES: usize = 2 * 1024;
+
+/// 豁免落盘的工具。
+///
+/// Read 的输出本来就是磁盘文件的一个窗口（自带 256KiB 上限和
+/// offset/limit 分页），再落盘等于让模型去读"文件的文件"；更糟的是
+/// 递归 —— 读落盘文件的结果超阈值又被落盘，64KiB~256KiB 之间的内容
+/// 模型永远够不到。
+const SPILL_EXEMPT: &[&str] = &["Read"];
+
+/// 第 1 层压缩（ARCHITECTURE §10.3）：超大文本结果写进工件目录，
+/// 消息里换成 [`ToolResultContent::Spilled`]（路径 + 头尾预览）。
+/// 无损 —— 模型需要细节时按路径 Read 回来。
+///
+/// 在遮蔽**之前**做：盘上是原文（用户自己的机器，和界面显示同一个
+/// 待遇），预览随后照常在 [`redact_content`] 被遮；日后模型 Read 这个
+/// 文件，读回的内容再次经过出口遮蔽 —— 两条路都不漏密钥。
+///
+/// 写盘失败退化成硬截断：保护窗口是这层唯一的存在理由，磁盘故障
+/// 不该反过来把几 MB 原文放进上下文。
+async fn spill_oversized(
+    outcome: ToolOutcome,
+    tool_name: &str,
+    fs: &dyn riot_protocol::tool::FileSystem,
+    artifacts_dir: &std::path::Path,
+    tool_use: &ToolUseId,
+) -> ToolOutcome {
+    let ToolOutcome::Ok {
+        model_content: ToolResultContent::Text { text },
+        ui_payload,
+        side_messages,
+    } = outcome
+    else {
+        return outcome;
+    };
+    if text.len() <= SPILL_THRESHOLD_BYTES || SPILL_EXEMPT.contains(&tool_name) {
+        return ToolOutcome::Ok {
+            model_content: ToolResultContent::Text { text },
+            ui_payload,
+            side_messages,
+        };
+    }
+
+    let preview = head_tail_preview(&text, SPILL_PREVIEW_BYTES);
+    let total_bytes = text.len() as u64;
+    let path = artifacts_dir.join(format!("spill-{}.txt", safe_stem(tool_use.as_str())));
+    let model_content = match fs.write(&path, text.as_bytes()).await {
+        Ok(()) => ToolResultContent::Spilled {
+            path,
+            preview,
+            total_bytes,
+        },
+        Err(e) => {
+            tracing::warn!(tool = %tool_name, error = %e, "超大结果落盘失败，退化为截断");
+            ToolResultContent::Text {
+                text: format!(
+                    "[结果过大（{total_bytes} 字节）且写盘失败，只保留头尾预览]\n{preview}"
+                ),
+            }
+        }
+    };
+    ToolOutcome::Ok {
+        model_content,
+        ui_payload,
+        side_messages,
+    }
+}
+
+/// 头尾各取 `each` 字节拼成预览，切口对齐字符边界。
+fn head_tail_preview(text: &str, each: usize) -> String {
+    if text.len() <= each.saturating_mul(2) {
+        return text.to_owned();
+    }
+    let mut head_end = each.min(text.len());
+    while head_end > 0 && !text.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = text.len().saturating_sub(each);
+    while tail_start < text.len() && !text.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    format!(
+        "{}\n……[中间省略，全文见落盘文件]……\n{}",
+        &text[..head_end],
+        &text[tail_start..]
+    )
+}
+
+/// tool_use id 转文件名主干：只留字母数字与 `._-`，其余替换，防路径注入。
+fn safe_stem(id: &str) -> String {
+    let mut s: String = id
+        .chars()
+        .take(64)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if s.is_empty() {
+        s.push_str("result");
+    }
+    s
 }
 
 fn split_outcome(outcome: ToolOutcome) -> (ToolResultContent, Vec<Message>) {
@@ -736,6 +862,131 @@ mod tests {
             pairs[0].1.contains("已遮蔽") && pairs[0].1.contains("其余配置正常"),
             "遮蔽要留痕、周围内容要保留：{}",
             pairs[0].1
+        );
+    }
+
+    /// 结果消息里第一个 tool_result 的内容。
+    fn first_content(o: &BatchOutcome) -> &ToolResultContent {
+        match &o.results {
+            Message::User { content, .. } => match &content[0] {
+                UserContent::ToolResult { content, .. } => content,
+                other => panic!("结果里混进了非 tool_result：{other:?}"),
+            },
+            other => panic!("结果消息必须是 User：{other:?}"),
+        }
+    }
+
+    /// 第 1 层压缩（§10.3）：超阈值的文本结果落盘，消息里只剩路径 +
+    /// 头尾预览。这层缺位的表现：一条几 MB 的 MCP 结果原样进上下文，
+    /// 一次调用吃掉窗口大半，之后只能靠最贵的 LLM 总结去救。
+    #[tokio::test]
+    async fn 超大文本结果落盘换成路径与预览() {
+        let big = format!("开头标记\n{}\n结尾标记", "x".repeat(80_000));
+        // MemFs 和真实文件系统一样要求父目录存在（生产端 SystemFs::write
+        // 自动建父目录，且会话装配时就预建了 artifacts 目录）。
+        let fs = Arc::new(crate::tools::memfs::MemFs::new().with_dir("/artifacts"));
+        let s = crate::testing::test_scheduler_with_fs(
+            vec![Arc::new(FakeTool::read_only("Fetch").ok_text(big.clone()))],
+            fs.clone(),
+        )
+        .with_artifacts_dir("/artifacts".into());
+        let events = run(&s, vec![call("t1", "Fetch")]).await;
+
+        let o = outcome(&events);
+        let ToolResultContent::Spilled {
+            path,
+            preview,
+            total_bytes,
+        } = first_content(o)
+        else {
+            panic!("超阈值结果必须落盘：{:?}", first_content(o));
+        };
+        assert_eq!(*total_bytes, big.len() as u64);
+        assert!(
+            preview.contains("开头标记") && preview.contains("结尾标记"),
+            "预览要头尾都有 —— 清单的关键在头、日志的报错在尾：{preview}"
+        );
+        assert!(preview.len() < 8 * 1024, "预览必须远小于原文");
+        assert_eq!(
+            fs.text(path).as_deref(),
+            Some(big.as_str()),
+            "盘上必须是完整原文，模型才能按需 Read 回来"
+        );
+    }
+
+    /// 阈值内的结果原样直传，一个字节的 IO 都不发生（NullFs 会对任何
+    /// 写操作报错，这条测试同时守着"正常路径不碰盘"）。
+    #[tokio::test]
+    async fn 阈值内的结果原样直传() {
+        let text = "正常大小的结果".to_owned();
+        let s = scheduler(vec![Arc::new(
+            FakeTool::read_only("Fetch").ok_text(text.clone()),
+        )]);
+        let events = run(&s, vec![call("t1", "Fetch")]).await;
+        assert_eq!(result_pairs(outcome(&events))[0].1, text);
+    }
+
+    /// Read 豁免落盘：它的输出本来就是磁盘文件的一个窗口（自带上限和
+    /// 分页），落盘会递归 —— 读落盘文件的结果又被落盘，64~256KiB 的
+    /// 内容模型永远够不到。
+    #[tokio::test]
+    async fn read_结果豁免落盘() {
+        let big = "y".repeat(80_000);
+        // NullFs：若豁免失效走到写盘，会报错退化成截断文本，断言随之失败。
+        let s = scheduler(vec![Arc::new(
+            FakeTool::read_only("Read").ok_text(big.clone()),
+        )]);
+        let events = run(&s, vec![call("t1", "Read")]).await;
+        assert_eq!(
+            result_pairs(outcome(&events))[0].1,
+            big,
+            "Read 的结果必须原样保留"
+        );
+    }
+
+    /// 写盘失败不能反过来把几 MB 原文放进上下文 —— 退化成硬截断。
+    #[tokio::test]
+    async fn 落盘失败退化为截断() {
+        let big = "z".repeat(80_000);
+        // NullFs 写必失败，正好当"磁盘故障"用。
+        let s = scheduler(vec![Arc::new(FakeTool::read_only("Fetch").ok_text(big))]);
+        let events = run(&s, vec![call("t1", "Fetch")]).await;
+        let text = &result_pairs(outcome(&events))[0].1;
+        assert!(
+            text.starts_with("[结果过大"),
+            "要向模型说明发生了什么：{text}"
+        );
+        assert!(
+            text.len() < 10 * 1024,
+            "退化后必须被截断，不能把原文放进去：{} 字节",
+            text.len()
+        );
+    }
+
+    /// 落盘预览照样过遮蔽：密钥出现在头部预览里也不能漏。盘上是原文——
+    /// 那是用户自己的机器；模型日后 Read 它时，出口还会再遮一次。
+    #[tokio::test]
+    async fn 落盘预览照样过遮蔽() {
+        let big = format!("AWS_KEY=AKIAIOSFODNN7EXAMPLE\n{}", "x".repeat(80_000));
+        let fs = Arc::new(crate::tools::memfs::MemFs::new().with_dir("/artifacts"));
+        let s = crate::testing::test_scheduler_with_fs(
+            vec![Arc::new(FakeTool::read_only("Fetch").ok_text(big.clone()))],
+            fs.clone(),
+        )
+        .with_artifacts_dir("/artifacts".into());
+        let events = run(&s, vec![call("t1", "Fetch")]).await;
+
+        let o = outcome(&events);
+        let ToolResultContent::Spilled { path, preview, .. } = first_content(o) else {
+            panic!("该落盘：{:?}", first_content(o));
+        };
+        assert!(
+            !preview.contains("AKIAIOSFODNN7EXAMPLE") && preview.contains("已遮蔽"),
+            "预览里的密钥必须被遮蔽：{preview}"
+        );
+        assert!(
+            fs.text(path).expect("盘上有文件").contains("AKIAIOSFODNN7EXAMPLE"),
+            "盘上保留原文 —— 遮蔽只对发给模型的内容"
         );
     }
 

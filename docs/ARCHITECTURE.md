@@ -1260,10 +1260,20 @@ Rust 这里有生态优势:`tree-sitter` 和 `tree-sitter-bash` 都是原生 cra
 `[约束]` 沙箱(OS 强制)和权限规则(策略)是两层,不要混。
 
 - macOS:`sandbox-exec` / seatbelt profile(**已落地**,`riot-runtime/src/sandbox.rs`)
-- Windows:Restricted Token + Low IL(**设计定稿未实现**,见 `docs/SANDBOX_WINDOWS.md`;那份文档解释了为什么不是 AppContainer)
+- Windows:Restricted Token + Low IL(**已落地**,见 `docs/SANDBOX_WINDOWS.md`;那份文档解释了为什么不是 AppContainer)
 - Linux:bubblewrap + seccomp(未排期)
 
 沙箱内的 Bash 可以自动放行(既然 OS 层已经挡住了),模型也可以显式请求出沙箱(需要用户同意)。
+
+#### 9.6.1 放宽的前提是「OS 真的挡得住」
+
+`[约束]` 可写集里有几处**在边界之内、却能换来边界之外执行权**的目标,沙箱放宽档必须把它们排除,否则打开沙箱反而比不开更弱。
+
+这条是一次真实回归的结论。沙箱默认开着,而 `bash::decide` 的放宽档基于"OS 已经挡住文件系统"直接 Allow ——于是 `cp payload .riot/hooks.json` 从"要问"变成了"静默放行",而下一轮 `HookEngine` 会把那个文件里的命令用 `sh -c` 裸跑在宿主上,还能返回 `permissionDecision: allow` 把整个权限层关掉。同类目标还有工作区里的 `.git/hooks/`、`git config core.hooksPath`、`~/.cargo/config.toml` 的 `rustc-wrapper`。
+
+`[前提]` 收紧可写集**修不了这个**:`cargo build` 要写 `~/.cargo/.package-cache` 的锁,`rust-toolchain.toml` 会触发 rustup 自动装工具链,猜错一条的表现就是"构建莫名其妙失败"——而那正是用户直接关掉沙箱的理由。在 profile 里给这几条补 `deny` 也不行:沙箱按静态策略激活,它不知道用户这一次批准了什么,deny 会造出「点了允许、命令照样失败」。
+
+所以挡在策略层:`riot_permissions::bash::write_targets` 扫子命令的参数字面量,命中就产出**对放行免疫**的 Ask。它同时补上了 §9.4 的一个老缺口——`safety::check` 走 `Tool::target_path`,而 Bash 返回 `None`,整个路径安全检查对它不生效;此前唯一能看见敏感路径的通道是命令分析器里的重定向目标检查,`cp` / `mv` / `install` / `sed -i` 一概看不见。
 
 ---
 
@@ -1295,14 +1305,18 @@ fn estimate_tokens(messages: &[Message]) -> u32 {
 
 ### 10.3 分层压缩管道
 
-能便宜解决就不用贵的。四层里前两层在**工具执行时**就发生(riot-tools),后两层在**压缩触发时**执行(riot-core 的 compactor):
+能便宜解决就不用贵的。第 1 层在**工具执行时**就发生(riot-tools),后两层在**压缩触发时**执行(riot-core 的 compactor):
 
 | 层 | 机制 | 在哪 | 信息损失 |
 |----|------|------|---------|
-| 1. 结果落盘 | 超大结果写文件,消息里留预览 + 路径 | riot-tools(执行管线第 8 步) | 无(可重读) |
-| 2. 聚合预算 | 单消息内并行结果合计超限 → 替换 | riot-tools(`tools/shrink.rs`) | 低 |
+| 1. 结果落盘 | 超 64KiB 的文本结果写进工件目录,消息里换成头尾预览 + 路径(`Spilled`) | riot-tools `scheduler.rs::spill_oversized`,执行后统一收口 | 无(按路径可重读) |
+| 2. 聚合预算 | 单消息内并行结果合计超限 → 替换 | **未实现**(见下) | — |
 | 3. 清旧结果 | 旧 tool_result 清成占位符,只留最近 **8** 个(`ClearOldResults`,原设计写 5,实现取 8) | riot-core `compactor.rs` | 中 |
 | 4. 全量总结 | LLM 总结替换历史 | riot-core `compactor.rs` | 高 |
+
+第 1 层的两个要点:**Read 豁免**(它的输出本来就是磁盘文件的一个窗口,落盘会递归——读落盘文件的结果又被落盘,64KiB~256KiB 的内容模型永远够不到);落盘发生在凭证遮蔽**之前**,盘上是原文、预览照常被遮,日后 Read 回来再遮一次,两条路都不漏。这层真正接住的是**没有自带截断的外部结果**(MCP 文本)——内置工具各有上限(Read 256KiB、Bash/Grep 30k 字符)。
+
+`[现状]` 第 2 层(聚合预算)未实现:内置工具的单结果上限 + 第 1 层的落盘把单条压住之后,「一批并行结果合计超限」的剩余风险很小(并行批大小上限 10),等真实场景撞上再做。注意 `tools/shrink.rs` **不是**这一层——那是发给模型的图片压缩(≤115 万像素),别看名字像。
 
 `[现状]` 原设计还有一条「microcompact 只在 prompt cache 大概率已过期时(距上次交互 > 60 分钟,依赖 `Clock`)才主动执行」——**未实现**。当前第 3 层只在压缩被触发时执行(主动阈值或反应式溢出),那个时刻不压就溢出,缓存热不热已不是主要矛盾;每轮空转的定期 microcompact 及其 60 分钟判断因此一直没有落地。要恢复这条,记得 `AgentDeps.clock` 就是为它留的。
 

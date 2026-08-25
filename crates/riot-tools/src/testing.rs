@@ -486,6 +486,16 @@ impl IdGenerator for SeqIds {
 
 /// 用给定工具搭一个调度器。
 pub fn test_scheduler(tools: Vec<Arc<dyn Tool>>) -> crate::scheduler::Scheduler {
+    test_scheduler_with_fs(tools, Arc::new(NullFs))
+}
+
+/// 同 [`test_scheduler`]，但文件系统可指定。给「超大结果落盘」这类
+/// 真要写文件的用例注入 MemFs；其余用例保持 NullFs 的守卫 ——
+/// 调度层对正常大小的结果不该碰任何 IO。
+pub fn test_scheduler_with_fs(
+    tools: Vec<Arc<dyn Tool>>,
+    fs: Arc<dyn FileSystem>,
+) -> crate::scheduler::Scheduler {
     crate::scheduler::Scheduler::new(
         Arc::new(crate::registry::Registry::new(tools).expect("注册表构造成功")),
         PromptContext {
@@ -494,7 +504,7 @@ pub fn test_scheduler(tools: Vec<Arc<dyn Tool>>) -> crate::scheduler::Scheduler 
             sibling_tools: Vec::new(),
             today: "2026年8月".into(),
         },
-        Arc::new(NullFs),
+        fs,
         Arc::new(NullProc),
         Arc::new(NullFileState),
         Arc::new(SeqIds::default()),
