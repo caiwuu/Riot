@@ -240,7 +240,12 @@ pub fn run_agent(
                                     // 拿着累加后的 streak 决定要不要熔断。
                                     // 终止逻辑只有一处，不要散在两个地方。
                                     tracing::warn!(reason, "压缩失败");
-                                    state.compact_failure_streak += 1;
+                                    // 用户按停止会掐断总结请求，那不是"压不动"——
+                                    // 计进 streak 的话，停止几次之后下一次真溢出
+                                    // 直接熔断。
+                                    if !cancel.is_cancelled() {
+                                        state.compact_failure_streak += 1;
+                                    }
                                 }
                             }
                         }

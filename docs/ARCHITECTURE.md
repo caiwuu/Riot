@@ -427,7 +427,9 @@ pub fn run_agent(
 
 `[约束]` **循环是否继续,只看本轮流式结束后有没有收到 `tool_use` 块。**
 
-不要用 `stop_reason == "tool_use"` 判断。Claude Code 的源码注释明确指出这个字段不可靠,实测会导致循环提前退出或死循环。Provider 层可以记录 `stop_reason` 用于遥测,但不得参与控制流。
+不要用 `stop_reason == "tool_use"` 判断。Claude Code 的源码注释明确指出这个字段不可靠,实测会导致循环提前退出或死循环。Provider 层可以记录 `stop_reason` 用于遥测,但不得参与循环控制。
+
+唯一的例外:`stop_reason == "max_tokens"` 时 provider 在消息后补报 `OutputLimit` 可恢复错误(与 OpenAI 侧 `finish_reason == "length"` 对齐)。它不决定循环走向,只把"输出被截断"从静默变成可恢复——静默接受截断的下场是回答缺一截没人知道,压缩场景下缺的恰是总结的最后几节;字段缺失时漏报,退回旧行为,不会误伤。
 
 ### 5.3 主循环签名里没有 Result
 

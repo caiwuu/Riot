@@ -21,13 +21,17 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
-use riot_protocol::message::{Attachment, Message, MessageMeta, ToolResultContent, UserContent};
+use riot_protocol::message::{
+    AssistantContent, Attachment, Message, MessageMeta, ToolResultContent, UserContent,
+};
 use riot_protocol::provider::{Provider, ProviderEvent, ProviderRequest, ThinkingConfig};
 use tokio_util::sync::CancellationToken;
 
 /// 总结输出的预算。CC 用 20k；对齐它 —— 长会话的九节总结真能写到
-/// 上万 token，砍太狠丢的是"文件与代码段"那节的完整片段。
-const SUMMARY_MAX_OUTPUT_TOKENS: u32 = 16_384;
+/// 上万 token，砍太狠丢的是"文件与代码段"那节的完整片段。撞上这个
+/// 预算时 provider 会报 OutputLimit，总结按失败处理而不是静默截尾
+/// （九节顺序输出，截掉的恰是用户原话/待办/下一步那几节）。
+const SUMMARY_MAX_OUTPUT_TOKENS: u32 = 20_000;
 
 /// 总结提示词。九节结构和 CC 逐节对应，措辞按中文对话习惯改写。
 const COMPACT_PROMPT: &str = "\
@@ -166,7 +170,17 @@ pub fn extract_summary(raw: &str) -> String {
 }
 
 /// 为总结请求瘦身：图片换占位符（视觉内容进不了文本总结，白占请求体），
-/// 已清理的工具结果保持原样。
+/// tool_use / tool_result 块降级成纯文本，思考块丢弃。
+///
+/// `[约束]` 工具块必须**转成文字而不是保留**。总结请求不带 `tools`，而
+/// Anthropic 对"消息里有 tool_use/tool_result 块但请求没定义 tools"直接 400
+/// （"Requests which include `tool_use` or `tool_result` blocks must define
+/// tools"）—— 带工具调用的会话（几乎所有真实会话）总结必失败，压缩阶梯的
+/// 重档等于不存在。OpenAI 主线容忍，但严格校验的兼容后端一样会拒。
+/// 转成文字：块类型消失，信息留下。
+///
+/// 思考块直接丢：它是脚手架不是事实，而且 Anthropic 的签名与模型绑定、
+/// 要求原样回传 —— 总结模型和会话模型可能不是同一个（INV-9 同源）。
 fn strip_for_summary(messages: &[Message]) -> Vec<Message> {
     messages
         .iter()
@@ -193,25 +207,71 @@ fn strip_for_summary(messages: &[Message]) -> Vec<Message> {
                             tool_use_id,
                             content,
                             is_error,
-                        } => UserContent::ToolResult {
-                            tool_use_id: tool_use_id.clone(),
-                            content: match content {
-                                ToolResultContent::Image { .. }
-                                | ToolResultContent::DescribedImage { .. } => {
-                                    ToolResultContent::text("[图片结果，总结时已省略]")
-                                }
-                                other => other.clone(),
-                            },
-                            is_error: *is_error,
+                        } => UserContent::Text {
+                            text: format!(
+                                "[工具调用 {} 的结果{}]\n{}",
+                                tool_use_id.as_str(),
+                                if *is_error { "（失败）" } else { "" },
+                                tool_result_text(content),
+                            ),
                         },
                         other => other.clone(),
                     })
                     .collect(),
                 meta: meta.clone(),
             },
+            Message::Assistant {
+                id,
+                content,
+                usage,
+                meta,
+            } => Message::Assistant {
+                id: id.clone(),
+                content: content
+                    .iter()
+                    .filter_map(|c| match c {
+                        AssistantContent::Text { .. } => Some(c.clone()),
+                        AssistantContent::ToolUse { id, name, input } => {
+                            Some(AssistantContent::Text {
+                                text: format!(
+                                    "[调用工具 {name}（{}），参数：{}]",
+                                    id.as_str(),
+                                    serde_json::to_string(input).unwrap_or_else(|_| "{}".into()),
+                                ),
+                            })
+                        }
+                        AssistantContent::Thinking { .. } => None,
+                    })
+                    .collect(),
+                usage: usage.clone(),
+                meta: meta.clone(),
+            },
             other => other.clone(),
         })
         .collect()
+}
+
+/// tool_result 内容的模型可见文字形态。措辞和 wire 层各家的转换同一个口径，
+/// 总结读到的和会话模型当时读到的尽量一致。
+fn tool_result_text(c: &ToolResultContent) -> String {
+    match c {
+        ToolResultContent::Text { text } => text.clone(),
+        ToolResultContent::Spilled {
+            path,
+            preview,
+            total_bytes,
+        } => format!(
+            "结果过大（{total_bytes} 字节），已写入 {}。\n预览：\n{preview}",
+            path.display()
+        ),
+        ToolResultContent::Cleared => "[结果已清理以节省上下文]".into(),
+        ToolResultContent::Image { .. } => "[图片结果，总结时已省略]".into(),
+        // 转述是模型本来就在读的内容，保留；图片本体进不了文本总结。
+        ToolResultContent::DescribedImage { text, .. } => text.clone(),
+        ToolResultContent::MarkedImage { text, .. } => {
+            format!("{text}\n[图片本体总结时已省略]")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -308,5 +368,71 @@ mod tests {
             "base64 图片进总结请求是纯浪费 —— 总结是文本任务"
         );
         assert!(matches!(&content[1], UserContent::Text { text } if text == "看图"));
+    }
+
+    /// `[约束]` 总结请求不带 `tools`，而 Anthropic 对"有 tool_use/tool_result
+    /// 块但没定义 tools"的请求直接 400。块必须消失，信息必须留下。
+    #[test]
+    fn 总结请求里工具块降级为纯文本() {
+        use riot_protocol::id::ToolUseId;
+
+        let msgs = vec![
+            Message::Assistant {
+                id: MessageId::from_raw("a1"),
+                content: vec![AssistantContent::ToolUse {
+                    id: ToolUseId::from_raw("t1"),
+                    name: "read_file".into(),
+                    input: serde_json::json!({"path": "/p/a.rs"}),
+                }],
+                usage: None,
+                meta: MessageMeta::default(),
+            },
+            Message::User {
+                id: MessageId::from_raw("m1"),
+                content: vec![UserContent::ToolResult {
+                    tool_use_id: ToolUseId::from_raw("t1"),
+                    content: ToolResultContent::text("fn main() {}"),
+                    is_error: false,
+                }],
+                meta: MessageMeta::default(),
+            },
+        ];
+
+        let stripped = strip_for_summary(&msgs);
+        let debug = format!("{stripped:?}");
+        assert!(
+            !debug.contains("ToolUse") && !debug.contains("ToolResult"),
+            "工具块必须全部降级成文本：{debug}"
+        );
+        assert!(
+            debug.contains("read_file") && debug.contains("/p/a.rs"),
+            "调了什么工具、什么参数要留在文字里：{debug}"
+        );
+        assert!(debug.contains("fn main"), "工具结果的内容要留在文字里");
+    }
+
+    #[test]
+    fn 总结请求里思考块被丢弃() {
+        // 思考是脚手架不是事实；Anthropic 的签名与模型绑定，总结模型
+        // 可能不是会话模型，带上必 400（INV-9 同源）。
+        let msgs = vec![Message::Assistant {
+            id: MessageId::from_raw("a1"),
+            content: vec![
+                AssistantContent::Thinking {
+                    text: "内心戏".into(),
+                    signature: Some("sig".into()),
+                },
+                AssistantContent::Text {
+                    text: "回答正文".into(),
+                },
+            ],
+            usage: None,
+            meta: MessageMeta::default(),
+        }];
+
+        let stripped = strip_for_summary(&msgs);
+        let debug = format!("{stripped:?}");
+        assert!(!debug.contains("内心戏"), "思考不进总结请求：{debug}");
+        assert!(debug.contains("回答正文"), "正文要留下");
     }
 }

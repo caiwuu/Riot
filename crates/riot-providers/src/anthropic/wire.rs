@@ -103,11 +103,16 @@ pub enum WireDelta {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct WireMessageDelta {
-    /// 记录用于遥测。
-    ///
-    /// `[约束]` **不得参与控制流。**循环是否继续只看有没有 tool_use 块。
-    /// 这个字段实测不可靠，用它判断会导致提前退出或死循环。
+    /// `[约束]` **不得参与循环控制。**循环是否继续只看有没有 tool_use 块。
+    /// 这个字段实测不可靠，用它判断续不续轮会导致提前退出或死循环。
     /// 见 ARCHITECTURE.md §5.2
+    ///
+    /// 唯一的例外：`"max_tokens"` → 补报 [`OutputLimit`] 错误（decode.rs），
+    /// 对齐 OpenAI 侧 `finish_reason == "length"` 的处理。它不决定循环走向，
+    /// 只把"输出被截断"从静默变成可恢复错误 —— 漏报（字段缺失）的代价是
+    /// 退回旧行为，不会误伤。
+    ///
+    /// [`OutputLimit`]: riot_protocol::provider::ProviderError::OutputLimit
     #[serde(default)]
     pub stop_reason: Option<String>,
     #[serde(default)]

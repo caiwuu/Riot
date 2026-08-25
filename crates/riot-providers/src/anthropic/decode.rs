@@ -64,6 +64,10 @@ pub struct StreamDecoder {
     usage: Usage,
     saw_message_start: bool,
     finished: bool,
+    /// message_delta 报过 `stop_reason: "max_tokens"`。message_stop 时据此
+    /// 在消息后面补一个 [`ProviderError::OutputLimit`] —— 对齐 OpenAI 侧
+    /// `finish_reason == "length"` 的处理。
+    hit_output_limit: bool,
 }
 
 impl StreamDecoder {
@@ -149,14 +153,28 @@ impl StreamDecoder {
             // 提前 parse 只是把 O(n²) 换成 O(n×块数)，没有收益。
             WireEvent::ContentBlockStop { .. } => Vec::new(),
 
-            WireEvent::MessageDelta { usage, .. } => {
+            WireEvent::MessageDelta { delta, usage } => {
                 if let Some(u) = usage {
                     self.merge_usage(u);
+                }
+                // stop_reason 唯一参与判断的场合（见 wire.rs 上的约束注释）：
+                // 截断不报错的话，回答/总结缺一截而没有任何人知道 ——
+                // 压缩场景下缺的恰是九节总结的最后几节（用户原话、待办）。
+                if delta.stop_reason.as_deref() == Some("max_tokens") {
+                    self.hit_output_limit = true;
                 }
                 Vec::new()
             }
 
-            WireEvent::MessageStop => self.finish_message(),
+            WireEvent::MessageStop => {
+                let mut out = self.finish_message();
+                // 半截消息照样交出去（用户能看到说到哪了），错误跟在后面 ——
+                // 顺序和 OpenAI 侧一致：主循环收到可恢复错误后自己决定重试。
+                if self.hit_output_limit {
+                    out.push(ProviderEvent::Error(ProviderError::OutputLimit));
+                }
+                out
+            }
 
             WireEvent::Error { error } => {
                 self.finished = true;
@@ -542,6 +560,51 @@ mod tests {
         assert_eq!(usage.input_tokens, 5000, "被 message_delta 的 0 抹掉了");
         assert_eq!(usage.cache_read_tokens, 12000, "cache_read 被抹掉了");
         assert_eq!(usage.output_tokens, 250);
+    }
+
+    /// 对齐 OpenAI 侧 `finish_reason == "length"`：静默接受截断消息的下场
+    /// 是"回答缺一截而没有任何人知道"—— 压缩场景下缺的恰是九节总结的
+    /// 最后几节（用户原话、待办、下一步）。
+    #[test]
+    fn max_tokens_截断在消息后补报_output_limit() {
+        let events = run(&[
+            START,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"半截"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"},
+                "usage":{"output_tokens":9}}"#,
+            r#"{"type":"message_stop"}"#,
+        ]);
+
+        let msg_pos = events
+            .iter()
+            .position(|e| matches!(e, ProviderEvent::Message(_)))
+            .expect("半截消息也要交出去 —— 用户至少能看到说到哪了");
+        let err_pos = events
+            .iter()
+            .position(|e| matches!(e, ProviderEvent::Error(ProviderError::OutputLimit)))
+            .unwrap_or_else(|| panic!("截断必须报可恢复错误，静默接受等于丢内容：{events:?}"));
+        assert!(msg_pos < err_pos, "先消息后错误，和 OpenAI 侧一致");
+    }
+
+    #[test]
+    fn 正常结束不报_output_limit() {
+        let events = run(&[
+            START,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"完整"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},
+                "usage":{"output_tokens":9}}"#,
+            r#"{"type":"message_stop"}"#,
+        ]);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ProviderEvent::Error(ProviderError::OutputLimit))),
+            "end_turn 不是截断：{events:?}"
+        );
     }
 
     #[test]

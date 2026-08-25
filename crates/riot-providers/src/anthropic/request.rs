@@ -224,7 +224,7 @@ pub fn build_request(
             .clone()
             .unwrap_or_else(|| req.model.clone()),
         max_tokens,
-        system: build_system(system),
+        system: build_system_with_request(system, &req.system),
         messages: build_messages(&req.messages, retry),
         tools: build_tools(&req.tools),
         thinking: match req.thinking {
@@ -254,6 +254,27 @@ pub fn build_request(
         validate_cache_breakpoints(&out)
     );
     out
+}
+
+/// Provider 级 sections 与请求级 system（`ProviderRequest::system`）合并。
+///
+/// `[约束]` `req.system` 必须进请求。生产路径（`provider_from_endpoint`）建
+/// provider 时 sections 是**空的**，会话的完整 system prompt、总结请求的角色
+/// 声明全靠 `req.system` 送进来 —— 丢掉它的表现是"Anthropic 协议下模型不认识
+/// 任何工具规矩"，而 OpenAI 侧一切正常（那边一直有拼接），排查会先怀疑模型。
+///
+/// 顺序对齐 OpenAI 侧的 `full_system`：provider 段在前，请求级在后。按稳定段
+/// 并入 —— 它在会话内不变，进全局缓存块是对的。
+fn build_system_with_request(
+    sections: &[SystemSection],
+    request_system: &str,
+) -> Vec<WireSystemBlock> {
+    if request_system.is_empty() {
+        return build_system(sections);
+    }
+    let mut merged = sections.to_vec();
+    merged.push(SystemSection::stable("request", request_system.to_owned()));
+    build_system(&merged)
 }
 
 /// 静态段合并成一块打全局缓存，动态段各自成块不打。
@@ -682,6 +703,34 @@ mod tests {
             "动态段每轮都变，打断点等于每轮写一次废缓存"
         );
         assert!(r.system[1].text.contains("12:00"));
+    }
+
+    /// `[约束]` `req.system` 必须进请求。生产路径建 provider 时 sections 是
+    /// 空的，会话的完整 system prompt（和总结请求的角色声明）全靠它 ——
+    /// 丢掉的表现是"Anthropic 协议下模型不认识任何工具规矩"。
+    #[test]
+    fn 请求级_system_并入稳定块() {
+        let mut r = req(vec![user("hi")]);
+        r.system = "总结助手的角色声明".into();
+
+        // 有 provider 段：接在稳定块末尾，顺序对齐 OpenAI 侧。
+        let b = build_request(&r, &sections(), &RetryContext::initial());
+        assert!(b.system[0].text.contains("编码助手"), "provider 段在前");
+        assert!(
+            b.system[0].text.contains("总结助手的角色声明"),
+            "请求级 system 接在后：{}",
+            b.system[0].text
+        );
+        assert_eq!(
+            b.system[0].cache_control,
+            Some(CacheControl::global()),
+            "它在会话内不变，归稳定块"
+        );
+
+        // 生产形态：provider 段为空，请求级 system 独自成块。
+        let b = build_request(&r, &[], &RetryContext::initial());
+        assert_eq!(b.system.len(), 1);
+        assert!(b.system[0].text.contains("总结助手的角色声明"));
     }
 
     #[test]
