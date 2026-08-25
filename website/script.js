@@ -29,29 +29,29 @@ const DOWNLOADS = {
 /** 全站统一版本号，注入 HTML 里所有 .js-version 占位。拉到最新 Release 后再改。 */
 let VERSION = "";
 
-function versionLabel(tag) {
+function versionLabel (tag) {
   const v = String(tag || "")
     .replace(/^Riot_/i, "")
     .replace(/^v/i, "");
   return v ? `v${v}` : "";
 }
 
-function pickAsset(assets, suffix) {
+function pickAsset (assets, suffix) {
   return (assets || []).find((a) => typeof a.name === "string" && a.name.endsWith(suffix));
 }
 
-function assetInfo(assets, suffix) {
+function assetInfo (assets, suffix) {
   const a = pickAsset(assets, suffix);
   if (!a) return { url: "", size: 0 };
   return { url: a.browser_download_url, size: Number(a.size) || 0 };
 }
 
-function formatSize(bytes) {
+function formatSize (bytes) {
   if (!bytes) return "";
   return `约 ${Math.round(bytes / (1024 * 1024))} MB`;
 }
 
-async function loadLatestRelease() {
+async function loadLatestRelease () {
   try {
     const cached = sessionStorage.getItem(RELEASE_CACHE);
     if (cached) return JSON.parse(cached);
@@ -76,7 +76,7 @@ async function loadLatestRelease() {
   return slim;
 }
 
-async function initDownloads() {
+async function initDownloads () {
   try {
     const latest = await loadLatestRelease();
     if (latest.mac?.url) {
@@ -267,15 +267,17 @@ function initHeroTitle () {
  * 洞口边缘的陨石被引力撕扯，位置散乱、忽明忽暗。
  * 星空中时常有流星拖着尾迹击穿粒子团，被撞飞的陨石在引力作用下缓缓归位。
  * 鼠标靠近同样会推开陨石。
+ * 画布挂在 .hero-sky 内铺满整个首屏：流星横穿全屏，星云锚定在 .hero-logo 容器处成形。
  */
 function initParticleLogo () {
   const canvas = document.getElementById("logo-canvas");
   const hero = document.getElementById("hero");
-  if (!canvas || !hero || reduceMotion) return;
+  const logoBox = document.querySelector(".hero-logo");
+  if (!canvas || !hero || !logoBox || reduceMotion) return;
 
   const showFallback = () => {
     canvas.style.display = "none";
-    const fallback = canvas.parentElement.querySelector(".hl-fallback");
+    const fallback = logoBox.querySelector(".hl-fallback");
     if (fallback) fallback.style.display = "block";
   };
 
@@ -286,15 +288,15 @@ function initParticleLogo () {
   }
 
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const REPEL_RADIUS = 80;
+  const REPEL_RADIUS = 60;
   const REPEL_FORCE = 4.6;
-  const METEOR_HIT_RADIUS = 56; // 流星冲击半径
+  const METEOR_HIT_RADIUS = 28; // 流星冲击半径
   const METEOR_FORCE = 8.5;
   const METEOR_TAIL = 96; // 尾迹长度（px）
   const METEOR_G = 2600000; // 黑洞引力常数：流星轨迹被星云中心弯折
   const METEOR_MAX_AGE = 26; // 秒，被引力俘获绕圈的流星最终回收
 
-  /** 预渲染辉光光点：锐利亮核 + 快速衰减的光晕，糊感来自光晕过散，核心必须硬 */
+  /** 预渲染辉光光点：加大实心亮核占比、收紧光晕衰减——光点更「实」，成形的 logo 更清晰 */
   const makeSprite = (r, g, b) => {
     const s = document.createElement("canvas");
     const SIZE = 64;
@@ -303,9 +305,9 @@ function initParticleLogo () {
     const c = s.getContext("2d");
     const grad = c.createRadialGradient(SIZE / 2, SIZE / 2, 0, SIZE / 2, SIZE / 2, SIZE / 2);
     grad.addColorStop(0, `rgba(${r},${g},${b},1)`);
-    grad.addColorStop(0.14, `rgba(${r},${g},${b},0.95)`);
-    grad.addColorStop(0.24, `rgba(${r},${g},${b},0.28)`);
-    grad.addColorStop(0.5, `rgba(${r},${g},${b},0.06)`);
+    grad.addColorStop(0.22, `rgba(${r},${g},${b},0.98)`);
+    grad.addColorStop(0.35, `rgba(${r},${g},${b},0.22)`);
+    grad.addColorStop(0.55, `rgba(${r},${g},${b},0.04)`);
     grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
     c.fillStyle = grad;
     c.fillRect(0, 0, SIZE, SIZE);
@@ -322,6 +324,8 @@ function initParticleLogo () {
 
   let W = 0;
   let H = 0;
+  let holeX = 0; // 星云 / 黑洞中心（画布坐标）：锚定在 .hero-logo 容器中心
+  let holeY = 0;
   let particles = [];
   let dust = []; // 吸积流星尘：被引力捕获，螺旋内落汇入 R 轮廓
   let nebulaR = 100;
@@ -359,12 +363,13 @@ function initParticleLogo () {
     d.draw = 2.4 + Math.random() * 3.6;
   };
 
-  /** 采样 logo 像素，生成粒子锚点（logo 尺寸跟随 .hero-logo 容器，画布本身远大于它） */
+  /** 采样 logo 像素，生成粒子锚点（logo 位置/尺寸跟随 .hero-logo 容器，画布铺满整个首屏） */
   const build = () => {
     resize();
     particles = [];
 
-    const box = canvas.parentElement.getBoundingClientRect();
+    const box = logoBox.getBoundingClientRect();
+    const canvasBox = canvas.getBoundingClientRect();
     const logoSize = Math.max(40, Math.round(Math.min(box.width, box.height) * 0.88));
     const off = document.createElement("canvas");
     off.width = logoSize;
@@ -521,9 +526,12 @@ function initParticleLogo () {
     };
 
     const step = Math.max(2, Math.round(logoSize / 74));
-    const offX = (W - logoSize) / 2;
-    const offY = (H - logoSize) / 2;
+    // logo 在画布坐标系中的落点：两个矩形同帧测量，与滚动位置无关
+    const offX = box.left - canvasBox.left + (box.width - logoSize) / 2;
+    const offY = box.top - canvasBox.top + (box.height - logoSize) / 2;
     const logoR = logoSize / 2;
+    holeX = offX + logoR;
+    holeY = offY + logoR;
 
     for (let y = 0; y < logoSize; y += step) {
       for (let x = 0; x < logoSize; x += step) {
@@ -582,17 +590,15 @@ function initParticleLogo () {
 
           /* 外圈尘埃绕黑洞极缓慢公转（避开 R 外接圆，公转不会盖住黑洞剪影）；
              0.72–0.87 半径带角速度渐增，内外过渡无剪切缝 */
-          const cxL = W / 2;
-          const cyL = H / 2;
-          const orbitR = Math.hypot(hx - cxL, hy - cyL);
+          const orbitR = Math.hypot(hx - holeX, hy - holeY);
           const wf = Math.min(1, Math.max(0, (orbitR / logoR - 0.72) / 0.15));
           const orbit =
             wf > 0
               ? {
-                  r: orbitR,
-                  a: Math.atan2(hy - cyL, hx - cxL),
-                  w: (0.014 + Math.random() * 0.018) * wf,
-                }
+                r: orbitR,
+                a: Math.atan2(hy - holeY, hx - holeX),
+                w: (0.014 + Math.random() * 0.018) * wf,
+              }
               : null;
 
           particles.push({
@@ -602,7 +608,7 @@ function initParticleLogo () {
             y: hy + Math.sin(angle) * dist,
             vx: 0,
             vy: 0,
-            draw: size * 6.6 * z, // 辉光绘制直径（核心约占 1/4）
+            draw: size * 5.4 * z, // 辉光绘制直径（亮核更实、光晕更收，成形更清晰）
             sprite,
             alpha: a0,
             orbit,
@@ -649,7 +655,7 @@ function initParticleLogo () {
     const tx = W * (0.12 + Math.random() * 0.76);
     const ty = H * (0.12 + Math.random() * 0.76);
     const d = Math.hypot(tx - sx, ty - sy) || 1;
-    const speed = 160 + Math.random() * 100; // px/s，宇宙尺度的慢
+    const speed = 80 + Math.random() * 50; // px/s，宇宙尺度的慢
 
     meteors.push({
       x: sx,
@@ -670,16 +676,16 @@ function initParticleLogo () {
     const dt = Math.min(0.05, lastFrame ? (t - lastFrame) / 1000 : 0.016);
     lastFrame = t;
 
-    // 流星调度：入场汇聚完成后开始，之后每 3.5–8 秒一颗
+    // 流星调度：入场汇聚完成后开始，之后每 1.75–4 秒一颗
     if (!nextMeteorAt) nextMeteorAt = revealStart + 3000;
     if (t >= nextMeteorAt) {
       spawnMeteor();
-      nextMeteorAt = t + 3500 + Math.random() * 4500;
+      nextMeteorAt = t + 1750 + Math.random() * 2250;
     }
 
     // 更新流星：受黑洞（星云中心）引力弯折轨迹；出界或过久（被俘获绕圈）回收
-    const gcx = W / 2;
-    const gcy = H / 2;
+    const gcx = holeX;
+    const gcy = holeY;
     const margin = 140;
     for (let i = meteors.length - 1; i >= 0; i--) {
       const m = meteors[i];
@@ -707,9 +713,9 @@ function initParticleLogo () {
     ctx.clearRect(0, 0, W, H);
     ctx.globalCompositeOperation = "lighter"; // 加色混合：光点重叠即增亮
 
-    /* 整个星云极缓慢地摇摆与呼吸 */
-    const cx = W / 2;
-    const cy = H / 2;
+    /* 整个星云极缓慢地摇摆与呼吸（绕星云自身中心，而非画布中心） */
+    const cx = holeX;
+    const cy = holeY;
     const sway = Math.sin(time * 0.05) * 0.04;
     const breath = 1 + Math.sin(time * 0.08) * 0.014;
     ctx.save();
@@ -1182,7 +1188,7 @@ function initVersion () {
 }
 
 /** 下载卡片底下的「v0.1.1 · 约 158 MB」跟资产走，包变大了不用改文案。 */
-function initDownloadMeta() {
+function initDownloadMeta () {
   document.querySelectorAll(".dl-meta[data-os]").forEach((el) => {
     const os = el.getAttribute("data-os");
     const parts = [];

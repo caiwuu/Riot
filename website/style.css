@@ -380,7 +380,8 @@ main,
   position: absolute;
   inset: 0 0 auto;
   z-index: 0;
-  height: min(860px, 96vh);
+  height: 100vh;
+  height: 100svh;
   overflow: hidden;
   pointer-events: none;
 }
@@ -411,23 +412,21 @@ main,
   z-index: 6;
 }
 
-/* 动画 Logo：粒子重构（canvas 绘制）+ 辉光。
+/* 动画 Logo 的定位锚：粒子云在此容器内成形（画布本体挂在 .hero-sky，铺满首屏）。
    容器只留极少余量（粒子占 88%），避免上下吃掉首屏空间 */
 .hero-logo {
   position: relative;
-  width: clamp(360px, 38vw, 480px);
+  width: clamp(288px, 30.4vw, 384px);
   aspect-ratio: 1;
   margin: 0 auto;
 }
 
-/* 画布远大于 logo 容器：流星从屏幕边缘飞入，长途划过后穿透粒子团 */
+/* 流星画布铺满整个首屏：流星从屏幕边缘飞入横穿全屏，星云只在 logo 区域成形 */
 .hl-canvas {
   position: absolute;
-  left: 50%;
-  top: 50%;
-  width: min(96vw, 1320px);
-  height: min(82vh, 740px);
-  transform: translate(-50%, -50%);
+  inset: 0;
+  width: 100%;
+  height: 100%;
   display: block;
   pointer-events: none;
 }
@@ -1672,7 +1671,7 @@ main,
     padding-top: calc(var(--nav-h) + 10px);
   }
   .hero-logo {
-    width: min(88vw, 340px);
+    width: min(70vw, 272px);
   }
   .hero-shot-wrap {
     margin-top: 60px;
