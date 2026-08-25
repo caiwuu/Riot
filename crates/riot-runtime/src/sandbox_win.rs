@@ -20,10 +20,13 @@
 /// （对称于激活时的 `authorize_writable`）。
 pub(crate) struct WinSandbox {
     token: token::OwnedToken,
-    /// 激活时打了 Low 标签的目录，`Drop` 逐个撤回。
+    /// 激活时打了 Low 标签的目录，`Drop` 逐个撤回。含 [`session_temp`]。
     labeled: Vec<std::path::PathBuf>,
     /// 标签清单的落盘位置，回滚时同步清账。
     ledger_path: std::path::PathBuf,
+    /// 本会话专属的 temp 子目录（`<%TEMP%>/riot-sbx-*`）。spawn 时把
+    /// 进程的 `TMP`/`TEMP` 指到这里，`Drop` 时整个删掉 —— 不碰全局 %TEMP%。
+    session_temp: std::path::PathBuf,
 }
 
 // 令牌句柄是 `*mut c_void`（HANDLE），裸指针不自动 Send/Sync，于是
@@ -39,11 +42,19 @@ const MAX_OUTPUT: usize = 8 * 1024 * 1024;
 
 impl WinSandbox {
     /// 在这枚令牌下起一条命令。语义见 [`spawn::spawn_with_token`]。
+    ///
+    /// 起进程前把 `TMP`/`TEMP` 指到会话专属 temp 子目录 —— 命令写临时
+    /// 文件（编译器中间产物、下载缓存）落在那儿（打了 Low 标签、可写），
+    /// 而不是全局 %TEMP%（没打标签，Low 进程写不进）。build_env_block 按
+    /// 大小写不敏感去重，这两条会覆盖继承来的同名变量。
     pub(crate) async fn run(
         &self,
-        spec: riot_protocol::tool::ProcessSpec,
+        mut spec: riot_protocol::tool::ProcessSpec,
         cancel: tokio_util::sync::CancellationToken,
     ) -> std::io::Result<riot_protocol::tool::ProcessOutput> {
+        let tmp = self.session_temp.to_string_lossy().into_owned();
+        spec.env.push(("TMP".to_owned(), tmp.clone()));
+        spec.env.push(("TEMP".to_owned(), tmp));
         spawn::spawn_with_token((*self.token.0).0 as isize, spec, MAX_OUTPUT, cancel).await
     }
 }
@@ -61,6 +72,8 @@ impl Drop for WinSandbox {
             }
             let _ = ledger.forget(dir);
         }
+        // 会话 temp 是我们建的，整个删掉 —— 里面是本会话命令的临时产物。
+        let _ = std::fs::remove_dir_all(&self.session_temp);
     }
 }
 
@@ -77,14 +90,42 @@ pub(crate) fn activate(
     use crate::sandbox::SandboxPolicy;
     use crate::sandbox_labels::{LabelLedger, authorize_writable};
 
-    let SandboxPolicy::WorkspaceWrite { writable, .. } = policy else {
+    let SandboxPolicy::WorkspaceWrite {
+        writable,
+        allow_network,
+    } = policy
+    else {
         return None; // Off 不该走到这里
     };
 
+    // `[约束]` NoNet 档（allow_network == false）在 Windows V1 诚实降级：
+    // Low IL / MIC 只管文件系统，不隔离网络，硬装成"断网了"就是假隔离。
+    // 断网的现实手段（WFP / 防火墙 / AppContainer）都太重（见 §4）。
+    // 返回 None → 决策链回到逐条询问，慢但不撒谎。
+    if !allow_network {
+        tracing::warn!("WorkspaceWriteNoNet 在 Windows 暂不隔离网络，本轮不激活沙箱（逐条询问）");
+        return None;
+    }
+
+    // 会话专属 temp 子目录：建在全局 %TEMP% 下，但只给**它**打标签，
+    // 不碰全局。spawn 时进程的 TMP/TEMP 指到这里（见 WinSandbox::run）。
+    let session_temp = match make_session_temp() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "建会话 temp 子目录失败，本轮不隔离");
+            return None;
+        }
+    };
+
+    // 要打标签的目录 = 配置里的可写目录 + 会话 temp。
+    let mut dirs = writable.clone();
+    dirs.push(session_temp.clone());
+
     let mut ledger = LabelLedger::load(ledger_path.clone());
-    if let Err(e) = authorize_writable(writable, &label::WinLabeler, &mut ledger, now_ms) {
-        // authorize 内部已回滚它打过的标签。
+    if let Err(e) = authorize_writable(&dirs, &label::WinLabeler, &mut ledger, now_ms) {
+        // authorize 内部已回滚它打过的标签；temp 子目录还没进标签体系，删掉。
         tracing::warn!(error = %e, "沙箱打标签失败，本轮不隔离");
+        let _ = std::fs::remove_dir_all(&session_temp);
         return None;
     }
 
@@ -95,19 +136,35 @@ pub(crate) fn activate(
             tracing::warn!(error = %e, "沙箱建令牌失败，回滚标签、本轮不隔离");
             use crate::sandbox_labels::DirLabeler;
             let labeler = label::WinLabeler;
-            for dir in writable {
+            for dir in &dirs {
                 let _ = labeler.untag(dir);
                 let _ = ledger.forget(dir);
             }
+            let _ = std::fs::remove_dir_all(&session_temp);
             return None;
         }
     };
 
     Some(WinSandbox {
         token,
-        labeled: writable.clone(),
+        labeled: dirs,
         ledger_path,
+        session_temp,
     })
+}
+
+/// 建一个会话专属的 temp 子目录 `<%TEMP%>/riot-sbx-<pid>-<纳秒>`。
+///
+/// 名字带 pid + 纳秒，避免同机多会话/多次激活撞名。建失败（磁盘满、
+/// %TEMP% 不可写）由调用方降级成不隔离。
+fn make_session_temp() -> std::io::Result<std::path::PathBuf> {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!("riot-sbx-{}-{}", std::process::id(), nonce));
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
 }
 
 // 下面是 M1 的实质产物：受限 Low IL 令牌。M2 的 spawn 会用到它，

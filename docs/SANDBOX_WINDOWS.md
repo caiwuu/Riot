@@ -117,8 +117,8 @@ spawn 代码的注释。
 | SandboxMode | macOS | Windows V1 |
 |---|---|---|
 | `Off` | 不激活 | 不激活 |
-| `WorkspaceWrite` | seatbelt：写白名单 + 联网 | Low IL：写白名单 + 联网（MIC 不管网络，联网天然放开） |
-| `WorkspaceWriteNoNet` | seatbelt + `(deny network*)` | **不激活**（activate None → 逐条询问） |
+| `WorkspaceWrite` | seatbelt：写白名单 + 联网 | Low IL：写白名单 + 会话 temp 子目录 + 联网（MIC 不管网络，联网天然放开）✅ |
+| `WorkspaceWriteNoNet` | seatbelt + `(deny network*)` | **不激活**（activate None → 逐条询问）✅ |
 
 `[取舍]` `NoNet` 档在 Windows V1 诚实降级，不做假隔离。断网的现实选项
 都太重：WFP 过滤要驱动或管理员、防火墙规则污染全局配置、AppContainer
@@ -183,9 +183,17 @@ CI 驱动开发（mac 上写、CI 上验）。必备用例，全部对照 macOS 
    - `SandboxedRunner::run` 的 Windows 分支用 `WinSandbox::run`（令牌
      spawn），macOS 仍垫 argv。
    - session.rs 装配传入 `<config>/sandbox-labels.json` 作 ledger 路径。
-   - ⏳ 仍缺：temp 子目录重写（§2）、`SandboxedRunner` 经 activate 的
-     集成测试、config 的 `WorkspaceWriteNoNet` 在 Windows 的诚实降级
-     文案（§4）。这些是收尾，不再有 FFI 运行时未知。
+   - ✅ 收尾（已落地）：
+     - temp 子目录重写（§2）：Windows 的 `workspace_write` 不再放全局
+       %TEMP%；`activate` 现建 `<%TEMP%>/riot-sbx-<pid>-<纳秒>`、打标签、
+       `WinSandbox::run` 把进程 `TMP`/`TEMP` 指过去、`Drop` 整个删掉。
+     - `WorkspaceWriteNoNet` 诚实降级：`allow_network == false` 时
+       Windows `activate` 直接返回 None（Low IL 不隔离网络，见 §4）。
+     - 集成测试 `windows_经装配路径的沙箱边界`：走完整
+       activate → SandboxedRunner → run，验边界（区别于 sandbox_win 的
+       e2e 手动串底层）。sandbox_win 的生产代码本地用隔离 crate 的
+       windows clippy 验过，集成测试的运行时靠 CI host。
+   - M3 全部完成。Windows 沙箱从设计到接线闭环。
 3. **M3 接线**：config 档位映射（含 NoNet 降级文案），用例 6 过，
    双平台 CI 全绿后发布。
 

@@ -70,6 +70,12 @@ impl SandboxPolicy {
     /// 用真实的失败换理论上的攻击面，这一步值得，但要写明白。
     pub fn workspace_write(workspace: &Path) -> Self {
         let mut writable = vec![workspace.to_path_buf()];
+        // temp 的处理平台不同：macOS/Unix 直接放开全局 temp（seatbelt 的
+        // 授权只对被包进程生效，不影响别人）；Windows **不**放全局 %TEMP%
+        // —— 那里的 Low 标签是对象属性，会让全机所有 Low 进程都能写它
+        // （§2）。Windows 的会话专属 temp 子目录由 sandbox_win::activate
+        // 现建现打标签、退出即删。
+        #[cfg(not(windows))]
         writable.extend(temp_dirs());
         if let Some(home) = home_dir() {
             for cache in [
@@ -206,6 +212,9 @@ impl ProcessRunner for SandboxedRunner {
 /// 临时目录。macOS 的 `TMPDIR` 是 `/var/folders/...`，而它本身是
 /// `/private/var/folders/...` 的符号链接 —— seatbelt 按真实路径匹配，
 /// 两个都要给，否则写临时文件会莫名其妙被拒。
+///
+/// 只非 Windows 用：Windows 不放全局 temp（见 workspace_write）。
+#[cfg(not(windows))]
 fn temp_dirs() -> Vec<PathBuf> {
     let mut out = vec![PathBuf::from("/tmp"), PathBuf::from("/private/tmp")];
     let tmp = std::env::temp_dir();
@@ -318,5 +327,72 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&work);
         let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// Windows：走**完整生产装配**（activate → SandboxedRunner → run）
+    /// 验证边界。sandbox_win 的 e2e 是手动串底层机制；这条多覆盖 activate
+    /// 的装配（建会话 temp、NoNet 检查、SandboxedRunner 的令牌分派、
+    /// TMP 注入、Drop 回滚）—— 也就是 session.rs 真正会走的那条路。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_经装配路径的沙箱边界() {
+        use crate::proc::SystemProcessRunner;
+
+        let base = std::env::temp_dir().join(format!("riot-sbx-integ-{}", std::process::id()));
+        let work = base.join("work");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&work).expect("建工作区");
+        std::fs::create_dir_all(&outside).expect("建外部目录");
+
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable: vec![work.clone()],
+            allow_network: true,
+        };
+        let setup = SandboxSetup {
+            ledger_path: base.join("labels.json"),
+            now_ms: 0,
+        };
+        let Some(active) = policy.activate(setup) else {
+            panic!("Windows 上 WorkspaceWrite 该激活成功");
+        };
+        let runner = SandboxedRunner::new(std::sync::Arc::new(SystemProcessRunner::default()), active);
+
+        let run = |target: std::path::PathBuf| {
+            let r = &runner;
+            let cwd = base.clone();
+            async move {
+                r.run(
+                    ProcessSpec {
+                        program: "cmd".to_owned(),
+                        args: vec![
+                            "/c".to_owned(),
+                            "echo".to_owned(),
+                            "hi".to_owned(),
+                            ">".to_owned(),
+                            target.display().to_string(),
+                        ],
+                        cwd,
+                        env: Vec::new(),
+                        timeout_ms: Some(10_000),
+                    },
+                    CancellationToken::new(),
+                )
+                .await
+                .expect("跑得起来")
+            }
+        };
+
+        let inside = work.join("in.txt");
+        let ok = run(inside.clone()).await;
+        assert_eq!(ok.exit_code, 0, "工作区内该写得进：{}", ok.stderr);
+        assert!(inside.exists());
+
+        let out_file = outside.join("out.txt");
+        let denied = run(out_file.clone()).await;
+        assert_ne!(denied.exit_code, 0, "工作区外必须写不进");
+        assert!(!out_file.exists(), "文件不该被创建");
+
+        drop(runner); // 触发 Drop：回滚标签 + 删会话 temp
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
