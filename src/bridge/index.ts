@@ -982,6 +982,11 @@ export async function openInDefaultApp(path: string): Promise<void> {
 
 /** 用系统默认应用打开路径。失败会抛，调用方自己决定怎么告诉用户。 */
 export async function openPath(path: string): Promise<void> {
+  // opener 插件是分离式启动，目标不存在它也报成功。先自己查一遍，
+  // 让"文件不存在"成为看得见的失败，而不是点了没反应。
+  if (!(await invoke<boolean>("path_exists", { path }))) {
+    throw new Error(`文件不存在：${path}`);
+  }
   const { openPath: open } = await import("@tauri-apps/plugin-opener");
   await open(path);
 }

@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 
@@ -121,6 +121,7 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkCodeRefs]}
         rehypePlugins={[[rehypeHighlight, { ignoreMissing: true, detect: false }]]}
+        urlTransform={keepFileUrls}
         components={{
           pre: CodeBlock,
           a: MdLink,
@@ -131,6 +132,19 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
     </div>
   );
 });
+
+/**
+ * 放行 `file:` 链接，其余交给默认的白名单（http/https/mailto 等）。
+ *
+ * react-markdown 的默认白名单会把 `file://` 的 href 清成空字符串 ——
+ * 模型写的真实路径就这么丢了，[`MdLink`] 只能退回"拿链接文字当相对
+ * 路径猜"，猜错就是无声无息。链接的打开全部由 [`MdLink`] 接管
+ * （preventDefault），file: 不会真的交给 webview 导航，放行它不会
+ * 打开 javascript: 那类注入面。
+ */
+function keepFileUrls(url: string): string {
+  return /^file:/i.test(url) ? url : defaultUrlTransform(url);
+}
 
 /**
  * 视口外的正文先按纯文本占位，进视野再 parse。
@@ -213,9 +227,16 @@ function MdLink({
   };
 
   return (
-    <a href={target.href} title={err ? "打不开" : target.title} onClick={onClick}>
-      {children}
-    </a>
+    <>
+      <a href={target.href} title={err ? "打不开" : target.title} onClick={onClick}>
+        {children}
+      </a>
+      {err ? (
+        <span className="md-link-err" role="status">
+          打不开
+        </span>
+      ) : null}
+    </>
   );
 }
 
@@ -254,9 +275,21 @@ function resolveMdLink(href: string | undefined, label: string, root: string): M
     return { kind: "url", value: raw, href: raw, title: raw };
   }
 
-  const pathish = raw || label.trim();
+  // markdown 渲染成 href 时地址被 percent-encode 过（中文、空格都成了
+  // %XX）。file:// 分支的 URL 解析自带解码；这条纯路径分支得自己解，
+  // 否则中文文件名拼出来的路径永远不存在。链接文字是明文，不用解。
+  const pathish = raw ? tryDecodePath(raw) : label.trim();
   if (!pathish || pathish.startsWith("#")) return null;
   return fileTarget(looksAbsPath(pathish) ? pathish : joinRoot(root, pathish));
+}
+
+/** 文件名里真有孤立 `%` 时 decodeURIComponent 会抛 —— 那就按原样用。 */
+function tryDecodePath(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
 }
 
 function fileTarget(path: string): MdLinkTarget {

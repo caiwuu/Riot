@@ -4984,6 +4984,14 @@ pre {
   text-decoration: underline;
 }
 
+/* 链接打开失败的行内提示。只改 title 的话得恰好悬停着才看得见，
+   体感就是"点了没反应"。 */
+.md-link-err {
+  margin-left: 5px;
+  font-size: 11px;
+  color: var(--danger);
+}
+
 .md img {
   max-width: 100%;
 }

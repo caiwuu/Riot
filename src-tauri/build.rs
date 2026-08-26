@@ -21,6 +21,7 @@ const COMMANDS: &[&str] = &[
     "add_project",
     "create_session",
     "probe_dirs",
+    "path_exists",
     "list_sessions",
     "get_history",
     "delete_session",

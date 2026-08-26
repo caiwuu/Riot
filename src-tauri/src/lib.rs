@@ -793,6 +793,15 @@ fn probe_dirs(paths: Vec<String>) -> Vec<String> {
     fence::missing_dirs(paths)
 }
 
+/// 这个路径在磁盘上存在吗。打开本地文件前的前置检查。
+///
+/// opener 插件是分离式启动（spawn 完不等结果），目标不存在也报成功，
+/// 用户看到的就是"点了没反应"。先问一句存在与否，界面才有机会说"打不开"。
+#[tauri::command]
+fn path_exists(path: String) -> bool {
+    std::path::Path::new(&path).exists()
+}
+
 /// 所有活着的会话。前端启动或刷新后用它对齐侧边栏。
 #[tauri::command]
 async fn list_sessions(state: tauri::State<'_, AppState>) -> HostResult<Vec<state::SessionInfo>> {
@@ -986,6 +995,7 @@ pub fn run() {
             add_project,
             create_session,
             probe_dirs,
+            path_exists,
             list_sessions,
             get_history,
             delete_session,
