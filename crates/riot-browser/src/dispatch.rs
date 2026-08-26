@@ -101,16 +101,91 @@ pub fn open_tab(tab: TabId) {
     };
     let url = CefString::from(riot_protocol::browser::BLANK_PAGE);
 
+    let fps = frame_rate();
+    eprintln!("riot-browser: 标签页 {tab} 合成器帧率上限 {fps} fps");
+    let settings = BrowserSettings {
+        windowless_frame_rate: fps,
+        ..Default::default()
+    };
+
     // 这一步只是发起创建，`on_after_created` 稍后才来 —— 那时候才登记进表、
     // 才发 TabOpened。主应用等的是那一条。
     browser_host_create_browser(
         Some(&window_info),
         Some(&mut client),
         Some(&url),
-        Some(&BrowserSettings::default()),
+        Some(&settings),
         None,
         None,
     );
+}
+
+/// 合成器出帧的上限（fps）:跟显示器里最快的那块走，探测不到按 60。
+///
+/// `[约束]` 不能留 `BrowserSettings` 的默认值 0（= CEF 默认的 30）。
+/// 离屏渲染的合成器按这个节奏出帧，30 意味着滚动和动画天生一秒 30 格 ——
+/// screencast 是从合成器拿帧的，传输层再快画面也只能一格一格蹦，摸起来
+/// 就是"滑动不跟手"。
+///
+/// 每次开页现查，不缓存:外接屏插拔之后新开的页自动拿到新值。
+///
+/// 钳到 30..=240:240 是 CEF 认的上限;下限挡的是 24Hz 投影仪这类
+/// 特殊显示器 —— 面板滚动不该被它拖回一格一格的年代。
+fn frame_rate() -> i32 {
+    display_refresh_rate().unwrap_or(60).clamp(30, 240)
+}
+
+/// 在线显示器里最高的当前刷新率（Hz）。探测不到回 `None`。
+///
+/// `[取舍]` 取所有显示器的最大值，而不是"面板此刻在哪块屏"。窗口在哪
+/// 只有主应用知道，而且随时会被拖走;上限宁高勿低 —— 合成器只在内容
+/// 变化时才真的出帧，上限高于所在屏的代价是滚动时多编几帧 JPEG，
+/// 低了则是 120Hz 屏上永远只有一半的格数。
+#[cfg(target_os = "macos")]
+fn display_refresh_rate() -> Option<i32> {
+    // maximumFramesPerSecond 对可变刷新率的屏（ProMotion）报的是上限
+    // （120），固定刷新率的屏报额定值 —— 正是"这块屏最多能画多快"。
+    //
+    // AppKit 的类只能在主线程碰;这里必然在主线程（CEF 的 UI 线程就是
+    // 进程主线程，见 open_tab 里的 debug_assert），拿不到 marker 说明
+    // 前提坏了，回 None 走 60 的兜底而不是 panic。
+    let mtm = objc2::MainThreadMarker::new()?;
+    objc2_app_kit::NSScreen::screens(mtm)
+        .iter()
+        .map(|s| s.maximumFramesPerSecond() as i32)
+        .filter(|&hz| hz > 0)
+        .max()
+}
+
+/// Windows:只看主屏。
+///
+/// 枚举所有屏要过一遍 EnumDisplayDevices + 220 字节的 DEVMODEW 手写
+/// FFI，为"副屏刷新率比主屏高"这种少数派配置不值得 —— 探测偏低的
+/// 代价只是滚动的格数粗一点，不是坏。
+#[cfg(windows)]
+fn display_refresh_rate() -> Option<i32> {
+    use std::os::raw::c_void;
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetDC(hwnd: *mut c_void) -> *mut c_void;
+        fn ReleaseDC(hwnd: *mut c_void, hdc: *mut c_void) -> i32;
+    }
+    #[link(name = "gdi32")]
+    unsafe extern "system" {
+        fn GetDeviceCaps(hdc: *mut c_void, index: i32) -> i32;
+    }
+    /// GetDeviceCaps 的垂直刷新率查询项。
+    const VREFRESH: i32 = 116;
+    unsafe {
+        let dc = GetDC(std::ptr::null_mut());
+        if dc.is_null() {
+            return None;
+        }
+        let hz = GetDeviceCaps(dc, VREFRESH);
+        ReleaseDC(std::ptr::null_mut(), dc);
+        // 0 和 1 都是"硬件默认"的意思，等于没探测到。
+        (hz > 1).then_some(hz)
+    }
 }
 
 /// 浏览器创建完成。登记句柄、挂 CDP 观察者，然后告诉主应用它能用了。

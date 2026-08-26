@@ -508,20 +508,36 @@ async fn set_api_key(
 /// `[约束]` 必须把状态一起回。不回的话前端只能等下一次定时同步 —— 而浏览器
 /// 起来本身就要一秒，再叠一次轮询间隔，用户看到的是"开了面板、空着两秒、
 /// 才冒出一个标签页"。
+///
+/// `[取舍]` 帧走**二进制**通道，不走 JSON。格式是 8 字节小端头（宽、高，
+/// 各 u32，CSS 像素）+ JPEG 字节，前端按这个拆。JSON 的路径每帧要把几百 KB
+/// 的 base64 序列化一遍、在 JS 主线程上 `JSON.parse` 一遍 —— 界面主线程
+/// 同时还要处理输入和渲染，滚动时正是它们在互相挤兑。Raw 通道在 Tauri
+/// 里走 fetch 取回，JS 拿到的直接是 ArrayBuffer，两次解析都省掉。
 #[tauri::command]
 async fn browser_open(
     state: tauri::State<'_, AppState>,
     session_id: String,
-    on_frame: Channel<browser::access::Frame>,
+    on_frame: Channel<tauri::ipc::InvokeResponseBody>,
 ) -> HostResult<browser::access::PanelState> {
     let b = state.panel_browser(&session_id).await?;
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<browser::access::Frame>();
 
     // 帧从 tokio 通道转到 Tauri 的 Channel。中间这一跳是必要的:
     // Channel 不是 Clone 到处传的东西，而帧的产生方在另一个任务里。
     tokio::spawn(async move {
-        while let Some(f) = rx.recv().await {
-            if on_frame.send(f).is_err() {
+        while let Some(mut f) = rx.recv().await {
+            // 只推最新的一帧。通道是无界的，前端一旦消化得慢，积压的
+            // 每一帧都还要过一遍 webview —— 追着播放旧帧只会让画面越来
+            // 越落后于手上的操作。滚动要的是"跟手"，不是"一帧不落"。
+            while let Ok(newer) = rx.try_recv() {
+                f = newer;
+            }
+            let mut buf = Vec::with_capacity(8 + f.data.len());
+            buf.extend_from_slice(&f.width.to_le_bytes());
+            buf.extend_from_slice(&f.height.to_le_bytes());
+            buf.extend_from_slice(&f.data);
+            if on_frame.send(tauri::ipc::InvokeResponseBody::Raw(buf)).is_err() {
                 break; // 前端不听了
             }
         }

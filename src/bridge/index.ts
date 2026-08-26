@@ -715,9 +715,10 @@ export function removeProject(root: string): Promise<string[]> {
 
 /* ── 内置浏览器面板 ─────────────────────────── */
 
-/** 一帧画面。`data` 是 base64 的 JPEG，直接能当 img 的 src。 */
+/** 一帧画面。`data` 是 JPEG 的原始字节;宽高是 CSS 像素（坐标换算用它）。 */
 export interface BrowserFrame {
-  data: string;
+  /** 标注 ArrayBuffer 后端:默认的 ArrayBufferLike 进不了 Blob（TS 5.7+）。 */
+  data: Uint8Array<ArrayBuffer>;
   width: number;
   height: number;
 }
@@ -783,9 +784,18 @@ export function openBrowser(
   onReady?: (s: PanelState) => void,
 ): Subscription {
   let active = true;
-  const channel = new Channel<BrowserFrame>();
-  channel.onmessage = (f) => {
-    if (active) onFrame(f);
+  // 帧是二进制:8 字节小端头（宽、高，各 u32）+ JPEG 字节，和宿主的
+  // browser_open 对齐。不走 JSON —— 每帧几百 KB 的 base64 要在主线程上
+  // JSON.parse，正是滚动时和输入事件抢时间的那一刀。
+  const channel = new Channel<ArrayBuffer>();
+  channel.onmessage = (buf) => {
+    if (!active) return;
+    const head = new DataView(buf);
+    onFrame({
+      width: head.getUint32(0, true),
+      height: head.getUint32(4, true),
+      data: new Uint8Array(buf, 8),
+    });
   };
   const ready = invoke<PanelState>("browser_open", { sessionId, onFrame: channel }).then(
     (s) => {

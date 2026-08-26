@@ -1129,8 +1129,10 @@ async fn 画面能持续推送而不是只出一帧() {
     }
 
     assert!(got[0].width > 0 && got[0].height > 0, "帧要带尺寸");
+    // Frame.data 是解好的原始字节（base64 在宿主侧就解掉），
+    // 所以这里验的是 JPEG 的魔数 FF D8 FF，不是 base64 的 "/9j/"。
     assert!(
-        got.iter().all(|f| f.data.starts_with("/9j/")),
+        got.iter().all(|f| f.data.starts_with(&[0xFF, 0xD8, 0xFF])),
         "每帧都该是 JPEG"
     );
 
@@ -1272,10 +1274,7 @@ async fn screencast_进行中放大面板画面要跟上() {
         if (f.width, f.height) == (1100, 900) {
             // 元数据跟上还不够:JPEG 的真实像素也要是新表面的大小。
             // 表面没放大的话，这里解出来还是旧的 1200x1000。
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(&f.data)
-                .expect("解 base64");
-            let real = jpeg_size(&bytes);
+            let real = jpeg_size(&f.data);
             assert_eq!(
                 real,
                 (2200, 1800),
@@ -1404,10 +1403,7 @@ async fn 帧按屏幕的像素密度出() {
         let Ok(Some(f)) = tokio::time::timeout(left, rx.recv()).await else {
             panic!("等帧失败，收到过：{seen:?}");
         };
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(&f.data)
-            .expect("帧是 base64");
-        let real = jpeg_size(&bytes);
+        let real = jpeg_size(&f.data);
         if (f.width, f.height) == (W, H) && real == ((W * SCALE) as u16, (H * SCALE) as u16) {
             break;
         }
@@ -2119,7 +2115,10 @@ async fn wait_frames(
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(!left.is_zero(), "等 {what} 的帧超时，只收到 {got} 帧");
         match tokio::time::timeout(left, rx.recv()).await {
-            Ok(Some(f)) => assert!(f.data.starts_with("/9j/"), "{what} 的帧该是 JPEG"),
+            Ok(Some(f)) => assert!(
+                f.data.starts_with(&[0xFF, 0xD8, 0xFF]),
+                "{what} 的帧该是 JPEG"
+            ),
             Ok(None) => panic!("{what}：帧通道断了，只收到 {got} 帧"),
             Err(_) => panic!("等 {what} 的帧超时，只收到 {got} 帧"),
         }

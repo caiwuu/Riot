@@ -38,7 +38,26 @@ export function BrowserPanel({
   sessionId: string;
   onClose: () => void;
 }) {
-  const [frame, setFrame] = useState<BrowserFrame | null>(null);
+  /**
+   * 收到过画面没有。只在第一帧翻一次 —— 帧本身不进 React 状态。
+   *
+   * `[约束]` 不能每帧 setState。一帧就是一次整棵子树的重渲染，15~30fps
+   * 下主线程全花在 React 提交上，输入事件被挤在后面，表现就是"看着卡、
+   * 点着也卡"。画面走 canvas 直绘（见 paint），React 只管空状态的切换。
+   */
+  const [hasFrame, setHasFrame] = useState(false);
+  /** 画布。帧解码完直接画上来，不经过 React。 */
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  /** 最近一帧的 CSS 尺寸。toPage 的坐标换算靠它。 */
+  const frameSize = useRef<{ w: number; h: number } | null>(null);
+  /** 正在解码一帧。期间到的新帧放 nextFrame，解完立刻画它。 */
+  const painting = useRef(false);
+  /**
+   * 等着画的下一帧。永远只留最新的一帧 —— 解码追不上推流时，追着播
+   * 旧帧只会让画面越来越落后于手上的操作。丢帧丢的是中间过程，
+   * 最终画面永远是最新的。
+   */
+  const nextFrame = useRef<BrowserFrame | null>(null);
   const [panel, setPanel] = useState<PanelState>(EMPTY_PANEL);
   const [address, setAddress] = useState("");
   const [busy, setBusy] = useState(false);
@@ -92,10 +111,60 @@ export function BrowserPanel({
     if (document.activeElement !== addressRef.current) setAddress(url);
   }, []);
 
+  /**
+   * 把一帧画到 canvas 上。
+   *
+   * `createImageBitmap` 的解码是异步的、不占布局和绘制的档期 ——
+   * 这正是不用 `<img src="data:...">` 的原因:data URL 每帧都要在主线程
+   * 上解析几百 KB 的字符串再同步解码 JPEG，滚动时一卡一卡的就是它。
+   *
+   * `[约束]` 一次只解一帧。解码期间来的新帧放进 nextFrame（只留最新），
+   * 解完接着画 —— 不排队。排队的话，解码一旦慢于推流，队伍只会越来越长，
+   * 画面对操作的延迟跟着一路涨。
+   */
+  const paint = useCallback((f: BrowserFrame) => {
+    painting.current = true;
+    createImageBitmap(new Blob([f.data], { type: "image/jpeg" }))
+      .then((bmp) => {
+        const canvas = canvasRef.current;
+        if (canvas) {
+          // 改尺寸会清空画布，所以只在真的变了的时候改。
+          if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
+            canvas.width = bmp.width;
+            canvas.height = bmp.height;
+          }
+          canvas.getContext("2d")?.drawImage(bmp, 0, 0);
+          frameSize.current = { w: f.width, h: f.height };
+        }
+        bmp.close();
+      })
+      .catch(() => {
+        // 坏一帧就丢一帧。下一帧马上就到，报错没人能做什么。
+      })
+      .finally(() => {
+        painting.current = false;
+        const next = nextFrame.current;
+        nextFrame.current = null;
+        if (next) paint(next);
+      });
+  }, []);
+
+  const onFrame = useCallback(
+    (f: BrowserFrame) => {
+      setHasFrame(true); // 同值 setState 会被 React 跳过，不会每帧重渲染
+      if (painting.current) {
+        nextFrame.current = f;
+      } else {
+        paint(f);
+      }
+    },
+    [paint],
+  );
+
   useEffect(() => {
     // 第三个参数让标签栏在浏览器就绪的那一刻就填上，不用等下一次定时同步 ——
     // 浏览器起来本身就要一秒，再叠一个轮询间隔就是两秒的空白。
-    const sub = openBrowser(sessionId, setFrame, apply);
+    const sub = openBrowser(sessionId, onFrame, apply);
     return () => {
       sub.unsubscribe();
       // 只停宿主的 JPEG 编码 —— 没人看的时候继续推是白烧 CPU。
@@ -103,7 +172,7 @@ export function BrowserPanel({
       // 改动再切回来，页面还是原样。
       void closeBrowser(sessionId);
     };
-  }, [sessionId, apply]);
+  }, [sessionId, apply, onFrame]);
 
   /**
    * 只换一页的信息。前进后退回来的就是这一条 —— 它作用在活动页上。
@@ -242,28 +311,81 @@ export function BrowserPanel({
    * 桌面比例、面板是竖条，contain 会居中留边 —— 按元素框算的话，留边
    * 越宽点击偏得越多。
    */
-  const toPage = useCallback(
-    (e: React.MouseEvent): { x: number; y: number } | null => {
-      const img = viewRef.current?.querySelector("img");
-      if (!img || !frame || !frame.width || !frame.height) return null;
-      const r = img.getBoundingClientRect();
-      if (r.width === 0 || r.height === 0) return null;
-      const s = Math.min(r.width / frame.width, r.height / frame.height);
-      const left = r.left + (r.width - frame.width * s) / 2;
-      const top = r.top + (r.height - frame.height * s) / 2;
-      const x = (e.clientX - left) / s;
-      const y = (e.clientY - top) / s;
-      // 点在留边上不算点在页面里。硬夹回页面范围的话，点黑边会命中
-      // 页面边缘的元素 —— 用户明明什么都没点到，页面却有反应。
-      if (x < 0 || y < 0 || x > frame.width || y > frame.height) return null;
-      return { x, y };
-    },
-    [frame],
-  );
+  const toPage = useCallback((e: React.MouseEvent): { x: number; y: number } | null => {
+    const canvas = canvasRef.current;
+    const size = frameSize.current;
+    if (!canvas || !size || !size.w || !size.h) return null;
+    const r = canvas.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return null;
+    // 比例用 CSS 尺寸算。canvas 的位图是物理像素（CSS × 密度），
+    // 两者同比，而页面坐标要的是 CSS 像素。
+    const s = Math.min(r.width / size.w, r.height / size.h);
+    const left = r.left + (r.width - size.w * s) / 2;
+    const top = r.top + (r.height - size.h * s) / 2;
+    const x = (e.clientX - left) / s;
+    const y = (e.clientY - top) / s;
+    // 点在留边上不算点在页面里。硬夹回页面范围的话，点黑边会命中
+    // 页面边缘的元素 —— 用户明明什么都没点到，页面却有反应。
+    if (x < 0 || y < 0 || x > size.w || y > size.h) return null;
+    return { x, y };
+  }, []);
 
   const send = useCallback(
     (input: BrowserInput) => void browserInput(sessionId, input).catch(() => {}),
     [sessionId],
+  );
+
+  /**
+   * 攒着还没发的移动/滚轮。
+   *
+   * `[约束]` 这两类不能逐事件发。触控板一秒出上百个事件，每个都是一次
+   * IPC 往返，和帧传输挤同一条主线程 —— 滚得越快画面越卡，正好和用户的
+   * 预期相反。节流的形状是"起手立发、帧内合并"（见 scheduleFlush）:
+   * 滚轮增量累加、位置取最新，页面收到的滚动总量一点不少。
+   * 按下/抬起/按键不合并 —— 它们是离散动作，丢一个语义就变了。
+   */
+  const pending = useRef<{
+    move?: { x: number; y: number };
+    scroll?: { x: number; y: number; deltaX: number; deltaY: number };
+  }>({});
+  const flushTimer = useRef<number | undefined>(undefined);
+
+  /**
+   * 把攒着的立刻发出去。
+   *
+   * `[约束]` 按下/抬起之前必须调它。页面看到的顺序得是"移到那儿、再按下"
+   * —— 攒着的移动排在按下后面的话，拖拽的起点就偏了。
+   */
+  const flushInputs = useCallback(() => {
+    if (flushTimer.current !== undefined) {
+      cancelAnimationFrame(flushTimer.current);
+      flushTimer.current = undefined;
+    }
+    const p = pending.current;
+    pending.current = {};
+    if (p.move) send({ kind: "move", ...p.move });
+    if (p.scroll) send({ kind: "scroll", ...p.scroll });
+  }, [send]);
+
+  const scheduleFlush = useCallback(() => {
+    // 帧内的后续事件只累积，等尾巴上的 rAF 一起走。
+    if (flushTimer.current !== undefined) return;
+    // 一段手势的**第一个**事件立刻发,不等 rAF —— 攒到下一帧平白多
+    // 0~16ms,而"跟手"恰恰取决于手指刚动那一下画面多快响应。代价是
+    // 持续滚动时每帧最多两次 IPC(头一次+尾一次),量级无碍。
+    flushInputs();
+    flushTimer.current = requestAnimationFrame(() => {
+      flushTimer.current = undefined;
+      flushInputs();
+    });
+  }, [flushInputs]);
+
+  // 卸载时把没发完的丢掉 —— 面板都没了，页面不需要最后那半下滚动。
+  useEffect(
+    () => () => {
+      if (flushTimer.current !== undefined) cancelAnimationFrame(flushTimer.current);
+    },
+    [],
   );
 
   const go = async () => {
@@ -302,6 +424,8 @@ export function BrowserPanel({
   };
 
   const active = panel.tabs.find((t) => t.id === panel.active);
+  /** 画面该不该露出来。没画面、或停在空白页（且不在导航中）时给空状态。 */
+  const showFrame = hasFrame && (Boolean(active?.url) || busy);
   /**
    * 浏览器还在起。
    *
@@ -488,6 +612,7 @@ export function BrowserPanel({
           // 页面里选字、拖滑块、双击选词、三击选段全靠这条真实的按下序列。
           const p = toPage(e);
           if (p) {
+            flushInputs(); // 攒着的移动要排在按下前面，拖拽起点才不偏
             send({
               kind: "down",
               ...p,
@@ -503,6 +628,7 @@ export function BrowserPanel({
         onMouseUp={(e) => {
           const p = toPage(e);
           if (p) {
+            flushInputs(); // 拖拽的最后一段移动要先落地，抬起的位置才对
             send({
               kind: "up",
               ...p,
@@ -518,13 +644,26 @@ export function BrowserPanel({
         }}
         onMouseMove={(e) => {
           const p = toPage(e);
-          if (p) send({ kind: "move", ...p });
+          if (p) {
+            pending.current.move = p; // 只留最新位置，中间的轨迹页面不需要
+            scheduleFlush();
+          }
         }}
         onWheel={(e) => {
           // 两个轴原样转发，不自己判断方向。macOS 上按住 shift 滚轮时
           // 系统已经把量放进了 deltaX，这里再换一次就换回去了。
           const p = toPage(e as unknown as React.MouseEvent);
-          if (p) send({ kind: "scroll", ...p, deltaX: e.deltaX, deltaY: e.deltaY });
+          if (p) {
+            const prev = pending.current.scroll;
+            pending.current.scroll = {
+              x: p.x,
+              y: p.y,
+              // 增量累加 —— 合并事件不能吞滚动量，只能少发几次。
+              deltaX: (prev?.deltaX ?? 0) + e.deltaX,
+              deltaY: (prev?.deltaY ?? 0) + e.deltaY,
+            };
+            scheduleFlush();
+          }
         }}
       >
         {/*
@@ -586,6 +725,17 @@ export function BrowserPanel({
         />
 
         {/*
+         * 画面画在这块 canvas 上（见 paint 的说明）。
+         *
+         * `[约束]` canvas 要一直挂着，藏是用 visibility 藏。卸掉再挂回来
+         * 画布是空的，而静止页面不会再推新帧 —— 空白要一直留到用户碰一下
+         * 页面为止。留着的话，最后一帧还在画布里，切回来立刻就能看。
+         */}
+        <canvas
+          ref={canvasRef}
+          style={{ visibility: showFrame ? "visible" : "hidden" }}
+        />
+        {/*
          * 空标签页给一句人话，而不是把空白页的画面摆上来。
          *
          * 空白页渲染出来是一整片纯色 —— 和"画面没出来"、"页面白屏"长得
@@ -595,15 +745,9 @@ export function BrowserPanel({
          * 更新（最多一秒）。不看这个标志的话，输完地址回车会先看到一秒
          * "开始浏览"，像是没接收到。
          */}
-        {frame && (active?.url || busy) ? (
-          <img
-            src={`data:image/jpeg;base64,${frame.data}`}
-            alt=""
-            draggable={false}
-          />
-        ) : (
+        {showFrame ? null : (
           <div className="browser-empty">
-            {frame ? (
+            {hasFrame ? (
               <>
                 <GlobeIcon size={30} />
                 <p className="browser-empty-title">开始浏览</p>

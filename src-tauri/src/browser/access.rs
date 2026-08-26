@@ -41,11 +41,15 @@ const TAB_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 const POPUP_TAB_LIMIT: usize = 24;
 
 /// 一帧画面。
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+///
+/// `data` 是 JPEG 的**原始字节**。CDP 给的是 base64，在这一层就解掉 ——
+/// Rust 里解一帧是微秒级；留给前端的话，几百 KB 的字符串要以 JSON 穿过
+/// IPC、在 JS 主线程上 parse、再交给 `data:` URL 同步解码，每一步都压在
+/// 那条同时要处理输入事件的线程上，帧率一高面板就卡。二进制的打包格式
+/// 见 `browser_open`。
+#[derive(Debug, Clone)]
 pub struct Frame {
-    /// base64 的 JPEG。直接能塞进 `<img src="data:image/jpeg;base64,...">`。
-    pub data: String,
+    pub data: Vec<u8>,
     pub width: u32,
     pub height: u32,
 }
@@ -1994,9 +1998,15 @@ async fn handle_cdp_event(
     let Some(data) = params["data"].as_str() else {
         return;
     };
+    // base64 在这儿解成字节，见 [`Frame`] 的说明。解不开就丢这一帧 ——
+    // 坏一帧的代价是画面晚 30ms 更新，报错反而没人能处理。
+    use base64::Engine as _;
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
+        return;
+    };
     let meta = &params["metadata"];
     let frame = Frame {
-        data: data.to_owned(),
+        data: bytes,
         width: meta["deviceWidth"].as_f64().unwrap_or_default() as u32,
         height: meta["deviceHeight"].as_f64().unwrap_or_default() as u32,
     };

@@ -1417,12 +1417,12 @@ pre {
   font-size: 13px;
 }
 
-.browser-view img {
+.browser-view canvas {
   /* `[约束]` 必须绝对定位，让帧的原始尺寸彻底退出布局计算。
 
      帧不总是和面板一样大:模型截整页图时，渲染表面会被临时拉到整页高
      （见宿主 ops::screenshot），期间 screencast 推过来的是几千像素高的
-     大帧。img 留在布局流里的话，它的固有尺寸会把 .browser-view 撑高 ——
+     大帧。canvas 留在布局流里的话，它的固有尺寸会把 .browser-view 撑高 ——
      而面板的尺寸同步正是靠 ResizeObserver 量这个元素:量到被撑爆的
      高度，就把它当"面板的新尺寸"发给浏览器，视口于是真的变成那么高，
      下一帧更大，正反馈一旦闭合就再也回不来。表现是画面等比缩小、
@@ -1435,7 +1435,8 @@ pre {
   width: 100%;
   height: 100%;
   /* 等比缩放。拉伸会让模型看到的和用户看到的比例不一致，
-     而这个面板存在的前提就是"两边看的是同一个东西"。 */
+     而这个面板存在的前提就是"两边看的是同一个东西"。
+     canvas 是替换元素，object-fit 对它和对 img 一样有效。 */
   object-fit: contain;
   display: block;
   user-select: none;

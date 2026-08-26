@@ -40,6 +40,8 @@ objc2-app-kit = { version = "0.3", features = [
     "NSApplication",
     "NSEvent",
     "NSResponder",
+    # NSScreen 用来探测显示器刷新率，合成器帧率跟着它走（见 dispatch::frame_rate）。
+    "NSScreen",
     "NSView",
     "NSWindow",
 ] }
