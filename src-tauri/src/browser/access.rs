@@ -234,6 +234,13 @@ pub struct HostBrowser {
     /// 时尺寸没变 —— 新页于是停在子进程那个 1280×800 的初值上，切过去
     /// 第一眼是带黑边、缩小了的页面，还要等下一次拖动窗口才会纠正。
     view: Mutex<Option<(i32, i32, f32)>>,
+    /// screencast JPEG 的物理像素上限 = 面板画面区 × 密度。
+    ///
+    /// `[约束]` 不能跟 `view` 绑死。Web 模式视口钉在 1280，面板可能只有
+    /// 四百宽：按视口出的是 2560 宽的 JPEG，再缩进面板。编码晚一截，
+    /// 滚动就有肉眼可见的延迟。模型截图走另一条（整页 PNG/JPEG），
+    /// 不受这个上限影响。`None` = 还没收到面板尺寸，用兜底值。
+    cast: Mutex<Option<(u32, u32)>>,
     /// 「没有页就开一页」这件事的互斥锁。
     ///
     /// `[约束]` 检查和创建之间不能有别人插进来。两个并发调用都看到"一页都
@@ -304,6 +311,7 @@ impl HostBrowser {
             opening: Arc::default(),
             streaming: Arc::default(),
             view: Mutex::default(),
+            cast: Mutex::default(),
             ensuring: Mutex::default(),
             snap_refs: Mutex::default(),
             taps: Arc::default(),
@@ -663,10 +671,8 @@ impl HostBrowser {
                 .await;
         }
         *cur = Some(tab);
-        if let Err(e) = b
-            .cdp(tab, "Page.startScreencast", screencast_params())
-            .await
-        {
+        let params = screencast_params(self.cast_max().await);
+        if let Err(e) = b.cdp(tab, "Page.startScreencast", params).await {
             tracing::warn!(error = %e, tab, "开 screencast 失败");
         }
     }
@@ -686,9 +692,13 @@ impl HostBrowser {
         let (b, tab) = self.active().await?;
         *self.frames.lock().await = Some(sink);
         *self.streaming.lock().await = Some(tab);
-        b.cdp(tab, "Page.startScreencast", screencast_params())
-            .await
-            .map_err(|e| BrowserUnavailable(e.to_string()))?;
+        b.cdp(
+            tab,
+            "Page.startScreencast",
+            screencast_params(self.cast_max().await),
+        )
+        .await
+        .map_err(|e| BrowserUnavailable(e.to_string()))?;
         Ok(())
     }
 
@@ -726,22 +736,54 @@ impl HostBrowser {
         height: i32,
         scale: f32,
     ) -> Result<(), BrowserUnavailable> {
+        // 测试和旧调用没画面区尺寸：按视口出，行为与改之前一致。
+        self.resize_view(width, height, scale, width, height).await
+    }
+
+    /// `view_w` / `view_h` 是面板画面区的 CSS 像素。screencast 按它 × 密度
+    /// 封顶，页面视口仍是 `width` × `height`（Web 模式的 1280）。
+    pub async fn resize_view(
+        &self,
+        width: i32,
+        height: i32,
+        scale: f32,
+        view_w: i32,
+        view_h: i32,
+    ) -> Result<(), BrowserUnavailable> {
         let b = self.get().await?;
-        // 锁的顺序必须是 tabs → view，和 spawn_tab 一致 —— 反过来会死锁。
-        // 两者都持着 tabs 做完"记下尺寸"和"发给已有的页"，正在创建的那一页
-        // 才不会两头落空，见 spawn_tab 末尾的说明。
-        let tabs = self.tabs.lock().await;
-        *self.view.lock().await = Some((width, height, scale));
-        for &tab in &tabs.order {
-            b.send(&Command::Resize {
-                tab,
-                width,
-                height,
-                scale,
-            })
-            .map_err(|e| BrowserUnavailable(e.to_string()))?;
+        let cast = cast_size(view_w, view_h, scale);
+        let changed = {
+            // 锁的顺序必须是 tabs → view，和 spawn_tab 一致 —— 反过来会死锁。
+            // 两者都持着 tabs 做完"记下尺寸"和"发给已有的页"，正在创建的那一页
+            // 才不会两头落空，见 spawn_tab 末尾的说明。
+            let tabs = self.tabs.lock().await;
+            *self.view.lock().await = Some((width, height, scale));
+            let old = *self.cast.lock().await;
+            *self.cast.lock().await = Some(cast);
+            for &tab in &tabs.order {
+                b.send(&Command::Resize {
+                    tab,
+                    width,
+                    height,
+                    scale,
+                })
+                .map_err(|e| BrowserUnavailable(e.to_string()))?;
+            }
+            old != Some(cast)
+        };
+        let recast = changed && self.frames.lock().await.is_some();
+        // 推流上限变了要重开 screencast，否则 Web 模式一直按 2560 宽出
+        // JPEG。CDP 没有"改参数"，再发一次 start 会换掉当前会话。
+        if recast && let Some(tab) = *self.streaming.lock().await {
+            let _ = b
+                .cdp(tab, "Page.startScreencast", screencast_params(cast))
+                .await;
         }
         Ok(())
+    }
+
+    async fn cast_max(&self) -> (u32, u32) {
+        self.cast.lock().await.unwrap_or(CAST_FALLBACK)
     }
 
     /// 把面板上的一次输入打到页面里。
@@ -1843,20 +1885,28 @@ fn stale_target(e: super::BrowserError) -> InteractError {
     }
 }
 
-/// screencast 的参数。开页、切页都用同一套。
-fn screencast_params() -> serde_json::Value {
+/// 还没收到面板尺寸时的 screencast 上限。
+const CAST_FALLBACK: (u32, u32) = (4000, 3000);
+
+/// 面板画面区（CSS）× 密度 → JPEG 物理像素上限。
+fn cast_size(view_w: i32, view_h: i32, scale: f32) -> (u32, u32) {
+    let scale = if scale.is_finite() { scale.clamp(1.0, 3.0) } else { 1.0 };
+    let w = ((view_w.max(1) as f32) * scale).round() as u32;
+    let h = ((view_h.max(1) as f32) * scale).round() as u32;
+    (w.clamp(80, CAST_FALLBACK.0), h.clamp(80, CAST_FALLBACK.1))
+}
+
+/// screencast 的参数。开页、切页、改推流上限都用这一套。
+fn screencast_params((max_width, max_height): (u32, u32)) -> serde_json::Value {
     serde_json::json!({
         "format": "jpeg",
         // 60 在文字页面上已经看不出压缩痕迹，再高只是白涨体积。
         "quality": 60,
-        // 只是给病态窗口尺寸兜个底。视口本来就跟着面板走（见 resize），
-        // 上限压到面板尺寸以下的话，帧会被缩过再放大回去，字发虚。
-        //
-        // `[约束]` 这两个数是**物理像素**，得留出像素密度的余量。按 CSS
-        // 尺寸设的话，Retina 上一块 1000×800 的面板出的是 2000×1600 的帧，
-        // 正好撞上限被缩回去 —— 于是密度白调了，而且现象和没调之前一样。
-        "maxWidth": 4000,
-        "maxHeight": 3000,
+        // `[约束]` 这两个数是**物理像素**。按面板画面区给，而不是页面
+        // 视口：Web 模式视口 1280、面板 400 宽时，按视口出 2560 的帧
+        // 再缩小，编码本身就比滚动慢。模型截图不走这条。
+        "maxWidth": max_width,
+        "maxHeight": max_height,
     })
 }
 

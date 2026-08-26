@@ -864,8 +864,18 @@ export function browserResize(
   width: number,
   height: number,
   scale: number,
+  /** 面板画面区 CSS 像素。推流按它封顶，页面视口仍是 width×height。 */
+  viewWidth: number,
+  viewHeight: number,
 ): Promise<void> {
-  return invoke("browser_resize", { sessionId, width, height, scale });
+  return invoke("browser_resize", {
+    sessionId,
+    width,
+    height,
+    scale,
+    viewWidth,
+    viewHeight,
+  });
 }
 
 export function browserInput(sessionId: string, input: BrowserInput): Promise<void> {

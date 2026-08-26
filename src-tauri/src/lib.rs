@@ -635,6 +635,8 @@ async fn browser_select_tab(
 
 /// 面板尺寸变了。视口跟着变 —— 比例对不上时画面周围会留出黑边。
 ///
+/// `width`/`height` 是页面排版视口（Web 模式是 1280）。`view_width` /
+/// `view_height` 是画面区实际占的 CSS 像素，推流按它封顶。
 /// `scale` 是面板所在屏幕的像素密度。它决定同一块地方用多少物理像素去画，
 /// 不改变页面的排版尺寸。
 #[tauri::command]
@@ -644,9 +646,11 @@ async fn browser_resize(
     width: i32,
     height: i32,
     scale: f32,
+    view_width: i32,
+    view_height: i32,
 ) -> HostResult<()> {
     let b = state.panel_browser(&session_id).await?;
-    b.resize(width, height, scale)
+    b.resize_view(width, height, scale, view_width, view_height)
         .await
         .map_err(HostError::Browser)
 }

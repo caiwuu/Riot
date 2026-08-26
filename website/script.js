@@ -388,14 +388,14 @@ function initParticleLogo () {
 
     const box = logoBox.getBoundingClientRect();
     const canvasBox = canvas.getBoundingClientRect();
-    // 离屏画布放大到容器的 1.75 倍：横排字标要铺开，四周还得给云带留溶解余量
-    const logoSize = Math.max(40, Math.round(Math.min(box.width, box.height) * 1.75));
+    // 离屏画布放大到容器的 1.95 倍：横排字标要铺开，四周还得给宽云带 + 长溶解尾留空间
+    const logoSize = Math.max(40, Math.round(Math.min(box.width, box.height) * 1.95));
     const off = document.createElement("canvas");
     off.width = logoSize;
     off.height = logoSize;
     const octx = off.getContext("2d", { willReadFrequently: true });
 
-    // 黑底白字居中写出字标，字宽拟合到画布的 52%（两侧留出云带 + 弥散的空间）
+    // 黑底白字居中写出字标；画布放大后拟合比例同步下调，字的绝对大小保持不变
     octx.fillStyle = "#000";
     octx.fillRect(0, 0, logoSize, logoSize);
     octx.fillStyle = "#fff";
@@ -409,7 +409,7 @@ function initParticleLogo () {
     let fontPx = Math.round(logoSize * 0.24);
     setFont(fontPx);
     const measured = octx.measureText(WORD).width || 1;
-    fontPx = Math.max(10, Math.round((fontPx * logoSize * 0.52) / measured));
+    fontPx = Math.max(10, Math.round((fontPx * logoSize * 0.467) / measured));
     setFont(fontPx);
     octx.fillText(WORD, logoSize / 2, logoSize / 2);
 
@@ -469,8 +469,8 @@ function initParticleLogo () {
     );
 
     /* 云朵 = 距文字 cloudBand 以内的雾带：贴字是浓核，向外连续衰减，天然无轮廓 */
-    const cloudBand = Math.max(24, logoSize * 0.22);
-    const coreBand = cloudBand * 0.35; // 浓核带：这圈内密度/亮度不衰减
+    const cloudBand = Math.max(24, logoSize * 0.24);
+    const coreBand = cloudBand * 0.15; // 浓核收小：云带的八成五都是溶解尾
     const nearBand = logoSize * 0.055; // 离字形这么近 → 青蓝
     const midBand = logoSize * 0.105; // 再远 → 紫，其余深紫
 
@@ -554,11 +554,11 @@ function initParticleLogo () {
 
         const z = 0.55 + Math.random() * 0.9;
         const size = 0.95 + Math.random() * 0.75;
-        // 亮度受景深影响收窄（0.7–1.0），云雾均匀不出脏斑
-        const a0 = alpha * (0.35 + 0.65 * fade) * (0.7 + 0.3 * ((z - 0.55) / 0.9));
+        // 亮度直接乘溶解度：外缘渐近于零，和密度一起构成长尾，云没有可感知的「结束线」
+        const a0 = alpha * fade * (0.7 + 0.3 * ((z - 0.55) / 0.9));
 
-        // 越靠边缘散得越开：外飘约一个云带的宽度，边缘雾圈显著外扩
-        const scatter = 1.5 + (1 - fade) * cloudBand * 0.9;
+        // 越靠边缘散得越开：最外圈弥散超过一个云带宽，把等值线彻底揉碎进星空
+        const scatter = 1.5 + (1 - fade) * cloudBand * 1.25;
         const hx = offX + x + (Math.random() - 0.5) * scatter;
         const hy = offY + y + (Math.random() - 0.5) * scatter;
         const angle = Math.random() * Math.PI * 2;
@@ -583,7 +583,7 @@ function initParticleLogo () {
           y: hy + Math.sin(angle) * dist,
           vx: 0,
           vy: 0,
-          draw: size * (5.2 + (1 - fade) * 2.4) * z, // 边缘颗更大更淡，像雾一样晕开
+          draw: size * (5.2 + (1 - fade) * 3.2) * z, // 边缘颗更大更淡，像雾一样晕开
           sprite,
           alpha: a0,
           orbit,

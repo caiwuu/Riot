@@ -259,7 +259,7 @@ export function BrowserPanel({
       const key = `${width}x${height}@${scale}`;
       if (key === last) return;
       last = key;
-      void browserResize(sessionId, width, height, scale).catch(() => {});
+      void browserResize(sessionId, width, height, scale, vw, vh).catch(() => {});
     };
 
     // 防抖。拖窗口时 ResizeObserver 每帧都回调，每次都让页面重排一遍的话，
@@ -311,7 +311,7 @@ export function BrowserPanel({
    * 桌面比例、面板是竖条，contain 会居中留边 —— 按元素框算的话，留边
    * 越宽点击偏得越多。
    */
-  const toPage = useCallback((e: React.MouseEvent): { x: number; y: number } | null => {
+  const toPage = useCallback((e: React.MouseEvent): { x: number; y: number; s: number } | null => {
     const canvas = canvasRef.current;
     const size = frameSize.current;
     if (!canvas || !size || !size.w || !size.h) return null;
@@ -327,7 +327,7 @@ export function BrowserPanel({
     // 点在留边上不算点在页面里。硬夹回页面范围的话，点黑边会命中
     // 页面边缘的元素 —— 用户明明什么都没点到，页面却有反应。
     if (x < 0 || y < 0 || x > size.w || y > size.h) return null;
-    return { x, y };
+    return { x, y, s };
   }, []);
 
   const send = useCallback(
@@ -363,7 +363,7 @@ export function BrowserPanel({
     }
     const p = pending.current;
     pending.current = {};
-    if (p.move) send({ kind: "move", ...p.move });
+    if (p.move) send({ kind: "move", x: p.move.x, y: p.move.y });
     if (p.scroll) send({ kind: "scroll", ...p.scroll });
   }, [send]);
 
@@ -615,7 +615,8 @@ export function BrowserPanel({
             flushInputs(); // 攒着的移动要排在按下前面，拖拽起点才不偏
             send({
               kind: "down",
-              ...p,
+              x: p.x,
+              y: p.y,
               button: mouseButton(e.button),
               clickCount: e.detail || 1,
             });
@@ -631,7 +632,8 @@ export function BrowserPanel({
             flushInputs(); // 拖拽的最后一段移动要先落地，抬起的位置才对
             send({
               kind: "up",
-              ...p,
+              x: p.x,
+              y: p.y,
               button: mouseButton(e.button),
               clickCount: e.detail || 1,
             });
@@ -645,22 +647,27 @@ export function BrowserPanel({
         onMouseMove={(e) => {
           const p = toPage(e);
           if (p) {
-            pending.current.move = p; // 只留最新位置，中间的轨迹页面不需要
+            pending.current.move = { x: p.x, y: p.y }; // 只留最新位置
             scheduleFlush();
           }
         }}
         onWheel={(e) => {
-          // 两个轴原样转发，不自己判断方向。macOS 上按住 shift 滚轮时
+          // 两个轴都转发，不自己判断方向。macOS 上按住 shift 滚轮时
           // 系统已经把量放进了 deltaX，这里再换一次就换回去了。
           const p = toPage(e as unknown as React.MouseEvent);
           if (p) {
             const prev = pending.current.scroll;
+            // `[约束]` 滚轮增量必须按 contain 缩放折到页面坐标。
+            // 事件给的是面板像素；Web 模式页面按 1280 渲染再缩小塞进
+            // 面板，s 常是 0.3~0.5。原样转发的话，手指滑 100px，页面
+            // 只走 100 个 CSS 像素，缩回去只动三四十像素 —— 自适应
+            // 看着跟手，Web 模式整段慢半拍，像卡。除以 s 让"滑多少
+            // 画面走多少"。自适应下 s≈1，这条是空操作。
             pending.current.scroll = {
               x: p.x,
               y: p.y,
-              // 增量累加 —— 合并事件不能吞滚动量，只能少发几次。
-              deltaX: (prev?.deltaX ?? 0) + e.deltaX,
-              deltaY: (prev?.deltaY ?? 0) + e.deltaY,
+              deltaX: (prev?.deltaX ?? 0) + e.deltaX / p.s,
+              deltaY: (prev?.deltaY ?? 0) + e.deltaY / p.s,
             };
             scheduleFlush();
           }
