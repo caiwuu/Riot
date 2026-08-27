@@ -1638,6 +1638,9 @@ impl Session {
                 model: model.model.clone(),
                 cheap: caps.subagent_cheap.take(),
                 gate: Arc::clone(&gate) as Arc<dyn PermissionGate>,
+                // 和上面那个 gate 来自同一次 activate。缺了它，子 agent 的
+                // 命令在宿主上裸跑而闸里写着 sandboxed: true。
+                sandbox: sandbox.clone(),
                 web: Arc::clone(&caps.web),
                 vision: Arc::clone(&caps.vision),
                 clock: Arc::clone(&clock),
@@ -1674,9 +1677,13 @@ impl Session {
         // 聊天里问「最近」「今年」也一样。系统提示词和工具 prompt 共用
         // 这一份，粒度（只到月，为缓存）见 tools::web::date。
         let today = riot_tools::tools::web::date::year_month(clock.now_ms());
+        let sandboxed = sandbox.is_some();
         let make_ctx = |sibling_tools: Vec<String>| PromptContext {
             cwd: self.cwd.clone(),
             platform: std::env::consts::OS.to_owned(),
+            // 和上面 PermissionContext 里那个是同一次 activate 的结果。
+            // 工具描述照它变（Bash 会讲清边界和出沙箱的办法）。
+            sandboxed,
             // 全部正式名。工具的 prompt 靠它写清分工（"有 X 就别用我"）。
             sibling_tools,
             today: today.clone(),
@@ -2553,6 +2560,7 @@ mod tests {
             cwd: std::path::PathBuf::from("/tmp"),
             env: vec![],
             timeout_ms: None,
+            sandbox_exempt: false,
         }
     }
 
@@ -3114,6 +3122,7 @@ mod tests {
                 prompt_ctx: PromptContext {
                     cwd: s.cwd.clone(),
                     platform: "test".into(),
+                    sandboxed: false,
                     sibling_tools: Vec::new(),
                     today: "2026年8月".into(),
                 },

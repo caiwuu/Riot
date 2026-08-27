@@ -80,6 +80,7 @@ fn prompt_ctx() -> riot_protocol::tool::PromptContext {
     riot_protocol::tool::PromptContext {
         cwd: "/work".into(),
         platform: "macos".into(),
+        sandboxed: false,
         sibling_tools: vec!["Read".into(), "Glob".into(), "Grep".into()],
         today: "2026年8月".into(),
     }
@@ -519,6 +520,167 @@ async fn 后台命令不吃沙箱放行() {
         ),
         "后台命令不经过沙箱,不能吃沙箱放行：{got:?}"
     );
+}
+
+#[tokio::test]
+async fn 外包命令不吃沙箱放行() {
+    // `docker` 这一族由 `call` 打上 sandbox_exempt、在宿主上裸跑（因为沙箱
+    // 关不住它 —— 写盘是 VM 里的 daemon 干的）。既然不在沙箱里，就不能吃
+    // 沙箱放行，否则「豁免」就成了一个不用确认的逃逸口：加一个 `docker run
+    // -v $HOME:/h` 就能静默写主目录。
+    let mut ctx = perm_ctx(vec![]);
+    ctx.sandboxed = true;
+
+    for cmd in [
+        "docker run --rm -v /Users/u:/h alpine true",
+        "docker build -t x .",
+        "podman run alpine true",
+    ] {
+        let got = Bash.check_permissions(&serde_json::json!({ "command": cmd }), &ctx);
+        assert!(
+            !matches!(
+                got,
+                PermissionResult::Allow {
+                    reason: DecisionReason::Sandbox,
+                    ..
+                }
+            ),
+            "{cmd} 不经过沙箱,不能吃沙箱放行：{got:?}"
+        );
+    }
+
+    // 反面：不在表里的命令**留在**沙箱里，照常吃沙箱放行。`osascript` 是
+    // 刻意留在通用路上的那一类 —— profile 里 `(deny appleevent-send)` 会让
+    // 它失败，模型看到提示后再带 `sandbox: false` 重跑，那时才问用户。
+    // 把它也塞进表 = 每条 osascript 都白问一次。
+    let got = Bash.check_permissions(
+        &serde_json::json!({ "command": "osascript -e 'do shell script \"id\"'" }),
+        &ctx,
+    );
+    assert!(
+        matches!(
+            got,
+            PermissionResult::Allow {
+                reason: DecisionReason::Sandbox,
+                ..
+            }
+        ),
+        "留在沙箱里的命令该照常吃沙箱放行：{got:?}"
+    );
+}
+
+#[tokio::test]
+async fn 申请出沙箱要用户点头且对全部放行免疫() {
+    // 逆向逃生口：命令被沙箱挡住时，模型带 `sandbox: false` 重跑。它会在
+    // 宿主上裸跑，所以必须由**用户**点头 —— 让模型自己关掉最后一道边界、
+    // 还不用问一声，等于 bypass 模式下根本没有边界。
+    let input = serde_json::json!({ "command": "touch /etc/probe", "sandbox": false });
+
+    for mode in [
+        riot_protocol::permission::PermissionMode::Default,
+        riot_protocol::permission::PermissionMode::BypassPermissions,
+    ] {
+        let mut ctx = perm_ctx(vec![]);
+        ctx.sandboxed = true;
+        ctx.mode = PermissionModeState(Some(mode));
+
+        let got = Bash.check_permissions(&input, &ctx);
+        match got {
+            PermissionResult::Ask { reason, .. } => {
+                assert!(
+                    matches!(
+                        reason,
+                        DecisionReason::SafetyCheck {
+                            safety: riot_protocol::permission::SafetyKind::SandboxEscape
+                        }
+                    ),
+                    "{mode:?} 下理由要指向出沙箱：{reason:?}"
+                );
+                assert!(
+                    !reason.yields_to_bypass(),
+                    "{mode:?} 下必须对「全部放行」免疫"
+                );
+            }
+            other => panic!("{mode:?} 下该问而不是 {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn 没有沙箱时申请出沙箱不额外打扰() {
+    // 没开沙箱的会话里，`sandbox: false` 什么都没改变 —— 命令本来就在宿主
+    // 上跑。这时候还弹一次"你要出沙箱吗"是纯噪音，而噪音会训练用户
+    // 无脑点允许。
+    let input = serde_json::json!({ "command": "touch foo.txt", "sandbox": false });
+    let got = Bash.check_permissions(&input, &perm_ctx(vec![]));
+
+    assert!(
+        !matches!(
+            got,
+            PermissionResult::Ask {
+                reason: DecisionReason::SafetyCheck {
+                    safety: riot_protocol::permission::SafetyKind::SandboxEscape
+                },
+                ..
+            }
+        ),
+        "没有沙箱可出，不该报出沙箱：{got:?}"
+    );
+}
+
+#[tokio::test]
+async fn 申请出沙箱的只读命令仍然免打扰() {
+    // `docker ps` 带不带 `sandbox: false` 都是只读查询。出沙箱这一档只
+    // 升级**兜底**那一支（没规则命中、也不是只读），不能顺手把只读也拦了。
+    let mut ctx = perm_ctx(vec![]);
+    ctx.sandboxed = true;
+
+    let got = Bash.check_permissions(
+        &serde_json::json!({ "command": "docker ps", "sandbox": false }),
+        &ctx,
+    );
+    assert!(
+        matches!(got, PermissionResult::Allow { .. }),
+        "只读查询不该打扰用户：{got:?}"
+    );
+}
+
+#[tokio::test]
+async fn 沙箱说明只在真的沙箱着时进_prompt() {
+    // 没沙箱还讲一堆边界规则，模型会把普通的权限错误当成沙箱拦截，
+    // 然后去申请一个根本不存在的豁免。
+    let off = Bash.prompt(&prompt_ctx());
+    assert!(!off.contains("沙箱"), "没沙箱时不该提沙箱：{off}");
+    assert!(!off.contains("sandbox: false"));
+
+    let mut on_ctx = prompt_ctx();
+    on_ctx.sandboxed = true;
+    let on = Bash.prompt(&on_ctx);
+    assert!(on.contains("沙箱"), "沙箱着就要讲清边界：{on}");
+    assert!(
+        on.contains("sandbox: false"),
+        "要给出下一步怎么做，而不只是说有个边界：{on}"
+    );
+    assert!(
+        on.contains("[riot:sandbox]"),
+        "要把运行时那条提示的标记对上，模型才知道两者是一回事：{on}"
+    );
+}
+
+#[tokio::test]
+async fn 外包命令里的只读查询仍然免打扰() {
+    // 上一条的反面。移出沙箱意味着走正常权限流,而正常权限流对只读命令
+    // 是放行的 —— 否则 `docker ps` 每次弹窗,只会训练用户无脑点"允许"。
+    let mut ctx = perm_ctx(vec![]);
+    ctx.sandboxed = true;
+
+    for cmd in ["docker ps", "docker images", "docker logs c"] {
+        let got = Bash.check_permissions(&serde_json::json!({ "command": cmd }), &ctx);
+        assert!(
+            matches!(got, PermissionResult::Allow { .. }),
+            "{cmd} 是只读查询,不该打扰用户：{got:?}"
+        );
+    }
 }
 
 // ── 参数校验 ──────────────────────────────────────────

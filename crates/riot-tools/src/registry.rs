@@ -136,6 +136,7 @@ mod tests {
         let ctx = PromptContext {
             cwd: std::path::PathBuf::from("/work"),
             platform: "macos".to_owned(),
+            sandboxed: false,
             sibling_tools: Vec::new(),
             today: "2026-08".to_owned(),
         };
@@ -179,6 +180,7 @@ mod tests {
         let ctx = riot_protocol::tool::PromptContext {
             cwd: std::path::PathBuf::from("/work"),
             platform: "linux".to_owned(),
+            sandboxed: false,
             sibling_tools: Vec::new(),
             today: "2026年8月".to_owned(),
         };
@@ -278,6 +280,7 @@ mod tests {
         let ctx = PromptContext {
             cwd: "/tmp".into(),
             platform: "test".into(),
+            sandboxed: false,
             sibling_tools: vec![],
             today: "2026年8月".into(),
         };
@@ -304,6 +307,7 @@ mod tests {
         let ctx = PromptContext {
             cwd: "/tmp".into(),
             platform: "test".into(),
+            sandboxed: false,
             sibling_tools: vec![],
             today: "2026年8月".into(),
         };

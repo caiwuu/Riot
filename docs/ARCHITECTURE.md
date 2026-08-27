@@ -1277,6 +1277,39 @@ Rust 这里有生态优势:`tree-sitter` 和 `tree-sitter-bash` 都是原生 cra
 
 所以挡在策略层:`riot_permissions::bash::write_targets` 扫子命令的参数字面量,命中就产出**对放行免疫**的 Ask。它同时补上了 §9.4 的一个老缺口——`safety::check` 走 `Tool::target_path`,而 Bash 返回 `None`,整个路径安全检查对它不生效;此前唯一能看见敏感路径的通道是命令分析器里的重定向目标检查,`cp` / `mv` / `install` / `sed -i` 一概看不见。
 
+#### 9.6.2 沙箱关的是进程,不是意图
+
+`[约束]` 上一节那几处目标好歹还在边界之内。这一节的问题更基本:**一条命令可以完全不碰边界,而是把活外包给一个沙箱外的进程去干。**
+
+`docker run -v $HOME:/h alpine sh -c 'echo x > /h/f'` 就是这样。实测在完整生产 profile 下它成功把文件写进了主目录,而同一个沙箱里 `echo x > $HOME/f` 是 `Operation not permitted` ——写是 VM 里的 daemon 干的,seatbelt 从头到尾没看见。同类通道还有 ssh-agent(以你的身份认证到任何主机)、已在跑的 tmux server(在沙箱外执行命令)、`osascript`(让别的 App 去做事)。
+
+`[前提]` 按命令名挡是修不了的。要判断一次 `docker run` 会不会写到工作区外,得跟 `-v` / `--mount` / compose YAML 三套语法赛跑,而漏一条的表现是**静默放行**。这和 §9.6.1 收紧可写集的困境同构:枚举一个开放集合,错的那一侧没有报错。
+
+所以按**通道**挡,不按命令挡。macOS 的 profile 里两条规则关掉整类:
+
+- `(deny network-outbound (subpath "/"))` —— unix domain socket 外连(`sandbox_macos::unix_socket_section`)。DNS 走 mDNSResponder 的 socket,必须单独放回来,否则表现是"沙箱一开就没网"而 `allow_network` 明明是 true。
+- `(deny appleevent-send)` —— Apple Events。接收方从 daemon 换成**另一个 App**,性质一样。Claude Code 默认也关着。
+
+#### 9.6.3 挡住之后要有出路,否则用户会把沙箱整个关掉
+
+`[前提]` 上一节挡掉的东西里有真正要用的(`docker`)。没有出路的话,用户唯一的选择是关沙箱——那比留着洞更糟。
+
+主通道是**逆向逃生口**,分三步,取自 Claude Code 的 `dangerouslyDisableSandbox`,Cursor 独立收敛到了同一个形状:
+
+1. **告诉模型边界存在。** `PromptContext::sandboxed` 为真时,Bash 的工具描述多一段讲清可写范围和被禁的通道。不讲的话模型根本不知道有沙箱。
+2. **失败时说清是谁拦的。** `SandboxedRunner::annotate_denial` 在命令失败且 stderr 像内核拒绝时,往输出末尾追加一句 `[riot:sandbox] …`。Cursor 公开过不做这件事的后果:agent 会把同一条命令原样重跑到轮次耗尽。判据是启发式的,宁可偶尔多说一句——多说的代价是模型多试一次,漏说的代价是它原地打转。
+3. **让模型能申请出去。** `Bash` 的 `sandbox: false`:`call` 给 `ProcessSpec` 打上 `sandbox_exempt`(由 `SandboxedRunner` 透传给宿主执行器),`check_permissions` 同时把 `sandboxed` 抹成 false 回落正常权限流。
+
+`[约束]` 出沙箱**对「全部放行」免疫**(`SafetyKind::SandboxEscape`)。开着沙箱的会话里沙箱是最后一道边界,让模型自己关掉、还不用问一声,等于 bypass 模式下根本没有边界——而用户选 bypass 的意思是"信任你做常规开发",不是"你可以自行退出隔离"。只把**兜底**那一档升级成安全询问:只读查询照常免打扰,用户写过的 allow 规则照常生效(那是他自己给的常设豁免,等价于 `excludedCommands`)。
+
+`riot_permissions::bash::delegation` 那张表只是**省一次注定失败的往返**,不是第二条出路——命中它同样走上面那个免疫询问。收进来的门槛是两条同时成立:沙箱内 100% 必然失败,且高频到不值得每次先失败一次。目前只有容器运行时符合。`osascript`、`launchctl`、`tmux` 符合第一条不符合第二条,走通用路。表越小,写错一条的机会越少。
+
+豁免的粒度是整条命令(一个 `bash -c`),所以只在每条子命令都是表内命令或只读命令时才豁免——否则 `docker run x && rm -rf y` 里的 `rm` 会跟着一起裸跑。
+
+`[约束]` **子 agent 必须套父会话的同一个沙箱**(`SubagentDeps::sandbox`)。它和父共用权限闸,而闸里带着 `sandboxed`;只要子 agent 这边没套上,那个标志就是谎报,决策链会按"OS 挡着"放行一批在宿主上裸跑的写命令。入口从 Bash 换成 Task,后果一模一样。
+
+`[取舍]` ssh-agent 的 socket 放回来了,尽管它确实是一条外包通道。挡住它,私钥在 agent 里的人连 `git push` 都跑不了;而放回来并没有新增能力(今天的沙箱本来就没挡它)。记为残余风险。同样开着的还有 `ssh localhost`、本地数据库的 `COPY TO '/path'`。
+
 ---
 
 ## 10. 上下文管理

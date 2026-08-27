@@ -345,6 +345,13 @@ impl ProgressSink {
 pub struct PromptContext {
     pub cwd: PathBuf,
     pub platform: String,
+    /// 本会话的命令是否跑在 OS 沙箱里。
+    ///
+    /// 工具描述要照着它变。不告诉模型的话，它撞上沙箱拒绝时唯一会做的事
+    /// 是把同一条命令再跑一遍 —— Cursor 公开过这个观察，也是他们给 Shell
+    /// 工具描述补沙箱说明的原因。知道边界存在，模型才会去申请出沙箱
+    /// （`Bash` 的 `sandbox: false`）而不是原地打转。
+    pub sandboxed: bool,
     /// 当前会话可用的其它工具名。用于在 prompt 里写清分工。
     pub sibling_tools: Vec<String>,
     /// 当前年月，如 `2026年8月`。
@@ -435,6 +442,20 @@ pub struct ProcessSpec {
     pub cwd: PathBuf,
     pub env: Vec<(String, String)>,
     pub timeout_ms: Option<u64>,
+    /// 这条命令不进 OS 沙箱，在宿主上裸跑。
+    ///
+    /// 给的是那些**把活外包给沙箱外 daemon** 的命令（`docker` 让 VM 干活、
+    /// `osascript` 让别的 App 干活……）。对它们而言沙箱从来就不是边界 ——
+    /// 边界只挡住了客户端进程，daemon 照样以完整权限写宿主。既然如此，
+    /// 与其让它在沙箱里失败（unix socket 外连被 profile 拒掉，见
+    /// `sandbox_macos::profile`），不如明说「这条不隔离」，换取决策层
+    /// 一次真实的确认。
+    ///
+    /// `[约束]` 置 true 的**同一处**必须把 `PermissionContext::sandboxed`
+    /// 抹成 false（见 `riot_tools::tools::bash`）。两者分开判会让决策链
+    /// 按「OS 挡着」放行一条实际在宿主裸跑的命令 —— 那正是 `riot_runtime`
+    /// 的 `sandbox` 模块头写的那种谎报。
+    pub sandbox_exempt: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

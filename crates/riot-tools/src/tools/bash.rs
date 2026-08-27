@@ -7,7 +7,10 @@
 use async_trait::async_trait;
 use riot_permissions::RuleSet;
 use riot_permissions::bash;
-use riot_protocol::permission::{DecisionReason, PermissionContext, PermissionResult, SafetyKind};
+use riot_protocol::permission::{
+    DecisionReason, PermissionContext, PermissionResult, PermissionUpdate, RuleDecision,
+    SafetyKind, UpdateScope,
+};
 use riot_protocol::tool::{
     InterruptBehavior, ProcessSpec, PromptContext, Tool, ToolContext, ToolOutcome, UiPayload,
     ValidationError,
@@ -45,6 +48,12 @@ struct Input {
     /// 面板里，立刻返回终端 id，不等它结束。
     #[serde(default)]
     background: bool,
+    /// 设为 false 表示这条命令必须在 OS 沙箱**之外**执行。会请求用户确认。
+    ///
+    /// 只在命令确实被沙箱边界挡住时才用（失败输出里会有 `[riot:sandbox]`
+    /// 提示）。`None` = 照常在沙箱里跑。
+    #[serde(default)]
+    sandbox: Option<bool>,
 }
 
 pub struct Bash;
@@ -59,9 +68,24 @@ impl Tool for Bash {
         schemars::schema_for!(Input)
     }
 
-    fn prompt(&self, _ctx: &PromptContext) -> String {
+    fn prompt(&self, ctx: &PromptContext) -> String {
+        // 沙箱那一段只在真的沙箱着时才给。没沙箱还讲一堆边界规则，模型会
+        // 把普通的权限错误当成沙箱拦截，然后去申请一个根本不存在的豁免。
+        let sandbox = if ctx.sandboxed {
+            "\n\
+             - 命令跑在 **OS 沙箱**里：可写范围限于工作目录、临时目录和构建缓存，\
+             读不受限；连接 unix socket 和 Apple Events 一律被拒，所以 `docker`、\
+             `osascript` 这类要跟本机 daemon 或别的 App 通信的工具在沙箱内必然失败。\n\
+             - 命令失败且输出里带 `[riot:sandbox]` 时，说明失败**可能**源自这条边界。\
+             确认目标确实在边界之外、而且这次操作有必要，就带 `sandbox: false` 重跑 —— \
+             它会在沙箱外执行并请求用户确认。失败与边界无关（路径写错、依赖缺失、\
+             测试真的挂了）就照常修，别用这个参数：它每次都会打断用户。\n"
+        } else {
+            ""
+        };
         format!(
             "在工作目录下执行一条 shell 命令。\n\
+             {sandbox}\
              \n\
              - 每次调用都是**独立的一次执行**。`cd` 只在这一条命令内有效，\
              不会影响下一次调用。需要切目录就写成 `cd sub && cmd`，或者直接用相对\
@@ -156,27 +180,66 @@ impl Tool for Bash {
 
         let rules = RuleSet::new(ctx.rules.clone());
 
-        // `[约束]` background 命令不经过沙箱。它走 spawn_service → 宿主终端
-        // 面板(见 `call`),而 `SandboxedRunner` 只套在 `ctx.proc` 上 —— 对这
-        // 条命令而言 OS 边界根本不存在。若仍按 `ctx.sandboxed` 放行,决策链
-        // 就会基于"OS 挡着文件系统和网络"放行一批写命令,而它们实际在无沙箱
-        // 的宿主上裸跑(正是 sandbox.rs 模块头 [约束] 说的:谎报 sandboxed 会
-        // 静默放行本该询问的命令)。所以 background 命令按"无沙箱"判定:抹掉
-        // sandboxed,让它退回逐条询问 / 通用决策链。
+        // `[约束]` 有三类命令不经过沙箱,对它们**必须**抹掉 sandboxed。否则
+        // 决策链会基于"OS 挡着文件系统和网络"放行一批写命令,而它们实际在无
+        // 沙箱的宿主上裸跑(正是 sandbox.rs 模块头 [约束] 说的:谎报 sandboxed
+        // 会静默放行本该询问的命令)。抹掉之后它们退回逐条询问 / 通用决策链。
         //
-        // 用 as_bool().unwrap_or(false):非法的 background 值(如字符串)当成
-        // 非后台,不误放宽 —— 真要执行时 `call` 的 serde 解析会先拒掉它。
+        // - background:走 spawn_service → 宿主终端面板(见 `call`),而
+        //   `SandboxedRunner` 只套在 `ctx.proc` 上。
+        // - 模型显式申请出沙箱(`sandbox: false`)。
+        // - 已知在沙箱内必然失败的命令(`bash::escapes_sandbox`),省掉一次
+        //   注定失败的往返。
+        //
+        // 后两类由 `call` 给 spec 打上 `sandbox_exempt`,判定必须和这里同源,
+        // 所以读的是同一个函数 / 同一个字段。
+        //
+        // 用 as_bool():非法值(如字符串)当成没给,不误放宽 —— 真要执行时
+        // `call` 的 serde 解析会先拒掉它。
         let background = input
             .get("background")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-        if background && ctx.sandboxed {
-            let mut ctx = ctx.clone();
-            ctx.sandboxed = false;
-            return bash::decide(cmd, &ctx, &rules);
+        let escapes = wants_out_of_sandbox(input) || bash::escapes_sandbox(cmd);
+
+        if !ctx.sandboxed || !(background || escapes) {
+            return bash::decide(cmd, ctx, &rules);
         }
 
-        bash::decide(cmd, ctx, &rules)
+        let mut relaxed = ctx.clone();
+        relaxed.sandboxed = false;
+        let verdict = bash::decide(cmd, &relaxed, &rules);
+
+        // `[约束]` 出沙箱这件事本身要用户点头,而且**对「全部放行」免疫**。
+        //
+        // 开着沙箱的会话里,沙箱是最后一道边界。让模型自己关掉它、还不用问
+        // 一声,等于 bypass 模式下根本没有边界 —— 而用户选 bypass 的意思是
+        // "信任你做常规开发",不是"你可以自行退出隔离"。所以只把**兜底**
+        // 那一档(Passthrough,即没有规则命中、也不是只读)升级成安全询问:
+        // 只读查询照常免打扰,用户写过的 allow 规则照常生效(那是他自己给的
+        // 常设豁免,等价于 Claude Code 的 excludedCommands)。
+        //
+        // background 不进这一档:它历来就在宿主上跑,而且跑在用户看得见的
+        // 终端面板里,退出边界是副作用不是目的。给 dev server 每次弹窗只会
+        // 让人把沙箱关掉。
+        if escapes && matches!(verdict, PermissionResult::Passthrough) {
+            return PermissionResult::Ask {
+                message: format!(
+                    "`{cmd}` 会在 OS 沙箱**之外**执行。\n\n\
+                     沙箱的文件系统边界对它不生效 —— 它能写工作区以外的任何地方。"
+                ),
+                suggestions: vec![PermissionUpdate::AddRule {
+                    tool: "Bash".to_owned(),
+                    pattern: Some(cmd.to_owned()),
+                    decision: RuleDecision::Allow,
+                    scope: UpdateScope::Session,
+                }],
+                reason: DecisionReason::SafetyCheck {
+                    safety: SafetyKind::SandboxEscape,
+                },
+            };
+        }
+        verdict
     }
 
     async fn validate_input(
@@ -228,6 +291,9 @@ impl Tool for Bash {
             cwd: ctx.cwd.clone(),
             env: non_interactive_env(),
             timeout_ms: Some(timeout_ms),
+            // 和 `check_permissions` 里抹 sandboxed 的判定同源。走到这里
+            // 说明那条路已经放行过了 —— 要么用户点了头，要么命令是只读的。
+            sandbox_exempt: parsed.sandbox == Some(false) || bash::escapes_sandbox(&parsed.command),
         };
 
         let out = match ctx.proc.run(spec, ctx.cancel.clone()).await {
@@ -549,6 +615,17 @@ fn clamp_chars(s: &str, n: usize) -> String {
         return s.to_owned();
     }
     format!("{}…", s.chars().take(n).collect::<String>())
+}
+
+/// 模型有没有在这次输入里申请出沙箱。
+///
+/// 读原始 JSON 而不是解析后的 `Input`：`check_permissions` 拿到的是未解析
+/// 的输入，而它和 `call` 必须得出同一个答案。
+fn wants_out_of_sandbox(input: &serde_json::Value) -> bool {
+    input
+        .get("sandbox")
+        .and_then(serde_json::Value::as_bool)
+        .is_some_and(|on| !on)
 }
 
 fn spawn_hint(e: &std::io::Error) -> String {

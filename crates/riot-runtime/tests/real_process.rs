@@ -26,6 +26,7 @@ fn spec(script: &str) -> ProcessSpec {
         cwd: std::env::temp_dir(),
         env: Vec::new(),
         timeout_ms: Some(10_000),
+        sandbox_exempt: false,
     }
 }
 
@@ -111,6 +112,7 @@ async fn 程序不存在时是_not_found() {
         cwd: std::env::temp_dir(),
         env: Vec::new(),
         timeout_ms: Some(5000),
+        sandbox_exempt: false,
     };
 
     let err = SystemProcessRunner::new()

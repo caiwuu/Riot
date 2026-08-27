@@ -325,6 +325,8 @@ impl Tool for Diagnostics {
                 cwd: ctx.cwd.clone(),
                 env: Vec::new(),
                 timeout_ms: Some(TIMEOUT_MS),
+                // 固定的检查命令（cargo check / tsc），不外包给任何 daemon。
+                sandbox_exempt: false,
             };
             let out = match ctx.proc.run(spec, ctx.cancel.clone()).await {
                 Ok(o) => o,

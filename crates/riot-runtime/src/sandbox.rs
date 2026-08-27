@@ -18,6 +18,15 @@
 //! 后端不可用、profile / token 构造失败 —— 任何一种情况下谎报都会让策略层
 //! 放行一批本该询问的命令，而且悄无声息。见 [`SandboxPolicy::activate`]。
 //!
+//! # 它关的是进程，不是意图
+//!
+//! `[约束]` 边界只管得住**被关住的那个进程自己**动手。一条命令完全可以
+//! 不碰边界，而是把活外包给一个沙箱外的 daemon 去干 —— `docker` 是最典型
+//! 的，写盘是 VM 干的，seatbelt 从头到尾没看见。这一类只能按**通道**挡：
+//! macOS 的 profile 禁掉 unix socket 外连（`sandbox_macos` 的
+//! `unix_socket_section`），配套的出口是 `ProcessSpec::sandbox_exempt`。
+//! 完整取舍见 ARCHITECTURE.md §9.6.2。
+//!
 //! # 平台后端
 //!
 //! 这个文件是**跨平台核心**：策略、激活、[`SandboxedRunner`] 装饰器的形状
@@ -241,10 +250,8 @@ impl ActiveSandbox {
 /// 会话设的 Python venv 和能力包就静默失效」。装在最里层则两个平台一致：
 /// 外层改完 env 的 spec 原样落到这里。
 pub struct SandboxedRunner {
-    // Windows 用令牌自己起进程（WinSandbox::run），不装饰 inner —— 于是
-    // inner 在这个平台无人读。macOS（垫 argv 交 inner 跑）和其它平台
-    // （透传）都读它。按平台豁免，而不是删字段（删了 macOS 就没法跑了）。
-    #[cfg_attr(windows, allow(dead_code))]
+    // 三个平台都读它：macOS 垫完 argv 交给它跑，Windows 平时用令牌自己起
+    // 进程、但 `sandbox_exempt` 的 spec 仍要落到它身上，其它平台直接透传。
     inner: std::sync::Arc<dyn ProcessRunner>,
     /// `Arc` 而不是独占：沙箱按**会话**激活一次、跨轮复用。Windows 上
     /// 激活要给可写目录打 Low 标签，而 `SetNamedSecurityInfoW` 会把可继承
@@ -269,25 +276,92 @@ impl ProcessRunner for SandboxedRunner {
         spec: ProcessSpec,
         cancel: CancellationToken,
     ) -> std::io::Result<ProcessOutput> {
+        // 明确要求不隔离的命令（`docker` 这类把活外包给沙箱外 daemon 的，
+        // 见 `riot_permissions::bash::delegation`）。对它们而言沙箱从来
+        // 不是边界，只是一层让命令失败的摩擦 —— 关住客户端进程拦不住
+        // daemon 写盘。放它们回宿主，换来的是决策层一次真实的确认。
+        //
+        // `[约束]` 打这个标记的地方必须同时把 `PermissionContext::sandboxed`
+        // 抹成 false。这里不复查（这一层看不到权限上下文），靠 `bash` 工具
+        // 把两处判定读同一个函数来保证。
+        if spec.sandbox_exempt {
+            return self.inner.run(spec, cancel).await;
+        }
         #[cfg(target_os = "macos")]
-        {
+        let out = {
             // seatbelt：把命令垫进 sandbox-exec，仍由 inner 起进程。
             let wrapped = crate::sandbox_macos::wrap(&self.sandbox.policy, spec);
             self.inner.run(wrapped, cancel).await
-        }
+        };
         #[cfg(windows)]
-        {
+        let out = {
             // Windows 不装饰 argv，而是用受限令牌自己起进程（inner 用不上）。
             self.sandbox.win.run(spec, cancel).await
-        }
+        };
         #[cfg(not(any(target_os = "macos", windows)))]
-        {
+        let out = {
             // 其它平台 activate 恒返回 None，构造不出 ActiveSandbox，这条
             // 跑不到 —— 存在只为能编译。
             let _ = &self.sandbox;
             self.inner.run(spec, cancel).await
-        }
+        };
+        Ok(annotate_denial(out?))
     }
+}
+
+/// 命令失败得像是被沙箱拒的，就在输出末尾说一声。
+///
+/// # 为什么非说不可
+///
+/// 模型看不到沙箱。它拿到的只有一句 `Operation not permitted`，而那句话
+/// 在没有沙箱的机器上通常意味着"路径写错了"或"该加 sudo" —— 两个方向都是
+/// 错的。Cursor 公开过这个失败模式：agent 会把同一条命令原样再跑一遍，
+/// 直到轮次耗尽；他们把沙箱约束回显给模型之后，离线 eval 明显变好。
+/// Claude Code 做的是同一件事（把 violation 详情追加到失败输出里）。
+///
+/// `[取舍]` 判据是**启发式**的，宁可偶尔多说一句。`Permission denied` 在
+/// 非沙箱原因下也会出现（跑一个没有执行位的文件），那时这句提示是噪音 ——
+/// 但代价只是模型多试一次、拿到同样的错误；反过来漏掉的代价是它在原地
+/// 打转直到轮次耗尽。所以措辞是"可能"，并且明说要先判断目标是不是真在
+/// 边界之外。
+fn annotate_denial(mut out: ProcessOutput) -> ProcessOutput {
+    // 超时不是拒绝。成功也不用解释。
+    if out.exit_code == 0 || out.timed_out || !looks_denied(&out.stderr) {
+        return out;
+    }
+    if !out.stderr.is_empty() && !out.stderr.ends_with('\n') {
+        out.stderr.push('\n');
+    }
+    out.stderr.push_str(DENIAL_HINT);
+    out
+}
+
+/// 追加给模型看的那句话。
+///
+/// 提到具体参数名（`sandbox: false`）而不是泛泛说"可以申请出沙箱"：
+/// 模型要的是下一步怎么做，而不是知道有个东西存在。
+const DENIAL_HINT: &str = "\n[riot:sandbox] 这条命令跑在 OS 沙箱里，上面的失败可能来自沙箱边界\
+（可写范围限于工作区和构建缓存；连接 unix socket 和 Apple Events 一律拒绝，\
+所以 docker 这类要跟本机 daemon 通信的工具在沙箱内必然失败）。\
+如果目标确实在边界之外而这次操作是必要的，用 `sandbox: false` 重跑一次 —— \
+那会在沙箱外执行并请求用户确认。如果失败与边界无关（路径写错、依赖缺失、\
+测试真的挂了），照常修就行，别用这个参数。\n";
+
+/// stderr 看起来像不像内核拒绝。
+///
+/// 三个平台的说法不一样：macOS 的 seatbelt 给 `EPERM`，Windows 的 MIC 给
+/// `ERROR_ACCESS_DENIED`。Rust 侧的 `std::io::Error` 又会渲染成 `os error N`。
+fn looks_denied(stderr: &str) -> bool {
+    const SIGNS: &[&str] = &[
+        "operation not permitted",
+        "permission denied",
+        "access is denied",
+        "os error 1)",
+        "os error 5)",
+        "read-only file system",
+    ];
+    let lower = stderr.to_ascii_lowercase();
+    SIGNS.iter().any(|s| lower.contains(s))
 }
 
 /// 临时目录。macOS 的 `TMPDIR` 是 `/var/folders/...`，而它本身是
@@ -369,7 +443,10 @@ impl ProtectedPath {
         Self { path, is_dir: true }
     }
     fn file(path: PathBuf) -> Self {
-        Self { path, is_dir: false }
+        Self {
+            path,
+            is_dir: false,
+        }
     }
 }
 
@@ -424,10 +501,8 @@ mod tests {
     /// 指向临时目录，测试不污染真实配置。
     fn test_setup() -> SandboxSetup {
         SandboxSetup {
-            ledger_path: std::env::temp_dir().join(format!(
-                "riot-sbx-labels-{}.json",
-                std::process::id()
-            )),
+            ledger_path: std::env::temp_dir()
+                .join(format!("riot-sbx-labels-{}.json", std::process::id())),
             now_ms: 0,
         }
     }
@@ -435,6 +510,64 @@ mod tests {
     #[test]
     fn 关掉的策略拿不到_active() {
         assert!(SandboxPolicy::Off.activate(test_setup()).is_none());
+    }
+
+    fn out(exit_code: i32, stderr: &str) -> ProcessOutput {
+        ProcessOutput {
+            stdout: String::new(),
+            stderr: stderr.to_owned(),
+            exit_code,
+            timed_out: false,
+            duration_ms: 1,
+        }
+    }
+
+    /// 被拒的失败要带上提示。模型看不到沙箱，只看到一句
+    /// `Operation not permitted` —— 那句话在没有沙箱的机器上通常意味着
+    /// "路径写错了"或"该加 sudo"，两个方向都会让它原地打转。
+    #[test]
+    fn 疑似被沙箱拒的失败要带提示() {
+        for stderr in [
+            "bash: /Users/u/x.txt: Operation not permitted",
+            "permission denied while trying to connect to the docker API",
+            "Access is denied.",
+            "failed to write: Read-only file system",
+        ] {
+            let got = annotate_denial(out(1, stderr));
+            assert!(
+                got.stderr.contains("[riot:sandbox]"),
+                "{stderr:?} 该带提示：{}",
+                got.stderr
+            );
+            assert!(got.stderr.starts_with(stderr), "原始 stderr 不能被改掉");
+        }
+    }
+
+    /// 反面三条。加提示的门槛要低到能覆盖真实拒绝，但不能低到每个失败
+    /// 都喊一句"可能是沙箱" —— 那样模型会拿 `sandbox: false` 去修一个
+    /// 编译错误，白打断用户一次。
+    #[test]
+    fn 普通失败不加提示() {
+        for (code, stderr) in [
+            (0, "Operation not permitted"), // 成功了就没什么好解释的
+            (1, "error[E0308]: mismatched types"),
+            (1, "2 tests failed"),
+            (101, ""),
+        ] {
+            let got = annotate_denial(out(code, stderr));
+            assert!(
+                !got.stderr.contains("[riot:sandbox]"),
+                "({code}, {stderr:?}) 不该带提示：{}",
+                got.stderr
+            );
+        }
+    }
+
+    #[test]
+    fn 超时不算被拒() {
+        let mut o = out(1, "Operation not permitted");
+        o.timed_out = true;
+        assert!(!annotate_denial(o).stderr.contains("[riot:sandbox]"));
     }
 
     /// 不存在的路径必须被丢掉 —— Windows 上给不存在的目录打标签直接
@@ -524,6 +657,7 @@ mod tests {
                         cwd,
                         env: Vec::new(),
                         timeout_ms: Some(10_000),
+                        sandbox_exempt: false,
                     },
                     CancellationToken::new(),
                 )
@@ -549,6 +683,83 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&work);
         let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// unix socket 外连真的被内核拒绝，而 `sandbox_exempt` 真的能绕开。
+    ///
+    /// 这两件事必须一起测。只测前者，`docker` 就只是"在沙箱里失败"，用户
+    /// 没有出路、只会把沙箱关掉；只测后者，豁免就成了一个谁都能走的后门。
+    /// 探针用 `nc -U` 连一个测试自己建的 socket，先跑一遍不沙箱的控制组 ——
+    /// 没有它，一个用法写错的 `nc` 会让这条测试"通过"而什么都没验到。
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn unix_socket_外连被拒而豁免的命令放行() {
+        use crate::proc::SystemProcessRunner;
+        use std::os::unix::net::UnixListener;
+
+        let dir = std::env::temp_dir().join(format!("riot-uds-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("建目录");
+        let sock = dir.join("probe.sock");
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).expect("建 socket");
+        std::thread::spawn(move || while listener.accept().is_ok() {});
+
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable: vec![dir.canonicalize().expect("规范化")],
+            allow_network: true,
+        };
+        let Some(active) = policy.activate(test_setup()) else {
+            eprintln!("这台机器没有 sandbox-exec，跳过");
+            return;
+        };
+        let base: std::sync::Arc<dyn ProcessRunner> =
+            std::sync::Arc::new(SystemProcessRunner::default());
+        let sandboxed = SandboxedRunner::new(base.clone(), std::sync::Arc::new(active));
+
+        let spec = || ProcessSpec {
+            program: "/usr/bin/nc".to_owned(),
+            args: vec![
+                "-U".to_owned(),
+                sock.display().to_string(),
+                "-w".to_owned(),
+                "2".to_owned(),
+            ],
+            cwd: dir.clone(),
+            env: Vec::new(),
+            timeout_ms: Some(10_000),
+            sandbox_exempt: false,
+        };
+
+        let control = base
+            .run(spec(), CancellationToken::new())
+            .await
+            .expect("跑得起来");
+        assert_eq!(control.exit_code, 0, "控制组该连得上：{}", control.stderr);
+
+        let denied = sandboxed
+            .run(spec(), CancellationToken::new())
+            .await
+            .expect("跑得起来");
+        assert_ne!(
+            denied.exit_code, 0,
+            "沙箱内必须连不上 unix socket —— 那是把活外包给沙箱外 daemon 的通道"
+        );
+
+        let exempt = ProcessSpec {
+            sandbox_exempt: true,
+            ..spec()
+        };
+        let out = sandboxed
+            .run(exempt, CancellationToken::new())
+            .await
+            .expect("跑得起来");
+        assert_eq!(
+            out.exit_code, 0,
+            "标了 sandbox_exempt 的命令要落到宿主执行器上：{}",
+            out.stderr
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Windows：走**完整生产装配**（activate → SandboxedRunner → run）
@@ -599,6 +810,7 @@ mod tests {
                         cwd,
                         env: Vec::new(),
                         timeout_ms: Some(10_000),
+                        sandbox_exempt: false,
                     },
                     CancellationToken::new(),
                 )
@@ -630,6 +842,7 @@ mod tests {
                         cwd,
                         env: Vec::new(),
                         timeout_ms: Some(10_000),
+                        sandbox_exempt: false,
                     },
                     CancellationToken::new(),
                 )

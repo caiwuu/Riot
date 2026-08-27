@@ -65,6 +65,7 @@ async fn 子进程不继承父进程的_stdin() {
         // 故意给一个很长的超时。要是靠超时才结束，说明 stdin 继承了 ——
         // 那种"能返回"不是我们要的。
         timeout_ms: Some(60_000),
+        sandbox_exempt: false,
     };
 
     let out = tokio::time::timeout(

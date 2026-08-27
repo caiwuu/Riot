@@ -658,6 +658,7 @@ fn 提示词里写死当前年月() {
     let ctx = riot_protocol::tool::PromptContext {
         cwd: "/w".into(),
         platform: "test".into(),
+        sandboxed: false,
         sibling_tools: Vec::new(),
         today: "2026年8月".into(),
     };

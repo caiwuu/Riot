@@ -501,6 +501,7 @@ pub fn test_scheduler_with_fs(
         PromptContext {
             cwd: "/tmp".into(),
             platform: "test".into(),
+            sandboxed: false,
             sibling_tools: Vec::new(),
             today: "2026年8月".into(),
         },

@@ -1070,6 +1070,7 @@ mod tests {
         let pctx = PromptContext {
             cwd: "/w".into(),
             platform: "t".into(),
+            sandboxed: false,
             sibling_tools: Vec::new(),
             today: "2026年8月".into(),
         };

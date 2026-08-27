@@ -74,6 +74,11 @@ static READ_ONLY: &[(&str, Flags)] = &[
     ("gawk", Flags::Any),
     // git 的只读子命令单独判定
     ("git", Flags::GitSubcommand),
+    // docker 同理。它进这张表是因为 `bash::delegation` 把 docker 整族移出了
+    // 沙箱 —— 移出之后就要走正常权限流,而 `docker ps` 这种纯查询命令如果
+    // 每次都弹窗,只会训练用户无脑点"允许"(见 chain::mode_default 的注释)。
+    ("docker", Flags::DockerSubcommand),
+    ("podman", Flags::DockerSubcommand),
 ];
 
 /// git 的只读子命令。
@@ -129,6 +134,29 @@ static GIT_WRITE_FLAGS: &[&str] = &[
     "-f",
 ];
 
+/// docker / podman 的只读子命令。
+///
+/// `[约束]` 和 git 一样是白名单。docker 的子命令能改的东西比文件系统大得多
+/// (起容器、删镜像、改 context),黑名单漏一条就是静默放行。
+///
+/// 故意不收的:
+///
+/// - `stats` / `events`:不给 flag 就永不返回,和 `tail -f` 同类。
+/// - `compose` / `volume` / `network` / `context`:它们的读写之分在**第二层**
+///   子命令上(`volume ls` 只读、`volume rm` 不是)。这张表只判第一层,收进来
+///   等于把 `volume rm` 也判成只读。
+static DOCKER_READ_ONLY: &[&str] = &[
+    "version", "info", "ps", "images", "inspect", "logs", "port", "top", "history", "diff",
+    "search",
+];
+
+/// docker 全局 flag 里会改变"对哪个 daemon 说话"的那些。
+///
+/// 它们后面跟一个值,不跳过的话 `docker -H tcp://x ps` 的 `tcp://x` 会被当成
+/// 子命令。直接放弃只读判定更简单,也更安全 —— 指向别的 daemon 这件事本身
+/// 就值得问一次。
+static DOCKER_HOST_FLAGS: &[&str] = &["-H", "--host", "-c", "--context", "--config"];
+
 enum Flags {
     /// 任何 flag 都不会让它写东西。
     Any,
@@ -136,6 +164,8 @@ enum Flags {
     Deny(&'static [&'static str]),
     /// git 走单独逻辑。
     GitSubcommand,
+    /// docker / podman 走单独逻辑。
+    DockerSubcommand,
 }
 
 /// 判断一组子命令整体是不是只读。
@@ -166,7 +196,33 @@ pub(crate) fn sub_is_read_only(sub: &SubCommand) -> bool {
         Flags::Any => true,
         Flags::Deny(deny) => !sub.args.iter().any(|a| flag_matches(a, deny)),
         Flags::GitSubcommand => git_is_read_only(&sub.args),
+        Flags::DockerSubcommand => docker_is_read_only(&sub.args),
     }
+}
+
+fn docker_is_read_only(args: &[String]) -> bool {
+    let mut it = args.iter();
+    let sub = loop {
+        let Some(a) = it.next() else {
+            // 光一个 `docker`,打印用法,无害
+            return true;
+        };
+        let head = a.split('=').next().unwrap_or(a);
+        if DOCKER_HOST_FLAGS.contains(&head) {
+            return false;
+        }
+        if !a.starts_with('-') {
+            break a;
+        }
+    };
+
+    if !DOCKER_READ_ONLY.contains(&sub.as_str()) {
+        return false;
+    }
+
+    // `docker logs -f` 跟着容器输出跑,永不返回 —— 和 `tail -f` 一样,
+    // 判成只读就等于让调度器静默起一个卡死的命令。
+    !it.any(|a| flag_matches(a, &["-f", "--follow"]))
 }
 
 /// flag 匹配要认 `--flag=value` 形式。

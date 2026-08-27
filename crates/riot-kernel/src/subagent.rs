@@ -119,6 +119,14 @@ pub struct SubagentDeps {
     pub cheap: Option<CheapModel>,
     /// 和父共用同一个权限闸：弹窗、会话规则、模式全部一致。
     pub gate: Arc<dyn PermissionGate>,
+    /// 父会话激活的沙箱，子 agent 的命令要套同一个。
+    ///
+    /// `[约束]` 和 `gate` 必须来自**同一次** activate。共用的那个闸里带着
+    /// `PermissionContext::sandboxed`，子 agent 这边只要没把沙箱套上，那个
+    /// 标志就成了谎报 —— 决策链按「OS 挡着文件系统」放行一批写命令，而它们
+    /// 在宿主上裸跑。这正是 `riot_runtime::sandbox` 模块头 [约束] 说的那种
+    /// 静默放行，只不过入口从 Bash 换成了 Task。
+    pub sandbox: Option<Arc<riot_runtime::ActiveSandbox>>,
     pub web: Arc<dyn riot_protocol::web::WebAccess>,
     pub vision: Arc<dyn riot_protocol::vision::VisionAccess>,
     pub clock: Arc<dyn riot_protocol::tool::Clock>,
@@ -385,6 +393,7 @@ impl Tool for TaskTool {
         let prompt_ctx = PromptContext {
             cwd: self.deps.cwd.clone(),
             platform: std::env::consts::OS.to_owned(),
+            sandboxed: self.deps.sandbox.is_some(),
             sibling_tools: tools.iter().map(|t| t.name().to_owned()).collect(),
             today: riot_tools::tools::web::date::year_month(self.deps.clock.now_ms()),
         };
@@ -392,11 +401,20 @@ impl Tool for TaskTool {
             Ok(r) => Arc::new(r),
             Err(e) => return ToolOutcome::failed(format!("子 agent 工具装配失败：{e}")),
         };
+        // 子 agent 的命令套父会话那个沙箱。不套的话共用的闸里那个
+        // `sandboxed: true` 就是谎报 —— 见 `SubagentDeps::sandbox`。
+        let proc: Arc<dyn riot_protocol::tool::ProcessRunner> = match &self.deps.sandbox {
+            Some(sb) => Arc::new(riot_runtime::SandboxedRunner::new(
+                Arc::new(SystemProcessRunner::default()),
+                Arc::clone(sb),
+            )),
+            None => Arc::new(SystemProcessRunner::default()),
+        };
         let scheduler = Scheduler::new(
             registry,
             prompt_ctx,
             Arc::new(SystemFs::new()),
-            Arc::new(SystemProcessRunner::default()),
+            proc,
             // 全新的先读后写缓存：子 agent 的"读过"和父互不作数 ——
             // 共享的话，父读过的文件子 agent 没看就能改。
             MemoryFileState::shared() as Arc<dyn riot_protocol::tool::FileStateCache>,
@@ -637,6 +655,7 @@ mod tests {
             model: "test-model".into(),
             cheap: None,
             gate: Arc::new(AllowAll),
+            sandbox: None,
             web: Arc::new(riot_protocol::web::NoWeb),
             vision: Arc::new(riot_protocol::vision::NoVision),
             clock: Arc::new(riot_providers::watchdog::TokioClock),

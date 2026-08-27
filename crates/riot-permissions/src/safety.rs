@@ -245,6 +245,10 @@ pub fn describe(kind: SafetyKind, path: &Path) -> String {
         // scope 不走文件路径的 safety::check，这一分支只为穷尽匹配存在;
         // 真正的 scope 提示由渗透工具自己拼（带目标域名）。
         SafetyKind::OutOfScope => format!("目标 {p} 不在授权的渗透范围内。"),
+        // 出沙箱同样不走文件路径,真正的提示由 Bash 自己拼（带整条命令）。
+        SafetyKind::SandboxEscape => {
+            format!("{p} 会在 OS 沙箱之外执行，文件系统边界对它不生效。")
+        }
     }
 }
 

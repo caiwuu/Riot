@@ -1403,6 +1403,7 @@ mod spawn {
                 cwd: std::env::temp_dir(),
                 env: Vec::new(),
                 timeout_ms: Some(10_000),
+                sandbox_exempt: false,
             };
             let out = spawn_with_token((*tok.0).0 as isize, spec, 1 << 20, CancellationToken::new())
                 .await
@@ -1442,6 +1443,7 @@ mod spawn {
                     env: Vec::new(),
                     // 竞态若回归，受影响的那条会挂到这里才失败；正常路径 <1s。
                     timeout_ms: Some(20_000),
+                    sandbox_exempt: false,
                 };
                 handles.push(tokio::spawn(async move {
                     let out = spawn_with_token(token, spec, 1 << 20, CancellationToken::new())
@@ -1500,6 +1502,7 @@ mod spawn {
                 cwd: dir.clone(),
                 env: Vec::new(),
                 timeout_ms: None,
+                sandbox_exempt: false,
             };
 
             {
@@ -1576,6 +1579,7 @@ mod e2e_tests {
                 cwd: cwd.to_path_buf(),
                 env: Vec::new(),
                 timeout_ms: Some(10_000),
+                sandbox_exempt: false,
             };
             let o = super::spawn::spawn_with_token(token_raw, spec, 1 << 20, CancellationToken::new())
                 .await
