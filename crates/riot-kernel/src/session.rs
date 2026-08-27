@@ -1334,7 +1334,26 @@ impl Session {
             *slot = None;
         }
 
-        let active = Arc::new(policy.clone().activate()?);
+        // `[约束]` 必须 `spawn_blocking`。`activate()` 从头到尾是同步阻塞:
+        // Windows 上它起 `srt-win` 子进程、等 `acl grant` 把可继承 ACE 传播
+        // 到工作区**每一个已存在的文件**（带 target/ 和 node_modules 的仓库
+        // 是几十万个），macOS 上也要 spawn 一次冒烟。直接在 async 里调 = 占死
+        // 一个 tokio 工作线程,而线程池是整个宿主共用的 —— 实测的表现不是
+        // "第一条命令慢",是**连消息都读不出来**,因为 IPC 的 handler 也在
+        // 同一个池子里排队。
+        //
+        // 挪到阻塞池之后,慢还是慢（那是另一回事,见 sandbox_win 的授权成本），
+        // 但界面是活的:用户能看到进度、能去设置里把隔离关掉。
+        let for_activate = policy.clone();
+        let active = tokio::task::spawn_blocking(move || for_activate.activate())
+            .await
+            .unwrap_or_else(|e| {
+                // JoinError 只可能是 panic 或取消。当成"这台机器上做不到"
+                // 处理 —— 决策链会退回逐条询问,而不是当成有边界。
+                tracing::warn!(error = %e, "沙箱激活任务没跑完,本轮不隔离");
+                None
+            })?;
+        let active = Arc::new(active);
         *slot = Some(CachedSandbox {
             policy,
             active: Arc::clone(&active),
