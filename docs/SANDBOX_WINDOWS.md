@@ -224,16 +224,7 @@ cargo build → exit 0，stderr："Updating crates.io index / Downloaded cfg-if 
 想加回来的话，光加路径没用 —— 必须同时用 `--env` 把 `CARGO_HOME` /
 `RUSTUP_HOME` / npm 那套变量显式指过去，并重新面对上面第二、三条代价。
 
-**但读要单独授权，而且不能省。** 这一条我判断错过一次，值得写下来：清空可写
-表时我按 macOS 的直觉认为「读不受限，构建不依赖那张表」—— 结果沙箱里连
-`where cargo` 都退 1。macOS 的 seatbelt 包住同一个进程，读确实全开；Windows
-换成专用账户之后，能不能读某个对象完全由它自己的 ACL 决定，而真实用户的
-profile 只授权给他本人，`BUILTIN\Users` 一点权限都没有。之前能执行
-`C:\Users\<真人>\.cargo\bin\cargo.exe`，靠的正是可写表**顺带**给出的读+执行权。
-
-所以工具链走 `acl grant` 的 **read** 那一列（`FILE_GENERIC_READ|EXECUTE`，见
-`sandbox_win::tool_reads`）：`~/.cargo\bin` 和 `~/.rustup`。只读不构成逃逸面
-—— 改不了 `cargo.exe` 就换不到沙箱外的执行权，`acl stamp` 那一整套不必跟上来。
+**清空这张表不等于工具链也够不着** —— 那是两件事，读的授权见 §4.7。
 
 三轮实测下来的账：
 
@@ -246,7 +237,40 @@ profile 只授权给他本人，`BUILTIN\Users` 一点权限都没有。之前�
 剩下那 2.4s 主要是 `~/.rustup` 的树传播。还能再收（只授权当前 active 的
 toolchain），但它是**每会话**一次不是每命令一次，暂时没动。
 
-### 4.7 授权的树里要再挖掉逃逸面
+### 4.7 读也要显式授权，清单从 PATH 推
+
+`[约束]` **Windows 没有「读默认放开」这回事。** macOS 的 seatbelt 包住同一个
+进程，读全开、只收紧写；Windows 换成专用账户之后，能不能读某个对象完全由它
+自己的 ACL 说了算，而真实用户的 profile 只授权给他本人 —— `BUILTIN\Users` 一点
+权限都没有。于是 PATH 上解析得到的 `C:\Users\<真人>\.cargo\bin\cargo.exe`
+**打不开**，沙箱里的 Rust 全废。
+
+这一条踩过：清空可写缓存表时按 macOS 的直觉判断「读不受限」，结果连
+`where cargo` 都退 1 —— 之前能跑，靠的正是那张表的 write grant **顺带**给出的
+读+执行权。
+
+所以走 `acl grant` 的 **read** 那一列（`FILE_GENERIC_READ|EXECUTE`）。清单不是
+写死的，是**从 PATH 推出来的**（`sandbox_win::tool_reads_from`）：
+
+1. PATH 里落在用户 profile 下的目录 —— PATH 本身就是「agent 要执行什么」的
+   权威清单。用户装了 fnm 它就在 PATH 上，换成 Scoop / volta / pyenv-win 同理，
+   不用我们逐个猜。机器级安装（`C:\Program Files\…`）对 `Users` 本来就开着
+   读+执行，不收，省一次 ACE 传播。
+2. 少数 **shim 指向别处**的树：`.rustup`（`.cargo\bin` 里是 rustup 代理，真正
+   被 exec 的二进制在这下面）、nvm-windows 和 fnm 的版本目录。这些不在 PATH 上。
+
+路径会先 canonicalize —— nvm/fnm 的 PATH 项是符号链接，给链接本身打 ACE 落不到
+真身上。
+
+只读不构成逃逸面：改不了 `cargo.exe` 就换不到沙箱外的执行权，所以 §4.8 那套
+DENY 不必跟上来。
+
+**和上游的差异。** 上游（以及 Claude Code）在这里只提供 `filesystem.allowRead`
+配置项，默认为空，把清单交给用户填。自动从 PATH 推是 Riot 这边加的：那份清单
+是开放集合，漏一条的表现是「某个命令在沙箱里神秘地打不开」，而用户没有任何
+线索该去填什么。
+
+### 4.8 授权的树里要再挖掉逃逸面
 
 `acl grant` 写的是 `(OI)(CI)` **可继承** ALLOW。所以「把 `~/.cargo` 整棵放开」
 不只放开了 registry 缓存，也一路放开了 `~/.cargo\bin` —— 沙箱账户能顶掉那里的
@@ -271,16 +295,17 @@ ACE 补回来（DENY 在 DACL 求值里排在 ALLOW 之前），清单和 macOS 
 ## 5. 已知限制（从上游原样继承）
 
 - **上游标 alpha。**
-- **够不到 per-user 安装的工具。** 沙箱进程以专用账户身份跑，所以 nvm/fnm 管
-  的 Node、per-user 的 Scoop/winget 包、`pip install --user`、
-  `%LOCALAPPDATA%\Programs\…` 在 PATH 上解析得到但**打不开**。出路是改用机器
-  级安装，或把具体路径加进授权。对 Windows 上的编码 agent 这是最疼的一条。
+- **PATH 之外的 per-user 工具够不到。** 上游把这条列为最疼的限制：沙箱以专用
+  账户跑，profile 下装的东西（nvm/fnm 的 Node、Scoop/winget 包、
+  `pip install --user`）在 PATH 上解析得到却**打不开**，出路是改用机器级安装
+  或手填一份路径清单。Riot 这边把常见情况自动覆盖了 —— 见 §4.7 —— 但真装在
+  profile 深处、又不在 PATH 上的东西仍然够不着。
 - **NoNet 档不隔离网络**（见 §2）。
 - **包缓存不共享，沙箱账户各下各的。** 见 §4.6：它的 `USERPROFILE` 是自己的，
   cargo / npm / pip 都在它自己的 profile 下建缓存。第一次构建要重下依赖，之后
   跨会话复用。想共享得显式传 `CARGO_HOME` 那套变量，代价见 §4.6。
 - **沙箱内装不了 rust 工具链（macOS）。** `~/.rustup\toolchains` 在逃逸面清单上
-  （见 §4.7），所以 `rustup toolchain install` 和 `rust-toolchain.toml` 的自动
+  （见 §4.8），所以 `rustup toolchain install` 和 `rust-toolchain.toml` 的自动
   安装会失败。收窄到 `*/bin` 修不了：`lib` 下的动态库同样由 rustc 加载执行。
   出路是在沙箱外先装好。Windows 上这条不适用 —— 那边 `.rustup` 不在授权表里，
   逃逸面清单也就不会去碰它（`stamp_targets` 只对授权过的路径打）。

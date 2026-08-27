@@ -319,6 +319,13 @@ pub(crate) fn activate(policy: &crate::sandbox::SandboxPolicy) -> Option<WinSand
         elapsed_ms = t_grant.elapsed().as_millis() as u64,
         write = granted.len(),
         read = reads.len(),
+        // 列出来而不只报个数:这一组是从 PATH 推出来的,机器之间不一样,
+        // 而「某个工具在沙箱里打不开」的排查第一步就是看它在不在这份表里。
+        read_paths = reads
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(";"),
         "acl grant 完成"
     );
 
@@ -529,9 +536,7 @@ fn pathext() -> Vec<String> {
 /// TS 侧也是这么传的（logon.rs 模块头：profile-scoped 的变量留沙箱账户的，
 /// 工具解析用的 PATH 用 broker 的）。
 ///
-/// `[取舍]` 这只解决「找得到」，不解决「打得开」。用户 profile 下装的工具
-/// （nvm 的 node、Scoop 的包）沙箱账户仍然没有读权限 —— 那是上游记档的已知
-/// 限制，见 vendor/srt-win/NOTICE.md。
+/// 「打得开」那一半由 [`tool_reads`] 负责 —— 它就是从这份 PATH 推出来的。
 fn broker_env() -> Vec<(String, String)> {
     std::env::var_os("PATH")
         .map(|p| vec![("PATH".to_owned(), p.to_string_lossy().into_owned())])
@@ -643,13 +648,71 @@ fn tool_reads() -> Vec<PathBuf> {
     let Some(home) = crate::sandbox::home_dir() else {
         return Vec::new();
     };
-    // 只列 per-user 装的工具链根。机器级安装（`C:\Program Files\…`）本来就
-    // 对 `Users` 开着读+执行，不用授权。
-    [".cargo\\bin", ".rustup"]
-        .iter()
-        .map(|p| home.join(p))
-        .filter(|p| p.exists())
-        .collect()
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    tool_reads_from(&home, &path)
+}
+
+/// [`tool_reads`] 的纯逻辑部分，抽出来是为了能在开发机上测。
+///
+/// 收两类：
+///
+/// 1. **PATH 里落在用户 profile 下的目录。** 这是清单本身 —— 不用猜哪个包
+///    管理器装在哪。用户装了 fnm，它就在 PATH 上，于是自动被收；换成
+///    Scoop、volta、pyenv-win 同理。而机器级安装（`C:\Program Files\…`）
+///    对 `BUILTIN\Users` 本来就开着读+执行，不必授权，所以只挑 profile 下的。
+///
+/// 2. **[`SHIM_TARGETS`]：shim 指向别处的那几个。** PATH 上是个转发器，真正
+///    被执行的二进制在另一棵树里，而那棵树不在 PATH 上。
+///
+/// `[约束]` 要 canonicalize。nvm-windows 和 fnm 的 PATH 项是**符号链接/联接**
+/// （`%APPDATA%\nvm\vXX` 之类），给链接本身打 ACE 落不到目标上。
+///
+/// `[取舍]` 这只覆盖「PATH 上找得到的」。真装在 profile 深处、又不在 PATH 上
+/// 的东西仍然打不开 —— 那是上游记档的已知限制（Claude Code 的出路是让用户
+/// 手填 `filesystem.allowRead`）。这里选择自动覆盖绝大多数情况，而不是把
+/// 一份猜出来的路径清单写死：那份清单是开放集合，漏一条的表现是「命令在
+/// 沙箱里神秘地打不开」。
+fn tool_reads_from(home: &Path, path_var: &std::ffi::OsStr) -> Vec<PathBuf> {
+    /// shim 转发的目标树。PATH 上只有转发器，这些不在 PATH 上但要能读。
+    const SHIM_TARGETS: &[&str] = &[
+        // `.cargo\bin` 的 rustup 代理最终 exec 的是这里的 rustc / cargo。
+        ".rustup",
+        // nvm-windows：PATH 上是 symlink，真身在这下面（symlink 解不开时兜底）。
+        "AppData\\Roaming\\nvm",
+        // fnm 的 multishell 目录同理。
+        "AppData\\Local\\fnm_multishells",
+    ];
+
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut push = |p: PathBuf| {
+        // 规范化到目标：链接本身打 ACE 落不到真身上。
+        let real = p.canonicalize().unwrap_or(p);
+        if !out.contains(&real) {
+            out.push(real);
+        }
+    };
+
+    let home_real = home.canonicalize();
+    let under_home = |p: &Path| match &home_real {
+        Ok(h) => p.canonicalize().map(|c| c.starts_with(h)).unwrap_or(false),
+        Err(_) => p.starts_with(home),
+    };
+
+    for entry in std::env::split_paths(path_var) {
+        if entry.as_os_str().is_empty() || !entry.is_dir() {
+            continue;
+        }
+        if under_home(&entry) {
+            push(entry);
+        }
+    }
+    for t in SHIM_TARGETS {
+        let p = home.join(t);
+        if p.is_dir() {
+            push(p);
+        }
+    }
+    out
 }
 
 /// 从 `srt-win user status` 的 JSON 里取沙箱账户 SID。
@@ -992,17 +1055,71 @@ mod tests {
         assert_eq!(v["read"].as_array().expect("read 是数组").len(), 1);
     }
 
-    /// 工具链只进读列。进了写列就是逃逸面 —— 见上一条。
+    /// PATH 上落在用户 profile 下的目录要被收进来，机器级的不收。
+    ///
+    /// 这条守的是「per-user 装的工具在沙箱里打得开」。Windows 的读不是默认
+    /// 放开的，漏掉一条的表现是那个命令在沙箱里神秘地起不来 —— 而清单靠猜
+    /// 是补不齐的（nvm / fnm / Scoop / volta / pyenv-win 各在一处），所以
+    /// 判据是「PATH 说要用的，就得能读」。
     #[test]
-    fn 工具链只读不写() {
-        for p in tool_reads() {
-            let name = p.to_string_lossy().to_lowercase();
-            assert!(
-                name.ends_with(".rustup") || name.ends_with("\\bin"),
-                "只该列 per-user 工具链根：{}",
-                p.display()
-            );
-        }
+    fn path_上属于用户的目录进读表_机器级的不进() {
+        let home = tempfile::tempdir().expect("临时 home");
+        let mine = home.path().join("tools/bin");
+        std::fs::create_dir_all(&mine).expect("建目录");
+        let machine = tempfile::tempdir().expect("机器级目录");
+        let missing = home.path().join("并不存在");
+
+        let joined = std::env::join_paths([mine.as_path(), machine.path(), missing.as_path()])
+            .expect("拼 PATH");
+        let got = tool_reads_from(home.path(), &joined);
+
+        let real_mine = mine.canonicalize().expect("规范化");
+        assert!(
+            got.contains(&real_mine),
+            "PATH 上属于用户的目录该收：{got:?}"
+        );
+        let real_machine = machine.path().canonicalize().expect("规范化");
+        assert!(
+            !got.contains(&real_machine),
+            "机器级目录对 Users 本来就开着读,收了只是白花一次 ACE 传播：{got:?}"
+        );
+        assert!(
+            !got.iter().any(|p| p.ends_with("并不存在")),
+            "不存在的 PATH 项不该收：{got:?}"
+        );
+    }
+
+    /// shim 指向的树不在 PATH 上，但必须能读。
+    ///
+    /// `.cargo\bin` 里的 rustup 代理最终 exec 的是 `.rustup\toolchains\…`。
+    /// 只按 PATH 收的话，`cargo --version` 能找到却跑不起来 —— 真机上正是
+    /// 这个形态（where cargo 成功、随后 exit 1）。
+    #[test]
+    fn shim_指向的树不在_path_上也要收() {
+        let home = tempfile::tempdir().expect("临时 home");
+        std::fs::create_dir_all(home.path().join(".rustup/toolchains")).expect("建目录");
+        let got = tool_reads_from(home.path(), std::ffi::OsStr::new(""));
+        let want = home.path().join(".rustup").canonicalize().expect("规范化");
+        assert!(got.contains(&want), "缺 .rustup：{got:?}");
+    }
+
+    /// 符号链接要解到真身。nvm-windows / fnm 的 PATH 项就是链接，给链接本身
+    /// 打 ACE 落不到目标上。
+    #[cfg(unix)]
+    #[test]
+    fn path_上的符号链接解析到目标再授权() {
+        let home = tempfile::tempdir().expect("临时 home");
+        let real = home.path().join("node-v22/bin");
+        std::fs::create_dir_all(&real).expect("建目录");
+        let link = home.path().join("current");
+        std::os::unix::fs::symlink(&real, &link).expect("建链接");
+
+        let joined = std::env::join_paths([link.as_path()]).expect("拼 PATH");
+        let got = tool_reads_from(home.path(), &joined);
+        assert!(
+            got.contains(&real.canonicalize().expect("规范化")),
+            "该授权给链接指向的真身而不是链接本身：{got:?}"
+        );
     }
 
     /// 授权了 `~/.cargo`，就必须筛出它的敏感面。
