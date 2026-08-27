@@ -179,6 +179,18 @@ macOS 那侧是 `(deny file-write*)` 打底再逐个放行，属于旧模型那�
 的 `D:\projects`），它的兄弟目录沙箱也写得进。想收紧只能靠 `srt-win acl
 stamp` 逐个打 DENY —— 而那是个开放集合，枚举不完，所以没做。
 
+实测（win-sandbox-e2e，GitHub runner）：未授权的兄弟目录 `exit=0`、文件真被
+建出来，它的 ACL 是
+
+```
+BUILTIN\Users:(I)(OI)(CI)(RX)
+BUILTIN\Users:(I)(CI)(AD)
+BUILTIN\Users:(I)(CI)(WD)
+```
+
+`AD`（AppendData / AddSubdirectory）和 `WD`（WriteData）都继承自上级，而沙箱
+账户是 `BUILTIN\Users` 成员 —— 这就是「未授权 ≠ 写不进」的具体样子。
+
 e2e 测试因此把判据定在「真实用户的主目录碰不到」上，而不是「任何未授权
 路径都碰不到」；后者只作诊断打印。
 

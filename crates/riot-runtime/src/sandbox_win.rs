@@ -249,11 +249,20 @@ pub(crate) fn activate(policy: &crate::sandbox::SandboxPolicy) -> Option<WinSand
     let mut granted = writable.clone();
     granted.push(session_temp.clone());
 
+    // 分步计时。`acl grant` 会把可继承 ACE 传播到**已有子对象**，而
+    // `~/.cargo\registry` 动辄几万文件 —— CI 上量到整个 activate 17.8s。
+    // 光一个总数说不清是 grant 还是 stamp 贵，而这两条的优化方向完全不同。
+    let t_grant = std::time::Instant::now();
     if let Err(e) = grant(&srt, &sid, &granted) {
         tracing::warn!(error = %e, "给沙箱账户授权可写目录失败,本轮不隔离");
         let _ = std::fs::remove_dir_all(&session_temp);
         return None;
     }
+    tracing::info!(
+        elapsed_ms = t_grant.elapsed().as_millis() as u64,
+        paths = granted.len(),
+        "acl grant 完成"
+    );
 
     // 先把它造出来：后面每一步失败都靠 `Drop` 回收（撤 grant/stamp、删会话
     // temp），不再各自写一遍清理。
@@ -273,10 +282,15 @@ pub(crate) fn activate(policy: &crate::sandbox::SandboxPolicy) -> Option<WinSand
     //
     // 盖不上就不能说自己沙箱着 —— 那等于一边报 sandboxed=true、一边把
     // 沙箱外的执行权敞着。
+    let t_stamp = std::time::Instant::now();
     if let Err(e) = sandbox.stamp_protected() {
         tracing::warn!(error = %e, "给 cargo 敏感面打 DENY 失败,本轮不隔离");
         return None;
     }
+    tracing::info!(
+        elapsed_ms = t_stamp.elapsed().as_millis() as u64,
+        "acl stamp 完成"
+    );
 
     // `[约束]` 装机状态对**不代表跑得起来**。真起一条命令确认一遍，失败就
     // 退回不隔离 —— 和 macOS 的 `profile_accepted` 同一个理由：不冒烟的话
