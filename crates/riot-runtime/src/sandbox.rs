@@ -497,7 +497,7 @@ impl ProtectedPath {
 /// GUI 启动的 Windows 进程环境里通常没有它（Git Bash 会设，但从宿主
 /// 起的内核继承不到）—— 读错变量的后果是缓存目录一条都进不了
 /// writable，沙箱下第一条 `cargo build` 就死在"写不了缓存"上。
-fn home_dir() -> Option<PathBuf> {
+pub(crate) fn home_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     return std::env::var_os("USERPROFILE").map(PathBuf::from);
     #[cfg(not(windows))]
@@ -651,11 +651,16 @@ mod tests {
                 "清单少了 rustup 工具链：{names:?}"
             );
         }
+        // 比之前先规范化。`escape_surfaces` 的路径来自 `canonicalize`，而
+        // Windows 上那会带 `\\?\` 扩展长度前缀 —— 拿没规范化的 home 去比
+        // 一律不匹配。
+        let home = home.canonicalize().unwrap_or(home);
         for p in &protected {
             assert!(
                 p.path.starts_with(&home),
-                "deny 必须落在 home 之内，否则会误伤别的路径：{}",
-                p.path.display()
+                "deny 必须落在 home 之内，否则会误伤别的路径：{} 不在 {} 之下",
+                p.path.display(),
+                home.display()
             );
         }
     }

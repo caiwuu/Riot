@@ -70,35 +70,10 @@ pub(crate) struct WinSandbox {
 impl WinSandbox {
     /// 给 cargo 敏感面打附加 DENY ACE。
     ///
-    /// 见 [`crate::sandbox::cargo_protected`]：这几处在可写区**之内**，但写了
-    /// 就换到沙箱**之外**的执行权。
-    ///
-    /// `[约束]` 不存在的路径也要打上。ACE 只能写在真实存在的对象上，而
-    /// "不存在"本身就是缺口 —— 沙箱账户可以在可写的 `.cargo` 里**创建**
-    /// `config.toml`（里面写一条 `rustc-wrapper`），内容照样被沙箱外的
-    /// cargo 读走。
-    ///
-    /// 预建交给 srt-win：它的 `acl stamp` 对缺失的 deny 目标会建
-    /// placeholder，且先记 intent 再落盘、崩溃能恢复、`acl restore` 只摘
-    /// ACE 不删文件。我们只需要用 `stamp_target` 的**尾分隔符**告诉它建目录
-    /// 还是建文件——它默认建文件，而 `.cargo\bin` 建成文件会把 rustup 弄坏。
-    ///
-    /// `[约束]` 只给**授权过的**路径打。DENY 存在的意义就是压住 grant 那条
-    /// 可继承 ALLOW，没 grant 的地方沙箱账户本来就够不着。这不是省事：
-    /// srt-win 的 `apply_aces` 会把 ACE 传播到已有子对象，给
-    /// `~/.rustup/toolchains` 那种几万文件的树白打一遍，激活要多花几秒。
-    /// 用 `granted` 现算而不是写死平台差异，是为了让"表里加一项就自动受
-    /// 保护"成立 —— 上次这套东西出问题，正是因为我把这层耦合记在脑子里
-    /// 而不是代码里。
+    /// 见 [`crate::sandbox::escape_surfaces`]：这几处在可写区**之内**，但写了
+    /// 就换到沙箱**之外**的执行权。清单怎么筛见 [`stamp_targets`]。
     fn stamp_protected(&self) -> std::io::Result<()> {
-        let paths: Vec<String> = crate::sandbox::escape_surfaces()
-            .iter()
-            .filter(|p| self.granted.iter().any(|g| p.path.starts_with(g)))
-            // 不给预建的、又还不存在的,只能放过 —— srt-win 对缺失的 deny
-            // 目标一律建 placeholder,没有"只在存在时才打"的模式。
-            .filter(|p| p.plant || p.path.exists())
-            .map(ProtectedPathExt::stamp_target)
-            .collect();
+        let paths = stamp_targets(&self.granted);
         if paths.is_empty() {
             return Ok(());
         }
@@ -511,6 +486,35 @@ fn session_temp_env(session_temp: &Path) -> Vec<(String, String)> {
 /// 只给 `write`:读不受限（沙箱账户对系统目录本来就有读权限,而工作区的读
 /// 由 `MODIFY` 里的 `FILE_GENERIC_READ` 带出来）。收紧读会让编译类命令
 /// 大面积失败,和 macOS 那侧的取舍一致。
+/// 从逃逸面清单里筛出这次真要打 DENY 的目标，翻成 `acl stamp` 的路径串。
+///
+/// `[约束]` 只给**授权过的**路径打。DENY 存在的意义就是压住 `acl grant` 那条
+/// 可继承 ALLOW，没 grant 的地方沙箱账户本来就够不着。这不是省事：srt-win 的
+/// `apply_aces` 会把 ACE 传播到已有子对象，给 `~/.rustup\toolchains` 那种几万
+/// 文件的树白打一遍，激活要多花好几秒。按 `granted` 现算而不是写死平台差异，
+/// 是为了让「缓存表里加一项，它的敏感面就自动受保护」成立 —— 上次这套东西
+/// 出问题，正是因为我把这层耦合记在脑子里而不是代码里。
+///
+/// `[约束]` 两边都规范化再比。`escape_surfaces` 的路径来自 `canonicalize`，
+/// 在 Windows 上带 `\\?\` 扩展长度前缀；`granted` 只有走
+/// `SandboxPolicy::workspace_write`（内部的 `dedup_existing`）才是同一种形式。
+/// 形式不一致时 `starts_with` 全假，筛出空表 —— 而空表是**静默**的：一条
+/// DENY 都不打，激活照样成功，洞就这么重新开了。不靠调用方保证。
+fn stamp_targets(granted: &[PathBuf]) -> Vec<String> {
+    let granted: Vec<PathBuf> = granted
+        .iter()
+        .map(|g| g.canonicalize().unwrap_or_else(|_| g.clone()))
+        .collect();
+    crate::sandbox::escape_surfaces()
+        .iter()
+        .filter(|p| granted.iter().any(|g| p.path.starts_with(g)))
+        // 不给预建的、又还不存在的,只能放过 —— srt-win 对缺失的 deny 目标
+        // 一律建 placeholder,没有"只在存在时才打"的模式。
+        .filter(|p| p.plant || p.path.exists())
+        .map(ProtectedPathExt::stamp_target)
+        .collect()
+}
+
 /// 把 [`crate::sandbox::ProtectedPath`] 翻成 `acl stamp` 认的目标串。
 trait ProtectedPathExt {
     fn stamp_target(&self) -> String;
@@ -855,6 +859,44 @@ mod tests {
         assert_eq!(v["read"].as_array().expect("read 是数组").len(), 0);
         assert_eq!(v["write"][0], "/a");
         assert_eq!(v["write"][1], "/b");
+    }
+
+    /// 授权了 `~/.cargo`，就必须筛出它的敏感面。
+    ///
+    /// 这条钉的是整个 DENY 机制**有没有生效**，而不是它生效得对不对。筛出
+    /// 空表是静默的：`stamp_protected` 直接返回 Ok，激活成功，`sandboxed`
+    /// 报 true，而 `.cargo\bin` 在可继承 ALLOW 下大敞着。CI 上真出过一次
+    /// 苗头 —— `canonicalize` 在 Windows 带 `\\?\` 前缀，两边形式不一致
+    /// `starts_with` 就全假。
+    #[test]
+    fn 授权了缓存树就要筛出它的敏感面() {
+        let Some(cargo) = crate::sandbox::home_dir().map(|h| h.join(".cargo")) else {
+            eprintln!("拿不到 home，跳过");
+            return;
+        };
+        if !cargo.join("bin").is_dir() {
+            eprintln!("这台机器没有 ~/.cargo/bin，跳过");
+            return;
+        }
+        // 故意传**没规范化**的路径：调用方不一定走
+        // `SandboxPolicy::workspace_write`，筛选不能依赖它先帮忙规范化。
+        let targets = stamp_targets(std::slice::from_ref(&cargo));
+        assert!(
+            targets.iter().any(|t| t.contains("bin")),
+            "授权了 {} 却没筛出 bin —— DENY 一条都不会打，洞是敞开的：{targets:?}",
+            cargo.display()
+        );
+    }
+
+    /// 没授权的地方不打 —— 没有 ALLOW 要压，白打一遍还要在几万文件的树上
+    /// 传播 ACE。
+    #[test]
+    fn 没授权的路径不打_deny() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        assert!(
+            stamp_targets(&[dir.path().to_path_buf()]).is_empty(),
+            "一个不相干的目录不该牵出任何 DENY 目标"
+        );
     }
 
     #[test]
