@@ -615,10 +615,16 @@ mod tests {
     fn 用户命令在双横线之后原样传递() {
         let args = exec_args(&[], Path::new("/t"), &spec("bash", &["-c", "ls -la"]));
         let dd = args.iter().position(|a| a == "--").expect("要有 --");
-        // 程序名会被 resolve_program 解析成绝对路径（这台机器上是 /bin/bash），
-        // 所以只断言它指向 bash；后面的参数必须一字不改。
+        // 程序名会被 resolve_program 解析成绝对路径（mac 上 /bin/bash，
+        // Windows 上 C:\Program Files\Git\bin\bash.EXE），所以只断言它指向
+        // bash；后面的参数必须一字不改。
+        //
+        // 大小写要放平：返回的是**候选路径**的拼写，扩展名来自 PATHEXT
+        // （那里是 `.EXE`），不是磁盘上的真实拼写。Windows 路径大小写不敏感，
+        // 这个差异对 CreateProcessAsUserW 无所谓 —— 只对断言有所谓。
+        let prog = args[dd + 1].to_ascii_lowercase();
         assert!(
-            args[dd + 1].ends_with("bash") || args[dd + 1].ends_with("bash.exe"),
+            prog.ends_with("bash") || prog.ends_with("bash.exe"),
             "第一个位置该是 bash：{:?}",
             args[dd + 1]
         );
