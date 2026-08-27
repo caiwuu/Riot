@@ -298,6 +298,7 @@ impl SessionManager {
             max_turns: config.limits.max_turns,
             compact_threshold_tokens: config.limits.compact_threshold_tokens,
             sandbox: sandbox_mode(config.limits.sandbox),
+            sandbox_allow_read: config.limits.sandbox_allow_read.clone(),
         };
         (caps, limits)
     }

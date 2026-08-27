@@ -72,6 +72,9 @@ pub(crate) fn profile_accepted(policy: &SandboxPolicy) -> bool {
 pub(crate) fn profile(policy: &SandboxPolicy) -> String {
     let SandboxPolicy::WorkspaceWrite {
         writable,
+        // seatbelt 的读本来就全开（allow default 只收写），手填的 allowRead
+        // 是 Windows 专属的概念，这里没有对应物。
+        readable: _,
         allow_network,
     } = policy
     else {
@@ -217,6 +220,7 @@ mod tests {
         // 只放工作区，不带临时目录和缓存 —— 测的是边界本身。
         SandboxPolicy::WorkspaceWrite {
             writable: vec![dir.canonicalize().expect("规范化")],
+            readable: vec![],
             allow_network: true,
         }
     }
@@ -244,6 +248,7 @@ mod tests {
     fn 断网策略写进_profile() {
         let p = profile(&SandboxPolicy::WorkspaceWrite {
             writable: vec![],
+            readable: vec![],
             allow_network: false,
         });
         assert!(p.contains("(deny network*)"));
@@ -256,6 +261,7 @@ mod tests {
     fn unix_socket_外连被挡住而_dns_放回来() {
         let p = profile(&SandboxPolicy::WorkspaceWrite {
             writable: vec![],
+            readable: vec![],
             allow_network: true,
         });
 
@@ -282,6 +288,7 @@ mod tests {
         for allow_network in [true, false] {
             let p = profile(&SandboxPolicy::WorkspaceWrite {
                 writable: vec![],
+                readable: vec![],
                 allow_network,
             });
             assert!(
@@ -297,6 +304,7 @@ mod tests {
     fn 断网档压在_unix_socket_段之后() {
         let p = profile(&SandboxPolicy::WorkspaceWrite {
             writable: vec![],
+            readable: vec![],
             allow_network: false,
         });
         let dns = p.find("(allow network-outbound").expect("有放行段");
@@ -364,6 +372,7 @@ mod tests {
         let wrapped = wrap(
             &SandboxPolicy::WorkspaceWrite {
                 writable: vec![],
+                readable: vec![],
                 allow_network: true,
             },
             spec,

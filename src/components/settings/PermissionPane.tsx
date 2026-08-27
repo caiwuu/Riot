@@ -7,6 +7,7 @@ import {
   type SandboxStatus,
   sandboxInstall,
   sandboxStatus,
+  sandboxUninstall,
   setConfig,
 } from "../../bridge";
 import {
@@ -75,11 +76,19 @@ const MODES: { id: PermissionMode; name: string; desc: string; danger?: boolean 
   },
 ];
 
+// 安装/卸载入口只在 Windows 出现：macOS 的隔离用系统自带的 sandbox-exec，
+// 没有装卸的生命周期。UA 判断和 main.tsx 的材质门控是同一招。
+const IS_WINDOWS = navigator.userAgent.includes("Windows");
+
 /**
  * 「开关说开着」和「这台机器上真的隔离着」之间的差额。
  *
- * 只在两者不一致、或有事要用户做时才出声：一切正常时多一行"生效中"是噪音，
- * 而噪音会让真正要紧的那次提示也被略过。
+ * 差额分支只在两者不一致、或有事要用户做时才出声：一切正常时多一行
+ * "生效中"是噪音，而噪音会让真正要紧的那次提示也被略过。
+ *
+ * 例外是已装好时的卸载入口：它在**任何档位**下都显示（包括「不隔离」）。
+ * 开关关的是会话策略，账户和凭证还留在系统里 —— 界面上分不出"关掉"和
+ * "卸载"的话，真有人以为选了不隔离就是卸载了（发生过）。
  */
 function SandboxReality({
   sbx,
@@ -87,12 +96,16 @@ function SandboxReality({
   wanted,
   installing,
   onInstall,
+  uninstalling,
+  onUninstall,
 }: {
   sbx: SandboxStatus | null;
   error: string;
   wanted: SandboxMode;
   installing: boolean;
   onInstall: () => void;
+  uninstalling: boolean;
+  onUninstall: () => void;
 }) {
   const line = (cls: string, text: string) => (
     <p className={cls} style={{ margin: "8px 0 0" }}>
@@ -104,7 +117,25 @@ function SandboxReality({
   if (error) {
     return line("form-error", `查不到隔离是否生效（${error}）—— 下面的选择可能不反映实际情况。`);
   }
-  if (!sbx || wanted === "off") return null;
+  if (!sbx) return null;
+
+  const uninstallEntry = IS_WINDOWS && sbx.implemented && sbx.ready && (
+    <>
+      {line(
+        "hint",
+        wanted === "off"
+          ? "系统级隔离已安装但未启用（上面选了「不隔离」）。不打算再用可以卸载："
+          : "系统级隔离已安装。",
+      )}
+      <div className="pack-actions" style={{ marginTop: 6 }}>
+        <button disabled={uninstalling} onClick={onUninstall}>
+          {uninstalling ? "等待权限确认…" : "卸载（需要管理员）"}
+        </button>
+      </div>
+    </>
+  );
+
+  if (wanted === "off") return uninstallEntry || null;
 
   if (!sbx.implemented) {
     return line("hint", "这个平台还没有系统级隔离，选了也不会生效 —— 实际仍然逐条询问。");
@@ -130,12 +161,17 @@ function SandboxReality({
   // 这一档在 Windows 上会整档降级成不隔离（断网要靠 WFP，而那一半没装）。
   // 不说的话，用户选了更严的档位反而什么都没得到。
   if (wanted === "workspaceWriteNoNet" && !sbx.networkIsolation) {
-    return line(
-      "form-error",
-      "这个平台还断不了网，所以整档退回不隔离 —— 想要隔离请改选「隔离（推荐）」。",
+    return (
+      <>
+        {line(
+          "form-error",
+          "这个平台还断不了网，所以整档退回不隔离 —— 想要隔离请改选「隔离（推荐）」。",
+        )}
+        {uninstallEntry}
+      </>
     );
   }
-  return null;
+  return uninstallEntry || null;
 }
 
 export function PermissionPane({
@@ -158,6 +194,11 @@ export function PermissionPane({
   const [turns, setTurns] = useState(String(status.config.maxTurns ?? DEFAULT_TURNS));
   const [compactAt, setCompactAt] = useState(
     String(status.config.compactThresholdTokens ?? DEFAULT_COMPACT_AT),
+  );
+  // 沙箱 allowRead：编辑期间存整段文本，失焦再拆行提交（一行一条，空行
+  // 忽略），和 MCP 面板的参数输入同一套。老配置可能没有这个字段。
+  const [allowRead, setAllowRead] = useState(
+    (status.config.sandboxAllowRead ?? []).join("\n"),
   );
 
   // 夹紧发生时在字段旁说一声 —— 不说的话，99999 无声变 3600 像是输入被吞了。
@@ -228,6 +269,7 @@ export function PermissionPane({
   const [sbx, setSbx] = useState<SandboxStatus | null>(null);
   const [sbxError, setSbxError] = useState("");
   const [installing, setInstalling] = useState(false);
+  const [uninstalling, setUninstalling] = useState(false);
   const refreshSbx = () => {
     sandboxStatus()
       .then((s) => {
@@ -268,6 +310,39 @@ export function PermissionPane({
           });
       },
     });
+  };
+
+  const runUninstall = () => {
+    askConfirm({
+      title: "卸载命令隔离？",
+      body: "会弹出一次 Windows 权限确认（UAC），删除沙箱专用账户、它的凭证和残留授权。卸载后命令不再被系统级隔离，之后可以随时重新安装。",
+      confirmLabel: "开始卸载",
+      action: () => {
+        setUninstalling(true);
+        setError("");
+        sandboxUninstall()
+          .catch((e: unknown) => setError(String(e)))
+          .finally(() => {
+            setUninstalling(false);
+            // 卸载成功后状态会翻回「还没安装」，安装入口重新出现。
+            refreshSbx();
+          });
+      },
+    });
+  };
+
+  const commitAllowRead = () => {
+    const list = allowRead
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    setAllowRead(list.join("\n"));
+    const prev = status.config.sandboxAllowRead ?? [];
+    if (list.length === prev.length && list.every((p, i) => p === prev[i])) return;
+    setError("");
+    setConfig({ ...status.config, sandboxAllowRead: list })
+      .then(saved)
+      .catch((e: unknown) => setError(String(e)));
   };
 
   const sandbox = status.config.sandbox ?? "workspaceWrite";
@@ -364,7 +439,25 @@ export function PermissionPane({
           wanted={sandbox}
           installing={installing}
           onInstall={runInstall}
+          uninstalling={uninstalling}
+          onUninstall={runUninstall}
         />
+        {IS_WINDOWS && sandbox !== "off" ? (
+          <label style={{ display: "block", marginTop: 10 }}>
+            <span className="hint" style={{ display: "block", margin: "0 0 4px" }}>
+              沙箱内额外可读的目录（一行一个绝对路径）。装在你用户目录下的工具（nvm、conda、pip
+              --user……）沙箱内默认打不开，需要哪个填哪个；目录越大，会话首次激活越慢。
+            </span>
+            <textarea
+              value={allowRead}
+              onChange={(e) => setAllowRead(e.target.value)}
+              onBlur={commitAllowRead}
+              placeholder={"如：\nC:\\Users\\你\\.cargo\nC:\\Users\\你\\.rustup"}
+              rows={3}
+              spellCheck={false}
+            />
+          </label>
+        ) : null}
       </section>
       <section>
         <h2>

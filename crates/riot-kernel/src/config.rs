@@ -677,6 +677,13 @@ pub struct AppConfig {
     /// 见 [`riot_runtime::SandboxPolicy::activate`]。
     #[serde(default)]
     pub sandbox: SandboxMode,
+    /// 沙箱内额外可读的路径，手填。对齐上游 sandbox-runtime 的
+    /// `filesystem.allowRead`：Windows 上 per-user 工具（nvm、conda、
+    /// `pip install --user`……）沙箱内默认打不开，需要谁填谁；macOS 读
+    /// 本就全开，用不上。**不**自动扫 PATH —— 那会把 anaconda 这类
+    /// 几十万文件的树拖进每次会话激活的 ACE 传播。
+    #[serde(default)]
+    pub sandbox_allow_read: Vec<String>,
 }
 
 /// 命令隔离的强度。
@@ -693,19 +700,26 @@ pub enum SandboxMode {
 }
 
 impl SandboxMode {
-    /// 翻译成执行器认识的策略。
-    pub fn policy(self, workspace: &std::path::Path) -> riot_runtime::SandboxPolicy {
+    /// 翻译成执行器认识的策略。`allow_read` 是设置里手填的额外可读路径。
+    pub fn policy(
+        self,
+        workspace: &std::path::Path,
+        allow_read: &[String],
+    ) -> riot_runtime::SandboxPolicy {
         match self {
             Self::Off => riot_runtime::SandboxPolicy::Off,
-            Self::WorkspaceWrite => riot_runtime::SandboxPolicy::workspace_write(workspace),
+            Self::WorkspaceWrite => {
+                riot_runtime::SandboxPolicy::workspace_write(workspace, allow_read)
+            }
             Self::WorkspaceWriteNoNet => {
-                match riot_runtime::SandboxPolicy::workspace_write(workspace) {
-                    riot_runtime::SandboxPolicy::WorkspaceWrite { writable, .. } => {
-                        riot_runtime::SandboxPolicy::WorkspaceWrite {
-                            writable,
-                            allow_network: false,
-                        }
-                    }
+                match riot_runtime::SandboxPolicy::workspace_write(workspace, allow_read) {
+                    riot_runtime::SandboxPolicy::WorkspaceWrite {
+                        writable, readable, ..
+                    } => riot_runtime::SandboxPolicy::WorkspaceWrite {
+                        writable,
+                        readable,
+                        allow_network: false,
+                    },
                     other => other,
                 }
             }
@@ -803,6 +817,7 @@ impl Default for AppConfig {
             vision_model: String::new(),
             subagent_model: String::new(),
             sandbox: SandboxMode::default(),
+            sandbox_allow_read: Vec::new(),
         }
     }
 }
@@ -1448,6 +1463,7 @@ fn migrate(old: LegacyConfig) -> AppConfig {
         vision_model: String::new(),
         subagent_model: String::new(),
         sandbox: SandboxMode::default(),
+        sandbox_allow_read: Vec::new(),
     }
 }
 

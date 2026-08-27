@@ -228,7 +228,7 @@ struct CompactOutcome {
 /// 打成一包而不是各自当参数，理由和 [`TurnCapabilities`] 一样:取值时机相同，
 /// 而且两个字段都是 `u32` —— 摊成位置参数一旦顺序写反，编译器一声不吭，
 /// 表现是"超时和轮数对调了"这种极难查的 bug。
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct TurnLimits {
     /// 权限弹窗等多久算超时（秒）。见 [`ASK_TIMEOUT_RANGE`]。
     pub ask_timeout_secs: u32,
@@ -239,6 +239,8 @@ pub struct TurnLimits {
     pub compact_threshold_tokens: u32,
     /// 命令的 OS 级隔离强度。每轮现取 —— 用户在设置里改完，下一轮生效。
     pub sandbox: crate::config::SandboxMode,
+    /// 沙箱内额外可读的路径（手填的 allowRead），随隔离强度一起每轮现取。
+    pub sandbox_allow_read: Vec<String>,
 }
 
 /// 会话缓存住的沙箱：激活它的策略 + 激活结果。
@@ -1320,8 +1322,9 @@ impl Session {
     async fn active_sandbox(
         &self,
         mode: crate::config::SandboxMode,
+        allow_read: &[String],
     ) -> Option<Arc<riot_runtime::ActiveSandbox>> {
-        let policy = mode.policy(&self.cwd);
+        let policy = mode.policy(&self.cwd, allow_read);
         let mut slot = self.sandbox.lock().await;
 
         if let Some(cached) = slot.as_ref() {
@@ -1589,7 +1592,9 @@ impl Session {
         // `[约束]` 两处必须来自**同一次** activate。分别判断的话，一边以为
         // 有边界、另一边其实没套上 —— 那正好是最坏的组合：决策链按"OS 挡着"
         // 放行了命令，而实际上什么都没挡。
-        let sandbox = self.active_sandbox(limits.sandbox).await;
+        let sandbox = self
+            .active_sandbox(limits.sandbox, &limits.sandbox_allow_read)
+            .await;
         if sandbox.is_none() && limits.sandbox != crate::config::SandboxMode::Off {
             // 说一声。静默降级的话，用户以为自己开着沙箱。
             //
@@ -3229,6 +3234,7 @@ mod tests {
             max_turns: 48,
             compact_threshold_tokens: 100_000,
             sandbox: crate::config::SandboxMode::Off,
+            sandbox_allow_read: Vec::new(),
         };
         let _ = s.run_turn(input, model, caps, ch, limits).await;
         assert!(s.running.lock().await.is_none(), "失败路径没有清理 running");
@@ -3316,6 +3322,7 @@ mod tests {
             // 测试跑真命令，沙箱会把临时目录外的写拦掉 —— 那是另一组
             // 用例的事（riot-runtime::sandbox），这里只测调度和权限。
             sandbox: crate::config::SandboxMode::Off,
+            sandbox_allow_read: Vec::new(),
         }
     }
 

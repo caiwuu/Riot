@@ -355,6 +355,17 @@ async fn sandbox_install() -> HostResult<()> {
         .map_err(HostError::Sandbox)
 }
 
+/// 卸载命令隔离（删掉沙箱专用账户与凭证）。**Windows 上会弹一次 UAC。**
+///
+/// `[约束]` 和安装同一条：走 `spawn_blocking`，等的是用户点系统对话框。
+#[tauri::command]
+async fn sandbox_uninstall() -> HostResult<()> {
+    tokio::task::spawn_blocking(riot_runtime::sandbox::uninstall)
+        .await
+        .map_err(|e| HostError::Sandbox(format!("卸载任务没跑完：{e}")))?
+        .map_err(HostError::Sandbox)
+}
+
 /// 和 `tauri.conf.json` 的 version 同一份，设置 → 关于用来显示。
 #[tauri::command]
 fn app_version(app: tauri::AppHandle) -> String {
@@ -996,6 +1007,27 @@ pub fn run() {
     gui_env::inherit_login_env();
     askpass::install();
 
+    // dev 和安装版共用 identifier「dev.riot.app」，Windows 上 WebView2 的用户
+    // 数据目录因此都是 %LOCALAPPDATA%\dev.riot.app\EBWebView。这个目录被先
+    // 启动的实例占住后，后启动的那个创建 webview 会报 0x8007139F
+    // （ERROR_INVALID_STATE），窗口永远出不来 —— 装过正式版再跑
+    // `pnpm tauri dev` 必踩。debug 构建改用自己的目录，两边即可并存。
+    // 环境变量的优先级高于 wry 传给 CreateCoreWebView2Environment 的参数；
+    // 用户自己 export 过就尊重用户的。
+    #[cfg(all(windows, debug_assertions))]
+    if std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").is_none()
+        && let Some(base) = std::env::var_os("LOCALAPPDATA")
+    {
+        let dir = std::path::Path::new(&base)
+            .join("dev.riot.app")
+            .join("EBWebView-dev");
+        // 豁免理由：宿主启动路径，建的是自己的 webview profile 目录。
+        #[allow(clippy::disallowed_methods)]
+        let _ = std::fs::create_dir_all(&dir);
+        // 此刻只有主线程（见 inherit_login_env 的约束），set_var 安全。
+        unsafe { std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &dir) };
+    }
+
     // 全局技能目录启动时就建好。设置页的「打开目录」按钮 reveal 的是它 ——
     // 目录不存在时系统的 reveal 静默失败，按钮看起来就是坏的（用户没写过
     // 技能之前恰恰是最需要这个按钮的时候）。建不出来只记日志：技能扫描
@@ -1079,6 +1111,7 @@ pub fn run() {
             skills_list,
             sandbox_status,
             sandbox_install,
+            sandbox_uninstall,
             packs_status,
             packs_install,
             packs_uninstall,

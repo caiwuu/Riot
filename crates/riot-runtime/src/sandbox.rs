@@ -59,6 +59,11 @@ pub enum SandboxPolicy {
     WorkspaceWrite {
         /// 可写目录。工作区、临时目录、构建缓存都在这里。
         writable: Vec<PathBuf>,
+        /// 额外可读的路径，用户在设置里手填。对齐上游 sandbox-runtime 的
+        /// `filesystem.allowRead`：Windows 上翻成 READ|EXECUTE 的 ALLOW
+        /// ACE（per-user 工具默认打不开，需要谁填谁）；macOS 读本就全开，
+        /// 这个清单用不上。
+        readable: Vec<PathBuf>,
         /// 允许联网。
         ///
         /// 默认允许，和 Codex 相反。理由是 Riot 的联网工具（WebFetch /
@@ -99,7 +104,12 @@ impl SandboxPolicy {
     /// 近乎不存在，批准后沙箱内失败的报错清晰（带路径的权限错误），
     /// 用户有出路（自己改/关沙箱），所以值得用 OS 挡住**间接写**这条
     /// 没有任何确认机会的静默路径。
-    pub fn workspace_write(workspace: &Path) -> Self {
+    /// `allow_read` 是用户手填的额外可读路径（上游 `filesystem.allowRead`
+    /// 语义）。**不**自动从 PATH 推：那样会把 anaconda 这类几十万文件的树
+    /// 拖进每次激活的 ACE 传播（2026-08-28 真机事故，一次激活五十多万次
+    /// ACL 写）。per-user 工具在沙箱内打不开时，失败输出带 `[riot:sandbox]`
+    /// 提示，出路是装机器级工具或在设置里手填 —— 和上游文档一致。
+    pub fn workspace_write(workspace: &Path, allow_read: &[String]) -> Self {
         let mut writable = vec![workspace.to_path_buf()];
         // temp 的处理平台不同：macOS/Unix 直接放开全局 temp（seatbelt 的
         // 授权只对被包进程生效，不影响别人）；Windows **不**放全局 %TEMP%
@@ -173,6 +183,10 @@ impl SandboxPolicy {
         }
         Self::WorkspaceWrite {
             writable: dedup_existing(writable),
+            // 手填清单同样过 dedup_existing：Windows 给不存在的路径写 ACE
+            // 直接失败，而 grant 是全有或全无 —— 一条填错的路径不该把整个
+            // 沙箱拖成永远激活不了。canonicalize 顺带解开 nvm 那类链接。
+            readable: dedup_existing(allow_read.iter().map(PathBuf::from).collect()),
             allow_network: true,
         }
     }
@@ -605,6 +619,23 @@ pub fn install() -> Result<(), String> {
     }
 }
 
+/// 卸载那套提权装的东西（专用账户 + 凭证 + 装机标记）。**Windows 上会弹
+/// 一次 UAC。**
+///
+/// 和 [`install`] 同一对约束：阻塞在「用户去点系统对话框」上，调用方必须
+/// 放到后台线程。卸载后 [`status`] 回到 `NeedsElevatedInstall`，设置页
+/// 重新出现安装入口。
+pub fn uninstall() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        crate::sandbox_win::uninstall()
+    }
+    #[cfg(not(windows))]
+    {
+        Err("这个平台没有可卸载的沙箱组件".to_owned())
+    }
+}
+
 /// 用户主目录。Windows 的约定是 `USERPROFILE`；`HOME` 是 Unix 的，
 /// GUI 启动的 Windows 进程环境里通常没有它（Git Bash 会设，但从宿主
 /// 起的内核继承不到）—— 读错变量的后果是缓存目录一条都进不了
@@ -789,7 +820,7 @@ mod tests {
     fn windows_不授权主目录缓存() {
         let dir = tempfile::tempdir().expect("临时目录");
         let SandboxPolicy::WorkspaceWrite { writable, .. } =
-            SandboxPolicy::workspace_write(dir.path())
+            SandboxPolicy::workspace_write(dir.path(), &[])
         else {
             panic!("该是 WorkspaceWrite");
         };
@@ -878,6 +909,7 @@ mod tests {
 
         let policy = SandboxPolicy::WorkspaceWrite {
             writable: vec![work.canonicalize().expect("规范化")],
+            readable: vec![],
             allow_network: true,
         };
         let Some(active) = policy.activate() else {
@@ -953,7 +985,7 @@ mod tests {
 
         let work = std::env::temp_dir().join(format!("riot-esc-{}", std::process::id()));
         std::fs::create_dir_all(&work).expect("建工作区");
-        let Some(active) = SandboxPolicy::workspace_write(&work).activate() else {
+        let Some(active) = SandboxPolicy::workspace_write(&work, &[]).activate() else {
             eprintln!("这台机器没有 sandbox-exec，跳过");
             return;
         };
@@ -1046,6 +1078,7 @@ mod tests {
 
         let policy = SandboxPolicy::WorkspaceWrite {
             writable: vec![dir.canonicalize().expect("规范化")],
+            readable: vec![],
             allow_network: true,
         };
         let Some(active) = policy.activate() else {
@@ -1146,7 +1179,22 @@ mod tests {
         // 用生产构造器而不是手写 `WorkspaceWrite{…}`：这条测试的意义就是
         // "完整生产装配"，而缓存表（`~/.cargo` 那些）和逃逸面 DENY 是一对，
         // 手写一个只有工作区的策略就把这对关系整个绕过去了。
-        let policy = SandboxPolicy::workspace_write(&work);
+        //
+        // allowRead 手填 `.cargo` + `.rustup`，和真实用户在设置页填的形态
+        // 一致 —— 下面「rustup 工具链打得开」「沙箱内 cargo build 跑得通」
+        // 两条硬断言验的就是这条手填链路。不填的话它们**该**失败（per-user
+        // 工具打不开是对齐上游的已知限制），那样测试就验不到 allowRead 了。
+        let allow_read: Vec<String> = home_dir()
+            .map(|h| {
+                [".cargo", ".rustup"]
+                    .iter()
+                    .map(|c| h.join(c))
+                    .filter(|p| p.is_dir())
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let policy = SandboxPolicy::workspace_write(&work, &allow_read);
         // `[约束]` 装 subscriber，否则 `activate` 失败的原因（全走
         // `tracing::warn!`）会被静默丢掉 —— 而这条测试只在 CI 的 Windows 上
         // 跑，日志是唯一的断案材料。`try_init` 而不是 `init`：同进程里别的
@@ -1192,7 +1240,12 @@ mod tests {
         // 退出 0，文件却没建出来。这个测试为此红过一次。
         let exec_t = |cmd: &str, timeout_ms: u64| {
             let r = &runner;
-            let cwd = base.clone();
+            // `[约束]` cwd 用**已授权**的工作区，和生产同形（Bash 的 cwd 永远
+            // 是工作区或会话 temp）。用 `base` 在 CI 上碰巧能过（RUNNER_TEMP
+            // 对 Users 开放），在真实用户机器上 %TEMP% 沙箱账户进不去 ——
+            // seclogon 设 cwd 报 ERROR_DIRECTORY，srt-win 归成
+            // mapped_drive_cwd，看起来像映射盘问题，实际是 cwd 没授权。
+            let cwd = work.clone();
             let cmd = cmd.to_owned();
             async move {
                 r.run(
@@ -1377,86 +1430,104 @@ mod tests {
             std::env::var("USERPROFILE").unwrap_or_default()
         );
 
-        // `[约束]` 上一轮 `cargo --version` 在沙箱里**成功**了，而按理不该：
-        // rustup 的 shim 从 `RUSTUP_HOME`（缺省 `%USERPROFILE%\.rustup`）找
-        // 工具链，而那是沙箱账户的空目录。两种解释在真实用户机器上结论相反 ——
-        // 若只是 runner 把 RUSTUP_HOME 设成了机器级变量，那删掉缓存表会让
-        // Rust 项目在沙箱里彻底构建不了。问清楚再改。
-        let rust_env = exec(
-            "echo RH=%RUSTUP_HOME%^&CH=%CARGO_HOME% & where cargo & rustup show active-toolchain",
-        )
-        .await;
-        eprintln!(
-            "[cache] rustup 怎么找到工具链的：exit={} stdout={} stderr={}",
-            rust_env.exit_code, rust_env.stdout, rust_env.stderr
-        );
         // `[约束]` 这条必须**硬断言**，不能只打印。
         //
-        // 它守的是「PATH 上解析得到的 per-user 工具链，沙箱里打得开」——
-        // 一条只有真机能回答、而且已经被打断过一次的性质：清空可写缓存表时
+        // 它守的是「allowRead 手填的 per-user 工具，沙箱里打得开」—— 一条
+        // 只有真机能回答、而且已经被打断过一次的性质：清空可写缓存表时
         // 我按 macOS 的直觉认为「读不受限」，结果连 `where cargo` 都退 1。
         // 那一轮 e2e 是**绿的**，因为它只断言「真实用户的 .cargo 写不进」，
         // 而在工具完全跑不了时那同样成立。
         //
-        // 不联网、确定性强，没有 flake 空间。
+        // 探针分两半：`where cargo` 验目录**列得动**（READ），
+        // `rustup --version` 验二进制**跑得动**（EXECUTE）—— rustup.exe 是
+        // 真身不是 shim，报版本不需要任何工具链。不联网、确定性强。
+        let rust_env = exec("where cargo & rustup --version").await;
+        eprintln!(
+            "[cache] allowRead 的工具打不打得开：exit={} stdout={} stderr={}",
+            rust_env.exit_code, rust_env.stdout, rust_env.stderr
+        );
         assert_eq!(
             rust_env.exit_code, 0,
-            "沙箱里够不到 rustup 工具链 —— PATH 上解析得到但打不开。\
-             Windows 的读不是默认放开的，per-user 装的工具链要显式给读+执行权\
-             （见 sandbox_win::tool_reads）。stdout={} stderr={}",
+            "沙箱里够不到手填的 per-user 工具 —— PATH 上解析得到但打不开。\
+             这条测试在 allowRead 里手填了 `.cargo` 和 `.rustup`，打不开说明\
+             手填链路（workspace_write → acl grant 的 read 列）断了。\
+             stdout={} stderr={}",
             rust_env.stdout, rust_env.stderr
         );
 
-        // 真构建。带一个依赖，因为要验的正是「registry 写得进去吗」——
-        // 无依赖的 crate 碰不到缓存，验了等于没验。
-        let proj = work.join("cachep");
-        std::fs::create_dir_all(proj.join("src")).expect("建探针工程");
-        std::fs::write(
-            proj.join("Cargo.toml"),
-            "[package]\nname=\"cachep\"\nversion=\"0.0.0\"\nedition=\"2021\"\n\
-             [dependencies]\ncfg-if=\"1\"\n",
-        )
-        .expect("写 Cargo.toml");
-        std::fs::write(proj.join("src").join("lib.rs"), "pub fn f() {}\n").expect("写 lib.rs");
-        let build = exec_t(
-            &format!("cd /d \"{}\" && cargo build", proj.display()),
-            180_000,
-        )
-        .await;
-        eprintln!(
-            "[cache] 沙箱内 cargo build：exit={} timed_out={}\nstdout={}\nstderr={}",
-            build.exit_code, build.timed_out, build.stdout, build.stderr
-        );
-        // 同样硬断言：整个 Windows 沙箱存在的意义就是让 agent 能在里面干活，
-        // 而「跑一次带依赖的构建」是最低限度的干活。不联网这条会挂，但这个
-        // job 更早的 `cargo build -p srt-win --release` 就已经依赖网络了 ——
-        // 网断的话轮不到这里红，所以没有额外的 flake 面。
-        assert_eq!(
-            build.exit_code, 0,
-            "沙箱里跑不了一次带依赖的 cargo build。\nstdout={}\nstderr={}",
-            build.stdout, build.stderr
-        );
+        // 真构建要先能**解析到工具链**。rustup 的 shim 按 `RUSTUP_HOME`
+        // （缺省 `%USERPROFILE%\.rustup`）找，而沙箱账户的 profile 是它自己
+        // 的空目录 —— 只有机器级设了 RUSTUP_HOME / CARGO_HOME（CI runner
+        // 就是）时才解析得到。真实用户机器上解析不到属于上游语义的已知
+        // 限制（allowRead 管「打得开」，不伪造环境变量；要在沙箱里跑
+        // per-user 的 rust，得自己把这两个变量设成机器级）。
+        // 解析得到就必须验完真构建；解析不到只在 CI（REQUIRE=1）判红。
+        let toolchain = exec("rustup show active-toolchain").await;
+        if toolchain.exit_code == 0 {
+            // 真构建。带一个依赖，因为要验的正是「registry 写得进去吗」——
+            // 无依赖的 crate 碰不到缓存，验了等于没验。
+            let proj = work.join("cachep");
+            std::fs::create_dir_all(proj.join("src")).expect("建探针工程");
+            std::fs::write(
+                proj.join("Cargo.toml"),
+                "[package]\nname=\"cachep\"\nversion=\"0.0.0\"\nedition=\"2021\"\n\
+                 [dependencies]\ncfg-if=\"1\"\n",
+            )
+            .expect("写 Cargo.toml");
+            std::fs::write(proj.join("src").join("lib.rs"), "pub fn f() {}\n").expect("写 lib.rs");
+            let build = exec_t(
+                &format!("cd /d \"{}\" && cargo build", proj.display()),
+                180_000,
+            )
+            .await;
+            eprintln!(
+                "[cache] 沙箱内 cargo build：exit={} timed_out={}\nstdout={}\nstderr={}",
+                build.exit_code, build.timed_out, build.stdout, build.stderr
+            );
+            // 硬断言：整个 Windows 沙箱存在的意义就是让 agent 能在里面干活，
+            // 而「跑一次带依赖的构建」是最低限度的干活。不联网这条会挂，但这个
+            // job 更早的 `cargo build -p srt-win --release` 就已经依赖网络了 ——
+            // 网断的话轮不到这里红，所以没有额外的 flake 面。
+            assert_eq!(
+                build.exit_code, 0,
+                "沙箱里跑不了一次带依赖的 cargo build。\nstdout={}\nstderr={}",
+                build.stdout, build.stderr
+            );
 
-        // 决定性的一条：那个依赖的 .crate 落到谁的 registry 里了。
-        // 落在沙箱账户那边 = 我们授权真实用户的 `~/.cargo` 是白花钱。
-        let whose =
-            exec("dir /b /s \"%USERPROFILE%\\.cargo\\registry\\cache\" 2>nul | findstr /i cfg-if")
-                .await;
-        eprintln!(
-            "[cache] 沙箱账户自己的 registry 里有没有 cfg-if：exit={} {:?}",
-            whose.exit_code,
-            whose.stdout.trim()
-        );
-        let host_cache = home_dir()
-            .map(|h| h.join(".cargo").join("registry").join("cache"))
-            .filter(|p| p.exists())
-            .map(|p| {
-                walk_names(&p)
-                    .into_iter()
-                    .filter(|n| n.starts_with("cfg-if"))
-                    .collect::<Vec<_>>()
-            });
-        eprintln!("[cache] 真实用户的 registry 里的 cfg-if：{host_cache:?}");
+            // 决定性的一条：那个依赖的 .crate 落到谁的 registry 里了。
+            // 落在沙箱账户那边 = 授权真实用户的 `~/.cargo` 换不到缓存复用。
+            let whose = exec(
+                "dir /b /s \"%USERPROFILE%\\.cargo\\registry\\cache\" 2>nul | findstr /i cfg-if",
+            )
+            .await;
+            eprintln!(
+                "[cache] 沙箱账户自己的 registry 里有没有 cfg-if：exit={} {:?}",
+                whose.exit_code,
+                whose.stdout.trim()
+            );
+            let host_cache = home_dir()
+                .map(|h| h.join(".cargo").join("registry").join("cache"))
+                .filter(|p| p.exists())
+                .map(|p| {
+                    walk_names(&p)
+                        .into_iter()
+                        .filter(|n| n.starts_with("cfg-if"))
+                        .collect::<Vec<_>>()
+                });
+            eprintln!("[cache] 真实用户的 registry 里的 cfg-if：{host_cache:?}");
+        } else {
+            let msg = format!(
+                "沙箱内解析不到 rust 工具链（rustup show active-toolchain exit={}），\
+                 跳过真构建。机器级设了 RUSTUP_HOME / CARGO_HOME 的环境（CI）不该\
+                 走到这里。stderr={}",
+                toolchain.exit_code, toolchain.stderr
+            );
+            assert!(
+                std::env::var_os("RIOT_SANDBOX_TEST_REQUIRE").is_none(),
+                "{msg}"
+            );
+            eprintln!("{msg}");
+        }
 
         // 整套设计成立与否的单点判据：沙箱里的命令**是另一个用户在跑**。
         //

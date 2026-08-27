@@ -237,7 +237,7 @@ cargo build → exit 0，stderr："Updating crates.io index / Downloaded cfg-if 
 剩下那 2.4s 主要是 `~/.rustup` 的树传播。还能再收（只授权当前 active 的
 toolchain），但它是**每会话**一次不是每命令一次，暂时没动。
 
-### 4.7 读也要显式授权，清单从 PATH 推
+### 4.7 读也要显式授权，清单由用户手填（allowRead，上游语义）
 
 `[约束]` **Windows 没有「读默认放开」这回事。** macOS 的 seatbelt 包住同一个
 进程，读全开、只收紧写；Windows 换成专用账户之后，能不能读某个对象完全由它
@@ -245,30 +245,30 @@ toolchain），但它是**每会话**一次不是每命令一次，暂时没动�
 权限都没有。于是 PATH 上解析得到的 `C:\Users\<真人>\.cargo\bin\cargo.exe`
 **打不开**，沙箱里的 Rust 全废。
 
-这一条踩过：清空可写缓存表时按 macOS 的直觉判断「读不受限」，结果连
-`where cargo` 都退 1 —— 之前能跑，靠的正是那张表的 write grant **顺带**给出的
-读+执行权。
+出路走 `acl grant` 的 **read** 那一列（`FILE_GENERIC_READ|EXECUTE`），清单来自
+设置页手填的「沙箱内额外可读的目录」（`AppConfig.sandbox_allow_read`，语义
+对齐上游的 `filesystem.allowRead`，默认为空）。路径会先 canonicalize ——
+nvm/fnm 那类目录是符号链接，给链接本身打 ACE 落不到真身上；不存在的路径直接
+丢掉（给不存在的路径写 ACE 失败，而 grant 全有或全无）。
 
-所以走 `acl grant` 的 **read** 那一列（`FILE_GENERIC_READ|EXECUTE`）。清单不是
-写死的，是**从 PATH 推出来的**（`sandbox_win::tool_reads_from`）：
+**这里曾经自动从 PATH 推清单**（收 PATH 里属于用户 profile 的目录 + `.rustup`
+等 shim 目标树），2026-08-28 撤掉了，别加回来。真机事故：用户把 anaconda 整棵
+（40 万文件）挂在 PATH 上，加上工作区和 `.rustup`，一次会话激活要做五十多万次
+文件级 ACE 传播 —— 首轮「正在生成」卡好几分钟，强杀后孤儿授权又把下一次内核
+启动堵在同步清扫上，界面上是「会话列表在、消息全空」。自动推的清单**没有体量
+上限**，而激活是每会话都要付的同步成本；上游（Claude Code）与 Codex 都不做
+这件事。
 
-1. PATH 里落在用户 profile 下的目录 —— PATH 本身就是「agent 要执行什么」的
-   权威清单。用户装了 fnm 它就在 PATH 上，换成 Scoop / volta / pyenv-win 同理，
-   不用我们逐个猜。机器级安装（`C:\Program Files\…`）对 `Users` 本来就开着
-   读+执行，不收，省一次 ACE 传播。
-2. 少数 **shim 指向别处**的树：`.rustup`（`.cargo\bin` 里是 rustup 代理，真正
-   被 exec 的二进制在这下面）、nvm-windows 和 fnm 的版本目录。这些不在 PATH 上。
-
-路径会先 canonicalize —— nvm/fnm 的 PATH 项是符号链接，给链接本身打 ACE 落不到
-真身上。
+代价照上游的方式记档：**per-user 安装的工具（nvm、Scoop、conda、
+`pip install --user`、`%LOCALAPPDATA%\Programs\…`）在沙箱内默认打不开。**
+命令失败时输出带 `[riot:sandbox]` 提示（§5），用户的出路是装机器级工具、
+手填 allowRead，或对那条命令用 `sandbox: false`。另注意手填只解决「打得开」：
+rustup / cargo 这类按 `%USERPROFILE%` 定位数据的工具在沙箱账户下看的是**它
+自己的** profile，要在沙箱里跑 per-user 的 rust 还得把 `RUSTUP_HOME` /
+`CARGO_HOME` 设成机器级环境变量（CI runner 正是这么配的）。
 
 只读不构成逃逸面：改不了 `cargo.exe` 就换不到沙箱外的执行权，所以 §4.8 那套
-DENY 不必跟上来。
-
-**和上游的差异。** 上游（以及 Claude Code）在这里只提供 `filesystem.allowRead`
-配置项，默认为空，把清单交给用户填。自动从 PATH 推是 Riot 这边加的：那份清单
-是开放集合，漏一条的表现是「某个命令在沙箱里神秘地打不开」，而用户没有任何
-线索该去填什么。
+DENY 不必跟上来（`stamp_targets` 只筛**可写**授权下的敏感面）。
 
 ### 4.8 授权的树里要再挖掉逃逸面
 

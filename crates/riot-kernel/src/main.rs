@@ -62,9 +62,14 @@ async fn kernel_main() {
     install_panic_hook();
 
     // 上次崩溃可能给沙箱账户留下没回收的 ACE(Windows 沙箱;非 Windows
-    // 空操作)。赶在任何会话激活之前收一次 —— 跨进程互斥由 srt-win 自己的
-    // 状态库负责,同机双开不会踩到对方还在用的授权。
-    riot_runtime::recover_orphan_sandbox_state();
+    // 空操作)。启动时收一次 —— 跨进程互斥由 srt-win 自己的状态库负责,
+    // 同机双开不会踩到对方还在用的授权;会话激活撞上正在收的锁也只是排队。
+    //
+    // `[约束]` 不能挡在 serve 之前。孤儿授权可能覆盖几十万个文件(工作区
+    // 加 anaconda / rustup 这类工具链树),同步收会让内核几分钟不应答任何
+    // RPC —— 宿主水合不到历史,界面开着但每个会话都是空的,看起来像数据
+    // 丢了(真实事故,2026-08-28)。放后台线程,收多久都不耽误启动。
+    std::thread::spawn(riot_runtime::recover_orphan_sandbox_state);
 
     // 会话 transcript 的落盘目录。宿主 spawn 内核时通过 RIOT_SESSIONS_DIR 传入
     // (决策:配置/路径由宿主定)。缺省给一个临时目录,只用于脱离宿主的调试。

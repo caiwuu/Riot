@@ -80,6 +80,7 @@
     "allow-skills-list",
     "allow-sandbox-status",
     "allow-sandbox-install",
+    "allow-sandbox-uninstall",
     "allow-packs-status",
     "allow-packs-install",
     "allow-packs-uninstall",

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-sandbox-uninstall"
+description = "Enables the sandbox_uninstall command without any pre-configured scope."
+commands.allow = ["sandbox_uninstall"]
+
+[[permission]]
+identifier = "deny-sandbox-uninstall"
+description = "Denies the sandbox_uninstall command without any pre-configured scope."
+commands.deny = ["sandbox_uninstall"]

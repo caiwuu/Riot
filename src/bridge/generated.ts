@@ -1072,6 +1072,14 @@ export interface TurnLimits {
    */
   max_turns: number;
   sandbox?: SandboxKind & string;
+  /**
+   * 沙箱内额外可读的路径,用户手填。语义对齐上游 sandbox-runtime 的
+   * `filesystem.allowRead`:Windows 上翻成 READ|EXECUTE 的 ALLOW ACE;
+   * macOS 读本就全开,用不上。per-user 工具(nvm、Scoop、conda……)在
+   * 沙箱内默认打不开是上游记档的已知限制,需要谁就填谁 —— **不**自动
+   * 扫 PATH 去授权,那会把 anaconda 这类几十万文件的树拖进每次激活。
+   */
+  sandbox_allow_read?: string[];
 }
 export interface PermissionRule {
   decision: RuleDecision;

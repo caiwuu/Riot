@@ -185,6 +185,12 @@ export interface AppConfig {
    * 目前只有 macOS 能真正生效，其他平台自动降级成不隔离。
    */
   sandbox: SandboxMode;
+  /**
+   * 沙箱内额外可读的路径（Windows 的 allowRead，手填，每行一条的语义）。
+   * per-user 工具（nvm、conda、`pip install --user`……）沙箱内默认打不开，
+   * 需要谁填谁；macOS 读本就全开，用不上。老配置可能没有这个字段。
+   */
+  sandboxAllowRead?: string[];
 }
 
 export type SandboxMode = "workspaceWrite" | "workspaceWriteNoNet" | "off";
@@ -658,6 +664,15 @@ export function sandboxStatus(): Promise<SandboxStatus> {
  */
 export function sandboxInstall(): Promise<void> {
   return invoke("sandbox_install");
+}
+
+/**
+ * 卸载命令隔离：删掉沙箱专用账户与凭证。Windows 上会弹一次 UAC。
+ *
+ * 和安装一样慢在等用户点对话框；取消会以一条给人看的话 reject。
+ */
+export function sandboxUninstall(): Promise<void> {
+  return invoke("sandbox_uninstall");
 }
 
 /** 一个可下载的能力包。 */

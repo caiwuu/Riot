@@ -112,7 +112,7 @@ pub enum SandboxKind {
 }
 
 /// 一轮的数值上限与隔离强度。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TurnLimits {
     /// 权限弹窗等多久算超时(秒)。超时按拒绝处理。
     pub ask_timeout_secs: u32,
@@ -122,6 +122,13 @@ pub struct TurnLimits {
     pub compact_threshold_tokens: u32,
     #[serde(default)]
     pub sandbox: SandboxKind,
+    /// 沙箱内额外可读的路径,用户手填。语义对齐上游 sandbox-runtime 的
+    /// `filesystem.allowRead`:Windows 上翻成 READ|EXECUTE 的 ALLOW ACE;
+    /// macOS 读本就全开,用不上。per-user 工具(nvm、Scoop、conda……)在
+    /// 沙箱内默认打不开是上游记档的已知限制,需要谁就填谁 —— **不**自动
+    /// 扫 PATH 去授权,那会把 anaconda 这类几十万文件的树拖进每次激活。
+    #[serde(default)]
+    pub sandbox_allow_read: Vec<String>,
 }
 
 /// 提交一轮所需的完整配置(`turn.submit` 的 RPC 载荷,除用户输入之外的一切)。

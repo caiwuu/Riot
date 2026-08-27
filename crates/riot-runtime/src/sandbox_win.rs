@@ -236,6 +236,26 @@ pub(crate) fn install() -> Result<(), String> {
     Ok(())
 }
 
+/// 卸载：删掉沙箱专用账户、它的凭证与装机标记。**会弹一次 UAC。**
+///
+/// 单步而不是像安装那样两步：`srt-win uninstall` 自己会把 WFP 过滤器
+/// （若有残留）、账户、凭证、装机标记和 ambient 印记一起收掉。
+///
+/// 已经在跑的会话若缓存着激活结果，下一次用到时两跳启动会因账户消失而
+/// 失败 —— 命令报错、决策链退回逐条询问，方向安全；重开会话即恢复干净。
+pub(crate) fn uninstall() -> Result<(), String> {
+    let srt = SrtWin::locate().ok_or_else(|| "找不到 srt-win".to_owned())?;
+    let (code, stderr) =
+        run_srt_code(&srt, &["uninstall"]).map_err(|e| format!("卸载时起不了 srt-win：{e}"))?;
+    if code == SRT_EXIT_UAC_CANCELLED {
+        return Err("你取消了权限确认，系统没有被改动。".to_owned());
+    }
+    if code != 0 {
+        return Err(format!("卸载失败（退出码 {code}）：{stderr}"));
+    }
+    Ok(())
+}
+
 /// 尝试激活 Windows 沙箱。
 ///
 /// `None` = 这台机器上做不到。三种情况:找不到 `srt-win`、没装过(用户还没
@@ -246,6 +266,7 @@ pub(crate) fn activate(policy: &crate::sandbox::SandboxPolicy) -> Option<WinSand
 
     let SandboxPolicy::WorkspaceWrite {
         writable,
+        readable,
         allow_network,
     } = policy
     else {
@@ -302,13 +323,28 @@ pub(crate) fn activate(policy: &crate::sandbox::SandboxPolicy) -> Option<WinSand
     let mut granted = writable.clone();
     granted.push(session_temp.clone());
 
-    // `[约束]` 读也要显式授权。见 `tool_reads`：Windows 上「读」不是默认
-    // 开着的，PATH 上解析得到的 per-user 工具链（rustup 那套）如果不给读+
-    // 执行权，沙箱里连 `where cargo` 都退 1。
-    let reads = tool_reads();
+    // 读授权只来自用户手填的 allowRead（上游 sandbox-runtime 语义）。
+    // Windows 上「读」不是默认开着的：沙箱账户对真实用户 profile 下的
+    // per-user 工具（nvm、conda、`pip install --user`……）没有任何权限，
+    // 在沙箱里打不开是**对齐上游的已知限制** —— 失败输出带 `[riot:sandbox]`
+    // 提示，出路是装机器级工具或在设置里手填路径。
+    //
+    // `[约束]` 不要自动从 PATH 推这份清单。推出来的树可能大到离谱
+    // （anaconda 整棵 40 万文件在 PATH 上并不罕见），可继承 ACE 逐文件
+    // 传播会把每次会话激活拖成几分钟，界面上就是「正在生成」卡死
+    // （2026-08-28 真机事故）。上游 Anthropic 和 Codex 都不这么做。
+    let reads = readable.clone();
 
     // 分步计时。`acl grant` 会把可继承 ACE 传播到**已有子对象**，树大就慢。
     // 光一个总数说不清是 grant 还是 stamp 贵，而这两条的优化方向完全不同。
+    //
+    // 开始前也要说一声：传播在几万文件的树上要跑几十秒，而这期间轮次就停在
+    // 「正在生成」上 —— 没有这行日志，卡顿看起来像挂了，唯一的线索被沉默掉。
+    tracing::info!(
+        write = granted.len(),
+        read = reads.len(),
+        "沙箱激活：开始授权目录（可继承 ACE 逐文件传播，工作区/工具链树大时要几十秒）"
+    );
     let t_grant = std::time::Instant::now();
     if let Err(e) = grant(&srt, &sid, &granted, &reads) {
         tracing::warn!(error = %e, "给沙箱账户授权目录失败,本轮不隔离");
@@ -319,8 +355,8 @@ pub(crate) fn activate(policy: &crate::sandbox::SandboxPolicy) -> Option<WinSand
         elapsed_ms = t_grant.elapsed().as_millis() as u64,
         write = granted.len(),
         read = reads.len(),
-        // 列出来而不只报个数:这一组是从 PATH 推出来的,机器之间不一样,
-        // 而「某个工具在沙箱里打不开」的排查第一步就是看它在不在这份表里。
+        // 列出来而不只报个数:「某个工具在沙箱里打不开」的排查第一步
+        // 就是看它在不在这份手填清单里。
         read_paths = reads
             .iter()
             .map(|p| p.display().to_string())
@@ -347,6 +383,7 @@ pub(crate) fn activate(policy: &crate::sandbox::SandboxPolicy) -> Option<WinSand
     //
     // 盖不上就不能说自己沙箱着 —— 那等于一边报 sandboxed=true、一边把
     // 沙箱外的执行权敞着。
+    tracing::info!("沙箱激活：开始给敏感面打 DENY");
     let t_stamp = std::time::Instant::now();
     if let Err(e) = sandbox.stamp_protected() {
         tracing::warn!(error = %e, "给 cargo 敏感面打 DENY 失败,本轮不隔离");
@@ -366,6 +403,7 @@ pub(crate) fn activate(policy: &crate::sandbox::SandboxPolicy) -> Option<WinSand
     // 时，seclogon 为沙箱账户建的登录会话里没有那个映射，
     // `CreateProcessWithLogonW` 直接失败（srt-win 退 16，stderr 一行 JSON）。
     // 没有这道冒烟的话，症状是**每条命令**都吐那段 JSON —— 而模型读不懂它。
+    tracing::info!("沙箱激活：开始冒烟（装机后首次要建沙箱账户的 profile，会慢一点）");
     if let Err(e) = sandbox.smoke() {
         tracing::warn!(error = %e, "Windows 沙箱冒烟没过,本轮不隔离(决策链回到逐条询问)");
         return None; // Drop 会回收刚授权的 ACE、删掉会话 temp
@@ -536,7 +574,8 @@ fn pathext() -> Vec<String> {
 /// TS 侧也是这么传的（logon.rs 模块头：profile-scoped 的变量留沙箱账户的，
 /// 工具解析用的 PATH 用 broker 的）。
 ///
-/// 「打得开」那一半由 [`tool_reads`] 负责 —— 它就是从这份 PATH 推出来的。
+/// 「打得开」那一半由用户手填的 allowRead 负责（见 `activate` 里的说明）：
+/// PATH 让工具**解析得到**，能不能打开由 ACL 说了算，两件事是分开的。
 fn broker_env() -> Vec<(String, String)> {
     std::env::var_os("PATH")
         .map(|p| vec![("PATH".to_owned(), p.to_string_lossy().into_owned())])
@@ -629,91 +668,12 @@ fn grant_payload(write: &[PathBuf], read: &[PathBuf]) -> String {
     serde_json::json!({ "read": s(read), "write": s(write) }).to_string()
 }
 
-/// 主目录下**只读**就够的东西：per-user 装的工具链。
-///
-/// `[约束]` Windows 没有「读默认放开」这回事。macOS 的 seatbelt 包住同一个
-/// 进程，读全开、只收紧写；Windows 换成专用账户之后，能不能读某个对象完全
-/// 由那个对象的 ACL 说了算，而真实用户的 profile 只授权给他本人 ——
-/// `BUILTIN\Users` 一点权限都没有。于是 PATH 上解析得到的
-/// `C:\Users\<真人>\.cargo\bin\cargo.exe` **打不开**，沙箱里的 Rust 全废。
-///
-/// 这一条踩过：清空可写缓存表时我按 macOS 的直觉判断「读不受限，构建不依赖
-/// 那张表」，结果连 `where cargo` 都退 1 —— 之前能跑，靠的正是那张表的
-/// write grant **顺带**给出的读+执行权。
-///
-/// 所以拆成两列：工具链走 `read`（`FILE_GENERIC_READ|EXECUTE`），缓存走
-/// `write`。只读的授权不构成逃逸面 —— 改不了 `cargo.exe` 就换不到沙箱外的
-/// 执行权，`stamp` 那一整套也就不必跟上来。
-fn tool_reads() -> Vec<PathBuf> {
-    let Some(home) = crate::sandbox::home_dir() else {
-        return Vec::new();
-    };
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    tool_reads_from(&home, &path)
-}
-
-/// [`tool_reads`] 的纯逻辑部分，抽出来是为了能在开发机上测。
-///
-/// 收两类：
-///
-/// 1. **PATH 里落在用户 profile 下的目录。** 这是清单本身 —— 不用猜哪个包
-///    管理器装在哪。用户装了 fnm，它就在 PATH 上，于是自动被收；换成
-///    Scoop、volta、pyenv-win 同理。而机器级安装（`C:\Program Files\…`）
-///    对 `BUILTIN\Users` 本来就开着读+执行，不必授权，所以只挑 profile 下的。
-///
-/// 2. **[`SHIM_TARGETS`]：shim 指向别处的那几个。** PATH 上是个转发器，真正
-///    被执行的二进制在另一棵树里，而那棵树不在 PATH 上。
-///
-/// `[约束]` 要 canonicalize。nvm-windows 和 fnm 的 PATH 项是**符号链接/联接**
-/// （`%APPDATA%\nvm\vXX` 之类），给链接本身打 ACE 落不到目标上。
-///
-/// `[取舍]` 这只覆盖「PATH 上找得到的」。真装在 profile 深处、又不在 PATH 上
-/// 的东西仍然打不开 —— 那是上游记档的已知限制（Claude Code 的出路是让用户
-/// 手填 `filesystem.allowRead`）。这里选择自动覆盖绝大多数情况，而不是把
-/// 一份猜出来的路径清单写死：那份清单是开放集合，漏一条的表现是「命令在
-/// 沙箱里神秘地打不开」。
-fn tool_reads_from(home: &Path, path_var: &std::ffi::OsStr) -> Vec<PathBuf> {
-    /// shim 转发的目标树。PATH 上只有转发器，这些不在 PATH 上但要能读。
-    const SHIM_TARGETS: &[&str] = &[
-        // `.cargo\bin` 的 rustup 代理最终 exec 的是这里的 rustc / cargo。
-        ".rustup",
-        // nvm-windows：PATH 上是 symlink，真身在这下面（symlink 解不开时兜底）。
-        "AppData\\Roaming\\nvm",
-        // fnm 的 multishell 目录同理。
-        "AppData\\Local\\fnm_multishells",
-    ];
-
-    let mut out: Vec<PathBuf> = Vec::new();
-    let mut push = |p: PathBuf| {
-        // 规范化到目标：链接本身打 ACE 落不到真身上。
-        let real = p.canonicalize().unwrap_or(p);
-        if !out.contains(&real) {
-            out.push(real);
-        }
-    };
-
-    let home_real = home.canonicalize();
-    let under_home = |p: &Path| match &home_real {
-        Ok(h) => p.canonicalize().map(|c| c.starts_with(h)).unwrap_or(false),
-        Err(_) => p.starts_with(home),
-    };
-
-    for entry in std::env::split_paths(path_var) {
-        if entry.as_os_str().is_empty() || !entry.is_dir() {
-            continue;
-        }
-        if under_home(&entry) {
-            push(entry);
-        }
-    }
-    for t in SHIM_TARGETS {
-        let p = home.join(t);
-        if p.is_dir() {
-            push(p);
-        }
-    }
-    out
-}
+// 这里曾有一个 `tool_reads()`：自动把 PATH 上属于用户 profile 的目录和
+// `.rustup` / nvm 这类 shim 目标树整棵收进读授权。**删掉是刻意的**，别加
+// 回来 —— 收进来的树可能大到离谱（anaconda 整棵在 PATH 上就是 40 万文件），
+// 可继承 ACE 逐文件传播会把每次会话激活拖成几分钟（2026-08-28 真机事故）。
+// 上游 sandbox-runtime 的语义是：per-user 工具在沙箱内打不开属于**记档的
+// 已知限制**，出路是装机器级工具或用户手填 allowRead（设置 → 权限）。
 
 /// 从 `srt-win user status` 的 JSON 里取沙箱账户 SID。
 ///
@@ -797,6 +757,20 @@ fn run_srt_code(srt: &SrtWin, args: &[&str]) -> std::io::Result<(i32, String)> {
     ))
 }
 
+/// 单次 srt-win 调用的耗时上限。
+///
+/// 合法耗时是秒级到几十秒：`acl grant` 把可继承 ACE 传播到 `.rustup` 这种
+/// 几万文件的树，冒烟的两跳启动首次还要建沙箱账户的 profile。上限放到
+/// 3 分钟，超过就当卡死（seclogon 不可用、状态库锁死之类），杀掉子进程、
+/// 这次调用按失败处理 —— 激活路径上决策链退回逐条询问，慢但不撒谎。
+///
+/// `[约束]` 必须有这个上限。这些调用全在轮次的关键路径上同步等待，没有
+/// 上限的卡死就是界面上永远的「正在生成」。而 multicall 意味着每个
+/// srt-win 子进程都是 riot-kernel.exe 的实例 —— 它活着就锁着内核 exe 的
+/// 镜像文件，dev 下 `cargo build -p riot-kernel` 会跟着报「拒绝访问
+/// (os error 5)」，连重新构建都做不了。
+const SRT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
 /// [`run_srt`] 的底座：参数已经拼全，可以指定工作目录。
 ///
 /// 冒烟要用它 —— `srt-win exec` 没有 `--cwd`，沙箱子进程的工作目录就是
@@ -826,12 +800,36 @@ fn run_srt_in(
 
     let mut child = cmd.spawn()?;
     if let Some(payload) = stdin {
+        // take 出来的句柄写完随即 drop 关闭，子进程才读得到 EOF。
         child
             .stdin
             .take()
             .ok_or_else(|| std::io::Error::other("srt-win stdin 拿不到"))?
             .write_all(payload.as_bytes())?;
     }
+
+    // 轮询等退出而不是 `wait_with_output` 一把梭：后者没有超时。
+    // stdout/stderr 都是小段 JSON / 告警，撑不满 64KB 的管道缓冲，等退出
+    // 再一次性读是安全的；真撑满的话子进程会卡在写上，走超时路径被杀，
+    // 方向不变（按失败处理）。
+    let deadline = std::time::Instant::now() + SRT_TIMEOUT;
+    loop {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::other(format!(
+                "srt-win {} 超过 {}s 没完成，已终止。半途的授权由状态库的\
+                 崩溃恢复在下次 acl 操作时收拾",
+                args.join(" "),
+                SRT_TIMEOUT.as_secs()
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    // try_wait 已经收割过，这里只是排干管道；status 是缓存的那份。
     let out = child.wait_with_output()?;
     if !out.status.success() {
         return Err(std::io::Error::other(format!(
@@ -1055,70 +1053,33 @@ mod tests {
         assert_eq!(v["read"].as_array().expect("read 是数组").len(), 1);
     }
 
-    /// PATH 上落在用户 profile 下的目录要被收进来，机器级的不收。
+    /// 手填的 allowRead 要原样落进 grant 的 read 列。
     ///
-    /// 这条守的是「per-user 装的工具在沙箱里打得开」。Windows 的读不是默认
-    /// 放开的，漏掉一条的表现是那个命令在沙箱里神秘地起不来 —— 而清单靠猜
-    /// 是补不齐的（nvm / fnm / Scoop / volta / pyenv-win 各在一处），所以
-    /// 判据是「PATH 说要用的，就得能读」。
+    /// 守的是「用户填了路径，沙箱里就真能读」这条链的纯逻辑半边：
+    /// workspace_write 收下清单、activate 把它交给 `acl grant` 的 read 列。
+    /// 真机上 ACE 生效与否由 Windows 集成测试验。
     #[test]
-    fn path_上属于用户的目录进读表_机器级的不进() {
-        let home = tempfile::tempdir().expect("临时 home");
-        let mine = home.path().join("tools/bin");
-        std::fs::create_dir_all(&mine).expect("建目录");
-        let machine = tempfile::tempdir().expect("机器级目录");
-        let missing = home.path().join("并不存在");
+    fn 手填的_allow_read_进读表_不存在的丢掉() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let readable_src = dir.path().join("tools");
+        std::fs::create_dir_all(&readable_src).expect("建目录");
+        let missing = dir.path().join("并不存在");
 
-        let joined = std::env::join_paths([mine.as_path(), machine.path(), missing.as_path()])
-            .expect("拼 PATH");
-        let got = tool_reads_from(home.path(), &joined);
-
-        let real_mine = mine.canonicalize().expect("规范化");
-        assert!(
-            got.contains(&real_mine),
-            "PATH 上属于用户的目录该收：{got:?}"
+        let policy = crate::sandbox::SandboxPolicy::workspace_write(
+            dir.path(),
+            &[
+                readable_src.to_string_lossy().into_owned(),
+                missing.to_string_lossy().into_owned(),
+            ],
         );
-        let real_machine = machine.path().canonicalize().expect("规范化");
+        let crate::sandbox::SandboxPolicy::WorkspaceWrite { readable, .. } = policy else {
+            panic!("该是 WorkspaceWrite");
+        };
+        let real = readable_src.canonicalize().expect("规范化");
+        assert!(readable.contains(&real), "手填的目录该进读表：{readable:?}");
         assert!(
-            !got.contains(&real_machine),
-            "机器级目录对 Users 本来就开着读,收了只是白花一次 ACE 传播：{got:?}"
-        );
-        assert!(
-            !got.iter().any(|p| p.ends_with("并不存在")),
-            "不存在的 PATH 项不该收：{got:?}"
-        );
-    }
-
-    /// shim 指向的树不在 PATH 上，但必须能读。
-    ///
-    /// `.cargo\bin` 里的 rustup 代理最终 exec 的是 `.rustup\toolchains\…`。
-    /// 只按 PATH 收的话，`cargo --version` 能找到却跑不起来 —— 真机上正是
-    /// 这个形态（where cargo 成功、随后 exit 1）。
-    #[test]
-    fn shim_指向的树不在_path_上也要收() {
-        let home = tempfile::tempdir().expect("临时 home");
-        std::fs::create_dir_all(home.path().join(".rustup/toolchains")).expect("建目录");
-        let got = tool_reads_from(home.path(), std::ffi::OsStr::new(""));
-        let want = home.path().join(".rustup").canonicalize().expect("规范化");
-        assert!(got.contains(&want), "缺 .rustup：{got:?}");
-    }
-
-    /// 符号链接要解到真身。nvm-windows / fnm 的 PATH 项就是链接，给链接本身
-    /// 打 ACE 落不到目标上。
-    #[cfg(unix)]
-    #[test]
-    fn path_上的符号链接解析到目标再授权() {
-        let home = tempfile::tempdir().expect("临时 home");
-        let real = home.path().join("node-v22/bin");
-        std::fs::create_dir_all(&real).expect("建目录");
-        let link = home.path().join("current");
-        std::os::unix::fs::symlink(&real, &link).expect("建链接");
-
-        let joined = std::env::join_paths([link.as_path()]).expect("拼 PATH");
-        let got = tool_reads_from(home.path(), &joined);
-        assert!(
-            got.contains(&real.canonicalize().expect("规范化")),
-            "该授权给链接指向的真身而不是链接本身：{got:?}"
+            !readable.iter().any(|p| p.ends_with("并不存在")),
+            "不存在的路径不该收 —— Windows 给它写 ACE 直接失败，而 grant 全有或全无：{readable:?}"
         );
     }
 

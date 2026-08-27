@@ -66,6 +66,7 @@ const COMMANDS: &[&str] = &[
     "skills_list",
     "sandbox_status",
     "sandbox_install",
+    "sandbox_uninstall",
     "packs_status",
     "packs_install",
     "packs_uninstall",

@@ -1019,6 +1019,7 @@ impl AppState {
                 // 就没必要再往下传一层。
                 compact_threshold_tokens: model.compact_threshold(config.compact_threshold_tokens),
                 sandbox: sandbox_kind(config.sandbox),
+                sandbox_allow_read: config.sandbox_allow_read.clone(),
             },
             mode,
             rules: Vec::new(),
