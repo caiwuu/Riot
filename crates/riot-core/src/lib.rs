@@ -20,6 +20,7 @@ pub mod agent_loop;
 pub mod compactor;
 pub mod guard;
 pub mod invariants;
+pub mod repair;
 pub mod state;
 pub mod summarize;
 // 测试替身只进测试构建。下游要用的话在 dev-dependencies 里开

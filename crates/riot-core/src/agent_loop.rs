@@ -162,6 +162,23 @@ pub fn run_agent(
                     // 结束渲染，而此时恢复循环还在跑，没人在听结果。
                     ProviderEvent::Error(e) if e.is_recoverable() => turn.withhold(e),
                     ProviderEvent::Error(e) => {
+                        // 流中途断开时，provider 会先把解码器里攒了一半的
+                        // assistant 消息吐出来（可能带完整的 tool_calls）
+                        // 再报这个错，而宿主对着事件流逐条持久化 —— 那条
+                        // 消息已经进了它的历史。这里必须把它 commit 进
+                        // 状态并补齐悬空的 tool_use：不补的话宿主历史从此
+                        // 带着孤儿 tool_calls，下一轮请求在严格校验的
+                        // 服务端（DeepSeek 等）上必然 400，重试也救不回。
+                        state.messages.extend(turn.take_messages());
+                        if let Some(msg) = synthesize_orphan_results(
+                            &state,
+                            "interrupted",
+                            "结果丢失：请求中断，这次调用没有执行。",
+                        ) {
+                            state.messages.push(msg.clone());
+                            yield AgentEvent::Message(msg);
+                        }
+                        invariants::check_tool_pairing(&state.messages);
                         let msg = error_message_for_user(&deps, &e);
                         state.messages.push(msg.clone());
                         yield AgentEvent::Message(msg);
@@ -541,20 +558,26 @@ fn attempt_recovery(state: &mut AgentState, err: &ProviderError) -> Recovery {
 /// 中断时必须做这件事。Anthropic API 要求每个 tool_use 都有配对的
 /// tool_result，缺一个就整条请求 400 —— 而且报错信息不会告诉你缺哪个。
 fn synthesize_cancelled_results(state: &AgentState) -> Option<Message> {
+    synthesize_orphan_results(state, "cancelled", "已取消")
+}
+
+/// 同上，但措辞和 id 后缀由调用方定 —— 致命错误路径的中断不是用户
+/// 取消，对模型说「已取消」会让它以为是用户的意思。
+fn synthesize_orphan_results(state: &AgentState, id_suffix: &str, text: &str) -> Option<Message> {
     let orphans: Vec<ToolUseId> = invariants::orphan_tool_uses(&state.messages);
     if orphans.is_empty() {
         return None;
     }
     Some(Message::User {
         id: riot_protocol::id::MessageId::from_raw(format!(
-            "{}_cancelled",
+            "{}_{id_suffix}",
             state.session_id.as_str()
         )),
         content: orphans
             .into_iter()
             .map(|id| UserContent::ToolResult {
                 tool_use_id: id,
-                content: ToolResultContent::text("已取消"),
+                content: ToolResultContent::text(text),
                 is_error: true,
             })
             .collect(),

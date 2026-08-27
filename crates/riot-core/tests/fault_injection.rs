@@ -318,6 +318,61 @@ async fn 被截断的_tool_use_不进_transcript() {
     ));
 }
 
+/// 流中途断开：provider 先吐出带 tool_calls 的半截消息，再报不可恢复的
+/// 传输错误。
+///
+/// `[约束]` 那条半截消息已经被宿主逐条持久化了（事件流投影 = 宿主历史）。
+/// 主循环必须在收场前给它的 tool_use 补上结果 —— 不补的话宿主历史从此
+/// 带着孤儿 tool_calls，下一轮请求在严格校验的服务端（DeepSeek 等）上
+/// 必然 400，重试和重启都救不回来。生产事故：报错文案里的
+/// "insufficient tool messages" 还会被前端误判成"账户额度不足"。
+#[tokio::test]
+async fn 流中断留下的_tool_use_要补齐配对() {
+    use riot_protocol::provider::{ProviderError, ProviderEvent};
+
+    let provider = Arc::new(ScriptedProvider::new(vec![vec![
+        ProviderEvent::Message(riot_core::testing::assistant_tool_use(
+            "msg_a1",
+            "tu_orphan",
+            "Read",
+            serde_json::json!({ "path": "a" }),
+        )),
+        ProviderEvent::Error(ProviderError::Transport {
+            message: "读取响应流失败: 连接被重置".into(),
+        }),
+    ]]));
+    let tools = Arc::new(ScriptedToolRunner::new(Default::default()));
+    let deps = mock_deps_with(provider, tools, Arc::new(FakeCompactor::default()));
+
+    let events = collect(state(4), deps, CancellationToken::new()).await;
+
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                reason: TerminalReason::Error { .. }
+            })
+        ),
+        "不可恢复错误该以 Error 收场，实际：{:?}",
+        events.last()
+    );
+
+    // 宿主看到的就是事件流投影出来的 transcript —— 它必须配对完整。
+    let t = transcript(&events);
+    invariants::check_tool_pairing(&t);
+    assert!(
+        invariants::take_violations().is_empty(),
+        "错误收场也不能留下孤儿 tool_use：{t:?}"
+    );
+    assert!(
+        t.iter().any(|m| m
+            .tool_result_ids()
+            .iter()
+            .any(|id| id.as_str() == "tu_orphan")),
+        "该给 tu_orphan 合成一条结果：{t:?}"
+    );
+}
+
 /// 空流：模型什么都没说就结束了。
 #[tokio::test]
 async fn 空响应也要干净收场() {

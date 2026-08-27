@@ -1511,7 +1511,11 @@ impl Session {
             *g = Some(cancel.clone());
         }
         self.hydrate().await;
-        let history = self.history.lock().await.clone();
+        let mut history = self.history.lock().await.clone();
+        // 和 run() 同一道自愈：历史里若有悬空 tool_use（上次中断/崩溃留下），
+        // 总结请求发给严格校验的服务端同样 400，用户看到的只是一句
+        // 莫名其妙的"压缩失败"。
+        riot_core::repair::repair_tool_pairing(&mut history);
         let result = if history.is_empty() {
             Err("还没有对话内容，没什么可压缩的。".to_owned())
         } else {
@@ -1791,6 +1795,22 @@ impl Session {
         };
 
         let mut history = self.history.lock().await.clone();
+
+        // 自愈：历史里可能残留悬空的 tool_use —— 流中途断开时被持久化的
+        // 半截 assistant 消息、工具执行途中崩溃/强杀、或旧版本留下的脏
+        // transcript。带着孤儿 tool_calls 组请求，严格校验的服务端
+        //（DeepSeek 等）会对**每一次**请求 400，会话永久废掉；宽松的
+        // 服务端（智谱等）能跑，于是表现成"换个模型就好了"。就地补上
+        // 错误结果。transcript 不回写：修复是幂等且确定的，每次组请求
+        // 前重修一遍，重启后加载的脏历史同样在这里被治好。
+        let repaired = riot_core::repair::repair_tool_pairing(&mut history);
+        if repaired > 0 {
+            tracing::warn!(
+                session = %self.id.as_str(),
+                repaired,
+                "历史里有 {repaired} 个悬空的 tool_use（上次中断/崩溃留下），已就地补上错误结果"
+            );
+        }
 
         // 本轮追加的那条用户消息。模型一个字都没给出就被停止时，它要被
         // 撤回（见 AgentEvent::PromptWithdrawn）。重新生成这一路没有它。

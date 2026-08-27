@@ -1628,7 +1628,16 @@ function humanizeError(e: unknown): string {
     [/connection refused|connect error|network|fetch failed/, "连不上服务方 —— 检查网络或代理设置。"],
     [/401|unauthorized|invalid.*key|authentication/, "服务方拒绝了 API key，去设置里检查一下。"],
     [/429|rate.?limit|overloaded/, "服务方限流了，稍等一会儿再发。"],
-    [/insufficient|quota|balance/, "服务方账户额度不足。"],
+    // 额度类只认带额度语境的措辞。裸的 "insufficient" 会误伤 ——
+    // DeepSeek 的 tool_calls 校验报错里就有 "insufficient tool messages"，
+    // 真实余额没问题的用户被这句话带去查账单（生产事故）。
+    // 覆盖的真实文案：DeepSeek "Insufficient Balance"、OpenAI
+    // "insufficient_quota" / "You exceeded your current quota"、
+    // Anthropic "credit balance is too low"、Kimi "balance is insufficient"。
+    [
+      /insufficient[_\s]+(quota|balance|funds|credits)|(credit\s+)?balance\s+is\s+(too\s+low|insufficient)|exceeded.{0,40}quota|quota.{0,40}exceeded|out\s+of\s+(quota|credits)|余额不足|欠费/,
+      "服务方账户额度不足。",
+    ],
   ];
   for (const [re, msg] of known) {
     if (re.test(lower)) return `${msg}（${raw.length > 200 ? `${raw.slice(0, 200)}…` : raw}）`;
