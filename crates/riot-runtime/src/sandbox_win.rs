@@ -325,8 +325,11 @@ fn exec_args(prefix: &[String], session_temp: &Path, spec: &ProcessSpec) -> Vec<
     // stderr 是要给模型看的。
     args.push("--quiet".to_owned());
 
-    for (k, v) in session_temp_env(session_temp)
+    // 顺序即优先级（同名时 srt-win 取后者）：broker 的 PATH 打底，会话 temp
+    // 覆盖它，调用方自己设的 env 最大。
+    for (k, v) in broker_env()
         .into_iter()
+        .chain(session_temp_env(session_temp))
         .chain(spec.env.iter().cloned())
     {
         args.push("--env".to_owned());
@@ -334,9 +337,82 @@ fn exec_args(prefix: &[String], session_temp: &Path, spec: &ProcessSpec) -> Vec<
     }
 
     args.push("--".to_owned());
-    args.push(spec.program.clone());
+    args.push(resolve_program(&spec.program));
     args.extend(spec.args.iter().cloned());
     args
+}
+
+/// 把程序名解析成绝对路径。
+///
+/// `[约束]` 不能把裸名字交给 srt-win。它最终走
+/// `CreateProcessAsUserW(lpApplicationName = <程序>, …)`，而 `lpApplicationName`
+/// **非 NULL 时 Windows 不做 PATH 搜索、也不自动补 `.exe`** —— 传 `cmd` 会以
+/// `The system cannot find the file specified (0x80070002)` 收场。
+///
+/// 这不是只影响测试：`diagnostics` 传的是 `cargo` / `npx` 这类裸名，
+/// `tools::bash::shell_program` 找不到 Git Bash 时也兜底成裸 `bash`。不解析的话
+/// 沙箱一开，这些命令全部起不来。
+fn resolve_program(program: &str) -> String {
+    resolve_program_in(
+        program,
+        std::env::var_os("PATH").as_deref().unwrap_or_default(),
+        &pathext(),
+    )
+}
+
+/// [`resolve_program`] 的纯逻辑部分：PATH 和扩展名列表由调用方给。
+///
+/// 拆出来是为了能测 —— 直接读环境变量的版本在并行测试里改不得
+/// （`set_var` 是进程级的）。
+fn resolve_program_in(program: &str, path: &std::ffi::OsStr, exts: &[String]) -> String {
+    // 已经带路径分隔符（绝对或相对）：调用方指名道姓了，别替它改。
+    if program.contains('/') || program.contains('\\') {
+        return program.to_owned();
+    }
+    for dir in std::env::split_paths(path) {
+        for ext in exts {
+            let cand = dir.join(format!("{program}{ext}"));
+            if cand.is_file() {
+                return cand.to_string_lossy().into_owned();
+            }
+        }
+    }
+    // 找不到就原样交出去。srt-win 报的 "cannot find the file specified" 比
+    // 我们在这里编一个错误更准确，而且路径完全一致（都是没找到）。
+    program.to_owned()
+}
+
+/// 要试的扩展名，空串在最前（`foo` 本身也可能就是可执行文件）。
+fn pathext() -> Vec<String> {
+    #[allow(unused_mut)] // 非 Windows 上永远只有那个空串
+    let mut v = vec![String::new()];
+    #[cfg(windows)]
+    if let Some(pe) = std::env::var_os("PATHEXT") {
+        v.extend(
+            pe.to_string_lossy()
+                .split(';')
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+        );
+    }
+    v
+}
+
+/// 沙箱子进程要继承的 broker 侧环境。
+///
+/// 目前只有 `PATH`。沙箱账户以 `LOGON_WITH_PROFILE` 登录，拿到的是**它自己**
+/// 的 profile 环境，`PATH` 只有机器级那部分 —— 而工具解析要按调用方（真实
+/// 用户）的 PATH 来算，否则沙箱里 `where npm` 和外面不是一个答案。上游的
+/// TS 侧也是这么传的（logon.rs 模块头：profile-scoped 的变量留沙箱账户的，
+/// 工具解析用的 PATH 用 broker 的）。
+///
+/// `[取舍]` 这只解决「找得到」，不解决「打得开」。用户 profile 下装的工具
+/// （nvm 的 node、Scoop 的包）沙箱账户仍然没有读权限 —— 那是上游记档的已知
+/// 限制，见 vendor/srt-win/NOTICE.md。
+fn broker_env() -> Vec<(String, String)> {
+    std::env::var_os("PATH")
+        .map(|p| vec![("PATH".to_owned(), p.to_string_lossy().into_owned())])
+        .unwrap_or_default()
 }
 
 /// 指向会话 temp 的三个变量。
@@ -539,10 +615,14 @@ mod tests {
     fn 用户命令在双横线之后原样传递() {
         let args = exec_args(&[], Path::new("/t"), &spec("bash", &["-c", "ls -la"]));
         let dd = args.iter().position(|a| a == "--").expect("要有 --");
-        assert_eq!(
-            &args[dd + 1..],
-            &["bash".to_owned(), "-c".to_owned(), "ls -la".to_owned()]
+        // 程序名会被 resolve_program 解析成绝对路径（这台机器上是 /bin/bash），
+        // 所以只断言它指向 bash；后面的参数必须一字不改。
+        assert!(
+            args[dd + 1].ends_with("bash") || args[dd + 1].ends_with("bash.exe"),
+            "第一个位置该是 bash：{:?}",
+            args[dd + 1]
         );
+        assert_eq!(&args[dd + 2..], &["-c".to_owned(), "ls -la".to_owned()]);
         assert!(args[..dd].contains(&"exec".to_owned()));
         assert!(args[..dd].contains(&"--quiet".to_owned()));
     }
@@ -588,6 +668,72 @@ mod tests {
         s.env = vec![("K".into(), "a=b=c".into())];
         let args = exec_args(&[], Path::new("/t"), &s);
         assert!(args.contains(&"K=a=b=c".to_owned()));
+    }
+
+    /// 裸程序名必须解析成绝对路径。
+    ///
+    /// srt-win 最终走 `CreateProcessAsUserW(lpApplicationName = <程序>, …)`，
+    /// 而它非 NULL 时 Windows **不做 PATH 搜索、也不补 .exe** —— 传 `cmd`
+    /// 直接 0x80070002。这条测试就是为那次真机失败写的。
+    #[test]
+    fn 裸程序名按_path_解析成绝对路径() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        // 扩展名的大小写和下面搜的那个保持一致：Windows 的文件系统大小写
+        // 不敏感，返回的是**候选路径**的拼写而不是磁盘上的真名，两边不一致
+        // 只会测出这个无关紧要的差异。
+        let exe = dir.path().join("mytool.BAT");
+        std::fs::write(&exe, "").expect("造一个假可执行文件");
+
+        let path = std::ffi::OsString::from(dir.path());
+        let exts = vec![String::new(), ".BAT".to_owned()];
+        assert_eq!(
+            resolve_program_in("mytool", &path, &exts),
+            exe.to_string_lossy(),
+            "该按 PATHEXT 补上扩展名并给出绝对路径"
+        );
+    }
+
+    /// 已经带路径的原样透传 —— 调用方指名道姓了，别替它改。
+    #[test]
+    fn 带路径的程序名不动() {
+        let empty = std::ffi::OsString::new();
+        let exts = vec![String::new()];
+        for p in [
+            r"C:\Windows\System32\cmd.exe",
+            "/usr/bin/env",
+            r".\local.exe",
+        ] {
+            assert_eq!(resolve_program_in(p, &empty, &exts), p);
+        }
+    }
+
+    /// 找不到就原样交出去：srt-win 报的「找不到文件」比我们编一个更准确。
+    #[test]
+    fn 找不到的程序名原样交出去() {
+        let empty = std::ffi::OsString::new();
+        assert_eq!(
+            resolve_program_in("definitely-not-here", &empty, &[String::new()]),
+            "definitely-not-here"
+        );
+    }
+
+    /// broker 的 PATH 要打底传进去，且排在最前 —— 同名时后写的赢，会话
+    /// 和调用方都能覆盖它。
+    #[test]
+    fn broker_的_path_打底且可被覆盖() {
+        let mut s = spec("cmd", &[]);
+        s.env = vec![("PATH".into(), "/only-this".into())];
+        let args = exec_args(&[], Path::new("/t"), &s);
+
+        let last = args
+            .iter()
+            .rfind(|a| a.starts_with("PATH="))
+            .map(String::as_str);
+        assert_eq!(
+            last,
+            Some("PATH=/only-this"),
+            "调用方设的 PATH 必须排在最后：{args:?}"
+        );
     }
 
     #[test]
