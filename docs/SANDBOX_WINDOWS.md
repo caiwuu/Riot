@@ -194,7 +194,41 @@ BUILTIN\Users:(I)(CI)(WD)
 e2e 测试因此把判据定在「真实用户的主目录碰不到」上，而不是「任何未授权
 路径都碰不到」；后者只作诊断打印。
 
-### 4.6 授权的树里要再挖掉逃逸面
+### 4.6 主目录缓存不授权 —— 沙箱账户看不到它们
+
+`[约束]` 两个平台的隔离轴不同，缓存表因此不能照抄。
+
+macOS 的 seatbelt 包住**同一个进程**，身份不变，`$HOME` 还是真实用户的，
+所以放行 `~/.cargo` 是实打实的。Windows 换成了专用账户：srt-win 用
+`CreateProcessWithLogonW(…, LOGON_WITH_PROFILE, …)` 且 `lpEnvironment = NULL`，
+沙箱进程拿到的是**沙箱账户自己的** profile 环境 —— `USERPROFILE` /
+`LOCALAPPDATA` 全换了人。而 cargo / npm / pip / go 的缓存位置无一例外由这两个
+变量推出来。
+
+真机实测（win-sandbox-e2e，2026-08-27）：
+
+```
+沙箱内 USERPROFILE = C:\Users\srt-sandbox   （宿主 = C:\Users\runneradmin）
+CARGO_HOME 未设 → cargo 的家 = C:\Users\srt-sandbox\.cargo
+cargo build → exit 0，stderr："Updating crates.io index / Downloaded cfg-if v1.0.4"
+```
+
+真实用户的 registry 里明明已经有那个 `.crate`，沙箱还是重下了一遍。授权那棵树
+换不到任何东西，只换来三样代价：每会话多花约 4 秒（可继承 ACE 要传播到几万个
+文件）、凭空造出一个逃逸面（ALLOW 继承进 `.cargo\bin`）、以及为堵它再花约 13 秒
+`acl stamp`。所以整张表清空，三样一起消失。
+
+代价是沙箱账户第一次构建要重下依赖 —— 但它的 profile 是真实目录、跨会话留着，
+所以这是**每台机器一次**，不是每会话一次。
+
+工具链不受影响：`.rustup` 本来就不在表里，沙箱内 `rustup show active-toolchain`
+照样报 `stable`（读不受限，PATH 上是真实用户的 shim）。构建能跑通这件事，从来
+没依赖过这张表。
+
+想加回来的话，光加路径没用 —— 必须同时用 `--env` 把 `CARGO_HOME` /
+`RUSTUP_HOME` / npm 那套变量显式指过去，并重新面对上面第二、三条代价。
+
+### 4.7 授权的树里要再挖掉逃逸面
 
 `acl grant` 写的是 `(OI)(CI)` **可继承** ALLOW。所以「把 `~/.cargo` 整棵放开」
 不只放开了 registry 缓存，也一路放开了 `~/.cargo\bin` —— 沙箱账户能顶掉那里的
@@ -224,14 +258,14 @@ ACE 补回来（DENY 在 DACL 求值里排在 ALLOW 之前），清单和 macOS 
   `%LOCALAPPDATA%\Programs\…` 在 PATH 上解析得到但**打不开**。出路是改用机器
   级安装，或把具体路径加进授权。对 Windows 上的编码 agent 这是最疼的一条。
 - **NoNet 档不隔离网络**（见 §2）。
-- **沙箱内装不了 rust 工具链。** `~/.rustup\toolchains` 在逃逸面清单上（见
-  §4.6），所以 `rustup toolchain install` 和 `rust-toolchain.toml` 的自动安装会
-  失败。收窄到 `*/bin` 修不了：`lib` 下的动态库同样由 rustc 加载执行。出路是
-  在沙箱外先装好，或让那条命令升级到沙箱外执行。两个平台一样。
-- **`pnpm add -g` 装不上。** `%LOCALAPPDATA%\pnpm` 根目录就是全局 bin
-  （`pnpm.exe` 在用户 PATH 上），和 `.cargo\bin` 同一类，不进授权表。它下面的
-  `store` 是纯内容寻址的包缓存，单独进表 —— `pnpm install` 要写它，而写它换不到
-  PATH 上的执行权。
+- **包缓存不共享，沙箱账户各下各的。** 见 §4.6：它的 `USERPROFILE` 是自己的，
+  cargo / npm / pip 都在它自己的 profile 下建缓存。第一次构建要重下依赖，之后
+  跨会话复用。想共享得显式传 `CARGO_HOME` 那套变量，代价见 §4.6。
+- **沙箱内装不了 rust 工具链（macOS）。** `~/.rustup\toolchains` 在逃逸面清单上
+  （见 §4.7），所以 `rustup toolchain install` 和 `rust-toolchain.toml` 的自动
+  安装会失败。收窄到 `*/bin` 修不了：`lib` 下的动态库同样由 rustc 加载执行。
+  出路是在沙箱外先装好。Windows 上这条不适用 —— 那边 `.rustup` 不在授权表里，
+  逃逸面清单也就不会去碰它（`stamp_targets` 只对授权过的路径打）。
 - **工作区不能在映射盘 / 网络盘上。** seclogon 为沙箱账户建的登录会话里没有
   per-user 的盘符映射，`CreateProcessWithLogonW` 指向那种路径会直接失败
   （srt-win 退 16，`code: mapped_drive_cwd`）。`activate` 的冒烟会提前发现

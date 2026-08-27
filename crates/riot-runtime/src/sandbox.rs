@@ -127,34 +127,45 @@ impl SandboxPolicy {
             "Library/Caches",
             "go/pkg",
         ];
-        // 这张表比 Unix 那张窄两项，两项各有各的理由，而且都**不是**
-        // Low IL 时代那个理由了（那时给 `~/.rustup` 打 Low 标签会让宿主
-        // 自己的 cargo 全废 —— 2026-08-25 的真实事故；换成专用账户 + 附加
-        // ACE 之后，授权只对沙箱账户生效，宿主一点不受影响）。
+        // Windows 这张表是**空的**，而且不是偷懒 —— 是这些路径根本不在
+        // 沙箱进程的视野里。
         //
-        // 缺 `.rustup`：整棵树里真正值钱的是 `toolchains`，而它在
-        // `escape_surfaces` 的 deny 清单上（沙箱换掉 `toolchains/*/bin/rustc`
-        // = 用户下次在沙箱外构建就执行它）。剩下的 `downloads`/`tmp` 单独
-        // 放开换不到什么 —— 装工具链照样卡在 `toolchains` 上。所以不进表，
-        // 沙箱内装工具链走升级到沙箱外那条路。
+        // 两个平台的隔离轴不同：macOS 的 seatbelt 包住**同一个进程**，身份
+        // 不变，`$HOME` 还是真实用户的，所以给 `~/.cargo` 放行是实打实的；
+        // Windows 换成了专用账户，srt-win 用
+        // `CreateProcessWithLogonW(…, LOGON_WITH_PROFILE, …)` 且
+        // `lpEnvironment = NULL`，于是沙箱进程拿到的是**沙箱账户自己的**
+        // profile 环境 —— `USERPROFILE` / `LOCALAPPDATA` 全是它自己的。
+        // 而 cargo / npm / pip / go 的缓存位置无一例外由这两个变量推出来。
         //
-        // 缺 pnpm 的 **根目录**：`%LOCALAPPDATA%\pnpm` 就是全局 bin
-        // （`pnpm.exe` 在用户 PATH 上），和 `.cargo\bin` 同一类。但它下面的
-        // `store` 是纯内容寻址的包缓存，单独进表 —— `pnpm install` 要写它，
-        // 而写它换不到 PATH 上的执行权。代价是 `pnpm add -g` 仍然失败。
+        // 真机实测（win-sandbox-e2e，2026-08-27）：
+        //   沙箱内 USERPROFILE = C:\Users\srt-sandbox（宿主是 runneradmin）
+        //   CARGO_HOME 未设 → cargo 的家是沙箱账户自己的 .cargo
+        //   cargo build 成功，stderr 是 "Updating crates.io index /
+        //   Downloaded cfg-if" —— 真实用户的 registry 里明明已经有那个
+        //   .crate，它还是**重新下了一遍**，落在自己的 registry 下。
         //
-        // `.cargo` 整树进表（构建要写 registry 和 .package-cache 锁），敏感面
-        // 由 `acl stamp` 的 DENY ACE 压掉，见 `escape_surfaces`。
+        // 所以放这张表换不到任何东西，只换来三样代价：
+        //   - 每次会话激活多花 ~4s（`acl grant` 要把可继承 ACE 传播到
+        //     `~/.cargo\registry` 那几万个文件）；
+        //   - 凭空造出一个逃逸面（可继承 ALLOW 会一路继承进 `.cargo\bin`），
+        //     于是又得花 ~13s 用 `acl stamp` 把它堵回去；
+        //   - 堵不干净：cargo 老配置名不能预建（预建会盖掉用户真实的
+        //     `.toml`），留了个补不上的洞。
+        // 三样一起消失。
+        //
+        // 代价是沙箱账户第一次构建要重下依赖。但它的 profile 是真实目录、
+        // 跨会话留着，所以这是**每台机器一次**，不是每会话一次。
+        //
+        // `[约束]` 想加回来的话，光加路径没用 —— 得同时用 `--env` 把
+        // `CARGO_HOME` / `RUSTUP_HOME` / npm 那套变量显式指过去，否则加的
+        // 是一堆没人看的 ACE。而那样做要重新面对上面第二、三条代价。
+        //
+        // 工具链不受影响：`.rustup` 本来就不在这张表里，沙箱内
+        // `rustup show active-toolchain` 照样报 stable（读不受限，PATH 上是
+        // 真实用户的 shim）。也就是说构建能跑通这件事，从来没依赖过这张表。
         #[cfg(windows)]
-        const HOME_CACHES: &[&str] = &[
-            ".cargo",
-            ".bun/install/cache",
-            "go/pkg",
-            "AppData/Local/npm-cache",
-            "AppData/Local/pip/Cache",
-            "AppData/Local/pnpm-cache",
-            "AppData/Local/pnpm/store",
-        ];
+        const HOME_CACHES: &[&str] = &[];
         if let Some(home) = home_dir() {
             for cache in HOME_CACHES {
                 writable.push(home.join(cache));
@@ -740,6 +751,35 @@ mod tests {
                 "deny 必须落在 home 之内，否则会误伤别的路径：{} 不在 {} 之下",
                 p.path.display(),
                 home.display()
+            );
+        }
+    }
+
+    /// Windows 的可写表里不能有主目录缓存。
+    ///
+    /// 加回去不会报错，只会静默变慢：沙箱进程以**另一个账户**跑，
+    /// `USERPROFILE` / `LOCALAPPDATA` 都是它自己的，工具压根不看真实用户
+    /// 那几棵树（真机实测：沙箱里的 cargo 重下了一遍真实用户已经有的
+    /// crate）。授权它们换不到可用性，只换来每会话十几秒的 ACE 传播、外加
+    /// 一个得再花十几秒堵回去的逃逸面。理由全文见 `workspace_write`。
+    #[cfg(windows)]
+    #[test]
+    fn windows_不授权主目录缓存() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let SandboxPolicy::WorkspaceWrite { writable, .. } =
+            SandboxPolicy::workspace_write(dir.path())
+        else {
+            panic!("该是 WorkspaceWrite");
+        };
+        let Some(home) = home_dir().and_then(|h| h.canonicalize().ok()) else {
+            eprintln!("拿不到 home，跳过");
+            return;
+        };
+        for w in &writable {
+            assert!(
+                !w.starts_with(&home) || w.starts_with(dir.path()),
+                "{} 在主目录下 —— 沙箱账户看不到它，授权只会白花激活时间",
+                w.display()
             );
         }
     }
