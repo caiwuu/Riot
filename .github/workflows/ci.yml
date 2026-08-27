@@ -7,7 +7,7 @@ on:
     branches: [main, master]
   pull_request:
   schedule:
-    - cron: "0 18 * * *"
+    - cron: '0 18 * * *'
   workflow_dispatch:
 
 env:
@@ -177,10 +177,25 @@ jobs:
           $sw = [Diagnostics.Stopwatch]::StartNew()
           target\release\srt-win.exe exec --quiet --env "TMP=$env:RUNNER_TEMP" --env "TEMP=$env:RUNNER_TEMP" --env "TMPDIR=$env:RUNNER_TEMP" -- cmd /c "echo hello-env & echo TMP=%TMP%"
           "C: exit=$LASTEXITCODE elapsed=$([int]$sw.Elapsed.TotalSeconds)s"
+      # 各盘符的类型。首跑失败在 srt-win 的 mapped_drive_cwd 前置检查上：
+      # 它对工作目录所在盘调 GetDriveTypeW，DRIVE_REMOTE(4) 就拒绝启动
+      # （seclogon 给沙箱账户建的登录会话里没有 per-user 盘符映射）。这台
+      # runner 上 C:\ 报的正是 4，所以要知道哪个盘是本地盘。
+      - name: 诊断｜盘符类型（3=本地 4=网络）
+        continue-on-error: true
+        run: Get-CimInstance Win32_LogicalDisk | Select-Object DeviceID, DriveType, ProviderName | Format-Table
       - name: 编排层端到端
         env:
           RIOT_SRT_WIN: ${{ github.workspace }}\target\release\srt-win.exe
-        # 这条超时短一点：挂住的话 10s 就能拿到结论，不用等 job 级超时。
+          # 把跳过变成失败：这个 job 刚装完 srt-win，activate 没成功就是真问题。
+          RIOT_SANDBOX_TEST_REQUIRE: "1"
+          # `[约束]` 测试的工作目录取自 `std::env::temp_dir()`，默认指向
+          # C:\Users\…\AppData\Local\Temp，而这台 runner 上 C:\ 报
+          # DRIVE_REMOTE —— srt-win 会直接拒绝启动。runner.temp 在 D: 上
+          # （和 checkout 出来的工作区同盘），改指到那儿。
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+        # 这条超时短一点：挂住的话很快能拿到结论，不用等 job 级超时。
         timeout-minutes: 10
         run: cargo test -p riot-runtime windows_经装配路径的沙箱边界 -- --nocapture
       - name: 收尾（无论成败都要跑）

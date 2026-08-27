@@ -159,6 +159,10 @@ loopback 上的代理端口段（默认 60080-60089）—— Riot 没有代理�
   `%LOCALAPPDATA%\Programs\…` 在 PATH 上解析得到但**打不开**。出路是改用机器
   级安装，或把具体路径加进授权。对 Windows 上的编码 agent 这是最疼的一条。
 - **NoNet 档不隔离网络**（见 §2）。
+- **工作区不能在映射盘 / 网络盘上。** seclogon 为沙箱账户建的登录会话里没有
+  per-user 的盘符映射，`CreateProcessWithLogonW` 指向那种路径会直接失败
+  （srt-win 退 16，`code: mapped_drive_cwd`）。`activate` 的冒烟会提前发现
+  并退回不隔离 —— 不然症状是**每条命令**都吐一段模型读不懂的 JSON。
 
 ## 6. 怎么验证
 

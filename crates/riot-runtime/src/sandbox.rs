@@ -723,8 +723,20 @@ mod tests {
             writable: vec![work.clone()],
             allow_network: true,
         };
-        let Some(active) = policy.activate() else {
-            eprintln!("这台机器没装 srt-win（需管理员跑一次 `srt-win install`），跳过");
+        let activated = policy.activate();
+        // `[约束]` CI 里必须失败得响亮。`activate` 返回 None 有两个原因：
+        // 没装（开发机的常态，该跳过），或者装了但冒烟没过（真问题）。这两个
+        // 在返回值上分不开，而默认跳过会让 e2e job 在什么都没验的情况下变绿 ——
+        // 那比红更糟。CI 设 RIOT_SANDBOX_TEST_REQUIRE=1 把跳过变成失败。
+        let Some(active) = activated else {
+            let msg = "沙箱没激活成功。要么没装（管理员跑 `srt-win install` \
+                       然后 `srt-win wfp uninstall`），要么装了但冒烟没过 —— \
+                       后者会在 warn 日志里给出原因（比如工作区在映射盘上）。";
+            assert!(
+                std::env::var_os("RIOT_SANDBOX_TEST_REQUIRE").is_none(),
+                "{msg}"
+            );
+            eprintln!("{msg} 跳过。");
             let _ = std::fs::remove_dir_all(&base);
             return;
         };

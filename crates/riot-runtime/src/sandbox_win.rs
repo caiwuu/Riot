@@ -68,6 +68,30 @@ pub(crate) struct WinSandbox {
 }
 
 impl WinSandbox {
+    /// 真起一条命令，确认这套东西在这台机器 / 这个工作区上跑得通。
+    ///
+    /// 用会话 temp 当工作目录而不是工作区：这一步要验的是「沙箱能不能起
+    /// 进程」，而会话 temp 是我们自己建的、必然已授权。工作区那侧的可写性
+    /// 由决策链之后的真实命令去验 —— 在这里多验一次只会让激活更慢。
+    ///
+    /// `[取舍]` 代价是每次会话激活多一次两跳启动（seclogon + 建桌面），
+    /// 比 macOS 那次 `/usr/bin/true` 贵得多。但它只在**会话第一次激活**时
+    /// 付，而换到的是「沙箱要么真能用、要么老实说不能用」。
+    fn smoke(&self) -> std::io::Result<()> {
+        let (program, prefix) = self.srt.argv_prefix();
+        let spec = ProcessSpec {
+            program: "cmd".to_owned(),
+            args: vec!["/c".to_owned(), "exit 0".to_owned()],
+            cwd: self.session_temp.clone(),
+            env: Vec::new(),
+            timeout_ms: None,
+            sandbox_exempt: false,
+        };
+        let args = exec_args(&prefix, &self.session_temp, &spec);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_srt_in(&program, &argv, None, Some(&self.session_temp)).map(drop)
+    }
+
     /// 把一条命令改写成「在沙箱里跑这条命令」。
     pub(crate) fn wrap(&self, spec: ProcessSpec) -> ProcessSpec {
         let (program, prefix) = self.srt.argv_prefix();
@@ -196,12 +220,28 @@ pub(crate) fn activate(policy: &crate::sandbox::SandboxPolicy) -> Option<WinSand
         return None;
     }
 
-    Some(WinSandbox {
+    let sandbox = WinSandbox {
         srt,
         sid,
         granted,
         session_temp,
-    })
+    };
+
+    // `[约束]` 装机状态对**不代表跑得起来**。真起一条命令确认一遍，失败就
+    // 退回不隔离 —— 和 macOS 的 `profile_accepted` 同一个理由：不冒烟的话
+    // `sandboxed` 已经报成 true、决策链按"OS 挡着"放行了一批命令，然后每
+    // 一条都失败。方向是安全的，但用户看到的是应用坏了。
+    //
+    // 已知会走到这里的一类是 `mapped_drive_cwd`：工作区在映射盘 / 网络盘上
+    // 时，seclogon 为沙箱账户建的登录会话里没有那个映射，
+    // `CreateProcessWithLogonW` 直接失败（srt-win 退 16，stderr 一行 JSON）。
+    // 没有这道冒烟的话，症状是**每条命令**都吐那段 JSON —— 而模型读不懂它。
+    if let Err(e) = sandbox.smoke() {
+        tracing::warn!(error = %e, "Windows 沙箱冒烟没过,本轮不隔离(决策链回到逐条询问)");
+        return None; // Drop 会回收刚授权的 ACE、删掉会话 temp
+    }
+
+    Some(sandbox)
 }
 
 /// 启动时回收上次进程残留的孤儿 ACE。**在任何会话激活之前调一次。**
@@ -377,13 +417,33 @@ fn grant(srt: &SrtWin, sid: &str, paths: &[PathBuf]) -> std::io::Result<()> {
 /// 真正要捕获输出、管超时和取消的是沙箱内的用户命令,那条走 `wrap` +
 /// `inner`,复用 `proc.rs`。
 fn run_srt(srt: &SrtWin, args: &[&str], stdin: Option<&str>) -> std::io::Result<String> {
+    let (program, prefix) = srt.argv_prefix();
+    let full: Vec<&str> = prefix
+        .iter()
+        .map(String::as_str)
+        .chain(args.iter().copied())
+        .collect();
+    run_srt_in(&program, &full, stdin, None)
+}
+
+/// [`run_srt`] 的底座：参数已经拼全，可以指定工作目录。
+///
+/// 冒烟要用它 —— `srt-win exec` 没有 `--cwd`，沙箱子进程的工作目录就是
+/// broker 的工作目录，所以只能在这里设。
+fn run_srt_in(
+    program: &str,
+    args: &[&str],
+    stdin: Option<&str>,
+    cwd: Option<&Path>,
+) -> std::io::Result<String> {
     use std::io::Write as _;
     use std::process::{Command, Stdio};
 
-    let (program, prefix) = srt.argv_prefix();
     let mut cmd = Command::new(program);
-    cmd.args(&prefix)
-        .args(args)
+    if let Some(d) = cwd {
+        cmd.current_dir(d);
+    }
+    cmd.args(args)
         .stdin(if stdin.is_some() {
             Stdio::piped()
         } else {
