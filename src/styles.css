@@ -113,9 +113,16 @@
 
 * {
   box-sizing: border-box;
-  /* 桌面应用不要橡皮筋。属性不继承，打在通配上：任何滚动容器
-     （对话流、预览文档、终端、改动列表）滚到边界都不弹，也不把
-     滚动链传给外层带着整页晃。 */
+}
+
+/* 只挡窗口本身的橡皮筋。属性不继承，这几层各自写。
+   `[约束]` 不许打在通配上。overflow:hidden 的折叠层 / 工具卡也是
+   滚动容器，none 会把滚轮吞掉、不往上交给对话流 —— 鼠标停在
+   思考过程或工具卡上时，左边会话完全滚不动。 */
+html,
+body,
+#root,
+.shell {
   overscroll-behavior: none;
 }
 
@@ -667,7 +674,9 @@ pre {
   display: grid;
   grid-template-rows: 0fr;
   min-height: 0;
-  overflow: hidden;
+  /* clip 只裁切，不是滚动容器。hidden 会截住滚轮（再叠
+     overscroll-behavior:none 就交不到外层对话流）。 */
+  overflow: clip;
   transition: grid-template-rows 0.2s ease;
 }
 
@@ -680,7 +689,7 @@ pre {
 }
 
 .smooth-fold-inner {
-  overflow: hidden;
+  overflow: clip;
   min-height: 0;
 }
 
@@ -1791,6 +1800,9 @@ pre {
 .transcript {
   flex: 1;
   overflow-y: auto;
+  /* 对话流自己滚到顶/底不弹。不要写在孩子上 —— 思考块 / 折叠层
+     必须把剩余滚量交回来，否则指针停在那些块上等于锁死。 */
+  overscroll-behavior: none;
   /* 垂直间距在 .thread-col 上，不在这：倒排容器把滚动"远端"翻到了
      顶部，而 WebKit 不把滚动容器远端的 padding 计入可滚动区域 ——
      写在这里的 padding-top 滚到顶时会被吞掉，首条消息贴着顶边。
@@ -2121,7 +2133,8 @@ pre {
   align-self: stretch;
   border: 1px solid var(--border);
   border-radius: 10px;
-  overflow: hidden;
+  /* clip 裁圆角，不当滚动容器（hidden 会吃滚轮，见 .smooth-fold）。 */
+  overflow: clip;
 }
 
 .tool-head {
@@ -5659,6 +5672,8 @@ button.ref-chip.clickable:hover {
 .think-block.live .think-body {
   max-height: min(28vh, 320px);
   overflow-y: auto;
+  /* 内层滚到头要把剩余滚量交给对话流，不能 none。 */
+  overscroll-behavior: auto;
 }
 
 /* ── 过程折叠组 ─────────────────────────────── */

@@ -54,6 +54,30 @@ export const transcriptView = new Map<string, { top: number; stick: boolean }>()
 const distFromBottom = (box: HTMLElement) => Math.max(0, -box.scrollTop);
 
 /**
+ * 子层（思考正文、代码块、工具详情）还能吃掉这次滚轮吗。
+ * overflow-x:auto 会把 overflow-y 算成 auto，即使竖向没溢出也像
+ * 滚动容器 —— 必须看真实 overflow 量，不能只看 computed style。
+ */
+function nestedScrollerTookWheel(start: EventTarget | null, box: HTMLElement, deltaY: number): boolean {
+  let el: HTMLElement | null =
+    start instanceof HTMLElement ? start : start instanceof Element ? start.parentElement : null;
+  while (el && el !== box) {
+    const oy = getComputedStyle(el).overflowY;
+    if (oy === "auto" || oy === "scroll" || oy === "overlay") {
+      const max = el.scrollHeight - el.clientHeight;
+      if (max > 1) {
+        const goingUp = deltaY < 0;
+        const atTop = el.scrollTop <= 1;
+        const atBottom = el.scrollTop >= max - 1;
+        if (!((goingUp && atTop) || (!goingUp && atBottom))) return true;
+      }
+    }
+    el = el.parentElement;
+  }
+  return false;
+}
+
+/**
  * 会话内查找（⌘F）。
  *
  * 高亮用 CSS Custom Highlight API：直接在文本节点上建 Range，不往
@@ -435,6 +459,25 @@ export function Transcript({
     box.addEventListener("scroll", onScroll, { passive: true });
     return () => box.removeEventListener("scroll", onScroll);
   }, [sessionId]);
+
+  // 滚轮接管：子层吃不掉的滚量自己写到倒排容器上。WebView2 对
+  // overflow:hidden / clip 的链式滚动经常不交，思考过程、工具卡、
+  // 代码块上原生滚轮等于没反应。passive:false 才能 preventDefault，
+  // 免得浏览器再滚一次变成双倍。
+  useEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    const onWheel = (e: WheelEvent) => {
+      if (e.defaultPrevented) return;
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+      if (nestedScrollerTookWheel(e.target, box, e.deltaY)) return;
+      if (box.scrollHeight - box.clientHeight < 2) return;
+      box.scrollTop += e.deltaY;
+      e.preventDefault();
+    };
+    box.addEventListener("wheel", onWheel, { passive: false });
+    return () => box.removeEventListener("wheel", onWheel);
+  }, []);
 
   // 切回来把位置还回去。layout 一次不够：正式包揭开 visibility
   // 之后还要再排一次，第二帧再写才能压住 WebKit 的清零。
