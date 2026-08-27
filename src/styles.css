@@ -1791,18 +1791,30 @@ pre {
 .transcript {
   flex: 1;
   overflow-y: auto;
-  padding: 24px 24px 8px;
-  /* 关掉浏览器滚动锚定。思考块收尾时从展开变折叠，底部内容一次矮掉
-     几百像素，锚定会自动回调 scrollTop 保持画面不动 —— 这次非用户的
-     scroll 事件让 gap 超过阈值，把贴底跟随误判成「用户往上翻了」。
-     滚动语义由 Transcript.tsx 自己管：贴底走 stick/pinBottom，向上
-     翻看走手动锚点补偿（captureAnchor）。WKWebView 本来也不支持
-     overflow-anchor，这行是给支持的引擎表态：别插手。 */
+  /* 垂直间距在 .thread-col 上，不在这：倒排容器把滚动"远端"翻到了
+     顶部，而 WebKit 不把滚动容器远端的 padding 计入可滚动区域 ——
+     写在这里的 padding-top 滚到顶时会被吞掉，首条消息贴着顶边。
+     子元素自己的 padding 是它盒子的一部分，怎么都吞不掉。 */
+  padding: 0 24px;
+  /* 倒排滚动容器（学 Codex 桌面端）：滚动原点挪到底部，scrollTop
+     贴底为 0、向上翻为负，浏览器保持的是"距底距离"。两个结构性红利：
+     贴底跟随免费（流式追加时 0 恒指底部，不用每帧去追）；视口上方的
+     行懒水合长高（content-visibility 估高落地、LazyMarkdown 换真身）
+     只撑大 scrollHeight，画面纹丝不动 —— "第一次上翻会跳"从机制上
+     消失。消息 DOM 顺序不用反转：thread-col 内部仍是正序，倒排只为
+     翻转滚动坐标系。代价是镜像问题 —— 翻历史时下方流式长高会顶画面，
+     由 Transcript 的锚点补偿拉回（见 captureAnchor）。 */
+  display: flex;
+  flex-direction: column-reverse;
+  /* 关掉浏览器滚动锚定：滚动语义（贴底 stick / 锚点补偿）由
+     Transcript.tsx 全权接管，原生锚定插手只会打架。WKWebView 要到
+     Safari 27 才支持 overflow-anchor，这行是给未来和其它引擎表态。 */
   overflow-anchor: none;
 }
 
-/* 回到底部：sticky 钉在滚动视口下缘。它是滚动容器的最后一个子元素，
-   自然位置在内容末尾 —— 往上翻时被 bottom 钳在可视区内。 */
+/* 回到底部：sticky 钉在滚动视口下缘。倒排容器里它是第一个子元素，
+   自然位置在视觉底部 —— 往上翻时被 bottom 钳在可视区内。负下边距
+   抵掉自身高度，不占滚动高度。 */
 .jump-bottom {
   position: sticky;
   bottom: 14px;
@@ -1814,7 +1826,7 @@ pre {
   /* 全局 button 有 6×14 的 padding。box-sizing:border-box 下
      30px 圆钮内容区会被挤成 0，箭头裁没了只剩一圈底。 */
   padding: 0;
-  margin: -30px auto 0;
+  margin: 0 auto -30px;
   border-radius: 50%;
   background: var(--bg-card);
   border: 1px solid var(--border-strong);
@@ -1828,7 +1840,8 @@ pre {
   border-color: var(--accent);
 }
 
-/* ⌘F 查找条：sticky 钉在滚动视口上缘，高度 0 不占流。 */
+/* ⌘F 查找条：sticky 钉在滚动视口上缘，高度 0 不占流。倒排容器里
+   它是最后一个子元素（视觉顶部），sticky top 才吸得住。 */
 .find-wrap {
   position: sticky;
   top: 0;
@@ -1897,11 +1910,23 @@ pre {
 }
 
 .thread-col {
+  /* flex 子项不再像块级子元素那样自动铺满：auto 横边距挡掉了 stretch，
+     宽度会缩成最宽的那条消息。显式给满，再由 max-width 收住居中。 */
+  width: 100%;
   max-width: 720px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
   gap: 14px;
+  /* 对话流的垂直间距（原因见 .transcript）。border-box 下含在
+     min-height 里，短会话不会因此多出 32px 滚动。
+     devtools 里看到的内联 translateY 是 Transcript 的锚点补偿在补
+     scrollTop 取整丢掉的亚像素余数，不是这里的样式。 */
+  padding: 24px 0 8px;
+  /* 倒排容器的 flex 子项。min-height 撑满一屏：col-reverse 会把不足
+     一屏的内容坠到底部，撑满之后消息照旧从顶上排；shrink-0 防压缩。 */
+  min-height: 100%;
+  flex-shrink: 0;
 }
 
 /* 长会话的渲染预算：离屏的行跳过排版和绘制（浏览器原生"虚拟化"）。
@@ -1911,10 +1936,9 @@ pre {
    窗口化会把它整个推倒重来，收益却只多在"DOM 节点数"这一项上。
 
    contain-intrinsic-size 的 auto 关键字：渲染过一次的行记住真实高度，
-   没渲染过的按 60px 估 —— 估偏了 scrollHeight 会抖，贴底逻辑靠
-   ResizeObserver + pinBottom 自愈，恢复位置有二次 rAF 补写兜着，
-   向上翻历史时由 Transcript 的锚点补偿把 scrollTop 拉回来（不然
-   第一次打开会话往上滑，上方的行水合落高度画面就跳）。
+   没渲染过的按 60px 估 —— 估偏了 scrollHeight 会抖，但倒排容器保持
+   "距底距离"，上方估高落地不再撼动视口；贴底由倒排原生保证 +
+   pinBottom 归零残差，恢复位置有二次 rAF 补写兜着。
    不支持的 WebView（Safari 18 之前）按普通渲染，只是不省。 */
 .thread-col > * {
   content-visibility: auto;

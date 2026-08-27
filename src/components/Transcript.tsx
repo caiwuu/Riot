@@ -1,8 +1,14 @@
 /**
  * 对话流：消息列表、会话内查找、贴底跟随，以及消息行的渲染。
  *
- * 从 App.tsx 拆出的独立职责。滚动语义（非对称迟滞、程序化滚动
- * pinning、每会话位置缓存）全在这里 —— 改贴底/恢复行为只动这个文件。
+ * 从 App.tsx 拆出的独立职责。滚动语义（倒排容器的距底坐标、非对称
+ * 迟滞、程序化滚动 pinning、锚点补偿、每会话位置缓存）全在这里 ——
+ * 改贴底/恢复行为只动这个文件。
+ *
+ * 滚动容器是 column-reverse 的倒排容器（学 Codex 桌面端）：scrollTop
+ * 贴底为 0、向上翻为负，浏览器保持的是"距底距离"。于是贴底跟随免费、
+ * 视口上方的行懒水合长高不再撼动画面；剩下要自己管的是翻历史时下方
+ * 流式长高（锚点补偿）。取舍见 styles.css 的 .transcript 注释。
  * 渲染预算的三层（懒解析 / memo / content-visibility）见
  * ARCHITECTURE §13.1。
  */
@@ -29,14 +35,23 @@ import { groupBlocks, ProcessGroup, ThinkingBlock } from "./ProcessFold";
 import { ShotViewer, ToolCard } from "./ToolCard";
 
 /**
- * 对话流滚到哪、跟不跟随底部。
+ * 对话流滚到哪、跟不跟随底部。top 存原始 scrollTop —— 倒排容器里
+ * 贴底为 0、向上翻为负。
  *
  * 正式包 WKWebView 一给面板加 `visibility:hidden` / 改 `position`，
- * 会把 scrollTop 清成 0 并冒一次 scroll。dev 的 WebView 常常不这么做，
- * 所以只有打包后才表现为"切回来跳到顶"。记的必须是用户还看得见时的
- * 位置，隐藏之后那次假滚动一律丢掉。
+ * 会把 scrollTop 清成 0 并冒一次 scroll（倒排后 0 是底部，症状从
+ * "切回来跳到顶"变成"跳回底部"，机制相同）。dev 的 WebView 常常不
+ * 这么做，所以只有打包后才复现。记的必须是用户还看得见时的位置，
+ * 隐藏之后那次假滚动一律丢掉。
  */
 export const transcriptView = new Map<string, { top: number; stick: boolean }>();
+
+/**
+ * 距底距离。倒排容器的滚动原点在底部：scrollTop 贴底为 0、向上翻为
+ * 负，取负即距底。clamp 到 0 —— 底部橡皮筋回弹时 scrollTop 会短暂
+ * 冲成正值，那不算"离开了底部"。
+ */
+const distFromBottom = (box: HTMLElement) => Math.max(0, -box.scrollTop);
 
 /**
  * 会话内查找（⌘F）。
@@ -235,13 +250,35 @@ export function Transcript({
   /**
    * 向上翻看时的滚动锚点：视口里第一个顶边完整可见的块 + 它到视口顶的距离。
    *
-   * 上方的行是懒水合的（content-visibility 按 60px 估高、LazyMarkdown
-   * 纯文本占位），第一次往上翻时真实高度陆续落地，scrollHeight 一变
-   * 画面就跳。WKWebView 不支持 overflow-anchor 的浏览器原生锚定 ——
-   * 只能自己记住「正看着哪个块」，高度变了把 scrollTop 补回去
-   * （补偿在下面的 ResizeObserver 里）。贴底时用不上，锚点清空。
+   * 倒排容器把"上方长高"消化掉了（懒水合落高度不动视口），剩下会动
+   * 视口的是**下方**长高：用户翻着历史时流式输出还在底部追加，浏览器
+   * 保持"距底距离"，正读的内容就往下漂。WKWebView 没有原生滚动锚定
+   * （overflow-anchor 到 Safari 27 才有）—— 自己记住「正看着哪个块」，
+   * 高度变了把 scrollTop 补回去（补偿在下面的 ResizeObserver 里）。
+   * 贴底时用不上，锚点清空。
+   *
+   * 基线只在**用户**滚动时重记，补偿性滚动绝不重记 —— 引擎会把
+   * scrollTop 写入取整，补完重记等于把取整误差吸进新基线，永不回正；
+   * 反复开合折叠每轮攒下几像素，页面就一点点爬（WebKit 每轮 5~7px，
+   * Chromium 也有）。对着原始基线做伺服，误差不再累积。
    */
   const anchor = useRef<{ el: Element; top: number } | null>(null);
+  /** 补偿写入后 scrollTop 的回读值。scroll 事件里等值命中 = 补偿滚动。 */
+  const expectedTop = useRef<number | null>(null);
+  /**
+   * 亚像素残差的 transform 修正量。引擎把 scrollTop 取整到整数 CSS
+   * 像素（WKWebView 还朝零截断），光靠滚动补偿必然留下 <1px 的绘制
+   * 抖动 —— 折叠动画的每一帧余数都不同，上方内容就闪。整数部分走
+   * scrollTop，余数落到 thread-col 的 translateY（合成层支持亚像素），
+   * 开合时上方内容纹丝不动。列里的全屏查看器都是 portal 到 body 的，
+   * 这个 transform 不会劫持它们的 fixed 定位。
+   */
+  const colShift = useRef(0);
+  const setColShift = (v: number) => {
+    colShift.current = v;
+    const col = boxRef.current?.querySelector<HTMLElement>(".thread-col");
+    if (col) col.style.transform = v ? `translateY(${v}px)` : "";
+  };
   // 渲染期就写：正式包隐藏面板时 scroll 发生在 commit 里，
   // effect 还没跑，闭包里的 armed 仍是 true，会把清零后的 0 记进去。
   const armedRef = useRef(armed);
@@ -253,6 +290,9 @@ export function Transcript({
   };
 
   const captureAnchor = () => {
+    // 重记基线前清掉残差修正：基线要取自然几何。清零带来的 ≤0.5px
+    // 位移发生在用户正在滚动的时刻，动势掩住了它。
+    if (colShift.current !== 0) setColShift(0);
     if (stick.current) {
       anchor.current = null;
       return;
@@ -304,9 +344,11 @@ export function Transcript({
     const box = boxRef.current;
     if (!box) return;
     pinning.current = true;
-    box.scrollTop = box.scrollHeight;
+    // 倒排容器的底部就是滚动原点。
+    box.scrollTop = 0;
     stick.current = true;
     anchor.current = null;
+    if (colShift.current !== 0) setColShift(0);
     rememberView(box);
     // 程序化滚动被 pinning 挡掉 onScroll，这里自己收按钮 ——
     // 不收的话点了「回到底部」它还挂着。
@@ -328,8 +370,7 @@ export function Transcript({
     pinning.current = true;
     box.scrollTop = saved.top;
     captureAnchor();
-    const gap = box.scrollHeight - box.scrollTop - box.clientHeight;
-    setAwayFromBottom(gap > box.clientHeight);
+    setAwayFromBottom(distFromBottom(box) > box.clientHeight);
     requestAnimationFrame(() => {
       pinning.current = false;
     });
@@ -367,22 +408,28 @@ export function Transcript({
       const delta = top - lastTop;
       // pinning 帧也要记位置，不然下一次用户滚动会拿到跨帧的假 delta。
       lastTop = top;
+      // 锚点补偿自己冒的 scroll：不改 stick、更不重记锚点基线（见
+      // anchor 的注释）。等值不命中说明同帧还叠着用户滚动，按用户算。
+      const compScroll = expectedTop.current !== null && top === expectedTop.current;
+      expectedTop.current = null;
+      if (compScroll) return;
       // 隐藏那一帧正式包会把 scrollTop 打成 0。armed 在渲染时已是
       // false，这次滚动不是用户翻的，不能写进缓存、也不能改 stick。
       if (!armedRef.current) return;
       if (pinning.current) return;
-      const gap = box.scrollHeight - top - box.clientHeight;
-      if (delta < 0 && gap > 1) {
-        // gap > 1 挡掉底部橡皮筋回弹：过冲弹回时 scrollTop 也在变小，
-        // 但那不是"想往上翻"。
+      const dfb = distFromBottom(box);
+      if (delta < 0 && dfb > 1) {
+        // 倒排坐标里向上翻 = scrollTop 变负，和正排同号。dfb > 1 挡掉
+        // 底部橡皮筋回弹：过冲弹回时 scrollTop 也在变小，但那不是
+        // "想往上翻"。
         stick.current = false;
-      } else if (delta > 0 && gap < 24) {
+      } else if (delta > 0 && dfb < 24) {
         // 只有自己滚回贴底才恢复跟随。阈值收窄到约一行 —— 停在离底
         // 几十像素处阅读时，跟随不该被抢回去。
         stick.current = true;
       }
       rememberView(box);
-      setAwayFromBottom(gap > box.clientHeight);
+      setAwayFromBottom(dfb > box.clientHeight);
       captureAnchor();
     };
     box.addEventListener("scroll", onScroll, { passive: true });
@@ -398,37 +445,45 @@ export function Transcript({
     return () => cancelAnimationFrame(again);
   }, [armed, sessionId]);
 
-  // 正文晚一拍量完（markdown / 图片）时高度还会涨，贴着就跟上。
+  // 内容高度一变（流式追加、懒水合落地、图片 / mermaid 出图）就到这里
+  // 校正。倒排容器把贴底和"上方长高"都交给了浏览器，这里剩两件事。
   useEffect(() => {
     const box = boxRef.current;
     const col = box?.querySelector(".thread-col");
     if (!box || !col) return;
     const ro = new ResizeObserver(() => {
       if (stick.current) {
+        // 贴底本是免费的（scrollTop 恒为 0 指着底部），pinBottom 只是
+        // 把补偿期间可能攒下的几像素残差归零，顺手收掉回程按钮。
         pinBottom();
         return;
       }
-      // 向上翻看时高度变了（懒水合落地、图片 / mermaid 出图），把锚点
-      // 块拉回原位，否则第一次翻历史每水合一块画面就跳一下。
-      // ResizeObserver 回调在 layout 之后、paint 之前跑，这里补写
-      // scrollTop 用户看不到中间态。pinning 帧（restoreView 正在二次
-      // 补写）不掺和；隐藏的保活面板（!armed）量出来的是假布局，也不动。
+      // 翻着历史时会动视口的只剩**下方**长高：流式输出在底部追加、
+      // 折叠组在视口内开合，浏览器保持"距底距离"，正读的内容就漂 ——
+      // 把锚点块拉回原位。上方长高（懒水合）倒排后天然不动视口，那时
+      // dy 恰好是 0。ResizeObserver 回调在 layout 之后、paint 之前跑，
+      // 这里补写 scrollTop 用户看不到中间态。写完回读进 expectedTop，
+      // 让 onScroll 认出这次滚动不是用户翻的；基线不重记（见 anchor
+      // 注释）。pinning 帧（restoreView 正在二次补写）不掺和；隐藏的
+      // 保活面板（!armed）量出来的是假布局，也不动。
       const a = anchor.current;
       if (a && a.el.isConnected && armedRef.current && !pinning.current) {
-        const dy = a.el.getBoundingClientRect().top - box.getBoundingClientRect().top - a.top;
-        if (Math.abs(dy) > 0.5) {
-          pinning.current = true;
-          box.scrollTop += dy;
+        // dy 是布局几何的偏差（去掉 transform 修正），伺服对它做；
+        // dy + colShift 是画面上的偏差，决定这一帧要不要动手。
+        const rawTop =
+          a.el.getBoundingClientRect().top - box.getBoundingClientRect().top - colShift.current;
+        const dy = rawTop - a.top;
+        if (Math.abs(dy + colShift.current) > 0.05) {
+          const desired = box.scrollTop + dy;
+          box.scrollTop = Math.round(desired);
+          expectedTop.current = box.scrollTop;
+          setColShift(-(desired - box.scrollTop));
           rememberView(box);
-          requestAnimationFrame(() => {
-            pinning.current = false;
-          });
         }
       }
-      // 交出跟随后内容还在下面长，gap 变大但不触发 scroll 事件 ——
+      // 交出跟随后内容还在下面长，离底距离变大但不触发 scroll 事件 ——
       // 「回到底部」得靠这里浮出来，不然用户翻上去就找不到回程。
-      const gap = box.scrollHeight - box.scrollTop - box.clientHeight;
-      setAwayFromBottom(gap > box.clientHeight);
+      setAwayFromBottom(distFromBottom(box) > box.clientHeight);
     });
     ro.observe(col);
     return () => ro.disconnect();
@@ -481,7 +536,31 @@ export function Transcript({
 
   return (
     <main className="transcript" ref={boxRef}>
-      {findOpen && armed ? <FindBar box={boxRef} onClose={() => setFindOpen(false)} /> : null}
+      {/* 倒排容器：DOM 首子元素排在视觉底部，「回到底部」在前、查找条
+          在后，sticky 才各自吸到正确的边。按钮往上翻超过一屏才出现 ——
+          贴底时它只是噪音；点了重新贴底，流式输出继续跟随。 */}
+      {awayFromBottom ? (
+        <button
+          type="button"
+          className="jump-bottom"
+          title="回到底部"
+          aria-label="回到底部"
+          onClick={() => {
+            stick.current = true;
+            pinBottom();
+          }}
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+            <path
+              d="M8 3v10M3.5 8.5L8 13l4.5-4.5"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </button>
+      ) : null}
       <div className="thread-col">
         {blocks.map((b, i) =>
           b.kind === "row" ? (
@@ -542,30 +621,7 @@ export function Transcript({
           <Dots label={waitLabel} timed since={waitSince} />
         ) : null}
       </div>
-      {/* 往上翻了超过一屏才出现 —— 贴底时这按钮只是噪音。点了重新贴底，
-          流式输出会继续跟随。 */}
-      {awayFromBottom ? (
-        <button
-          type="button"
-          className="jump-bottom"
-          title="回到底部"
-          aria-label="回到底部"
-          onClick={() => {
-            stick.current = true;
-            pinBottom();
-          }}
-        >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
-            <path
-              d="M8 3v10M3.5 8.5L8 13l4.5-4.5"
-              stroke="currentColor"
-              strokeWidth="1.8"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </button>
-      ) : null}
+      {findOpen && armed ? <FindBar box={boxRef} onClose={() => setFindOpen(false)} /> : null}
     </main>
   );
 }

@@ -80,7 +80,8 @@ function installMacOverlayScrollbar() {
     // 拖分隔条时聊天区贴底逻辑会程序化滚动、连发 scroll 事件，而容器
     // 右缘正在移动 —— 滑块跟不上就是一条拖影。拖动期间整个静默。
     if (document.querySelector(".rz.dragging")) return;
-    const overflowY = getComputedStyle(el).overflowY;
+    const style = getComputedStyle(el);
+    const overflowY = style.overflowY;
     if (overflowY !== "auto" && overflowY !== "scroll" && overflowY !== "overlay") {
       return;
     }
@@ -100,7 +101,11 @@ function installMacOverlayScrollbar() {
     const pad = 3;
     const track = Math.max(0, r.height - pad * 2);
     const h = Math.min(track, Math.max(18, (clientHeight / scrollHeight) * track));
-    const top = r.top + pad + (scrollTop / (scrollHeight - clientHeight)) * (track - h);
+    const max = scrollHeight - clientHeight;
+    // 倒排滚动容器（对话流是 column-reverse）原点在底部、scrollTop ≤ 0，
+    // 归一成"离顶距离"再画滑块。
+    const fromTop = style.flexDirection === "column-reverse" ? max + scrollTop : scrollTop;
+    const top = r.top + pad + (Math.max(0, Math.min(max, fromTop)) / max) * (track - h);
     thumb.style.height = `${h}px`;
     thumb.style.transform = `translate(${Math.round(r.right - 7)}px, ${Math.round(top)}px)`;
     thumb.classList.add("show");
