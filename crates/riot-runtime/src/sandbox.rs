@@ -819,14 +819,55 @@ mod tests {
             ok.stdout
         );
 
-        let out_file = outside.join("out.txt");
-        let denied = exec(&write_probe(&out_file)).await;
-        assert_ne!(
-            denied.exit_code, 0,
-            "工作区外必须写不进：stdout={:?}",
-            denied.stdout
+        // ── 工作区之外写不进 ────────────────────────────────────────
+        //
+        // `[约束]` 判据是「**真实用户的文件**碰不到」，不是「任何没授权的
+        // 路径都碰不到」。这两者在旧的 Low IL 模型下是一回事（没打标签的
+        // 一律拒），在账户 + ACE 模型下不是：附加 ACE 只**增加**权限，不
+        // 移除已有的。沙箱账户是 `BUILTIN\Users` 成员，凡是对 Users 开放
+        // 写的位置（`C:\Windows\Temp`、松散 ACL 的数据盘目录……）它照样
+        // 写得进 —— 那些地方从来就没被任何人保护过。
+        //
+        // 用真实用户的 profile 当靶子：那是这套设计真正要挡住的东西，也是
+        // 唯一一个「挡不住就等于沙箱没用」的判据。取舍与残余风险记在
+        // docs/SANDBOX_WINDOWS.md。
+        let icacls = |p: &std::path::Path| {
+            std::process::Command::new("icacls")
+                .arg(p)
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+                .unwrap_or_else(|e| format!("(icacls 跑不起来：{e})"))
+        };
+
+        let home = std::path::PathBuf::from(
+            std::env::var_os("USERPROFILE").expect("Windows 上必然有 USERPROFILE"),
         );
-        assert!(!out_file.exists(), "文件不该被创建");
+        let home_file = home.join(format!("riot-sbx-escape-{}.txt", std::process::id()));
+        let denied = exec(&write_probe(&home_file)).await;
+        let leaked = home_file.exists();
+        let _ = std::fs::remove_file(&home_file);
+        assert!(
+            denied.exit_code != 0 && !leaked,
+            "沙箱写进了真实用户的主目录 —— 这套隔离没起作用。\n\
+             exit={} stdout={:?}\n{} 的 ACL:\n{}",
+            denied.exit_code,
+            denied.stdout,
+            home.display(),
+            icacls(&home)
+        );
+
+        // 同一个临时树里的兄弟目录。这一条**只诊断不断言**：它写不写得进
+        // 取决于那棵树原本的 ACL（CI runner 上的 RUNNER_TEMP 对 Users 开放
+        // 写），而那不是沙箱能决定的事。打出来是为了让残余风险有据可查。
+        let out_file = outside.join("out.txt");
+        let sibling = exec(&write_probe(&out_file)).await;
+        eprintln!(
+            "[diag] 未授权兄弟目录 exit={} 文件存在={} ACL:\n{}",
+            sibling.exit_code,
+            out_file.exists(),
+            icacls(&outside)
+        );
+        let _ = std::fs::remove_file(&out_file);
 
         // 整套设计成立与否的单点判据：沙箱里的命令**是另一个用户在跑**。
         //
