@@ -1,0 +1,73 @@
+{
+  "name": "@file-viewer/renderer-presentation",
+  "version": "2.4.0",
+  "private": false,
+  "type": "module",
+  "description": "Standalone PowerPoint renderer for binary PPT and OpenXML PPTX presentation formats.",
+  "keywords": [
+    "file-viewer",
+    "renderer",
+    "ppt",
+    "pptx",
+    "presentation",
+    "document-preview",
+    "document-viewer",
+    "file-preview",
+    "self-hosted",
+    "powerpoint"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "author": {
+    "name": "Yu Wang",
+    "email": "admin@flyfish.dev"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/flyfish-dev/file-viewer.git",
+    "directory": "packages/renderers/presentation"
+  },
+  "homepage": "https://doc.file-viewer.app/guide/on-demand-renderers",
+  "bugs": {
+    "url": "https://github.com/flyfish-dev/file-viewer/issues"
+  },
+  "funding": {
+    "type": "individual",
+    "url": "https://dev.flyfish.group/donate?source=npm"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./ppt": {
+      "types": "./dist/ppt.d.ts",
+      "import": "./dist/ppt.js",
+      "default": "./dist/ppt.js"
+    },
+    "./pptx": {
+      "types": "./dist/pptx.d.ts",
+      "import": "./dist/pptx.js",
+      "default": "./dist/pptx.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "README.en.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@file-viewer/core": "workspace:2.4.0",
+    "@file-viewer/ppt": "0.3.3",
+    "@file-viewer/pptx": "workspace:2.4.0"
+  },
+  "license": "Apache-2.0"
+}

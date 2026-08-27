@@ -1,0 +1,63 @@
+{
+  "name": "@file-viewer/renderer-pdf",
+  "version": "2.4.0",
+  "private": false,
+  "type": "module",
+  "description": "Standalone PDF renderer plugin for File Viewer powered by PDF.js.",
+  "keywords": [
+    "file-viewer",
+    "renderer",
+    "pdf",
+    "pdfjs",
+    "document-preview",
+    "document-viewer",
+    "file-preview",
+    "self-hosted",
+    "pdf-viewer"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "author": {
+    "name": "Yu Wang",
+    "email": "admin@flyfish.dev"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/flyfish-dev/file-viewer.git",
+    "directory": "packages/renderers/pdf"
+  },
+  "homepage": "https://doc.file-viewer.app/guide/on-demand-renderers",
+  "bugs": {
+    "url": "https://github.com/flyfish-dev/file-viewer/issues"
+  },
+  "funding": {
+    "type": "individual",
+    "url": "https://dev.flyfish.group/donate?source=npm"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "README.en.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@file-viewer/core": "workspace:2.4.0",
+    "@fontsource-variable/noto-sans-sc": "5.2.10",
+    "pdf-lib": "1.17.1",
+    "pdfjs-dist": "5.4.624"
+  },
+  "license": "Apache-2.0"
+}

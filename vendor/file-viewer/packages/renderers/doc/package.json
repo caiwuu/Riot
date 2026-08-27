@@ -1,0 +1,68 @@
+{
+  "name": "@file-viewer/doc",
+  "version": "2.4.0",
+  "private": false,
+  "type": "module",
+  "description": "Browser-native legacy MS-DOC (.doc) parser and HTML renderer extracted from the public msdoc-viewer 0.2.0 line.",
+  "keywords": [
+    "file-viewer",
+    "doc",
+    "ms-doc",
+    "ole",
+    "cfb",
+    "word",
+    "document-preview",
+    "document-viewer",
+    "file-preview",
+    "self-hosted",
+    "offline-first"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "author": {
+    "name": "Yu Wang",
+    "email": "admin@flyfish.dev"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/flyfish-dev/docjs.git",
+    "directory": "packages/renderers/doc"
+  },
+  "homepage": "https://github.com/flyfish-dev/docjs",
+  "bugs": {
+    "url": "https://github.com/flyfish-dev/docjs/issues"
+  },
+  "funding": {
+    "type": "individual",
+    "url": "https://dev.flyfish.group/donate?source=npm"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./worker": {
+      "types": "./dist/worker.d.ts",
+      "import": "./dist/worker.js",
+      "default": "./dist/worker.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "README.en.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "dompurify": "^3.4.13"
+  },
+  "license": "MIT"
+}

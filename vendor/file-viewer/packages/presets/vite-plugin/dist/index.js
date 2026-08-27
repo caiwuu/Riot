@@ -1,0 +1,2161 @@
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { copyFile, cp, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
+import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+const virtualModuleId = 'virtual:file-viewer-renderers';
+const resolvedVirtualModuleId = `\0${virtualModuleId}`;
+const packagedPptFallbackModuleId = 'virtual:file-viewer-packaged-ppt-fallback';
+const resolvedPackagedPptFallbackModuleId = `\0${packagedPptFallbackModuleId}`;
+const isPresentationRendererImporter = (importer) => {
+    if (!importer)
+        return false;
+    const normalized = importer.replace(/\\/g, '/');
+    return (normalized.includes('/@file-viewer/renderer-presentation/') ||
+        normalized.includes('/@file-viewer+renderer-presentation@') ||
+        normalized.includes('/packages/renderers/presentation/'));
+};
+const pluginRequire = createRequire(import.meta.url);
+let workspacePackageJsonCache = null;
+const rendererModules = [
+    {
+        id: 'pdf',
+        packageName: '@file-viewer/renderer-pdf',
+        exportName: 'pdfRenderer',
+        formats: ['pdf'],
+        rendererIds: ['pdf'],
+        chunkName: 'file-viewer-pdf'
+    },
+    {
+        id: 'ofd',
+        packageName: '@file-viewer/renderer-ofd',
+        exportName: 'ofdRenderer',
+        formats: ['ofd'],
+        rendererIds: ['ofd'],
+        chunkName: 'file-viewer-ofd'
+    },
+    {
+        id: 'cad',
+        packageName: '@file-viewer/renderer-cad',
+        exportName: 'cadRenderer',
+        formats: ['cad', 'dwg', 'dxf', 'dwf', 'dwfx', 'xps'],
+        rendererIds: ['cad'],
+        chunkName: 'file-viewer-cad'
+    },
+    {
+        id: 'typst',
+        packageName: '@file-viewer/renderer-typst',
+        exportName: 'typstRenderer',
+        formats: ['typ', 'typst'],
+        rendererIds: ['typst'],
+        chunkName: 'file-viewer-typst'
+    },
+    {
+        id: 'presentation',
+        packageName: '@file-viewer/renderer-presentation',
+        exportName: 'presentationRenderer',
+        formats: ['presentation'],
+        rendererIds: ['office-presentation-binary', 'office-presentation'],
+        chunkName: 'file-viewer-presentation'
+    },
+    {
+        id: 'presentation-binary',
+        packageName: '@file-viewer/renderer-presentation/ppt',
+        exportName: 'pptRenderer',
+        formats: ['ppt', 'pot'],
+        rendererIds: ['office-presentation-binary'],
+        chunkName: 'file-viewer-presentation-ppt'
+    },
+    {
+        id: 'presentation-openxml',
+        packageName: '@file-viewer/renderer-presentation/pptx',
+        exportName: 'pptxRenderer',
+        formats: ['pptx', 'pptm', 'potx', 'potm', 'ppsx', 'ppsm'],
+        rendererIds: ['office-presentation'],
+        chunkName: 'file-viewer-presentation-pptx'
+    },
+    {
+        id: 'word',
+        packageName: '@file-viewer/renderer-word',
+        exportName: 'wordRenderer',
+        formats: ['word', 'doc', 'docx', 'docm', 'dot', 'dotx', 'dotm', 'odt', 'odp', 'rtf'],
+        rendererIds: ['office-word-openxml', 'office-word-binary', 'open-document'],
+        chunkName: 'file-viewer-word'
+    },
+    {
+        id: 'spreadsheet',
+        packageName: '@file-viewer/renderer-spreadsheet',
+        exportName: 'spreadsheetRenderer',
+        formats: ['spreadsheet', 'excel', 'xls', 'xlsx', 'xltx', 'xlsm', 'xlsb', 'xlt', 'xla', 'xlam', 'xltm', 'csv', 'tsv', 'ods', 'fods', 'dbf'],
+        rendererIds: ['spreadsheet-openxml', 'spreadsheet-dbf'],
+        chunkName: 'file-viewer-spreadsheet'
+    },
+    {
+        id: 'iwork',
+        packageName: '@file-viewer/renderer-iwork',
+        exportName: 'iworkRenderer',
+        formats: ['iwork', 'pages', 'numbers', 'key', 'keynote'],
+        rendererIds: ['apple-pages', 'apple-numbers', 'apple-keynote'],
+        chunkName: 'file-viewer-iwork'
+    },
+    {
+        id: 'wordperfect',
+        packageName: '@file-viewer/renderer-wordperfect',
+        exportName: 'wordPerfectRenderer',
+        formats: ['wordperfect', 'wpd', 'wp', 'wp5', 'wp6'],
+        rendererIds: ['office-wordperfect'],
+        chunkName: 'file-viewer-wordperfect'
+    },
+    {
+        id: 'hangul',
+        packageName: '@file-viewer/renderer-hangul',
+        exportName: 'hangulRenderer',
+        formats: ['hangul', 'hwp', 'hwpx'],
+        rendererIds: ['office-hangul'],
+        chunkName: 'file-viewer-hangul'
+    },
+    {
+        id: 'drawing',
+        packageName: '@file-viewer/renderer-drawing',
+        exportName: 'drawingRenderer',
+        formats: ['drawing', 'drawio', 'dio', 'excalidraw', 'mermaid', 'mmd', 'plantuml', 'puml'],
+        rendererIds: ['drawing'],
+        chunkName: 'file-viewer-drawing'
+    },
+    {
+        id: 'model',
+        packageName: '@file-viewer/renderer-3d',
+        exportName: 'modelRenderer',
+        formats: [
+            '3d',
+            'model',
+            'stl',
+            'obj',
+            'gltf',
+            'glb',
+            'fbx',
+            'dae',
+            '3ds',
+            '3mf',
+            'amf',
+            'ply',
+            'pcd',
+            'vrml',
+            'wrl',
+            'vtk',
+            'vtp',
+            'xyz',
+            'usd',
+            'usda',
+            'usdc',
+            'usdz',
+            'kmz',
+            'step',
+            'stp',
+            'iges',
+            'igs',
+            'ifc',
+            '3dm',
+            'brep'
+        ],
+        rendererIds: ['model'],
+        chunkName: 'file-viewer-3d'
+    },
+    {
+        id: 'archive',
+        packageName: '@file-viewer/renderer-archive',
+        exportName: 'archiveRenderer',
+        formats: [
+            'archive',
+            'zip',
+            'zipx',
+            '7z',
+            'rar',
+            'tar',
+            'gz',
+            'gzip',
+            'tgz',
+            'bz2',
+            'bzip2',
+            'tbz',
+            'tbz2',
+            'xz',
+            'txz',
+            'lzma',
+            'zst',
+            'tzst',
+            'cab',
+            'ar',
+            'cpio',
+            'iso',
+            'xar',
+            'lha',
+            'lzh',
+            'jar',
+            'war',
+            'ear',
+            'apk',
+            'cbz',
+            'cbr'
+        ],
+        rendererIds: ['archive'],
+        chunkName: 'file-viewer-archive'
+    },
+    {
+        id: 'email',
+        packageName: '@file-viewer/renderer-email',
+        exportName: 'emailRenderer',
+        formats: ['email', 'eml', 'msg', 'mbox'],
+        rendererIds: ['email'],
+        chunkName: 'file-viewer-email'
+    },
+    {
+        id: 'ebook',
+        packageName: '@file-viewer/renderer-epub',
+        exportName: 'ebookRenderer',
+        formats: ['ebook', 'epub', 'fb2', 'umd'],
+        rendererIds: ['epub', 'ebook-fb2', 'umd'],
+        chunkName: 'file-viewer-ebook'
+    },
+    {
+        id: 'text',
+        packageName: '@file-viewer/renderer-text',
+        exportName: 'textRenderer',
+        formats: [
+            'text',
+            'txt',
+            'log',
+            'code',
+            'md',
+            'markdown',
+            'js',
+            'mjs',
+            'cjs',
+            'jsx',
+            'ts',
+            'tsx',
+            'json',
+            'jsonc',
+            'json5',
+            'xml',
+            'yaml',
+            'yml',
+            'toml',
+            'ini',
+            'htm',
+            'html',
+            'css',
+            'vue',
+            'py',
+            'java',
+            'go',
+            'rs',
+            'c',
+            'cpp',
+            'cc',
+            'h',
+            'hpp',
+            'cs',
+            'diff',
+            'patch',
+            'bundle',
+            'bdl',
+            'php',
+            'rb',
+            'swift',
+            'kt',
+            'sh',
+            'bash',
+            'sql',
+            'json5',
+            'proto',
+            'hcl',
+            'tex',
+            'gv',
+            'graphviz',
+            'http',
+            'react',
+            'ipynb'
+        ],
+        rendererIds: ['code', 'markdown'],
+        chunkName: 'file-viewer-text'
+    },
+    {
+        id: 'image',
+        packageName: '@file-viewer/renderer-image',
+        exportName: 'imageRenderer',
+        formats: [
+            'image',
+            'jpg',
+            'jpeg',
+            'png',
+            'gif',
+            'webp',
+            'svg',
+            'bmp',
+            'tiff',
+            'tif',
+            'avif',
+            'ico',
+            'heic',
+            'heif',
+            'jxl'
+        ],
+        rendererIds: ['image'],
+        chunkName: 'file-viewer-image'
+    },
+    {
+        id: 'media',
+        packageName: '@file-viewer/renderer-media',
+        exportName: 'mediaRenderer',
+        formats: [
+            'media',
+            'audio',
+            'video',
+            'mp3',
+            'mpeg',
+            'wav',
+            'ogg',
+            'oga',
+            'opus',
+            'flac',
+            'aac',
+            'm4a',
+            'mp4',
+            'webm',
+            'weba',
+            'mov',
+            'm3u8',
+            'midi',
+            'mid'
+        ],
+        rendererIds: ['audio', 'video'],
+        chunkName: 'file-viewer-media'
+    },
+    {
+        id: 'mindmap',
+        packageName: '@file-viewer/renderer-mindmap',
+        exportName: 'mindmapRenderer',
+        formats: ['mindmap', 'xmind'],
+        rendererIds: ['mindmap'],
+        chunkName: 'file-viewer-mindmap'
+    },
+    {
+        id: 'geo',
+        packageName: '@file-viewer/renderer-geo',
+        exportName: 'geoRenderer',
+        formats: ['geo', 'geojson', 'kml', 'gpx', 'shp'],
+        rendererIds: ['geo'],
+        chunkName: 'file-viewer-geo'
+    },
+    {
+        id: 'data',
+        packageName: '@file-viewer/renderer-data',
+        exportName: 'dataRenderer',
+        formats: [
+            'data',
+            'data-asset',
+            'sqlite',
+            'db',
+            'sqlite3',
+            'parquet',
+            'avro',
+            'psd',
+            'ai',
+            'eps',
+            'webarchive',
+            'wasm',
+            'ttf',
+            'otf',
+            'woff',
+            'woff2'
+        ],
+        rendererIds: ['data-asset'],
+        chunkName: 'file-viewer-data'
+    },
+    {
+        id: 'eda',
+        packageName: '@file-viewer/renderer-eda',
+        exportName: 'edaRenderer',
+        formats: ['eda', 'gds', 'oas', 'oasis', 'olb', 'dra', 'dsn'],
+        rendererIds: ['eda'],
+        chunkName: 'file-viewer-eda'
+    }
+];
+const descriptorsById = new Map(rendererModules.map((descriptor) => [descriptor.id, descriptor]));
+const descriptorsByFormat = new Map();
+const descriptorsByRendererId = new Map();
+rendererModules.forEach((descriptor) => {
+    descriptor.formats.forEach((format) => descriptorsByFormat.set(format, descriptor));
+    descriptor.rendererIds.forEach((rendererId) => descriptorsByRendererId.set(rendererId, descriptor));
+});
+const presetRendererIds = {
+    all: rendererModules.map((descriptor) => descriptor.id),
+    lite: ['text', 'image', 'media'],
+    office: ['pdf', 'word', 'spreadsheet', 'presentation', 'ofd', 'iwork', 'wordperfect', 'hangul'],
+    engineering: [
+        'cad',
+        'model',
+        'drawing',
+        'mindmap',
+        'geo',
+        'typst',
+        'archive',
+        'data',
+        'eda'
+    ]
+};
+const presetModules = {
+    all: {
+        id: 'all',
+        packageName: '@file-viewer/preset-all',
+        exportName: 'allRenderers',
+        rendererIds: presetRendererIds.all,
+        chunkName: 'file-viewer-preset-all'
+    },
+    lite: {
+        id: 'lite',
+        packageName: '@file-viewer/preset-lite',
+        exportName: 'liteRenderers',
+        rendererIds: presetRendererIds.lite,
+        chunkName: 'file-viewer-preset-lite'
+    },
+    office: {
+        id: 'office',
+        packageName: '@file-viewer/preset-office',
+        exportName: 'officeRenderers',
+        rendererIds: presetRendererIds.office,
+        chunkName: 'file-viewer-preset-office'
+    },
+    engineering: {
+        id: 'engineering',
+        packageName: '@file-viewer/preset-engineering',
+        exportName: 'engineeringRenderers',
+        rendererIds: presetRendererIds.engineering,
+        chunkName: 'file-viewer-preset-engineering'
+    }
+};
+const fileViewerFullPackages = [
+    '@file-viewer/react-full',
+    '@file-viewer/react-legacy-full',
+    '@file-viewer/vue3-full',
+    '@file-viewer/vue2.7-full',
+    '@file-viewer/vue2.6-full',
+    '@file-viewer/web-full',
+    '@file-viewer/jquery-full',
+    '@file-viewer/svelte-full'
+];
+// Vite dep optimization rewrites import.meta.url into node_modules/.vite/deps
+// and can trigger full-preset dev-server re-optimization reloads. Keep File
+// Viewer packages out of dep optimization while still optimizing their
+// CommonJS/UMD helper dependencies below.
+const fileViewerOptimizationExcludedPackages = [
+    '@file-viewer/core',
+    '@file-viewer/ppt',
+    '@file-viewer/pptx',
+    ...rendererModules.map((descriptor) => descriptor.packageName),
+    ...Object.values(presetModules).map((preset) => preset.packageName),
+    ...fileViewerFullPackages
+];
+const cjsInteropPackages = [
+    '@file-viewer/docx',
+    '@xmldom/xmldom',
+    'keynote-archives',
+    'occt-import-js',
+    'jszip'
+];
+const defaultScanRoots = ['src', 'app', 'pages', 'components'];
+const defaultScanExtensions = [
+    'js',
+    'jsx',
+    'ts',
+    'tsx',
+    'vue',
+    'svelte',
+    'html',
+    'md',
+    'mdx'
+];
+const ignoredScanDirectories = new Set([
+    '.git',
+    '.idea',
+    '.next',
+    '.nuxt',
+    '.output',
+    '.release',
+    '.svelte-kit',
+    '.vite',
+    'coverage',
+    'dist',
+    'node_modules'
+]);
+const defaultScanMaxFileSize = 1024 * 1024;
+const mimeFormatHints = {
+    'application/pdf': ['pdf'],
+    'application/ofd': ['ofd'],
+    'application/zip': ['zip'],
+    'application/x-zip-compressed': ['zip'],
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['docx'],
+    'application/msword': ['doc'],
+    'application/vnd.ms-excel': ['xls'],
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['xlsx'],
+    'application/vnd.ms-powerpoint': ['ppt'],
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation': ['pptx'],
+    'application/json': ['json'],
+    'application/x-ndjson': ['json'],
+    'application/xml': ['xml'],
+    'application/x-tar': ['tar'],
+    'application/gzip': ['gz'],
+    'application/x-7z-compressed': ['7z'],
+    'application/vnd.rar': ['rar'],
+    'text/markdown': ['md'],
+    'text/csv': ['csv'],
+    'text/tab-separated-values': ['tsv'],
+    'text/html': ['html'],
+    'text/css': ['css'],
+    'text/plain': ['txt'],
+    'image/*': ['image'],
+    'image/tiff': ['tiff'],
+    'image/heic': ['heic'],
+    'image/heif': ['heif'],
+    'audio/*': ['audio'],
+    'audio/mpeg': ['mp3'],
+    'audio/ogg': ['ogg'],
+    'audio/flac': ['flac'],
+    'audio/midi': ['midi'],
+    'video/*': ['video']
+};
+function normalizeToken(value) {
+    return value.trim().toLowerCase().replace(/^\./, '');
+}
+function unique(items) {
+    return [...new Set(items)];
+}
+function normalizeScanExtension(value) {
+    return normalizeToken(value);
+}
+function collectQuotedTokens(value) {
+    return [...value.matchAll(/['"`]([^'"`]+)['"`]/g)].flatMap((match) => collectDelimitedTokens(match[1]));
+}
+function collectDelimitedTokens(value) {
+    return value
+        .split(/[\s,;|]+/g)
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .flatMap((item) => mimeFormatHints[item.toLowerCase()] || [item])
+        .map(normalizeToken)
+        .filter(Boolean);
+}
+export function extractFileViewerRendererHintTokens(source) {
+    const tokens = [];
+    const push = (items) => {
+        items.forEach((item) => {
+            if (item) {
+                tokens.push(item);
+            }
+        });
+    };
+    // Explicit JavaScript/TypeScript hints:
+    //   const fileViewerFormats = ['pdf', 'docx']
+    //   fileViewerRenderers: ['pdf', 'cad']
+    for (const match of source.matchAll(/\bfileViewer(?:Formats?|Renderers?)\b\s*[:=]\s*\[([\s\S]*?)\]/g)) {
+        push(collectQuotedTokens(match[1]));
+    }
+    // HTML / template hints:
+    //   <div data-file-viewer-formats="pdf,docx"></div>
+    //   <input accept=".pdf,.docx,application/vnd.ms-excel">
+    for (const match of source.matchAll(/\bdata-file-viewer-(?:formats?|renderers?)\s*=\s*["']([^"']+)["']/g)) {
+        push(collectDelimitedTokens(match[1]));
+    }
+    for (const match of source.matchAll(/\baccept\s*=\s*["']([^"']+)["']/g)) {
+        push(collectDelimitedTokens(match[1]));
+    }
+    // Comment hints are useful in non-framework projects where the upload UI is
+    // assembled dynamically:
+    //   // file-viewer-formats: pdf,docx,dwg
+    for (const match of source.matchAll(/file-viewer-(?:formats?|renderers?)\s*:\s*([^\n\r<]+)/g)) {
+        push(collectDelimitedTokens(match[1]));
+    }
+    return unique(tokens);
+}
+function normalizeScanOptions(value) {
+    if (!value) {
+        return null;
+    }
+    const raw = typeof value === 'object' ? value : {};
+    if (raw.enabled === false) {
+        return null;
+    }
+    return {
+        roots: raw.roots?.length ? [...raw.roots] : defaultScanRoots,
+        extensions: new Set((raw.extensions?.length ? raw.extensions : defaultScanExtensions).map(normalizeScanExtension)),
+        maxFileSize: raw.maxFileSize ?? defaultScanMaxFileSize
+    };
+}
+function scanFile(filePath, extensions, maxFileSize) {
+    const extension = normalizeScanExtension(extname(filePath));
+    if (!extensions.has(extension)) {
+        return [];
+    }
+    const info = statSyncSafe(filePath);
+    if (!info?.isFile() || info.size > maxFileSize) {
+        return [];
+    }
+    return extractFileViewerRendererHintTokens(readFileSync(filePath, 'utf8'));
+}
+function statSyncSafe(filePath) {
+    try {
+        return existsSync(filePath) ? statSync(filePath) : null;
+    }
+    catch {
+        return null;
+    }
+}
+function walkScanRoot(directory, extensions, maxFileSize, output) {
+    if (!existsSync(directory)) {
+        return;
+    }
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        if (entry.isDirectory()) {
+            if (!ignoredScanDirectories.has(entry.name)) {
+                walkScanRoot(join(directory, entry.name), extensions, maxFileSize, output);
+            }
+            continue;
+        }
+        if (entry.isFile()) {
+            output.push(...scanFile(join(directory, entry.name), extensions, maxFileSize));
+        }
+    }
+}
+export function collectFileViewerRendererScanTokens(projectRoot, scan) {
+    const normalized = normalizeScanOptions(scan);
+    if (!normalized) {
+        return [];
+    }
+    const tokens = [];
+    normalized.roots.forEach((root) => {
+        walkScanRoot(isAbsolute(root) ? root : resolve(projectRoot, root), normalized.extensions, normalized.maxFileSize, tokens);
+    });
+    return unique(tokens);
+}
+function resolveManualPreset(preset) {
+    return preset && preset !== 'auto' ? preset : null;
+}
+function selectRenderers(options) {
+    const preset = resolveManualPreset(options.preset);
+    const presetCoveredIds = new Set(preset ? presetRendererIds[preset] : []);
+    const selected = new Map();
+    const missing = [];
+    const requestedTokens = [...(options.renderers || []), ...(options.formats || [])]
+        .map(normalizeToken)
+        .filter(Boolean);
+    requestedTokens.forEach((token) => {
+        const descriptor = descriptorsById.get(token) ||
+            descriptorsByRendererId.get(token) ||
+            descriptorsByFormat.get(token);
+        if (descriptor) {
+            if (!presetCoveredIds.has(descriptor.id)) {
+                selected.set(descriptor.id, descriptor);
+            }
+            return;
+        }
+        missing.push({
+            format: token,
+            note: 'No renderer mapping is registered for this format yet.'
+        });
+    });
+    return { preset, descriptors: [...selected.values()], missing };
+}
+function formatMissingRendererMessage(missing) {
+    return [
+        'Some requested File Viewer formats do not have standalone renderer packages in this workspace yet:',
+        ...missing.map((item) => `  - ${item.format}${item.targetPackage ? ` -> ${item.targetPackage}` : ''}: ${item.note}`),
+        'Use @file-viewer/preset-all for full compatibility while the remaining renderer lines are extracted, or remove those formats from @file-viewer/vite-plugin.'
+    ].join('\n');
+}
+function assertMissingRendererPolicy(selection, mode) {
+    if (!selection.missing.length || mode === 'ignore') {
+        return;
+    }
+    const message = formatMissingRendererMessage(selection.missing);
+    if (mode === 'warn') {
+        console.warn(`[file-viewer:vite-plugin]\n${message}`);
+        return;
+    }
+    throw new Error(`[file-viewer:vite-plugin]\n${message}`);
+}
+function expandDescriptorRendererIds(ids) {
+    return unique(ids.flatMap((id) => {
+        const descriptor = descriptorsById.get(id);
+        return descriptor ? [...descriptor.rendererIds] : [id];
+    }));
+}
+function renderVirtualModule(selection, formats, autoPresetIds = [], runtimeAssetBase = null, configureFullAssetBase = false) {
+    const presetModule = selection.preset ? presetModules[selection.preset] : null;
+    const autoPresetModules = autoPresetIds
+        .filter((id) => id !== selection.preset)
+        .map((id) => presetModules[id]);
+    const presetImport = presetModule
+        ? `import { ${presetModule.exportName} as presetRenderers } from '${presetModule.packageName}';`
+        : null;
+    const autoPresetImports = autoPresetModules.map((preset, index) => `import { ${preset.exportName} as autoPresetRenderers${index} } from '${preset.packageName}';`);
+    const rendererImports = selection.descriptors.map((descriptor, index) => `import { ${descriptor.exportName} as renderer${index} } from '${descriptor.packageName}';`);
+    const rendererNames = [
+        ...(presetModule ? ['presetRenderers'] : []),
+        ...autoPresetModules.map((_preset, index) => `autoPresetRenderers${index}`),
+        ...selection.descriptors.map((_descriptor, index) => `renderer${index}`)
+    ];
+    const rendererIds = unique([
+        ...(presetModule ? expandDescriptorRendererIds(presetModule.rendererIds) : []),
+        ...autoPresetModules.flatMap((preset) => expandDescriptorRendererIds(preset.rendererIds)),
+        ...selection.descriptors.flatMap((descriptor) => descriptor.rendererIds)
+    ]);
+    const packages = unique([
+        ...(presetModule ? [presetModule.packageName] : []),
+        ...autoPresetModules.map((preset) => preset.packageName),
+        ...selection.descriptors.map((descriptor) => descriptor.packageName)
+    ]);
+    const plan = {
+        preset: selection.preset,
+        autoPresets: autoPresetModules.map((preset) => preset.id),
+        formats,
+        rendererIds,
+        packages,
+        generatedBy: '@file-viewer/vite-plugin'
+    };
+    const autoRegistrationId = selection.descriptors.length
+        ? '@file-viewer/vite-plugin:configured'
+        : selection.preset && !autoPresetModules.length
+            ? selection.preset
+            : !selection.preset && autoPresetModules.length === 1
+                ? autoPresetModules[0].id
+                : '@file-viewer/vite-plugin:configured';
+    const runtimeAssetBaseImport = runtimeAssetBase
+        ? runtimeAssetBase.kind === 'deployment'
+            ? `import { resolveFileViewerRuntimeAssetBaseUrl, setDefaultFileViewerAssetBaseUrl } from '@file-viewer/core/assets';`
+            : `import { setDefaultFileViewerAssetBaseUrl } from '@file-viewer/core/assets';`
+        : null;
+    const fullAssetBaseImport = runtimeAssetBase && configureFullAssetBase
+        ? `import { setDefaultFullAssetBaseUrl } from '@file-viewer/preset-all';`
+        : null;
+    const autoRegistrationImport = rendererNames.length
+        ? `import { registerFileViewerAutoRendererPreset } from '@file-viewer/core';`
+        : null;
+    const runtimeAssetBaseSetup = !runtimeAssetBase
+        ? []
+        : runtimeAssetBase.kind === 'literal'
+            ? [
+                `setDefaultFileViewerAssetBaseUrl(${JSON.stringify(runtimeAssetBase.url)});`,
+                ...(configureFullAssetBase
+                    ? [`setDefaultFullAssetBaseUrl(${JSON.stringify(runtimeAssetBase.url)});`]
+                    : []),
+                ''
+            ]
+            : [
+                "const fileViewerDeploymentBaseUrl = typeof document === 'undefined'",
+                "  ? '/'",
+                '  : resolveFileViewerRuntimeAssetBaseUrl(document);',
+                "const fileViewerRuntimeAssetBaseUrl = typeof document === 'undefined'",
+                `  ? '/' + ${JSON.stringify(runtimeAssetBase.encodedBaseDir)}`,
+                `  : new URL(${JSON.stringify(runtimeAssetBase.encodedBaseDir)}, fileViewerDeploymentBaseUrl.endsWith('/') ? fileViewerDeploymentBaseUrl : fileViewerDeploymentBaseUrl + '/').href;`,
+                'setDefaultFileViewerAssetBaseUrl(fileViewerRuntimeAssetBaseUrl);',
+                ...(configureFullAssetBase
+                    ? ['setDefaultFullAssetBaseUrl(fileViewerRuntimeAssetBaseUrl);']
+                    : []),
+                ''
+            ];
+    return [
+        ...[autoRegistrationImport, runtimeAssetBaseImport, fullAssetBaseImport].filter(Boolean),
+        ...[presetImport].filter(Boolean),
+        ...autoPresetImports,
+        ...rendererImports,
+        '',
+        ...runtimeAssetBaseSetup,
+        `export const configuredFileViewerRenderers = [${rendererNames.join(', ')}];`,
+        `export const fileViewerRendererPlan = ${JSON.stringify(plan, null, 2)};`,
+        ...(rendererNames.length
+            ? [`registerFileViewerAutoRendererPreset(configuredFileViewerRenderers, { id: ${JSON.stringify(autoRegistrationId)} });`]
+            : []),
+        'export default configuredFileViewerRenderers;',
+        ''
+    ].join('\n');
+}
+function hasManualChunks(config) {
+    const output = config.build?.rollupOptions?.output;
+    if (Array.isArray(output)) {
+        return output.some((item) => Boolean(item.manualChunks));
+    }
+    return Boolean(output?.manualChunks);
+}
+function resolveProjectViteMajor(projectRoot) {
+    const requireFns = [
+        createRequire(resolve(projectRoot, 'package.json')),
+        pluginRequire
+    ];
+    for (const requireFn of requireFns) {
+        try {
+            const packageJsonPath = requireFn.resolve('vite/package.json');
+            const version = String(JSON.parse(readFileSync(packageJsonPath, 'utf8')).version || '');
+            const major = Number.parseInt(version.split('.')[0] || '', 10);
+            if (Number.isInteger(major) && major > 0)
+                return major;
+        }
+        catch {
+            // Try the plugin's own Vite installation when the project does not expose one.
+        }
+    }
+    return 7;
+}
+function getManualChunksFunction(config) {
+    const output = config.build?.rollupOptions?.output;
+    if (Array.isArray(output)) {
+        return null;
+    }
+    return typeof output?.manualChunks === 'function'
+        ? output.manualChunks
+        : null;
+}
+function getNodeModulePackageName(id) {
+    const normalized = id.replace(/\\/g, '/');
+    const marker = '/node_modules/';
+    const index = normalized.lastIndexOf(marker);
+    if (index === -1) {
+        return null;
+    }
+    const parts = normalized.slice(index + marker.length).split('/');
+    if (!parts[0]) {
+        return null;
+    }
+    return parts[0].startsWith('@')
+        ? [parts[0], parts[1]].filter(Boolean).join('/')
+        : parts[0];
+}
+function getStableInteropChunkName(id) {
+    const packageName = getNodeModulePackageName(id);
+    if (!packageName) {
+        return undefined;
+    }
+    if (packageName === 'codemirror' ||
+        packageName === '@replit/codemirror-vim' ||
+        packageName.startsWith('@codemirror/') ||
+        packageName.startsWith('@lezer/') ||
+        packageName.startsWith('@codesandbox/sandpack') ||
+        packageName === '@codesandbox/nodebox' ||
+        packageName === '@marijn/find-cluster-break' ||
+        packageName === 'crelt' ||
+        packageName === 'style-mod' ||
+        packageName === 'w3c-keyname') {
+        return 'vendor-codemirror';
+    }
+    return undefined;
+}
+function createStableInteropManualChunks(manualChunks) {
+    return (id, meta) => getStableInteropChunkName(id) || manualChunks(id, meta);
+}
+function createRolldownCodeSplittingGroups(selection, autoPresetIds, options) {
+    const groups = [];
+    if (options.stabilizeInteropChunks !== false) {
+        groups.push({
+            name: 'vendor-codemirror',
+            test: (id) => getStableInteropChunkName(id) === 'vendor-codemirror',
+            priority: -10
+        });
+    }
+    if ((options.chunkStrategy || 'renderer') !== 'none') {
+        const resolveChunkName = createManualChunks(selection, autoPresetIds);
+        groups.push({
+            name: (id) => resolveChunkName(id) || null,
+            priority: -20
+        });
+    }
+    return groups;
+}
+function mergeRolldownCodeSplittingOutput(output, pluginGroups) {
+    const current = output || {};
+    if (current.codeSplitting === false || !pluginGroups.length)
+        return current;
+    const codeSplitting = current.codeSplitting && typeof current.codeSplitting === 'object'
+        ? current.codeSplitting
+        : {};
+    const existingGroups = Array.isArray(codeSplitting.groups) ? codeSplitting.groups : [];
+    const existingNames = new Set(existingGroups
+        .map(group => typeof group.name === 'string' ? group.name : null)
+        .filter((name) => Boolean(name)));
+    const groups = [
+        ...existingGroups,
+        ...pluginGroups.filter(group => typeof group.name !== 'string' || !existingNames.has(group.name))
+    ];
+    return {
+        ...current,
+        codeSplitting: {
+            ...codeSplitting,
+            groups
+        }
+    };
+}
+function createVite8ChunkConfig(userConfig, selection, autoPresetIds, options) {
+    const build = userConfig.build;
+    const rolldownOptions = build?.rolldownOptions || {};
+    const groups = createRolldownCodeSplittingGroups(selection, autoPresetIds, options);
+    const currentOutput = rolldownOptions.output;
+    if (!groups.length ||
+        (!Array.isArray(currentOutput) && currentOutput?.codeSplitting === false)) {
+        return {};
+    }
+    const output = Array.isArray(currentOutput)
+        ? currentOutput.map(item => mergeRolldownCodeSplittingOutput(item, groups))
+        : mergeRolldownCodeSplittingOutput(currentOutput, groups);
+    return {
+        build: {
+            rolldownOptions: {
+                ...rolldownOptions,
+                output
+            }
+        }
+    };
+}
+function createOptimizeDepsExclude(config) {
+    return unique([
+        ...(config.optimizeDeps?.exclude || []),
+        ...fileViewerOptimizationExcludedPackages
+    ]);
+}
+function createOptimizeDepsInclude(config, exclude, anchorPackages) {
+    const excluded = new Set(exclude);
+    return unique([
+        ...(config.optimizeDeps?.include || []),
+        ...cjsInteropPackages.filter((packageName) => !excluded.has(packageName) && Boolean(resolvePackageJson(packageName, anchorPackages)))
+    ]);
+}
+function createManualChunks(selection, autoPresetIds = []) {
+    const packageToChunk = new Map();
+    const presetIds = unique([
+        ...(selection.preset ? [selection.preset] : []),
+        ...autoPresetIds
+    ]);
+    presetIds.forEach((presetId) => {
+        const presetModule = presetModules[presetId];
+        packageToChunk.set(presetModule.packageName, presetModule.chunkName);
+        presetModule.rendererIds
+            .map((id) => descriptorsById.get(id))
+            .filter((descriptor) => Boolean(descriptor))
+            .forEach((descriptor) => {
+            packageToChunk.set(descriptor.packageName, descriptor.chunkName);
+        });
+    });
+    selection.descriptors.forEach((descriptor) => {
+        packageToChunk.set(descriptor.packageName, descriptor.chunkName);
+    });
+    return (id) => {
+        const normalized = id.replace(/\\/g, '/');
+        for (const [packageName, chunkName] of packageToChunk) {
+            if (normalized.includes(`/node_modules/${packageName}/`) ||
+                normalized.includes(`/node_modules/.pnpm/${packageName.replace('/', '+')}@`)) {
+                return chunkName;
+            }
+        }
+        return undefined;
+    };
+}
+function projectRequire() {
+    return createRequire(resolve(process.cwd(), 'package.json'));
+}
+function findPackageJsonFromEntry(entry) {
+    let current = dirname(entry);
+    while (current && current !== dirname(current)) {
+        const candidate = join(current, 'package.json');
+        if (existsSync(candidate)) {
+            return candidate;
+        }
+        current = dirname(current);
+    }
+    return null;
+}
+function tryResolvePackageJson(packageName, requireFn) {
+    try {
+        return requireFn.resolve(`${packageName}/package.json`);
+    }
+    catch {
+        try {
+            const entry = requireFn.resolve(packageName);
+            return findPackageJsonFromEntry(entry);
+        }
+        catch {
+            return null;
+        }
+    }
+}
+function collectWorkspacePackageJsons(root) {
+    const packageJsons = new Map();
+    const ignoredDirectoryNames = new Set(['node_modules', 'dist', 'vendor', '.git']);
+    const scanRoots = ['packages', 'apps'].map((item) => join(root, item));
+    const visit = (directory, depth) => {
+        if (depth < 0 || !existsSync(directory)) {
+            return;
+        }
+        const packageJsonPath = join(directory, 'package.json');
+        if (existsSync(packageJsonPath)) {
+            try {
+                const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+                if (packageJson.name) {
+                    packageJsons.set(packageJson.name, packageJsonPath);
+                }
+            }
+            catch {
+                // Ignore malformed package.json files in unrelated workspace folders.
+            }
+        }
+        for (const entry of readdirSync(directory)) {
+            if (ignoredDirectoryNames.has(entry)) {
+                continue;
+            }
+            const candidate = join(directory, entry);
+            if (statSync(candidate).isDirectory()) {
+                visit(candidate, depth - 1);
+            }
+        }
+    };
+    scanRoots.forEach((scanRoot) => visit(scanRoot, 4));
+    return packageJsons;
+}
+function resolveWorkspacePackageJson(packageName) {
+    const root = process.cwd();
+    if (!workspacePackageJsonCache || workspacePackageJsonCache.root !== root) {
+        workspacePackageJsonCache = {
+            root,
+            packages: collectWorkspacePackageJsons(root)
+        };
+    }
+    return workspacePackageJsonCache.packages.get(packageName) || null;
+}
+function resolvePackageJson(packageName, anchorPackages = []) {
+    const rootRequireFns = [projectRequire(), pluginRequire];
+    const requireFns = [...rootRequireFns];
+    const effectiveAnchorPackages = unique([
+        ...Object.values(presetModules).map((preset) => preset.packageName),
+        ...anchorPackages
+    ]);
+    const anchorPackageJsons = new Set();
+    let discoveredAnchor = true;
+    while (discoveredAnchor) {
+        discoveredAnchor = false;
+        for (const anchorPackage of effectiveAnchorPackages) {
+            for (const requireFn of [...requireFns]) {
+                const anchorPackageJson = tryResolvePackageJson(anchorPackage, requireFn) ||
+                    resolveWorkspacePackageJson(anchorPackage);
+                if (anchorPackageJson && !anchorPackageJsons.has(anchorPackageJson)) {
+                    anchorPackageJsons.add(anchorPackageJson);
+                    requireFns.push(createRequire(anchorPackageJson));
+                    discoveredAnchor = true;
+                }
+            }
+        }
+    }
+    const preferredAnchorPackageJsons = unique(anchorPackages
+        .map((anchorPackage) => requireFns
+        .map((requireFn) => tryResolvePackageJson(anchorPackage, requireFn))
+        .find(Boolean) || resolveWorkspacePackageJson(anchorPackage))
+        .filter((packageJson) => Boolean(packageJson)));
+    const targetRequireFns = [
+        ...preferredAnchorPackageJsons.map((packageJson) => createRequire(packageJson)),
+        ...requireFns
+    ];
+    for (const requireFn of targetRequireFns) {
+        const packageJson = tryResolvePackageJson(packageName, requireFn);
+        if (packageJson) {
+            return packageJson;
+        }
+    }
+    return resolveWorkspacePackageJson(packageName);
+}
+function hasExplicitRendererSelection(options) {
+    return Boolean(resolveManualPreset(options.preset) ||
+        options.formats?.length ||
+        options.renderers?.length ||
+        options.scan);
+}
+function shouldAutoDiscoverPresets(options) {
+    if (Array.isArray(options.autoPresets)) {
+        return true;
+    }
+    if (typeof options.autoPresets === 'boolean') {
+        return options.autoPresets;
+    }
+    return options.preset === 'auto' || !hasExplicitRendererSelection(options);
+}
+function resolveAutoPresetIds(options) {
+    if (!shouldAutoDiscoverPresets(options)) {
+        return [];
+    }
+    const candidates = Array.isArray(options.autoPresets)
+        ? options.autoPresets
+        : Object.keys(presetModules);
+    const installed = unique(candidates).filter((presetId) => Boolean(resolvePackageJson(presetModules[presetId].packageName)));
+    return installed.includes('all') ? ['all'] : installed;
+}
+function collectSelectedPackages(selection, autoPresetIds = []) {
+    const presetModule = selection.preset ? presetModules[selection.preset] : null;
+    return unique([
+        ...(presetModule ? [presetModule.packageName] : []),
+        ...autoPresetIds.map((presetId) => presetModules[presetId].packageName),
+        ...selection.descriptors.map((descriptor) => descriptor.packageName)
+    ]);
+}
+function collectDependencyAnchorPackages(selection, autoPresetIds = []) {
+    const presetIds = unique([
+        ...(selection.preset ? [selection.preset] : []),
+        ...autoPresetIds
+    ]);
+    return unique([
+        ...collectSelectedPackages(selection, autoPresetIds),
+        ...presetIds.flatMap((presetId) => presetModules[presetId].rendererIds
+            .map((rendererId) => descriptorsById.get(rendererId)?.packageName)
+            .filter((packageName) => Boolean(packageName))),
+        ...selection.descriptors.map((descriptor) => descriptor.packageName)
+    ]);
+}
+function resolvePackageRoot(packageName, anchorPackages = []) {
+    const packageJson = resolvePackageJson(packageName, anchorPackages);
+    return packageJson ? dirname(packageJson) : null;
+}
+function readPackageVersion(packageRoot) {
+    if (!packageRoot) {
+        return null;
+    }
+    try {
+        const packageJson = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'));
+        return packageJson.version || null;
+    }
+    catch {
+        return null;
+    }
+}
+function assertOwnedPackageVersion(packageName, packageRoot, ownerPackageName, anchorPackages = []) {
+    if (!packageRoot) {
+        return null;
+    }
+    const ownerPackageJsonPath = resolvePackageJson(ownerPackageName, anchorPackages);
+    if (!ownerPackageJsonPath) {
+        return readPackageVersion(packageRoot);
+    }
+    const ownerPackageJson = JSON.parse(readFileSync(ownerPackageJsonPath, 'utf8'));
+    const configuredVersion = ownerPackageJson.dependencies?.[packageName];
+    const expectedVersion = configuredVersion?.startsWith('workspace:')
+        ? configuredVersion.slice('workspace:'.length)
+        : configuredVersion;
+    const actualVersion = readPackageVersion(packageRoot);
+    if (expectedVersion &&
+        /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(expectedVersion) &&
+        actualVersion !== expectedVersion) {
+        throw new Error(`[file-viewer:vite-plugin] ${ownerPackageName} requires ${packageName}@${expectedVersion}, ` +
+            `but renderer assets resolved from ${packageName}@${actualVersion || 'unknown'} (${packageRoot}).`);
+    }
+    return actualVersion;
+}
+function resolvePackageEntry(packageName, anchorPackages = []) {
+    const packageJsonPath = resolvePackageJson(packageName, anchorPackages);
+    if (!packageJsonPath) {
+        return null;
+    }
+    const packageRoot = dirname(packageJsonPath);
+    const anchorPackageJson = anchorPackages
+        .map((anchorPackage) => resolvePackageJson(anchorPackage))
+        .find(Boolean);
+    const requireFns = [
+        projectRequire(),
+        pluginRequire,
+        ...(anchorPackageJson ? [createRequire(anchorPackageJson)] : [])
+    ];
+    try {
+        const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+        const exportSubpath = packageJson.name && packageName.startsWith(`${packageJson.name}/`)
+            ? `.${packageName.slice(packageJson.name.length)}`
+            : null;
+        if (exportSubpath) {
+            const exportedEntry = readPackageExportEntry(packageJson.exports?.[exportSubpath]);
+            if (exportedEntry) {
+                const entry = resolve(packageRoot, exportedEntry);
+                if (existsSync(entry) && statSync(entry).isFile()) {
+                    return entry;
+                }
+            }
+            for (const requireFn of requireFns) {
+                try {
+                    return requireFn.resolve(packageName);
+                }
+                catch {
+                    // Continue probing alternate anchors.
+                }
+            }
+            return null;
+        }
+        const candidates = unique([
+            packageJson.module,
+            packageJson.main,
+            'index.js'
+        ].filter((value) => Boolean(value)));
+        for (const candidate of candidates) {
+            const entry = resolve(packageRoot, candidate);
+            if (existsSync(entry) && statSync(entry).isFile()) {
+                return entry;
+            }
+        }
+    }
+    catch {
+        // Fall back to Node resolution below.
+    }
+    for (const requireFn of requireFns) {
+        try {
+            return requireFn.resolve(packageName);
+        }
+        catch {
+            // Continue probing alternate anchors.
+        }
+    }
+    return null;
+}
+function resolvePackageFile(packageName, relativePath, anchorPackages = []) {
+    const packageRoot = resolvePackageRoot(packageName, anchorPackages);
+    if (!packageRoot) {
+        return null;
+    }
+    const entry = resolve(packageRoot, relativePath);
+    return existsSync(entry) && statSync(entry).isFile() ? entry : null;
+}
+function readPackageExportEntry(value) {
+    if (typeof value === 'string') {
+        return value;
+    }
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+    const record = value;
+    return readPackageExportEntry(record.import) ||
+        readPackageExportEntry(record.default) ||
+        readPackageExportEntry(record.require);
+}
+function resolvePackageExportEntry(packageName, exportPath, anchorPackages = []) {
+    const packageJsonPath = resolvePackageJson(packageName, anchorPackages);
+    if (!packageJsonPath) {
+        return null;
+    }
+    try {
+        const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+        const exportEntry = readPackageExportEntry(packageJson.exports?.[exportPath]);
+        if (!exportEntry) {
+            return null;
+        }
+        const entry = resolve(dirname(packageJsonPath), exportEntry);
+        return existsSync(entry) && statSync(entry).isFile() ? entry : null;
+    }
+    catch {
+        return null;
+    }
+}
+function normalizeViteAlias(alias) {
+    if (!alias) {
+        return [];
+    }
+    if (Array.isArray(alias)) {
+        return [...alias];
+    }
+    return Object.entries(alias).map(([find, replacement]) => ({ find, replacement }));
+}
+function escapeRegExp(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+function createExactImportAlias(find, replacement) {
+    return {
+        find: new RegExp(`^${escapeRegExp(find)}$`),
+        replacement
+    };
+}
+function createFileViewerResolveAliases(anchorPackages) {
+    const packageNames = unique([
+        '@file-viewer/core',
+        ...anchorPackages,
+        ...cjsInteropPackages
+    ]);
+    const aliases = [];
+    const coreAssetsEntry = resolvePackageExportEntry('@file-viewer/core', './assets', anchorPackages);
+    if (coreAssetsEntry) {
+        aliases.push(createExactImportAlias('@file-viewer/core/assets', coreAssetsEntry));
+    }
+    const jszipBrowserEntry = resolvePackageFile('jszip', 'dist/jszip.js', anchorPackages);
+    if (jszipBrowserEntry) {
+        aliases.push(createExactImportAlias('jszip/dist/jszip', jszipBrowserEntry));
+    }
+    aliases.push(...packageNames
+        .map((packageName) => {
+        const entry = resolvePackageEntry(packageName, anchorPackages);
+        return entry ? createExactImportAlias(packageName, entry) : null;
+    })
+        .filter((alias) => Boolean(alias)));
+    return aliases;
+}
+async function copyFileIfPresent(from, to) {
+    if (!from || !existsSync(from)) {
+        return false;
+    }
+    const info = await stat(from);
+    if (!info.isFile()) {
+        return false;
+    }
+    await mkdir(dirname(to), { recursive: true });
+    await copyFile(from, to);
+    return true;
+}
+async function copyDirectoryIfPresent(from, to) {
+    if (!from || !existsSync(from)) {
+        return false;
+    }
+    const info = await stat(from);
+    if (!info.isDirectory()) {
+        return false;
+    }
+    await rm(to, { recursive: true, force: true });
+    await mkdir(dirname(to), { recursive: true });
+    await cp(from, to, { recursive: true, force: true });
+    return true;
+}
+async function copyVersionedCadRuntimeDirectoryIfPresent(from, to, runtimeVersion) {
+    if (!from || !existsSync(from)) {
+        return false;
+    }
+    if (!runtimeVersion || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(runtimeVersion)) {
+        throw new Error(`[file-viewer:vite-plugin] Cannot publish CAD runtime assets with invalid version ${JSON.stringify(runtimeVersion)}.`);
+    }
+    const copied = await copyDirectoryIfPresent(from, to);
+    if (!copied) {
+        return false;
+    }
+    const versionedTarget = join(to, runtimeVersion);
+    return copyDirectoryIfPresent(from, versionedTarget);
+}
+async function copyPdfCjkFontAssets(from, to) {
+    if (!from) {
+        return false;
+    }
+    const files = join(from, 'files');
+    const stylesheet = join(from, 'wght.css');
+    const license = join(from, 'LICENSE');
+    if (![files, stylesheet, license].every(existsSync) || !statSync(files).isDirectory()) {
+        return false;
+    }
+    await rm(to, { recursive: true, force: true });
+    await mkdir(to, { recursive: true });
+    await cp(files, join(to, 'files'), { recursive: true, force: true });
+    await copyFile(stylesheet, join(to, 'noto-sans-sc.css'));
+    await copyFile(license, join(to, 'OFL-1.1.txt'));
+    return true;
+}
+async function copyKnownRendererAssets(targetRoot, rendererIds) {
+    const selected = new Set(rendererIds);
+    const results = [];
+    const push = async (rendererId, id, to, copyAction, reason, source) => {
+        if (!selected.has(rendererId)) {
+            return;
+        }
+        const copied = await copyAction();
+        results.push({
+            rendererId,
+            id,
+            to,
+            copied,
+            reason: copied ? undefined : reason || 'source asset not found',
+            ...source,
+        });
+    };
+    const pdfRoot = resolvePackageRoot('pdfjs-dist', ['@file-viewer/renderer-pdf']);
+    const pdfVersion = assertOwnedPackageVersion('pdfjs-dist', pdfRoot, '@file-viewer/renderer-pdf');
+    const pdfSource = pdfRoot
+        ? { sourcePackage: 'pdfjs-dist', sourceVersion: pdfVersion || undefined }
+        : undefined;
+    await push('pdf', 'pdf-worker', join(targetRoot, 'vendor/pdf/pdf.worker.mjs'), () => copyFileIfPresent(pdfRoot ? join(pdfRoot, 'legacy/build/pdf.worker.mjs') : null, join(targetRoot, 'vendor/pdf/pdf.worker.mjs')), undefined, pdfSource);
+    await push('pdf', 'pdf-cmaps', join(targetRoot, 'vendor/pdf/cmaps'), () => copyDirectoryIfPresent(pdfRoot ? join(pdfRoot, 'cmaps') : null, join(targetRoot, 'vendor/pdf/cmaps')), undefined, pdfSource);
+    await push('pdf', 'pdf-wasm', join(targetRoot, 'vendor/pdf/wasm'), () => copyDirectoryIfPresent(pdfRoot ? join(pdfRoot, 'wasm') : null, join(targetRoot, 'vendor/pdf/wasm')), undefined, pdfSource);
+    await push('pdf', 'pdf-standard-fonts', join(targetRoot, 'vendor/pdf/standard_fonts'), () => copyDirectoryIfPresent(pdfRoot ? join(pdfRoot, 'standard_fonts') : null, join(targetRoot, 'vendor/pdf/standard_fonts')), undefined, pdfSource);
+    const pdfCjkFontRoot = resolvePackageRoot('@fontsource-variable/noto-sans-sc', [
+        '@file-viewer/renderer-pdf'
+    ]);
+    await push('pdf', 'pdf-cjk-font-fallback', join(targetRoot, 'vendor/pdf/fonts'), () => copyPdfCjkFontAssets(pdfCjkFontRoot, join(targetRoot, 'vendor/pdf/fonts')));
+    const pptxRoot = resolvePackageRoot('@file-viewer/pptx', ['@file-viewer/renderer-presentation']);
+    await push('office-presentation', 'pptx-worker', join(targetRoot, 'vendor/pptx/pptx.worker.js'), () => copyFileIfPresent(pptxRoot ? join(pptxRoot, 'dist/worker/pptx.worker.js') : null, join(targetRoot, 'vendor/pptx/pptx.worker.js')));
+    const pptRoot = resolvePackageRoot('@file-viewer/ppt', ['@file-viewer/renderer-presentation']);
+    const pptVersion = readPackageVersion(pptRoot);
+    const pptSource = pptRoot
+        ? { sourcePackage: '@file-viewer/ppt', sourceVersion: pptVersion || undefined }
+        : undefined;
+    for (const [id, filename] of [
+        ['ppt-module', 'index.mjs'],
+        ['ppt-worker', 'worker.mjs'],
+        ['ppt-frame-cache', 'frame-cache.mjs'],
+        ['ppt-wasm', 'ppt-native.wasm'],
+        ['ppt-cjk-font', 'ppt-font-cjk.otf'],
+        ['ppt-manifest', 'manifest.json'],
+        ['ppt-package', 'package.json'],
+        ['ppt-license', 'LICENSE'],
+        ['ppt-notice', 'NOTICE']
+    ]) {
+        await push('office-presentation-binary', id, join(targetRoot, `vendor/ppt/${filename}`), () => copyFileIfPresent(pptRoot ? join(pptRoot, filename) : null, join(targetRoot, `vendor/ppt/${filename}`)), undefined, pptSource);
+    }
+    const docxRoot = resolvePackageRoot('@file-viewer/docx', ['@file-viewer/renderer-word']);
+    await push('office-word-openxml', 'docx-worker', join(targetRoot, 'vendor/docx/docx.worker.js'), () => copyFileIfPresent(docxRoot ? join(docxRoot, 'dist/docx-preview.worker.js') : null, join(targetRoot, 'vendor/docx/docx.worker.js')));
+    await push('office-word-openxml', 'docx-worker-jszip', join(targetRoot, 'vendor/docx/jszip.min.js'), () => copyFileIfPresent(docxRoot ? join(docxRoot, 'dist/jszip.min.js') : null, join(targetRoot, 'vendor/docx/jszip.min.js')));
+    const spreadsheetRoot = resolvePackageRoot('@file-viewer/renderer-spreadsheet', [
+        '@file-viewer/renderer-spreadsheet',
+        '@file-viewer/preset-office',
+        '@file-viewer/preset-all'
+    ]);
+    const spreadsheetVersion = readPackageVersion(spreadsheetRoot);
+    await push('spreadsheet-openxml', 'spreadsheet-worker', join(targetRoot, 'vendor/xlsx/sheet.worker.js'), () => copyFileIfPresent(spreadsheetRoot ? join(spreadsheetRoot, 'dist/worker/sheet.worker.js') : null, join(targetRoot, 'vendor/xlsx/sheet.worker.js')), undefined, spreadsheetRoot
+        ? {
+            sourcePackage: '@file-viewer/renderer-spreadsheet',
+            sourceVersion: spreadsheetVersion || undefined
+        }
+        : undefined);
+    const cadDependencyAnchors = ['@file-viewer/renderer-cad'];
+    const cadRoot = resolvePackageRoot('@flyfish-dev/cad-viewer', cadDependencyAnchors);
+    const cadRuntimeVersion = assertOwnedPackageVersion('@flyfish-dev/cad-viewer', cadRoot, '@file-viewer/renderer-cad', cadDependencyAnchors);
+    await push('cad', 'cad-wasm-directory', join(targetRoot, 'wasm/cad'), () => copyVersionedCadRuntimeDirectoryIfPresent(cadRoot ? join(cadRoot, 'dist/wasm') : null, join(targetRoot, 'wasm/cad'), cadRuntimeVersion), undefined, cadRoot
+        ? {
+            sourcePackage: '@flyfish-dev/cad-viewer',
+            sourceVersion: cadRuntimeVersion || undefined
+        }
+        : undefined);
+    const modelDependencyAnchors = [
+        '@file-viewer/renderer-3d',
+        '@file-viewer/geometry-engine'
+    ];
+    const occtRoot = resolvePackageRoot('occt-import-js', modelDependencyAnchors);
+    const geometryEngineRoot = resolvePackageRoot('@file-viewer/geometry-engine', [
+        '@file-viewer/renderer-3d'
+    ]);
+    const occtVersion = assertOwnedPackageVersion('occt-import-js', occtRoot, '@file-viewer/geometry-engine', modelDependencyAnchors);
+    const occtSource = occtRoot
+        ? { sourcePackage: 'occt-import-js', sourceVersion: occtVersion || undefined }
+        : undefined;
+    await push('model', 'model-occt-worker', join(targetRoot, 'wasm/model/occt-worker.js'), () => copyFileIfPresent(geometryEngineRoot ? join(geometryEngineRoot, 'assets/occt-worker.js') : null, join(targetRoot, 'wasm/model/occt-worker.js')));
+    for (const [id, filename] of [
+        ['model-occt-runtime', 'occt-import-js.js'],
+        ['model-occt-wasm', 'occt-import-js.wasm'],
+        ['model-occt-license', 'license.occt.txt'],
+        ['model-occt-import-license', 'license.occt-import-js.txt']
+    ]) {
+        const targetFilename = filename.startsWith('license.')
+            ? filename.replace(/^license\./, 'LICENSE.')
+            : filename;
+        await push('model', id, join(targetRoot, `wasm/model/${targetFilename}`), () => copyFileIfPresent(occtRoot ? join(occtRoot, `dist/${filename}`) : null, join(targetRoot, `wasm/model/${targetFilename}`)), undefined, occtSource);
+    }
+    const typstCompilerRoot = resolvePackageRoot('@myriaddreamin/typst-ts-web-compiler', [
+        '@file-viewer/renderer-typst'
+    ]);
+    const typstRendererRoot = resolvePackageRoot('@myriaddreamin/typst-ts-renderer', [
+        '@file-viewer/renderer-typst'
+    ]);
+    const typstRendererPackageRoot = resolvePackageRoot('@file-viewer/renderer-typst', [
+        '@file-viewer/renderer-typst'
+    ]);
+    await push('typst', 'typst-compiler-wasm', join(targetRoot, 'wasm/typst/typst_ts_web_compiler_bg.wasm'), () => copyFileIfPresent(typstCompilerRoot ? join(typstCompilerRoot, 'pkg/typst_ts_web_compiler_bg.wasm') : null, join(targetRoot, 'wasm/typst/typst_ts_web_compiler_bg.wasm')));
+    await push('typst', 'typst-renderer-wasm', join(targetRoot, 'wasm/typst/typst_ts_renderer_bg.wasm'), () => copyFileIfPresent(typstRendererRoot ? join(typstRendererRoot, 'pkg/typst_ts_renderer_bg.wasm') : null, join(targetRoot, 'wasm/typst/typst_ts_renderer_bg.wasm')));
+    await push('typst', 'typst-font-assets', join(targetRoot, 'wasm/typst/fonts'), () => copyDirectoryIfPresent(typstRendererPackageRoot ? join(typstRendererPackageRoot, 'assets/fonts') : null, join(targetRoot, 'wasm/typst/fonts')));
+    const archiveRoot = resolvePackageRoot('libarchive.js', ['@file-viewer/renderer-archive']);
+    await push('archive', 'libarchive-worker', join(targetRoot, 'vendor/libarchive/worker-bundle.js'), () => copyFileIfPresent(archiveRoot ? join(archiveRoot, 'dist/worker-bundle.js') : null, join(targetRoot, 'vendor/libarchive/worker-bundle.js')));
+    await push('archive', 'libarchive-wasm', join(targetRoot, 'vendor/libarchive/libarchive.wasm'), () => copyFileIfPresent(archiveRoot ? join(archiveRoot, 'dist/libarchive.wasm') : null, join(targetRoot, 'vendor/libarchive/libarchive.wasm')));
+    const sqlJsRoot = resolvePackageRoot('sql.js', ['@file-viewer/renderer-data']);
+    await push('data-asset', 'data-sql-wasm', join(targetRoot, 'wasm/data/sql-wasm.wasm'), () => copyFileIfPresent(sqlJsRoot ? join(sqlJsRoot, 'dist/sql-wasm.wasm') : null, join(targetRoot, 'wasm/data/sql-wasm.wasm')));
+    await mkdir(targetRoot, { recursive: true });
+    await writeFile(join(targetRoot, 'flyfish-viewer-assets.json'), `${JSON.stringify({
+        schemaVersion: 1,
+        generatedBy: '@file-viewer/vite-plugin',
+        rendererIds,
+        copiedAt: new Date().toISOString(),
+        assets: results
+    }, null, 2)}\n`);
+    return results;
+}
+function matchesBundledAssetKind(kind, info) {
+    return kind === 'directory' || kind === 'wasm-directory'
+        ? info.isDirectory()
+        : info.isFile();
+}
+function isBundledFullAssetPayload(payloadRoot) {
+    return Boolean(payloadRoot &&
+        existsSync(payloadRoot) &&
+        statSync(payloadRoot).isDirectory() &&
+        existsSync(join(payloadRoot, 'flyfish-viewer-assets.json')));
+}
+function resolveBundledFullAssetSource(installedFullPackages) {
+    const copyAssetsPackageRoot = resolvePackageRoot('file-viewer-copy-assets', installedFullPackages);
+    const copyAssetsPayloadRoot = copyAssetsPackageRoot
+        ? join(copyAssetsPackageRoot, 'viewer')
+        : null;
+    if (copyAssetsPackageRoot && copyAssetsPayloadRoot && isBundledFullAssetPayload(copyAssetsPayloadRoot)) {
+        installedFullPackages.forEach((ownerPackageName) => {
+            assertOwnedPackageVersion('file-viewer-copy-assets', copyAssetsPackageRoot, ownerPackageName);
+        });
+        const sourceVersion = readPackageVersion(copyAssetsPackageRoot);
+        if (sourceVersion) {
+            return {
+                packageName: 'file-viewer-copy-assets',
+                packageRoot: copyAssetsPackageRoot,
+                payloadRoot: copyAssetsPayloadRoot,
+                sourceVersion
+            };
+        }
+    }
+    if (installedFullPackages.includes('@file-viewer/web-full')) {
+        const webFullPackageRoot = resolvePackageRoot('@file-viewer/web-full', installedFullPackages);
+        const webFullPayloadRoot = webFullPackageRoot
+            ? join(webFullPackageRoot, 'dist')
+            : null;
+        const sourceVersion = readPackageVersion(webFullPackageRoot);
+        if (webFullPackageRoot &&
+            webFullPayloadRoot &&
+            sourceVersion &&
+            isBundledFullAssetPayload(webFullPayloadRoot)) {
+            return {
+                packageName: '@file-viewer/web-full',
+                packageRoot: webFullPackageRoot,
+                payloadRoot: webFullPayloadRoot,
+                sourceVersion
+            };
+        }
+    }
+    // Source workspaces may not have staged file-viewer-copy-assets/viewer yet.
+    // @file-viewer/web keeps the same tracked payload for local development.
+    const webPackageRoot = resolvePackageRoot('@file-viewer/web', installedFullPackages);
+    const webPayloadRoot = webPackageRoot ? join(webPackageRoot, 'viewer') : null;
+    const sourceVersion = readPackageVersion(webPackageRoot);
+    if (webPackageRoot &&
+        webPayloadRoot &&
+        sourceVersion &&
+        isBundledFullAssetPayload(webPayloadRoot)) {
+        return {
+            packageName: '@file-viewer/web',
+            packageRoot: webPackageRoot,
+            payloadRoot: webPayloadRoot,
+            sourceVersion
+        };
+    }
+    return null;
+}
+function assertBundledFullAssetSourceVersion(source, installedFullPackages) {
+    const payloadManifestPath = join(source.payloadRoot, 'flyfish-viewer-manifest.json');
+    if (!existsSync(payloadManifestPath)) {
+        throw new Error(`[file-viewer:vite-plugin] Missing version manifest in ${source.packageName} payload: ${payloadManifestPath}.`);
+    }
+    const payloadManifest = JSON.parse(readFileSync(payloadManifestPath, 'utf8'));
+    if (!payloadManifest.version || payloadManifest.version !== source.sourceVersion) {
+        throw new Error(`[file-viewer:vite-plugin] ${source.packageName}@${source.sourceVersion} contains ` +
+            `viewer assets for ${payloadManifest.version || 'an unknown version'}.`);
+    }
+    installedFullPackages.forEach((packageName) => {
+        const packageRoot = resolvePackageRoot(packageName, installedFullPackages);
+        const packageVersion = readPackageVersion(packageRoot);
+        if (packageVersion && packageVersion !== payloadManifest.version) {
+            throw new Error(`[file-viewer:vite-plugin] ${packageName}@${packageVersion} cannot use ` +
+                `${source.packageName} viewer assets at ${payloadManifest.version}.`);
+        }
+    });
+}
+async function copyBundledFullRendererAssets(targetRoot, rendererIds, installedFullPackages) {
+    const source = resolveBundledFullAssetSource(installedFullPackages);
+    if (!source) {
+        return null;
+    }
+    assertBundledFullAssetSourceVersion(source, installedFullPackages);
+    const sourceManifestPath = join(source.payloadRoot, 'flyfish-viewer-assets.json');
+    const manifest = JSON.parse(readFileSync(sourceManifestPath, 'utf8'));
+    if (manifest.schemaVersion !== 1 || !Array.isArray(manifest.rendererAssetManifests)) {
+        throw new Error(`[file-viewer:vite-plugin] Unsupported full asset manifest in ${sourceManifestPath}.`);
+    }
+    await mkdir(targetRoot, { recursive: true });
+    await cp(source.payloadRoot, targetRoot, { recursive: true, force: true });
+    const results = [];
+    for (const asset of manifest.rendererAssetManifests.flatMap((rendererManifest) => rendererManifest.assets)) {
+        if (asset.target !== 'public' || !asset.defaultPath) {
+            continue;
+        }
+        const relativePath = asset.defaultPath.replace(/\\/g, '/').replace(/^\/+/, '');
+        const destination = resolve(targetRoot, ...relativePath.split('/'));
+        let copied = false;
+        let reason;
+        if (!isPathWithin(targetRoot, destination)) {
+            reason = 'asset manifest path escapes the copy target';
+        }
+        else {
+            try {
+                copied = matchesBundledAssetKind(asset.kind, await stat(destination));
+                if (!copied) {
+                    reason = `copied path does not match asset kind ${asset.kind}`;
+                }
+            }
+            catch {
+                reason = 'bundled full asset not found after copy';
+            }
+        }
+        results.push({
+            rendererId: asset.rendererId,
+            id: asset.id,
+            to: destination,
+            copied,
+            required: asset.required,
+            reason,
+            sourcePackage: source.packageName,
+            sourceVersion: source.sourceVersion
+        });
+    }
+    await writeFile(join(targetRoot, 'flyfish-viewer-assets.json'), `${JSON.stringify({
+        ...manifest,
+        generatedBy: '@file-viewer/vite-plugin',
+        copiedAt: new Date().toISOString(),
+        rendererIds,
+        assets: results
+    }, null, 2)}\n`);
+    return results;
+}
+async function copyRendererAssets(target, rendererIds) {
+    if (target.installedFullPackages.length) {
+        const bundledResults = await copyBundledFullRendererAssets(target.targetRoot, rendererIds, target.installedFullPackages);
+        if (bundledResults) {
+            return bundledResults;
+        }
+    }
+    const results = await copyKnownRendererAssets(target.targetRoot, rendererIds);
+    if (target.installedFullPackages.length) {
+        results.push({
+            rendererId: 'full',
+            id: 'full-asset-payload',
+            to: target.targetRoot,
+            copied: false,
+            required: true,
+            reason: 'no version-matched full viewer payload was found in file-viewer-copy-assets, @file-viewer/web-full, or @file-viewer/web'
+        });
+    }
+    return results;
+}
+function copyOptions(value) {
+    return typeof value === 'object' ? value : {};
+}
+function findNearestProjectPackageJson(projectRoot) {
+    let current = resolve(projectRoot);
+    while (true) {
+        const packageJsonPath = join(current, 'package.json');
+        if (existsSync(packageJsonPath) && statSyncSafe(packageJsonPath)?.isFile()) {
+            return packageJsonPath;
+        }
+        const parent = dirname(current);
+        if (parent === current) {
+            return null;
+        }
+        current = parent;
+    }
+}
+function resolveInstalledFullPackages(projectRoot) {
+    const packageJsonPath = findNearestProjectPackageJson(projectRoot);
+    if (!packageJsonPath) {
+        return [];
+    }
+    try {
+        const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+        const declaredPackages = new Set([
+            ...Object.keys(packageJson.dependencies || {}),
+            ...Object.keys(packageJson.devDependencies || {}),
+            ...Object.keys(packageJson.optionalDependencies || {}),
+            ...Object.keys(packageJson.peerDependencies || {})
+        ]);
+        const projectPackageRequire = createRequire(packageJsonPath);
+        return fileViewerFullPackages.filter((packageName) => declaredPackages.has(packageName) &&
+            Boolean(tryResolvePackageJson(packageName, projectPackageRequire)));
+    }
+    catch {
+        return [];
+    }
+}
+function normalizeCopyAssetsBaseDir(value) {
+    const normalized = value.trim().replace(/\\/g, '/');
+    if (!normalized) {
+        return '';
+    }
+    if (normalized.startsWith('/') ||
+        isAbsolute(value) ||
+        /^[A-Za-z]:\//.test(normalized) ||
+        normalized.includes('\0')) {
+        throw new Error(`[file-viewer:vite-plugin] copyAssets.baseDir must be a relative directory, received ${JSON.stringify(value)}.`);
+    }
+    const segments = normalized.split('/').filter(Boolean);
+    const decodedSegments = [];
+    for (const segment of segments) {
+        let decodedSegment = segment;
+        try {
+            decodedSegment = decodeURIComponent(segment);
+        }
+        catch {
+            throw new Error(`[file-viewer:vite-plugin] copyAssets.baseDir contains invalid URL encoding: ${JSON.stringify(value)}.`);
+        }
+        if (decodedSegment === '.' ||
+            decodedSegment === '..' ||
+            decodedSegment.includes('/') ||
+            decodedSegment.includes('\\') ||
+            decodedSegment.includes('\0')) {
+            throw new Error(`[file-viewer:vite-plugin] copyAssets.baseDir cannot escape its output directory: ${JSON.stringify(value)}.`);
+        }
+        decodedSegments.push(decodedSegment);
+    }
+    return decodedSegments.join('/');
+}
+function isPathWithin(parent, candidate) {
+    const relativePath = relative(parent, candidate);
+    return relativePath === '' || (relativePath !== '..' &&
+        !relativePath.startsWith(`..${sep}`) &&
+        !isAbsolute(relativePath));
+}
+function resolveOutputRoot(value, fallback, projectRoot) {
+    const output = value || fallback;
+    return isAbsolute(output) ? resolve(output) : resolve(projectRoot, output);
+}
+/**
+ * Resolves the exact directory used by copyAssets without running a Vite build.
+ * This is exported so integrations can validate their deployment contract.
+ */
+export function resolveFileViewerCopyAssetsTarget(mode, value = true, config = {}) {
+    const projectRoot = resolve(config.projectRoot || process.cwd());
+    const options = copyOptions(value);
+    const installedFullPackages = resolveInstalledFullPackages(projectRoot);
+    const baseDir = normalizeCopyAssetsBaseDir(typeof options.baseDir === 'string'
+        ? options.baseDir
+        : installedFullPackages.length
+            ? 'file-viewer'
+            : '');
+    const outputRoot = resolveOutputRoot(mode === 'dev' ? options.publicDir : options.outDir, mode === 'dev' ? config.publicDir || 'public' : config.outDir || 'dist', projectRoot);
+    const targetRoot = baseDir
+        ? resolve(outputRoot, ...baseDir.split('/'))
+        : outputRoot;
+    if (!isPathWithin(outputRoot, targetRoot)) {
+        throw new Error(`[file-viewer:vite-plugin] Refusing to copy assets outside ${outputRoot}: ${targetRoot}.`);
+    }
+    return {
+        mode,
+        outputRoot,
+        targetRoot,
+        baseDir,
+        installedFullPackages: [...installedFullPackages]
+    };
+}
+function normalizeViteDevBasePath(base) {
+    let pathname = base;
+    if (/^[A-Za-z][A-Za-z\d+.-]*:\/\//.test(base)) {
+        try {
+            pathname = new URL(base).pathname;
+        }
+        catch {
+            return '/';
+        }
+    }
+    if (!pathname.startsWith('/')) {
+        return '/';
+    }
+    return pathname.endsWith('/') ? pathname : `${pathname}/`;
+}
+function resolveViteFullAssetBase(base, baseDir) {
+    const encodedBaseDir = baseDir
+        .split('/')
+        .filter(Boolean)
+        .map((segment) => encodeURIComponent(segment))
+        .join('/');
+    const encodedBaseDirWithSlash = encodedBaseDir ? `${encodedBaseDir}/` : '';
+    const resolvedBase = base === undefined ? '/' : base.trim();
+    const isAbsoluteBase = resolvedBase.startsWith('/') || /^[A-Za-z][A-Za-z\d+.-]*:\/\//.test(resolvedBase);
+    if (!isAbsoluteBase) {
+        return { kind: 'deployment', encodedBaseDir: encodedBaseDirWithSlash };
+    }
+    const normalizedBase = resolvedBase.endsWith('/') ? resolvedBase : `${resolvedBase}/`;
+    return { kind: 'literal', url: `${normalizedBase}${encodedBaseDirWithSlash}` };
+}
+function resolveDevAssetRequestPath(targetRoot, baseDir, requestPathname, viteBasePath) {
+    let requestRelativePath;
+    try {
+        // Depending on the Vite major and middleware ordering, configureServer can
+        // observe either the original base-prefixed URL or the pathname after
+        // Vite's base middleware has stripped it. Accept both shapes, then keep the
+        // strict viewer-asset allowlist and target-root boundary checks below.
+        const encodedRelativePath = viteBasePath === '/' || requestPathname.startsWith(viteBasePath)
+            ? requestPathname.slice(viteBasePath === '/' ? 1 : viteBasePath.length)
+            : requestPathname.replace(/^\/+/, '');
+        requestRelativePath = decodeURIComponent(encodedRelativePath);
+    }
+    catch {
+        return null;
+    }
+    requestRelativePath = requestRelativePath.replace(/\\/g, '/');
+    if (requestRelativePath.includes('\0')) {
+        return null;
+    }
+    const basePrefix = baseDir ? `${baseDir}/` : '';
+    if (basePrefix && !requestRelativePath.startsWith(basePrefix)) {
+        return null;
+    }
+    const assetRelativePath = requestRelativePath.slice(basePrefix.length);
+    const isViewerManifest = assetRelativePath === 'flyfish-viewer-assets.json' ||
+        assetRelativePath === 'flyfish-viewer-manifest.json';
+    if (!isViewerManifest &&
+        !assetRelativePath.startsWith('vendor/') &&
+        !assetRelativePath.startsWith('wasm/')) {
+        return null;
+    }
+    const assetPath = resolve(targetRoot, ...assetRelativePath.split('/'));
+    return isPathWithin(targetRoot, assetPath) ? assetPath : null;
+}
+function collectAssetRendererIds(selection, autoPresetIds = [], includeFullPreset = false) {
+    if (includeFullPreset) {
+        return expandDescriptorRendererIds(presetModules.all.rendererIds);
+    }
+    const presetIds = [
+        ...(selection.preset ? expandDescriptorRendererIds(presetModules[selection.preset].rendererIds) : []),
+        ...autoPresetIds.flatMap((presetId) => expandDescriptorRendererIds(presetModules[presetId].rendererIds))
+    ];
+    return unique([
+        ...presetIds,
+        ...selection.descriptors.flatMap((descriptor) => descriptor.rendererIds)
+    ]);
+}
+function reportAssetCopy(results, targetRoot, mode) {
+    const failedRequired = results.filter((result) => !result.copied && (result.required ?? [
+        'pdf',
+        'office-word-openxml',
+        'office-presentation-binary',
+        'office-presentation',
+        'archive',
+        'cad',
+        'typst'
+    ].includes(result.rendererId)));
+    if (!results.length) {
+        return;
+    }
+    const summary = `[file-viewer:vite-plugin] Copied ${results.filter((result) => result.copied).length}/${results.length} renderer assets to ${targetRoot}`;
+    if (!failedRequired.length || mode === 'ignore') {
+        console.log(summary);
+        return;
+    }
+    const details = failedRequired
+        .map((result) => `  - ${result.rendererId}:${result.id} -> ${result.to} (${result.reason})`)
+        .join('\n');
+    if (mode === 'warn') {
+        console.warn(`${summary}\nMissing required assets:\n${details}`);
+        return;
+    }
+    throw new Error(`${summary}\nMissing required assets:\n${details}`);
+}
+export function fileViewerRenderers(options = {}) {
+    const moduleId = options.moduleId || virtualModuleId;
+    const resolvedModuleId = `\0${moduleId}`;
+    const injectedModulePath = moduleId.startsWith('/') ? moduleId : `/${moduleId}`;
+    const missingMode = options.missingRenderer || 'error';
+    const explicitFormats = [...(options.formats || []), ...(options.renderers || [])]
+        .map(normalizeToken)
+        .filter(Boolean);
+    let scanFormats = [];
+    let requestedFormats = unique([...explicitFormats, ...scanFormats]);
+    let selection = selectRenderers({
+        ...options,
+        formats: [...(options.formats || []), ...scanFormats]
+    });
+    let autoPresetIds = resolveAutoPresetIds(options);
+    let resolvedConfig = null;
+    let installedFullPackages = [];
+    let runtimeAssetBase = null;
+    const refreshSelection = (projectRoot) => {
+        if (projectRoot) {
+            scanFormats = collectFileViewerRendererScanTokens(projectRoot, options.scan);
+        }
+        requestedFormats = unique([...explicitFormats, ...scanFormats]);
+        selection = selectRenderers({
+            ...options,
+            formats: [...(options.formats || []), ...scanFormats]
+        });
+        autoPresetIds = resolveAutoPresetIds(options);
+    };
+    const refreshFullAssetRuntime = (projectRoot, viteBase) => {
+        if (!options.copyAssets) {
+            installedFullPackages = [];
+            runtimeAssetBase = null;
+            return;
+        }
+        const target = resolveFileViewerCopyAssetsTarget('dev', options.copyAssets, {
+            projectRoot
+        });
+        installedFullPackages = target.installedFullPackages;
+        runtimeAssetBase = resolveViteFullAssetBase(viteBase, target.baseDir);
+    };
+    const hasConfiguredRenderers = () => Boolean(selection.preset || selection.descriptors.length || autoPresetIds.length);
+    return {
+        name: 'file-viewer-renderers',
+        enforce: 'pre',
+        config(userConfig) {
+            const projectRoot = resolve(process.cwd(), userConfig.root || '.');
+            refreshSelection(projectRoot);
+            refreshFullAssetRuntime(projectRoot, userConfig.base);
+            const dependencyAnchorPackages = collectDependencyAnchorPackages(selection, autoPresetIds);
+            const resolvedDependencyAnchorPackages = runtimeAssetBase
+                ? unique([
+                    ...dependencyAnchorPackages,
+                    '@file-viewer/core',
+                    ...installedFullPackages,
+                    ...(installedFullPackages.length ? ['@file-viewer/preset-all'] : [])
+                ])
+                : dependencyAnchorPackages;
+            const optimizeDepsExclude = createOptimizeDepsExclude(userConfig);
+            const manualChunksFunction = getManualChunksFunction(userConfig);
+            const nextConfig = {
+                optimizeDeps: {
+                    exclude: optimizeDepsExclude,
+                    include: createOptimizeDepsInclude(userConfig, optimizeDepsExclude, resolvedDependencyAnchorPackages)
+                },
+                resolve: {
+                    alias: [
+                        ...normalizeViteAlias(userConfig.resolve?.alias),
+                        ...createFileViewerResolveAliases(resolvedDependencyAnchorPackages)
+                    ]
+                }
+            };
+            if (resolveProjectViteMajor(projectRoot) >= 8) {
+                return {
+                    ...nextConfig,
+                    ...createVite8ChunkConfig(userConfig, selection, autoPresetIds, options)
+                };
+            }
+            if (manualChunksFunction && options.stabilizeInteropChunks !== false) {
+                return {
+                    ...nextConfig,
+                    build: {
+                        rollupOptions: {
+                            output: {
+                                manualChunks: createStableInteropManualChunks(manualChunksFunction)
+                            }
+                        }
+                    }
+                };
+            }
+            if ((options.chunkStrategy || 'renderer') === 'none' || hasManualChunks(userConfig)) {
+                return nextConfig;
+            }
+            return {
+                ...nextConfig,
+                build: {
+                    rollupOptions: {
+                        output: {
+                            manualChunks: createManualChunks(selection, autoPresetIds)
+                        }
+                    }
+                }
+            };
+        },
+        configResolved(config) {
+            resolvedConfig = config;
+            refreshSelection(config.root);
+            refreshFullAssetRuntime(config.root, config.base);
+        },
+        buildStart() {
+            assertMissingRendererPolicy(selection, missingMode);
+            const packages = collectSelectedPackages(selection, autoPresetIds);
+            const missingPackages = packages.filter((packageName) => !resolvePackageJson(packageName));
+            if (missingPackages.length && missingMode !== 'ignore') {
+                const message = `Missing File Viewer preset/renderer package(s): ${missingPackages.join(', ')}. Install them or remove the matching preset/formats from @file-viewer/vite-plugin.`;
+                if (missingMode === 'warn') {
+                    console.warn(`[file-viewer:vite-plugin] ${message}`);
+                }
+                else {
+                    throw new Error(`[file-viewer:vite-plugin] ${message}`);
+                }
+            }
+        },
+        async configureServer(server) {
+            if (!options.copyAssets || copyOptions(options.copyAssets).mode === 'build') {
+                return;
+            }
+            const copyTarget = resolveFileViewerCopyAssetsTarget('dev', options.copyAssets, {
+                projectRoot: resolvedConfig?.root,
+                publicDir: resolvedConfig?.publicDir || 'public',
+                outDir: resolvedConfig?.build.outDir || 'dist'
+            });
+            const { targetRoot } = copyTarget;
+            const results = await copyRendererAssets(copyTarget, collectAssetRendererIds(selection, autoPresetIds, copyTarget.installedFullPackages.length > 0));
+            reportAssetCopy(results, targetRoot, missingMode);
+            const viteBasePath = normalizeViteDevBasePath(resolvedConfig?.base || '/');
+            if (server?.middlewares?.use) {
+                const realTargetRoot = await realpath(targetRoot).catch(() => targetRoot);
+                server.middlewares.use(async function fileViewerAssetMiddleware(request, response, next) {
+                    const requestUrl = request.url || '';
+                    const queryIndex = requestUrl.indexOf('?');
+                    const pathname = queryIndex >= 0 ? requestUrl.slice(0, queryIndex) : requestUrl;
+                    const assetPath = resolveDevAssetRequestPath(targetRoot, copyTarget.baseDir, pathname, viteBasePath);
+                    if (assetPath) {
+                        try {
+                            const resolvedAssetPath = await realpath(assetPath);
+                            if (isPathWithin(realTargetRoot, resolvedAssetPath)) {
+                                const info = await stat(resolvedAssetPath);
+                                if (info.isFile()) {
+                                    const contentTypes = {
+                                        '.avif': 'image/avif',
+                                        '.bcmap': 'application/octet-stream',
+                                        '.css': 'text/css; charset=utf-8',
+                                        '.gif': 'image/gif',
+                                        '.ico': 'image/x-icon',
+                                        '.jpeg': 'image/jpeg',
+                                        '.jpg': 'image/jpeg',
+                                        '.js': 'text/javascript; charset=utf-8',
+                                        '.json': 'application/json; charset=utf-8',
+                                        '.map': 'application/json; charset=utf-8',
+                                        '.md': 'text/markdown; charset=utf-8',
+                                        '.mjs': 'text/javascript; charset=utf-8',
+                                        '.otf': 'font/otf',
+                                        '.pfb': 'application/x-font-type1',
+                                        '.png': 'image/png',
+                                        '.svg': 'image/svg+xml',
+                                        '.ttf': 'font/ttf',
+                                        '.txt': 'text/plain; charset=utf-8',
+                                        '.wasm': 'application/wasm',
+                                        '.webp': 'image/webp',
+                                        '.woff': 'font/woff',
+                                        '.woff2': 'font/woff2',
+                                        '.xml': 'application/xml; charset=utf-8'
+                                    };
+                                    response.statusCode = 200;
+                                    response.setHeader('Content-Type', contentTypes[extname(resolvedAssetPath).toLowerCase()] || 'application/octet-stream');
+                                    if (request.method === 'HEAD') {
+                                        response.end();
+                                    }
+                                    else {
+                                        response.end(await readFile(resolvedAssetPath));
+                                    }
+                                    return;
+                                }
+                            }
+                        }
+                        catch {
+                            // Let Vite return its normal 404/fallback response.
+                        }
+                    }
+                    next();
+                });
+            }
+        },
+        transformIndexHtml: {
+            order: 'pre',
+            handler() {
+                if (options.inject === false || (!hasConfiguredRenderers() && !runtimeAssetBase)) {
+                    return undefined;
+                }
+                return [
+                    {
+                        tag: 'script',
+                        attrs: { type: 'module', src: injectedModulePath },
+                        injectTo: 'head'
+                    }
+                ];
+            }
+        },
+        handleHotUpdate(context) {
+            if (!options.scan || !resolvedConfig) {
+                return undefined;
+            }
+            const previous = requestedFormats.join(',');
+            refreshSelection(resolvedConfig.root);
+            if (requestedFormats.join(',') === previous) {
+                return undefined;
+            }
+            const modules = [
+                context.server.moduleGraph.getModuleById(resolvedModuleId),
+                context.server.moduleGraph.getModuleById(resolvedVirtualModuleId)
+            ].filter(Boolean);
+            modules.forEach((module) => {
+                if (module) {
+                    context.server.moduleGraph.invalidateModule(module);
+                }
+            });
+            context.server.ws.send({
+                type: 'full-reload'
+            });
+            return [];
+        },
+        async closeBundle() {
+            if (!options.copyAssets || copyOptions(options.copyAssets).mode === 'dev') {
+                return;
+            }
+            const copyTarget = resolveFileViewerCopyAssetsTarget('build', options.copyAssets, {
+                projectRoot: resolvedConfig?.root,
+                publicDir: resolvedConfig?.publicDir || 'public',
+                outDir: resolvedConfig?.build.outDir || 'dist'
+            });
+            const { targetRoot } = copyTarget;
+            const results = await copyRendererAssets(copyTarget, collectAssetRendererIds(selection, autoPresetIds, copyTarget.installedFullPackages.length > 0));
+            reportAssetCopy(results, targetRoot, missingMode);
+        },
+        resolveId(id, importer) {
+            if (id === '@file-viewer/ppt' &&
+                options.copyAssets &&
+                installedFullPackages.length > 0 &&
+                isPresentationRendererImporter(importer)) {
+                return resolvedPackagedPptFallbackModuleId;
+            }
+            if (id === moduleId || id === virtualModuleId || id === injectedModulePath) {
+                return id === virtualModuleId ? resolvedVirtualModuleId : resolvedModuleId;
+            }
+            return undefined;
+        },
+        load(id) {
+            if (id === resolvedPackagedPptFallbackModuleId) {
+                return `
+export async function createPptViewer() {
+  throw new Error('Packaged PPT runtime URL was not initialized.')
+}
+`;
+            }
+            if (id === resolvedModuleId || id === resolvedVirtualModuleId) {
+                return renderVirtualModule(selection, requestedFormats, autoPresetIds, runtimeAssetBase, installedFullPackages.length > 0);
+            }
+            return undefined;
+        }
+    };
+}
+export function createFileViewerManualChunks(options = {}) {
+    return createManualChunks(selectRenderers(options), resolveAutoPresetIds(options));
+}
+export function resolveFileViewerRendererSelection(options = {}, projectRoot = process.cwd()) {
+    const scanFormats = collectFileViewerRendererScanTokens(projectRoot, options.scan);
+    const requestedFormats = unique([
+        ...(options.formats || []),
+        ...(options.renderers || []),
+        ...scanFormats
+    ].map(normalizeToken).filter(Boolean));
+    const selection = selectRenderers({
+        ...options,
+        formats: [...(options.formats || []), ...scanFormats]
+    });
+    const presetModule = selection.preset ? presetModules[selection.preset] : null;
+    const autoPresetIds = resolveAutoPresetIds(options);
+    const autoPresetModules = autoPresetIds.map((presetId) => presetModules[presetId]);
+    const packages = collectSelectedPackages(selection, autoPresetIds);
+    return {
+        preset: selection.preset,
+        presetPackage: presetModule?.packageName ?? null,
+        autoPresets: autoPresetModules.map((preset) => preset.id),
+        autoPresetPackages: autoPresetModules.map((preset) => preset.packageName),
+        formats: requestedFormats,
+        packages,
+        rendererIds: unique([
+            ...(presetModule ? expandDescriptorRendererIds(presetModule.rendererIds) : []),
+            ...autoPresetModules.flatMap((preset) => expandDescriptorRendererIds(preset.rendererIds)),
+            ...selection.descriptors.flatMap((descriptor) => descriptor.rendererIds)
+        ]),
+        renderers: selection.descriptors.map((descriptor) => ({
+            id: descriptor.id,
+            packageName: descriptor.packageName,
+            formats: [...descriptor.formats],
+            rendererIds: [...descriptor.rendererIds],
+            chunkName: descriptor.chunkName
+        })),
+        missing: selection.missing
+    };
+}
+export default fileViewerRenderers;

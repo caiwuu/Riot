@@ -1,0 +1,8 @@
+import type { FileViewerPrintMaskDesignerResult, OpenFileViewerPrintMaskDesignerOptions } from './printMaskDesigner';
+/**
+ * Lazily opens the print-mask designer.
+ * Kept as a dynamic import so the designer stays out of the main core graph,
+ * while remaining reachable through the primary `@file-viewer/core` entry
+ * (no consumer alias / subpath setup required).
+ */
+export declare const openFileViewerPrintMaskDesignerAsync: (options: OpenFileViewerPrintMaskDesignerOptions) => Promise<FileViewerPrintMaskDesignerResult | null>;

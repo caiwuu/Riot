@@ -5,6 +5,11 @@ crates/riot-browser/target/bundle/
 **/*.rs.bk
 node_modules
 dist
+# 例外：vendor 进来的 file-viewer 搬的**就是** dist（见 NOTICE.md）。
+# 不写这条的话，提交上去只剩 package.json —— 而 `pnpm install` 照样成功，
+# 要等到 tsc 才报 "Cannot find module"。必须先反选目录本身：父目录被排除时
+# 无法只把里面的文件放回来。
+!vendor/file-viewer/packages/**/dist/
 .DS_Store
 .env
 .env.local

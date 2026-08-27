@@ -1,0 +1,69 @@
+{
+  "name": "@file-viewer/renderer-text",
+  "version": "2.4.0",
+  "private": false,
+  "type": "module",
+  "description": "Standalone code, text, Markdown, patch diff, and Git bundle renderer plugin for File Viewer.",
+  "keywords": [
+    "file-viewer",
+    "renderer",
+    "text",
+    "code",
+    "markdown",
+    "patch",
+    "git-bundle",
+    "highlight.js",
+    "document-preview",
+    "document-viewer",
+    "file-preview",
+    "self-hosted"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "author": {
+    "name": "Yu Wang",
+    "email": "admin@flyfish.dev"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/flyfish-dev/file-viewer.git",
+    "directory": "packages/renderers/text"
+  },
+  "homepage": "https://doc.file-viewer.app/guide/on-demand-renderers",
+  "bugs": {
+    "url": "https://github.com/flyfish-dev/file-viewer/issues"
+  },
+  "funding": {
+    "type": "individual",
+    "url": "https://dev.flyfish.group/donate?source=npm"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "README.en.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@file-viewer/core": "workspace:2.4.0",
+    "diff2html": "^3.4.56",
+    "highlight.js": "^11.11.1",
+    "marked": "^18.0.5",
+    "mermaid": "^11.16.1",
+    "pako": "^2.1.0",
+    "dompurify": "^3.4.13"
+  },
+  "license": "Apache-2.0"
+}

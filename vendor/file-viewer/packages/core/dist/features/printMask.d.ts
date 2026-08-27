@@ -1,0 +1,7 @@
+import type { FileViewerPrintMaskOptions, FileViewerPrintMaskRegion, FileViewerPrintStamp } from '../contracts/types';
+export declare const normalizeFileViewerPrintMaskRegion: (region: Partial<FileViewerPrintMaskRegion> | null | undefined) => FileViewerPrintMaskRegion | null;
+export declare const normalizeFileViewerPrintStamp: (stamp: Partial<FileViewerPrintStamp> | null | undefined) => FileViewerPrintStamp | null;
+export declare const normalizeFileViewerPrintMaskOptions: (mask?: FileViewerPrintMaskOptions | null) => FileViewerPrintMaskOptions | null;
+export declare const buildFileViewerPrintMaskOverlayHtml: (mask?: FileViewerPrintMaskOptions | null, pageScoped?: boolean) => string;
+export declare const FILE_VIEWER_PRINT_MASK_STYLE = "\n  .viewer-export-print-mask{position:absolute;inset:0;z-index:15;pointer-events:none;print-color-adjust:exact;-webkit-print-color-adjust:exact;}\n  .viewer-export-print-mask--page{z-index:2147483647;}\n  .viewer-export-print-mask-block{position:absolute;box-sizing:border-box;print-color-adjust:exact;-webkit-print-color-adjust:exact;}\n  .viewer-export-print-stamp{position:absolute;display:block;object-fit:contain;transform-origin:center center;print-color-adjust:exact;-webkit-print-color-adjust:exact;}\n  [data-viewer-print-page-index]{position:relative!important;isolation:isolate;}\n";
+export declare const applyFileViewerPagePrintMasksToHtml: (contentHtml: string, mask?: FileViewerPrintMaskOptions | null) => string;

@@ -1,0 +1,72 @@
+{
+  "name": "@file-viewer/pptx",
+  "version": "2.4.0",
+  "private": false,
+  "type": "module",
+  "description": "Native PPTX renderer extracted from File Viewer",
+  "keywords": [
+    "pptx",
+    "powerpoint",
+    "presentation",
+    "file-viewer",
+    "document-preview",
+    "document-viewer",
+    "file-preview",
+    "self-hosted"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "author": {
+    "name": "Yu Wang",
+    "email": "admin@flyfish.dev"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/flyfish-dev/pptxjs.git",
+    "directory": "packages/renderers/pptx"
+  },
+  "homepage": "https://doc.file-viewer.app/",
+  "bugs": {
+    "url": "https://github.com/flyfish-dev/pptxjs/issues"
+  },
+  "funding": {
+    "type": "individual",
+    "url": "https://dev.flyfish.group/donate?source=npm"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./worker": {
+      "types": "./dist/worker.d.ts",
+      "import": "./dist/worker.js",
+      "default": "./dist/worker.js"
+    },
+    "./worker/pptx.worker.js": "./dist/worker/pptx.worker.js",
+    "./styles.css": "./dist/styles/pptxjs.css",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "README.en.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "billboard.js": "^3.17.2",
+    "d3-format": "^3.1.2",
+    "dingbat-to-unicode": "^1.0.1",
+    "dompurify": "^3.4.13",
+    "jszip": "^3.10.1",
+    "tinycolor2": "^1.6.0",
+    "utif": "^3.1.0"
+  },
+  "license": "Apache-2.0"
+}

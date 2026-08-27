@@ -1,0 +1,20 @@
+import type { FileViewerFileRef, FileViewerSource, NormalizedFileViewerSource } from '../contracts/types';
+export { createFileViewerTextDecoder, decodeFileViewerTextBuffer, isValidFileViewerUtf8, resolveFileViewerTextEncoding, } from './textEncoding';
+export type { DecodedFileViewerText, FileViewerTextEncoding, ResolvedFileViewerTextEncoding, ResolvedFileViewerTextSource, } from './textEncoding';
+export type FileViewerReadResult = string | ArrayBuffer | undefined | null;
+export declare const DEFAULT_FILE_VIEWER_SOURCE_FILENAME = "preview.bin";
+export declare const normalizeFileExtension: (extension: string) => string;
+export declare const decodeFilename: (name: string) => string;
+export declare const getExtension: (name: string) => string;
+export declare const normalizeFilename: (value: string | undefined, fallback?: string) => string;
+export declare const resolveFileViewerSourceFilename: ({ filename, file, url, fallback, }: {
+    filename?: string;
+    file?: FileViewerFileRef;
+    url?: string;
+    fallback?: string;
+}) => string;
+export declare const normalizeSource: (source: FileViewerSource) => NormalizedFileViewerSource;
+export declare const wrapFileViewerFileRef: (data: FileViewerFileRef, filename?: string) => File;
+export declare const readFileViewerBuffer: (file: Blob) => Promise<ArrayBuffer>;
+export declare const readFileViewerDataUrl: (source: Blob | ArrayBuffer) => Promise<string>;
+export declare const readFileViewerText: (source: Blob | ArrayBuffer, encoding?: string) => Promise<string>;

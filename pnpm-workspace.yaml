@@ -1,13 +1,13 @@
-# 文件预览的渲染库（@file-viewer）指向本地 fork：~/code/file-viewer
-# （github.com/flyfish-dev/file-viewer 的克隆，定制以本地 commit 叠在
-# upstream 上，升级 = git pull --rebase 后重跑 pnpm build）。
-# 只需覆盖 Riot 直接声明的依赖：link 包自己的 @file-viewer/* 依赖
-# （core、doc/pptx 引擎等）由 fork 的 workspace 解析，不经过这里。
-overrides:
-  '@file-viewer/react': link:../file-viewer/packages/components/react
-  '@file-viewer/renderer-pdf': link:../file-viewer/packages/renderers/pdf
-  '@file-viewer/renderer-presentation': link:../file-viewer/packages/renderers/presentation
-  '@file-viewer/renderer-spreadsheet': link:../file-viewer/packages/renderers/spreadsheet
-  '@file-viewer/renderer-text': link:../file-viewer/packages/renderers/text
-  '@file-viewer/renderer-word': link:../file-viewer/packages/renderers/word
-  '@file-viewer/vite-plugin': link:../file-viewer/packages/presets/vite-plugin
+# 文件预览的渲染库（@file-viewer）作为 workspace 成员从 vendor/ 解析。
+#
+# `[约束]` 这里**不能**用 `overrides: link:…` 指向仓库外的 fork。那样在别人的
+# 机器和 CI 上：目录不存在，pnpm 照样把软链建出来、`--frozen-lockfile` 退 0，
+# 直到 tsc 才报 "Cannot find module" —— 装不上却装得"成功"，症状推迟到最后一刻。
+# 而且 `link:` 不会安装被链包自己的依赖（jszip、pdfjs-dist 那些），只是碰巧
+# 借了 fork 自己的 node_modules。
+#
+# 声明成 workspace 成员，pnpm 才会把它们的依赖一并解进 Riot 的 lockfile。
+# 搬进来的是构建产物，来源和升级方式见 vendor/file-viewer/NOTICE.md。
+packages:
+  - "vendor/file-viewer/packages/*"
+  - "vendor/file-viewer/packages/*/*"

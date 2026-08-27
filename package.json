@@ -14,12 +14,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@file-viewer/react": "^2.4.0",
-    "@file-viewer/renderer-pdf": "^2.4.0",
-    "@file-viewer/renderer-presentation": "^2.4.0",
-    "@file-viewer/renderer-spreadsheet": "^2.4.0",
-    "@file-viewer/renderer-text": "^2.4.0",
-    "@file-viewer/renderer-word": "^2.4.0",
+    "@file-viewer/react": "workspace:*",
+    "@file-viewer/renderer-pdf": "workspace:*",
+    "@file-viewer/renderer-presentation": "workspace:*",
+    "@file-viewer/renderer-spreadsheet": "workspace:*",
+    "@file-viewer/renderer-text": "workspace:*",
+    "@file-viewer/renderer-word": "workspace:*",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-notification": "^2.3.3",
     "@xterm/addon-fit": "^0.11.0",
@@ -35,7 +35,7 @@
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
-    "@file-viewer/vite-plugin": "^2.4.0",
+    "@file-viewer/vite-plugin": "workspace:*",
     "@tauri-apps/cli": "^2.11.4",
     "@tauri-apps/plugin-dialog": "^2.7.2",
     "@tauri-apps/plugin-opener": "^2.5.4",
