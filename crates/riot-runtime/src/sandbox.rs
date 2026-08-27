@@ -1281,37 +1281,41 @@ mod tests {
         // `acl grant` 的可继承 ALLOW 下是可写的，沙箱能顶掉用户 PATH 上的
         // `cargo.exe`。
         //
-        // 配对断言：`.cargo` 本身要写得进（否则下面那半证明不了任何事 ——
-        // 可能只是整棵树压根没授权），`.cargo\bin` 要写不进。
+        // `[约束]` 判据随设计改过一次，这里记一下，免得有人以为是退化。
         //
-        // `[约束]` CI 里「没有 ~/.cargo\bin」要判红，不能跳过。整段包在一个
-        // `if` 里，条件不成立就**静默**不验 —— 而这条 job 存在的理由就是验它。
-        // 一个绿灯背后什么都没跑，比红灯更糟：它会让人以为这条路已经有人守着。
+        // 曾经是配对断言：`~/.cargo` 要写得进、`~/.cargo\bin` 要写不进 ——
+        // 那时缓存表把 `.cargo` 整棵授权出去了，所以要验「DENY 压得过继承来
+        // 的 ALLOW」。现在缓存表清空了（见 workspace_write 里的实测：沙箱
+        // 账户的 USERPROFILE 是它自己的，那些目录它压根不看），于是**整棵
+        // `.cargo` 都够不着**，前提消失，配对也就无从谈起。
+        //
+        // 新判据更强也更简单：真实用户的 cargo 目录，一寸都碰不到。
+        // 「DENY 压得过 ALLOW」那条改由 macOS 那侧的
+        // `逃逸面在放开的缓存树里依然写不进` 守着 —— 那边 `.cargo` 仍然放行,
+        // 机制还在真跑。
+        //
+        // 没有 `~/.cargo` 时 CI 要判红而不是跳过：整段包在 `if` 里，条件不
+        // 成立就静默不验，而绿灯背后什么都没跑比红灯更糟。
         let cargo = home_dir().map(|h| h.join(".cargo"));
-        let has_cargo_bin = cargo.as_ref().is_some_and(|c| c.join("bin").is_dir());
-        if !has_cargo_bin {
-            let msg = "这台机器没有 ~/.cargo\\bin，验不了「DENY 压得过继承来的 \
-                       ALLOW」—— 而那是这条测试最要紧的一半。";
+        let has_cargo = cargo.as_ref().is_some_and(|c| c.join("bin").is_dir());
+        if !has_cargo {
+            let msg = "这台机器没有 ~/.cargo\\bin，验不了「真实用户的构建缓存碰不到」。";
             assert!(
                 std::env::var_os("RIOT_SANDBOX_TEST_REQUIRE").is_none(),
                 "{msg}"
             );
             eprintln!("{msg} 跳过。");
         }
-        if let Some(cargo) = cargo.filter(|_| has_cargo_bin) {
+        if let Some(cargo) = cargo.filter(|_| has_cargo) {
             let tag = format!("riot-esc-{}.txt", std::process::id());
-            for (probe, writable) in [
-                (cargo.join(&tag), true),
-                (cargo.join("bin").join(&tag), false),
-            ] {
+            for probe in [cargo.join(&tag), cargo.join("bin").join(&tag)] {
                 let r = exec(&write_probe(&probe)).await;
                 let born = probe.exists();
                 let _ = std::fs::remove_file(&probe);
-                assert_eq!(
-                    (r.exit_code == 0) && born,
-                    writable,
-                    "{} 的可写性不对（该 writable={writable}）：exit={} stdout={:?} \
-                     文件存在={born}\nACL:\n{}",
+                assert!(
+                    r.exit_code != 0 && !born,
+                    "{} 被写进去了 —— 真实用户的 cargo 目录不该在沙箱视野里：\
+                     exit={} stdout={:?} 文件存在={born}\nACL:\n{}",
                     probe.display(),
                     r.exit_code,
                     r.stdout,
