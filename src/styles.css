@@ -635,17 +635,25 @@ pre {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  /* Chromium：叠在内容上，不占一列。不认 overlay 的引擎会丢掉这行，
-     落到上一行的 auto。macOS 不写 ::-webkit-scrollbar 几何，走系统
-     overlay：滚才出现。 */
+  /* overlay 在 Chromium ≥114 只是 auto 的别名（classic 条、占一列），
+     不认它的引擎也落回上一行的 auto —— 留着只为还会真 overlay 的老
+     runtime。macOS 不写 ::-webkit-scrollbar 几何，走系统 overlay。 */
   overflow-y: overlay;
   margin-top: 14px;
-  /* 滚出侧栏的右内边距，滑块贴着分隔线；padding 把会话行推回原位。 */
-  margin-right: -10px;
-  padding-right: 10px;
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+/* 滚出侧栏的右内边距，滑块贴着分隔线；padding 把会话行推回原位。
+   `[约束]` 只给 macOS。它的原生条藏着（display:none），滑块由 .riot-osb
+   自绘且 pointer-events:none，贴线纯是视觉。Windows / Linux 画的是真实的
+   8px classic 条 —— 贴线会把它送进拖宽把手 .rz-x 的 4px 左悬底下
+   （z-index 20），滑块按下去命中的是把手，变成拖侧栏宽度，表现为
+   "滚动条拖不动"。留在 10px 内边距以内就和把手互不相交。 */
+html[data-vibrancy='mac'] .threads {
+  margin-right: -10px;
+  padding-right: 10px;
 }
 
 .group-caption {
