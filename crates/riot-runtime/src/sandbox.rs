@@ -1034,6 +1034,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 递归收集目录下的文件名。只给下面那条缓存归属诊断用。
+    #[cfg(windows)]
+    fn walk_names(root: &std::path::Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if let Some(n) = p.file_name().and_then(|n| n.to_str()) {
+                    out.push(n.to_owned());
+                }
+            }
+        }
+        out
+    }
+
     /// Windows：走**完整生产装配**（activate → SandboxedRunner → run）
     /// 验证边界。`sandbox_win` 的单测只覆盖命令行拼装那半（纯逻辑，mac 上
     /// 也跑）；这条覆盖真正落地的那半：装机检查、`acl grant`、`srt-win exec`
@@ -1284,12 +1305,18 @@ mod tests {
             std::env::var("USERPROFILE").unwrap_or_default()
         );
 
-        let cargo_v = exec("cargo --version").await;
+        // `[约束]` 上一轮 `cargo --version` 在沙箱里**成功**了，而按理不该：
+        // rustup 的 shim 从 `RUSTUP_HOME`（缺省 `%USERPROFILE%\.rustup`）找
+        // 工具链，而那是沙箱账户的空目录。两种解释在真实用户机器上结论相反 ——
+        // 若只是 runner 把 RUSTUP_HOME 设成了机器级变量，那删掉缓存表会让
+        // Rust 项目在沙箱里彻底构建不了。问清楚再改。
+        let rust_env = exec(
+            "echo RH=%RUSTUP_HOME%^&CH=%CARGO_HOME% & where cargo & rustup show active-toolchain",
+        )
+        .await;
         eprintln!(
-            "[cache] 沙箱内 cargo --version：exit={} stdout={:?} stderr={:?}",
-            cargo_v.exit_code,
-            cargo_v.stdout.trim(),
-            cargo_v.stderr.trim()
+            "[cache] rustup 怎么找到工具链的：exit={} stdout={} stderr={}",
+            rust_env.exit_code, rust_env.stdout, rust_env.stderr
         );
 
         // 真构建。带一个依赖，因为要验的正是「registry 写得进去吗」——
@@ -1312,6 +1339,27 @@ mod tests {
             "[cache] 沙箱内 cargo build：exit={} timed_out={}\nstdout={}\nstderr={}",
             build.exit_code, build.timed_out, build.stdout, build.stderr
         );
+
+        // 决定性的一条：那个依赖的 .crate 落到谁的 registry 里了。
+        // 落在沙箱账户那边 = 我们授权真实用户的 `~/.cargo` 是白花钱。
+        let whose =
+            exec("dir /b /s \"%USERPROFILE%\\.cargo\\registry\\cache\" 2>nul | findstr /i cfg-if")
+                .await;
+        eprintln!(
+            "[cache] 沙箱账户自己的 registry 里有没有 cfg-if：exit={} {:?}",
+            whose.exit_code,
+            whose.stdout.trim()
+        );
+        let host_cache = home_dir()
+            .map(|h| h.join(".cargo").join("registry").join("cache"))
+            .filter(|p| p.exists())
+            .map(|p| {
+                walk_names(&p)
+                    .into_iter()
+                    .filter(|n| n.starts_with("cfg-if"))
+                    .collect::<Vec<_>>()
+            });
+        eprintln!("[cache] 真实用户的 registry 里的 cfg-if：{host_cache:?}");
 
         // 整套设计成立与否的单点判据：沙箱里的命令**是另一个用户在跑**。
         //
