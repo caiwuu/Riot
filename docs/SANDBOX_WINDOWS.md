@@ -113,9 +113,13 @@ stderr 的东西都会污染那条通道。
 | 时机 | 动作 |
 |---|---|
 | 内核启动 | `acl recover`（回收上次崩溃残留的 ACE）|
-| 会话激活 | `user status` 查装机 → 建会话 temp → `acl grant`（可写目录 + temp）|
+| 会话激活 | `user status` 查装机 → 建会话 temp → `acl grant`（可写目录 + temp）→ `acl stamp`（逃逸面 DENY）→ 冒烟 |
 | 每条命令 | `srt-win exec --quiet --env … -- <命令>` |
-| 会话结束 | `acl revoke --holder-pid <本进程>` + 删会话 temp |
+| 会话结束 | `acl revoke` + `acl restore` + 删会话 temp |
+
+`grant` 和 `stamp` 是一对，回收也必须成对（`revoke` 撤 ALLOW，`restore` 撤
+DENY）。只撤一边会留下另一边，而留下 DENY 尤其糟：下次会话的 grant 压不过它，
+表现是沙箱内的 cargo 莫名其妙写不了 `.cargo\bin`。
 
 holder 是**内核进程的 pid**，不是 `srt-win acl` 那个短命进程的。srt-win 按
 路径引用计数，同机另一个会话正用着同一个工作区时，它的 ACE 不会被连坐撤掉。
@@ -178,6 +182,28 @@ stamp` 逐个打 DENY —— 而那是个开放集合，枚举不完，所以没
 e2e 测试因此把判据定在「真实用户的主目录碰不到」上，而不是「任何未授权
 路径都碰不到」；后者只作诊断打印。
 
+### 4.6 授权的树里要再挖掉逃逸面
+
+`acl grant` 写的是 `(OI)(CI)` **可继承** ALLOW。所以「把 `~/.cargo` 整棵放开」
+不只放开了 registry 缓存，也一路放开了 `~/.cargo\bin` —— 沙箱账户能顶掉那里的
+`cargo.exe` / `rustc.exe`（rustup shim 全家，就在用户 PATH 上），用户下一次在
+**沙箱外**构建就执行了它。
+
+这一层曾经漏过：从 Low IL 换到账户模型时，按「不 grant 就够不着」把 Windows 的
+排除面整个删了 —— 而 `.cargo` 恰恰是 grant 的。现在由 `acl stamp` 的附加 DENY
+ACE 补回来（DENY 在 DACL 求值里排在 ALLOW 之前），清单和 macOS 共用
+`escape_surfaces()`，只对**授权过的**路径打（没 grant 的地方本来就够不着，白打
+一遍还要在几万文件的树上传播 ACE）。
+
+**一个补不上的洞。** srt-win 对缺失的 deny 目标会建空 placeholder，而 cargo 的
+配置有「现代名」和「无扩展名的老名」两份，两份都在时**用老的**并警告一句。所以
+老名不能预建：一个空的 `~/.cargo\config` 会把用户真实的 `config.toml` 整个屏蔽
+掉（`credentials` 那对更糟，registry 凭证直接失效），而 placeholder 是永久的
+（`acl restore` 只摘 ACE 不删文件）。预建的伤害大过它堵的洞，所以留着 —— 沙箱
+可以创建一个老名配置来盖过用户的。**它不是静默的**：cargo 之后每次都会打印
+`warning: both … exist. Using …`。macOS 那侧没有这个问题，seatbelt 的 deny 按
+路径匹配，不要求对象存在。
+
 ## 5. 已知限制（从上游原样继承）
 
 - **上游标 alpha。**
@@ -186,6 +212,14 @@ e2e 测试因此把判据定在「真实用户的主目录碰不到」上，而�
   `%LOCALAPPDATA%\Programs\…` 在 PATH 上解析得到但**打不开**。出路是改用机器
   级安装，或把具体路径加进授权。对 Windows 上的编码 agent 这是最疼的一条。
 - **NoNet 档不隔离网络**（见 §2）。
+- **沙箱内装不了 rust 工具链。** `~/.rustup\toolchains` 在逃逸面清单上（见
+  §4.6），所以 `rustup toolchain install` 和 `rust-toolchain.toml` 的自动安装会
+  失败。收窄到 `*/bin` 修不了：`lib` 下的动态库同样由 rustc 加载执行。出路是
+  在沙箱外先装好，或让那条命令升级到沙箱外执行。两个平台一样。
+- **`pnpm add -g` 装不上。** `%LOCALAPPDATA%\pnpm` 根目录就是全局 bin
+  （`pnpm.exe` 在用户 PATH 上），和 `.cargo\bin` 同一类，不进授权表。它下面的
+  `store` 是纯内容寻址的包缓存，单独进表 —— `pnpm install` 要写它，而写它换不到
+  PATH 上的执行权。
 - **工作区不能在映射盘 / 网络盘上。** seclogon 为沙箱账户建的登录会话里没有
   per-user 的盘符映射，`CreateProcessWithLogonW` 指向那种路径会直接失败
   （srt-win 退 16，`code: mapped_drive_cwd`）。`activate` 的冒烟会提前发现

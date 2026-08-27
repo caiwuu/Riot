@@ -93,15 +93,14 @@ pub(crate) fn profile(policy: &SandboxPolicy) -> String {
     }
     p.push_str(")\n");
 
-    // cargo 敏感面：可写区之内、写了等于换取沙箱外执行权的路径
-    // （config 的 rustc-wrapper、PATH 上的 bin……见 cargo_protected）。
+    // 逃逸面：可写区之内、写了等于换取沙箱外执行权的路径（config 的
+    // rustc-wrapper、PATH 上的 bin、rustup 工具链……见 escape_surfaces）。
     // 排在 allow 之后 —— SBPL 后写覆盖先写，这段必须压住上面的放行。
     // deny 按路径匹配，不要求文件存在：连"创建一个新的 config.toml"
     // 一并挡住（实测），所以 macOS 不需要 Windows 那样的预建。
-    if let Some((_, protected)) = crate::sandbox::cargo_protected() {
-        p.push_str(&deny_section(
-            protected.iter().map(std::path::PathBuf::as_path),
-        ));
+    let protected = crate::sandbox::escape_surfaces();
+    if !protected.is_empty() {
+        p.push_str(&deny_section(protected.iter().map(|pp| pp.path.as_path())));
     }
 
     p.push_str(&unix_socket_section());
@@ -324,19 +323,23 @@ mod tests {
         // 有 ~/.cargo 的机器上（开发机与 CI 都是 Rust 环境），deny 段要
         // 真进 profile，且排在 allow 段之后 —— SBPL 后写覆盖先写，顺序
         // 反了 allow 会把 deny 盖掉，敏感面静默重新可写。
-        if let Some((cargo, _)) = crate::sandbox::cargo_protected() {
+        let surfaces = crate::sandbox::escape_surfaces();
+        if !surfaces.is_empty() {
             let dir = tempfile::tempdir().expect("临时目录");
             let p = profile(&policy_for(dir.path()));
             let allow_pos = p.find("(allow file-write*\n").expect("有 allow 段");
             let deny_pos = p.rfind("(deny file-write*\n").expect("有敏感面 deny 段");
             assert!(deny_pos > allow_pos, "deny 必须写在 allow 之后：{p}");
-            assert!(
-                p.contains(&format!(
-                    "(subpath {})",
-                    sbpl_str(&cargo.join("config.toml").to_string_lossy())
-                )),
-                "config.toml 要在 deny 段里：{p}"
-            );
+            for s in &surfaces {
+                assert!(
+                    p.contains(&format!(
+                        "(subpath {})",
+                        sbpl_str(&s.path.to_string_lossy())
+                    )),
+                    "{} 要在 deny 段里：{p}",
+                    s.path.display()
+                );
+            }
         }
     }
 

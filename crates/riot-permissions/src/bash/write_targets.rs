@@ -27,7 +27,7 @@
 //!
 //! `[取舍]` cargo 敏感面（config / bin / 凭证）**同时**由 OS 挡着 ——
 //! seatbelt 的 deny 子句（`riot_runtime::sandbox` 的
-//! `cargo_protected`）。OS 那层管住的是这里扫不出来的**间接写**
+//! `escape_surfaces`）。OS 那层管住的是这里扫不出来的**间接写**
 //! （`npm install` 的 postinstall 偷改 `~/.cargo/config.toml`）——
 //! 那条路上没有任何确认机会。这层仍然要扫 cargo 面：先在决策层问一声，
 //! 好过让命令跑到一半被 OS 拒；而且没开沙箱的会话只有这一层。

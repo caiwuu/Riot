@@ -79,12 +79,15 @@ impl SandboxPolicy {
     /// （`.package-cache`、`.package-cache-mutate`、`.global-cache`……），
     /// 猜漏一条的表现就是"构建莫名其妙失败"，而那正是用户直接关掉沙箱的
     /// 理由。所以方向反过来 —— 表保持放宽，把**敏感面**排除掉（见
-    /// [`cargo_protected`]）：macOS 翻成 profile 末尾的 deny 子句。排除清单
-    /// 是有限且稳定的（config/bin/凭证），写路径清单是开放且会长的 ——
-    /// 排除式站在稳定的那一边。
+    /// [`escape_surfaces`]）：macOS 翻成 profile 末尾的 deny 子句，Windows
+    /// 翻成 `acl stamp` 的 DENY ACE。排除清单是有限且稳定的
+    /// （config/bin/凭证/工具链），写路径清单是开放且会长的 —— 排除式站在
+    /// 稳定的那一边。
     ///
-    /// Windows 不需要这个排除面：那边的授权是「给沙箱账户加 ALLOW ACE」，
-    /// 不 grant 的路径它本来就够不着，没有「先放宽再挖洞」这一步。
+    /// `[约束]` **表里加一项，就要问它的敏感面在不在排除清单里。**两者是
+    /// 一对：放宽的每一寸都可能盖住一条通往沙箱外的执行路径。Windows 那侧
+    /// 曾经按「不 grant 就够不着」省掉过排除面 —— 而 `.cargo` 恰恰是 grant
+    /// 的，`(OI)(CI)` 的 ALLOW 一路继承进 `.cargo\bin`，边界自己开了门。
     ///
     /// `[约束]` 边界之内仍留着通往边界之外的路：**工作区里**的
     /// `.git/hooks/` 和 `.riot/hooks.json` —— 写了它们，下一次提交 / 对话
@@ -110,9 +113,9 @@ impl SandboxPolicy {
         // 工具直接在 ~ 下建点目录，Windows 的 npm/pip/pnpm 走
         // %LOCALAPPDATA%）。表可以放心列宽：dedup_existing 只保留真实存在
         // 的目录。
-        // `.cargo` 整树进表，但它的敏感面（bin、config、凭证 —— 见
-        // cargo_protected）在 macOS 由 profile 末尾的 deny 子句压掉：
-        // 写它们换到的是**沙箱外**的执行权，放行等于边界自己开门。
+        // `.cargo` 和 `.rustup` 整树进表，但它们的敏感面（bin、config、凭证、
+        // 工具链 —— 见 escape_surfaces）由 deny 压掉：写它们换到的是**沙箱
+        // 外**的执行权，放行等于边界自己开门。
         #[cfg(not(windows))]
         const HOME_CACHES: &[&str] = &[
             ".cargo",
@@ -124,20 +127,24 @@ impl SandboxPolicy {
             "Library/Caches",
             "go/pkg",
         ];
-        // `[取舍]` 这张表比 Unix 那张窄，缺 `.rustup` 和 pnpm 的 store。
+        // 这张表比 Unix 那张窄两项，两项各有各的理由，而且都**不是**
+        // Low IL 时代那个理由了（那时给 `~/.rustup` 打 Low 标签会让宿主
+        // 自己的 cargo 全废 —— 2026-08-25 的真实事故；换成专用账户 + 附加
+        // ACE 之后，授权只对沙箱账户生效，宿主一点不受影响）。
         //
-        // **窄的理由已经不存在了。** 它是 Low IL 时代留下的：那时授权靠给
-        // 目录打 Low 标签，而标签是对象属性 —— 给 `~/.rustup` 打上的瞬间，
-        // 用户自己终端里的 cargo/rustc 全废（2026-08-25 真实事故，宿主机
-        // cargo 全局 os error 5，重装 rustup 都救不回来）。换成专用账户 +
-        // 附加 ACE 之后，授权只对沙箱账户生效，宿主用户一点不受影响。
+        // 缺 `.rustup`：整棵树里真正值钱的是 `toolchains`，而它在
+        // `escape_surfaces` 的 deny 清单上（沙箱换掉 `toolchains/*/bin/rustc`
+        // = 用户下次在沙箱外构建就执行它）。剩下的 `downloads`/`tmp` 单独
+        // 放开换不到什么 —— 装工具链照样卡在 `toolchains` 上。所以不进表，
+        // 沙箱内装工具链走升级到沙箱外那条路。
         //
-        // 没有顺手加回去，是因为这次重构本身还没在真机上验证过 —— 先让
-        // 行为和旧版保持一致，等真机跑通再单独一步放宽。加回去能换到的是
-        // 沙箱内 `rustup` 自动装工具链和 `pnpm add -g` 不再失败。
+        // 缺 pnpm 的 **根目录**：`%LOCALAPPDATA%\pnpm` 就是全局 bin
+        // （`pnpm.exe` 在用户 PATH 上），和 `.cargo\bin` 同一类。但它下面的
+        // `store` 是纯内容寻址的包缓存，单独进表 —— `pnpm install` 要写它，
+        // 而写它换不到 PATH 上的执行权。代价是 `pnpm add -g` 仍然失败。
         //
-        // `.cargo` 进表（构建要写 registry 和 .package-cache 锁）。它的
-        // 敏感面在 Windows 不需要单独排除：见上面 `[取舍]`。
+        // `.cargo` 整树进表（构建要写 registry 和 .package-cache 锁），敏感面
+        // 由 `acl stamp` 的 DENY ACE 压掉，见 `escape_surfaces`。
         #[cfg(windows)]
         const HOME_CACHES: &[&str] = &[
             ".cargo",
@@ -146,6 +153,7 @@ impl SandboxPolicy {
             "AppData/Local/npm-cache",
             "AppData/Local/pip/Cache",
             "AppData/Local/pnpm-cache",
+            "AppData/Local/pnpm/store",
         ];
         if let Some(home) = home_dir() {
             for cache in HOME_CACHES {
@@ -384,23 +392,105 @@ fn temp_dirs() -> Vec<PathBuf> {
 /// `.crates.toml`/`.crates2.json`（install 记账）同理不收：写它们骗不来
 /// 执行权。
 ///
-/// `[取舍]` **只剩 macOS 用它了。** Windows 那侧以前要把这几条翻成「保护
-/// 洞」（打 Low 标签时跳过它们），因为标签是对象属性、一打就全机生效。换成
-/// 专用账户 + 附加 ACE 之后不需要了：ACE 只给沙箱账户，而它对宿主用户的
-/// `~/.cargo` 本来就没有任何权限 —— 我们不主动 grant，它就够不着。
-/// 从「先放宽再挖洞」变成「默认够不着，按需授权」。
-#[cfg(target_os = "macos")]
-pub(crate) fn cargo_protected() -> Option<(PathBuf, Vec<PathBuf>)> {
-    let cargo = home_dir()?.join(".cargo").canonicalize().ok()?;
-    let protected = vec![
-        cargo.join("bin"),
-        cargo.join("config.toml"),
-        cargo.join("config"),
-        cargo.join("credentials.toml"),
-        cargo.join("credentials"),
-        cargo.join("env"),
-    ];
-    Some((cargo, protected))
+/// 两个平台都要：macOS 翻成 profile 末尾的 deny 子句
+/// （`sandbox_macos::profile`），Windows 翻成 `srt-win acl stamp` 的附加
+/// DENY ACE（`sandbox_win::stamp`）。
+///
+/// `[约束]` Windows 这边**一定要有**。`.cargo` 整树在 grant 列表里，而
+/// `acl grant` 写的是 `(OI)(CI)` 可继承 ALLOW —— 它会一路继承进
+/// `.cargo\bin`，于是沙箱账户能顶掉那里的 `cargo.exe` / `rustc.exe`
+/// （rustup shim 全家，就在用户 PATH 上），用户下一次在**沙箱外**构建就
+/// 执行了它。DENY 在 Windows 的 DACL 求值里排在 ALLOW 之前，压得住。
+///
+/// 这一条曾经漏过：从 Low IL 换到账户模型时，我按「不 grant 就够不着」把
+/// Windows 这半删了 —— 而 `.cargo` 恰恰是 grant 的。
+pub(crate) fn escape_surfaces() -> Vec<ProtectedPath> {
+    let Some(home) = home_dir() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Ok(cargo) = home.join(".cargo").canonicalize() {
+        out.push(ProtectedPath::dir(cargo.join("bin")));
+        out.push(ProtectedPath::file(cargo.join("env")));
+        // cargo 的配置有「现代名」和「无扩展名的老名」两份，两份都在就**用
+        // 老的**并警告一句（实测 `warning: both … exist. Using …`）。所以两
+        // 份都要 deny：只钉现代名，沙箱建一个老名的就把它盖过去了。
+        //
+        // `[约束]` 但老名**不能预建**。Windows 侧缺失的 deny 目标由 srt-win
+        // 建空 placeholder，而一个空的 `config` 会把用户真实的 `config.toml`
+        // 整个屏蔽掉（`credentials` 那对更糟，registry 凭证直接失效），而且
+        // placeholder 是永久的。预建的伤害大过它堵的洞。
+        for (legacy, modern) in [
+            ("config", "config.toml"),
+            ("credentials", "credentials.toml"),
+        ] {
+            let legacy = cargo.join(legacy);
+            // 现代名只在老名不存在时才预建 —— 老名在的话，凭空多出一个
+            // `config.toml` 只会让 cargo 每次都警告一句，配置还是走老名。
+            let plant_modern = !legacy.exists();
+            out.push(ProtectedPath::file(legacy).no_plant());
+            out.push(ProtectedPath::file(cargo.join(modern)).plant_if(plant_modern));
+        }
+    }
+    // `~/.rustup/toolchains` 整棵。`.cargo/bin` 里的 shim 只是 rustup 代理，
+    // 真正被执行的 rustc / cargo 二进制在这里 —— 只钉 `.cargo/bin` 而放开
+    // 这棵，等于锁了门开着窗：`~/.rustup` 在 macOS 的可写表里（见
+    // `HOME_CACHES`），沙箱换掉 `toolchains/stable-*/bin/rustc`，用户下次在
+    // 沙箱外构建就执行了它。
+    //
+    // `[取舍]` 整棵 deny 会让沙箱内的 `rustup toolchain install` 和
+    // `rust-toolchain.toml` 自动装工具链失败（那要写 `toolchains/<名>/`）。
+    // 收窄到 `*/bin` 修不了：`lib` 下的 `.dylib` / `.so` 同样由 rustc 加载
+    // 执行。所以按「写它能换到什么」的判据整棵进表，装工具链走升级到沙箱外
+    // 的那条路。
+    if let Ok(rustup) = home.join(".rustup").canonicalize() {
+        out.push(ProtectedPath::dir(rustup.join("toolchains")));
+    }
+    out
+}
+
+/// [`escape_surfaces`] 清单里的一条。
+///
+/// `is_dir` 是**约定的**类型而不是现场 stat 出来的：Windows 要给不存在的
+/// 路径也打上 DENY —— ACE 只能写在真实存在的对象上，而"不存在"本身就是
+/// 缺口（沙箱账户可以在可写的 `.cargo` 里**创建** `config.toml`，内容照样被
+/// 沙箱外的 cargo 读走）。预建交给 srt-win，但建目录还是建文件得我们说。
+///
+/// macOS 用不上它：seatbelt 的 deny 按路径匹配、不要求对象存在。
+pub(crate) struct ProtectedPath {
+    pub path: PathBuf,
+    pub is_dir: bool,
+    /// 不存在时，可不可以建一个空的占位再打 DENY。
+    ///
+    /// `false` 的含义是「宁可留着这个洞」—— 见 [`escape_surfaces`] 里 cargo
+    /// 老配置名那段。Windows 专用；macOS 的 deny 不要求对象存在。
+    pub plant: bool,
+}
+
+impl ProtectedPath {
+    fn dir(path: PathBuf) -> Self {
+        Self {
+            path,
+            is_dir: true,
+            plant: true,
+        }
+    }
+    fn file(path: PathBuf) -> Self {
+        Self {
+            path,
+            is_dir: false,
+            plant: true,
+        }
+    }
+    fn no_plant(self) -> Self {
+        Self {
+            plant: false,
+            ..self
+        }
+    }
+    fn plant_if(self, plant: bool) -> Self {
+        Self { plant, ..self }
+    }
 }
 
 /// 用户主目录。Windows 的约定是 `USERPROFILE`；`HOME` 是 Unix 的，
@@ -526,32 +616,96 @@ mod tests {
     }
 
     /// 钉住 cargo 敏感面的内容：少一条，对应的注入路径就静默重开。
-    #[cfg(target_os = "macos")]
     #[test]
     fn cargo_敏感面清单覆盖执行权路径() {
-        let Some((cargo, protected)) = cargo_protected() else {
-            eprintln!("这台机器没有 ~/.cargo，跳过");
+        let Some(home) = home_dir() else {
+            eprintln!("拿不到 home，跳过");
             return;
         };
+        let protected = escape_surfaces();
+        if protected.is_empty() {
+            eprintln!("这台机器既没有 ~/.cargo 也没有 ~/.rustup，跳过");
+            return;
+        }
         let names: Vec<_> = protected
             .iter()
-            .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+            .filter_map(|p| p.path.file_name().and_then(|n| n.to_str()))
             .collect();
-        for required in [
-            "bin",
-            "config.toml",
-            "config",
-            "credentials.toml",
-            "credentials",
-            "env",
-        ] {
-            assert!(names.contains(&required), "清单少了 {required}：{names:?}");
+        if home.join(".cargo").exists() {
+            for required in [
+                "bin",
+                "config.toml",
+                "config",
+                "credentials.toml",
+                "credentials",
+                "env",
+            ] {
+                assert!(names.contains(&required), "清单少了 {required}：{names:?}");
+            }
+        }
+        // `.cargo/bin` 里的 rustup shim 只是代理，真正被执行的二进制在
+        // `~/.rustup/toolchains` 下 —— 漏了它等于锁门开窗。
+        if home.join(".rustup").exists() {
+            assert!(
+                names.contains(&"toolchains"),
+                "清单少了 rustup 工具链：{names:?}"
+            );
         }
         for p in &protected {
             assert!(
-                p.starts_with(&cargo),
-                "deny 子句必须落在 .cargo 之内，否则会误伤别的路径：{}",
-                p.display()
+                p.path.starts_with(&home),
+                "deny 必须落在 home 之内，否则会误伤别的路径：{}",
+                p.path.display()
+            );
+        }
+    }
+
+    /// cargo 的老配置名一律不预建。
+    ///
+    /// 预建的是空文件，而 cargo 在两份都在时**用老的**（实测会警告一句
+    /// `both … exist. Using …`）—— 于是一个空的 `config` 会把用户真实的
+    /// `config.toml` 整个屏蔽掉，`credentials` 那对更糟。Windows 的
+    /// placeholder 还是永久的，摘 ACE 不删文件。宁可留着那个洞。
+    #[test]
+    fn cargo_老配置名不许预建() {
+        let protected = escape_surfaces();
+        if protected.is_empty() {
+            eprintln!("这台机器上没有相关目录，跳过");
+            return;
+        }
+        for p in &protected {
+            let name = p.path.file_name().unwrap_or_default();
+            if name == "config" || name == "credentials" {
+                assert!(
+                    !p.plant,
+                    "{} 不能预建：空文件会盖掉用户真实的 .toml 配置",
+                    p.path.display()
+                );
+            }
+        }
+    }
+
+    /// 目录型和文件型不能记混。
+    ///
+    /// Windows 侧 srt-win 会给缺失的 deny 目标建 placeholder，缺省建**文件**，
+    /// 而且 placeholder 是永久的（`acl restore` 只摘 ACE 不删）。把 `bin` 或
+    /// `toolchains` 声明成文件 = 在还没装 rustup 的机器上永久占掉那个位置，
+    /// 之后 rustup 自己也建不出目录，用户得手工收拾。
+    #[test]
+    fn 目录型敏感面要如实标记() {
+        let protected = escape_surfaces();
+        if protected.is_empty() {
+            eprintln!("这台机器上没有相关目录，跳过");
+            return;
+        }
+        for p in &protected {
+            let name = p.path.file_name().unwrap_or_default();
+            let expect_dir = name == "bin" || name == "toolchains";
+            assert_eq!(
+                p.is_dir,
+                expect_dir,
+                "{} 的类型声明错了：建错类型的 placeholder 是不可逆的",
+                p.path.display()
             );
         }
     }
@@ -620,6 +774,103 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&work);
         let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// 逃逸面真的被内核挡住，而它所在的缓存树真的还写得进。
+    ///
+    /// 两半必须一起验。只验 deny，测试在「`.cargo` 压根没放开」的情况下
+    /// 也会通过 —— 那时候什么都没证明；只验 allow，排除面漏了也发现不了。
+    /// 一起验才说明「先放宽、再挖洞」这套顺序在真内核上成立。
+    ///
+    /// 探针文件名带 pid 且是点开头：万一沙箱没生效，落在用户真实
+    /// `~/.cargo/bin` 里的东西不会被 PATH 捡起来执行，收尾也会删掉。
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn 逃逸面在放开的缓存树里依然写不进() {
+        use crate::proc::SystemProcessRunner;
+
+        let Some(home) = home_dir() else {
+            eprintln!("拿不到 home，跳过");
+            return;
+        };
+        let (cargo, rustup) = (home.join(".cargo"), home.join(".rustup"));
+        if !cargo.join("bin").is_dir() {
+            eprintln!("这台机器没有 ~/.cargo/bin，跳过");
+            return;
+        }
+
+        let work = std::env::temp_dir().join(format!("riot-esc-{}", std::process::id()));
+        std::fs::create_dir_all(&work).expect("建工作区");
+        let Some(active) = SandboxPolicy::workspace_write(&work).activate() else {
+            eprintln!("这台机器没有 sandbox-exec，跳过");
+            return;
+        };
+        let runner = SandboxedRunner::new(
+            std::sync::Arc::new(SystemProcessRunner::default()),
+            std::sync::Arc::new(active),
+        );
+        let run = |cmd: String| {
+            let (r, cwd) = (&runner, work.clone());
+            async move {
+                r.run(
+                    ProcessSpec {
+                        program: "/bin/sh".to_owned(),
+                        args: vec!["-c".to_owned(), cmd],
+                        cwd,
+                        env: Vec::new(),
+                        timeout_ms: Some(10_000),
+                        sandbox_exempt: false,
+                    },
+                    CancellationToken::new(),
+                )
+                .await
+                .expect("跑得起来")
+            }
+        };
+
+        let tag = format!(".riot-probe-{}", std::process::id());
+        // 每棵缓存树都配一对：树本身可写（控制组）、树里的逃逸面不可写
+        // （实验组）。控制组不过的话，实验组通过什么都不说明 —— 那可能只是
+        // 整棵树压根没放开。
+        let mut cases = vec![
+            (cargo.join(&tag), true),
+            (cargo.join("bin").join(&tag), false),
+            (cargo.join("config.toml"), false),
+        ];
+        if rustup.join("toolchains").is_dir() {
+            cases.push((rustup.join(&tag), true));
+            cases.push((rustup.join("toolchains").join(&tag), false));
+        }
+
+        for (probe, writable) in cases {
+            let existed = probe.exists();
+            // 追加而不是截断：清单里有 `config.toml` 这种可能已存在且用户
+            // 在用的文件，deny 万一失效也不能把它清空。
+            let r = run(format!("echo nope >> {}", probe.display())).await;
+            if writable {
+                assert_eq!(
+                    r.exit_code,
+                    0,
+                    "{} 该是放开的,否则下面的 deny 断言证明不了任何事：{}",
+                    probe.display(),
+                    r.stderr
+                );
+            } else {
+                assert_ne!(
+                    r.exit_code,
+                    0,
+                    "{} 必须写不进 —— 写得进就等于能顶掉用户在沙箱外执行的 rustc",
+                    probe.display()
+                );
+            }
+            if !existed {
+                let born = probe.exists();
+                let _ = std::fs::remove_file(&probe);
+                assert_eq!(born, writable, "文件在不在，要和退出码说的一致");
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&work);
     }
 
     /// unix socket 外连真的被内核拒绝，而 `sandbox_exempt` 真的能绕开。
@@ -719,10 +970,10 @@ mod tests {
         std::fs::create_dir_all(&work).expect("建工作区");
         std::fs::create_dir_all(&outside).expect("建外部目录");
 
-        let policy = SandboxPolicy::WorkspaceWrite {
-            writable: vec![work.clone()],
-            allow_network: true,
-        };
+        // 用生产构造器而不是手写 `WorkspaceWrite{…}`：这条测试的意义就是
+        // "完整生产装配"，而缓存表（`~/.cargo` 那些）和逃逸面 DENY 是一对，
+        // 手写一个只有工作区的策略就把这对关系整个绕过去了。
+        let policy = SandboxPolicy::workspace_write(&work);
         // `[约束]` 装 subscriber，否则 `activate` 失败的原因（全走
         // `tracing::warn!`）会被静默丢掉 —— 而这条测试只在 CI 的 Windows 上
         // 跑，日志是唯一的断案材料。`try_init` 而不是 `init`：同进程里别的
@@ -732,7 +983,13 @@ mod tests {
             .with_max_level(tracing::Level::DEBUG)
             .try_init();
 
+        // 计时是有用的信号，不只是好奇：`acl grant` 会把可继承 ACE 传播到
+        // 已有子对象，而 `~/.cargo\registry` 动辄几万文件。这个数字直接决定
+        // 「每会话激活一次」这个设计能不能接受（见 SandboxedRunner 的
+        // `sandbox: Arc<…>` 注释）。回收要再付一次同样的钱。
+        let t0 = std::time::Instant::now();
         let activated = policy.activate();
+        eprintln!("[timing] activate 耗时 {:?}", t0.elapsed());
         // `[约束]` CI 里必须失败得响亮。`activate` 返回 None 有两个原因：
         // 没装（开发机的常态，该跳过），或者装了但冒烟没过（真问题）。这两个
         // 在返回值上分不开，而默认跳过会让 e2e job 在什么都没验的情况下变绿 ——
@@ -868,6 +1125,40 @@ mod tests {
             icacls(&outside)
         );
         let _ = std::fs::remove_file(&out_file);
+
+        // ── 授权的树里，逃逸面依然写不进 ─────────────────────────────
+        //
+        // `[约束]` 这条只有真机说了算。整套 DENY 建立在「显式 DENY ACE 在
+        // DACL 求值里排在显式 ALLOW 之前」上 —— mac 上的单测只能验命令行拼
+        // 得对，压不压得住得 Windows 自己回答。压不住的话 `~/.cargo\bin` 在
+        // `acl grant` 的可继承 ALLOW 下是可写的，沙箱能顶掉用户 PATH 上的
+        // `cargo.exe`。
+        //
+        // 配对断言：`.cargo` 本身要写得进（否则下面那半证明不了任何事 ——
+        // 可能只是整棵树压根没授权），`.cargo\bin` 要写不进。
+        if let Some(cargo) = home_dir().map(|h| h.join(".cargo"))
+            && cargo.join("bin").is_dir()
+        {
+            let tag = format!("riot-esc-{}.txt", std::process::id());
+            for (probe, writable) in [
+                (cargo.join(&tag), true),
+                (cargo.join("bin").join(&tag), false),
+            ] {
+                let r = exec(&write_probe(&probe)).await;
+                let born = probe.exists();
+                let _ = std::fs::remove_file(&probe);
+                assert_eq!(
+                    (r.exit_code == 0) && born,
+                    writable,
+                    "{} 的可写性不对（该 writable={writable}）：exit={} stdout={:?} \
+                     文件存在={born}\nACL:\n{}",
+                    probe.display(),
+                    r.exit_code,
+                    r.stdout,
+                    icacls(&probe)
+                );
+            }
+        }
 
         // 整套设计成立与否的单点判据：沙箱里的命令**是另一个用户在跑**。
         //

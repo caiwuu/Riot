@@ -68,6 +68,56 @@ pub(crate) struct WinSandbox {
 }
 
 impl WinSandbox {
+    /// 给 cargo 敏感面打附加 DENY ACE。
+    ///
+    /// 见 [`crate::sandbox::cargo_protected`]：这几处在可写区**之内**，但写了
+    /// 就换到沙箱**之外**的执行权。
+    ///
+    /// `[约束]` 不存在的路径也要打上。ACE 只能写在真实存在的对象上，而
+    /// "不存在"本身就是缺口 —— 沙箱账户可以在可写的 `.cargo` 里**创建**
+    /// `config.toml`（里面写一条 `rustc-wrapper`），内容照样被沙箱外的
+    /// cargo 读走。
+    ///
+    /// 预建交给 srt-win：它的 `acl stamp` 对缺失的 deny 目标会建
+    /// placeholder，且先记 intent 再落盘、崩溃能恢复、`acl restore` 只摘
+    /// ACE 不删文件。我们只需要用 `stamp_target` 的**尾分隔符**告诉它建目录
+    /// 还是建文件——它默认建文件，而 `.cargo\bin` 建成文件会把 rustup 弄坏。
+    ///
+    /// `[约束]` 只给**授权过的**路径打。DENY 存在的意义就是压住 grant 那条
+    /// 可继承 ALLOW，没 grant 的地方沙箱账户本来就够不着。这不是省事：
+    /// srt-win 的 `apply_aces` 会把 ACE 传播到已有子对象，给
+    /// `~/.rustup/toolchains` 那种几万文件的树白打一遍，激活要多花几秒。
+    /// 用 `granted` 现算而不是写死平台差异，是为了让"表里加一项就自动受
+    /// 保护"成立 —— 上次这套东西出问题，正是因为我把这层耦合记在脑子里
+    /// 而不是代码里。
+    fn stamp_protected(&self) -> std::io::Result<()> {
+        let paths: Vec<String> = crate::sandbox::escape_surfaces()
+            .iter()
+            .filter(|p| self.granted.iter().any(|g| p.path.starts_with(g)))
+            // 不给预建的、又还不存在的,只能放过 —— srt-win 对缺失的 deny
+            // 目标一律建 placeholder,没有"只在存在时才打"的模式。
+            .filter(|p| p.plant || p.path.exists())
+            .map(ProtectedPathExt::stamp_target)
+            .collect();
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let pid = std::process::id().to_string();
+        run_srt(
+            &self.srt,
+            &[
+                "acl",
+                "stamp",
+                "--holder-pid",
+                &pid,
+                "--sandbox-user-sid",
+                &self.sid,
+            ],
+            Some(&stamp_payload(&paths)),
+        )
+        .map(drop)
+    }
+
     /// 真起一条命令，确认这套东西在这台机器 / 这个工作区上跑得通。
     ///
     /// 用会话 temp 当工作目录而不是工作区：这一步要验的是「沙箱能不能起
@@ -114,27 +164,37 @@ impl Drop for WinSandbox {
         let n = self.granted.len();
         let temp = std::mem::take(&mut self.session_temp);
         let cleanup = move || {
-            // 按 holder pid 回收本会话的全部 ALLOW ACE。srt-win 内部按路径
-            // 引用计数,归零才真撤——同机另一个会话正用着同一个工作区时,
-            // 它的 ACE 不会被我们连坐撤掉。
-            match run_srt(
-                &srt,
-                &[
-                    "acl",
-                    "revoke",
-                    "--holder-pid",
-                    &std::process::id().to_string(),
-                    "--sandbox-user-sid",
-                    &sid,
-                    "--json",
-                ],
-                None,
-            ) {
-                Ok(_) => tracing::debug!(paths = n, "沙箱授权已回收"),
-                // 撤不掉不 panic:srt-win 的状态库在下一次 acl 操作时会跑
-                // 崩溃恢复(它的 state_db 模块头写明"crash-recovery runs
-                // unconditionally at every acquire"),孤儿 ACE 由那条路兜底。
-                Err(e) => tracing::warn!(error = %e, "回收沙箱授权失败,留给下次崩溃恢复"),
+            // 按 holder pid 回收本会话写下的 ACE。srt-win 内部按路径引用
+            // 计数,归零才真撤——同机另一个会话正用着同一个工作区时,它的
+            // ACE 不会被我们连坐撤掉。
+            //
+            // `[约束]` 两笔账要分开撤:grant 的 ALLOW 走 `revoke`,stamp 的
+            // DENY 走 `restore`。只撤一边会留下另一边,而留下 DENY 尤其糟 ——
+            // 下一次会话的 grant 压不过它(DENY 在 DACL 求值里优先),表现是
+            // 沙箱内的 cargo 莫名其妙写不了 `.cargo\bin`。
+            let pid = std::process::id().to_string();
+            for (what, sub) in [("授权", "revoke"), ("敏感面 DENY", "restore")] {
+                match run_srt(
+                    &srt,
+                    &[
+                        "acl",
+                        sub,
+                        "--holder-pid",
+                        &pid,
+                        "--sandbox-user-sid",
+                        &sid,
+                        "--json",
+                    ],
+                    None,
+                ) {
+                    Ok(_) => tracing::debug!(paths = n, kind = what, "沙箱 ACE 已回收"),
+                    // 撤不掉不 panic:srt-win 的状态库在下一次 acl 操作时会跑
+                    // 崩溃恢复(它的 state_db 模块头写明"crash-recovery runs
+                    // unconditionally at every acquire"),孤儿 ACE 由那条路兜底。
+                    Err(e) => {
+                        tracing::warn!(error = %e, kind = what, "回收沙箱 ACE 失败,留给下次崩溃恢复");
+                    }
+                }
             }
             let _ = std::fs::remove_dir_all(&temp);
         };
@@ -220,12 +280,28 @@ pub(crate) fn activate(policy: &crate::sandbox::SandboxPolicy) -> Option<WinSand
         return None;
     }
 
+    // 先把它造出来：后面每一步失败都靠 `Drop` 回收（撤 grant/stamp、删会话
+    // temp），不再各自写一遍清理。
     let sandbox = WinSandbox {
         srt,
         sid,
         granted,
         session_temp,
     };
+
+    // `[约束]` 敏感面的 DENY 必须跟在 grant 后面，而且失败要退回不隔离。
+    //
+    // `.cargo` 整树在 grant 列表里（构建要写 registry 和锁），而 `acl grant`
+    // 写的是 `(OI)(CI)` 可继承 ALLOW —— 它会继承进 `.cargo\bin`，于是沙箱
+    // 账户能顶掉那里的 `cargo.exe` / `rustc.exe`，用户下一次在**沙箱外**
+    // 构建就执行了它。DENY 在 DACL 求值里排在 ALLOW 之前，压得住。
+    //
+    // 盖不上就不能说自己沙箱着 —— 那等于一边报 sandboxed=true、一边把
+    // 沙箱外的执行权敞着。
+    if let Err(e) = sandbox.stamp_protected() {
+        tracing::warn!(error = %e, "给 cargo 敏感面打 DENY 失败,本轮不隔离");
+        return None;
+    }
 
     // `[约束]` 装机状态对**不代表跑得起来**。真起一条命令确认一遍，失败就
     // 退回不隔离 —— 和 macOS 的 `profile_accepted` 同一个理由：不冒烟的话
@@ -435,6 +511,36 @@ fn session_temp_env(session_temp: &Path) -> Vec<(String, String)> {
 /// 只给 `write`:读不受限（沙箱账户对系统目录本来就有读权限,而工作区的读
 /// 由 `MODIFY` 里的 `FILE_GENERIC_READ` 带出来）。收紧读会让编译类命令
 /// 大面积失败,和 macOS 那侧的取舍一致。
+/// 把 [`crate::sandbox::ProtectedPath`] 翻成 `acl stamp` 认的目标串。
+trait ProtectedPathExt {
+    fn stamp_target(&self) -> String;
+}
+
+impl ProtectedPathExt for crate::sandbox::ProtectedPath {
+    /// 目录带尾 `\`，文件不带。
+    ///
+    /// srt-win 的 `create_placeholder_chain` 用尾分隔符区分二者，缺省建
+    /// **文件** —— `.cargo\bin` 要是落成文件，rustup 的 shim 目录就没了，
+    /// 而且它明说 placeholder 是永久的（restore 只摘 ACE 不删），坏了得用户
+    /// 手工收拾。
+    fn stamp_target(&self) -> String {
+        let s = self.path.to_string_lossy();
+        if self.is_dir {
+            format!("{}\\", s.trim_end_matches('\\'))
+        } else {
+            s.into_owned()
+        }
+    }
+}
+
+/// `acl stamp` 的 stdin 载荷。
+///
+/// 只 deny 写。读不拦：`.cargo\bin` 里的 shim 本来就要能被读（沙箱内的构建
+/// 要跑它们），拦读等于让沙箱里的 cargo 直接不可用。要防的是**改**。
+fn stamp_payload(paths: &[String]) -> String {
+    serde_json::json!({ "denyRead": [], "denyWrite": paths }).to_string()
+}
+
 fn grant_payload(paths: &[PathBuf]) -> String {
     let write: Vec<String> = paths
         .iter()
@@ -749,6 +855,48 @@ mod tests {
         assert_eq!(v["read"].as_array().expect("read 是数组").len(), 0);
         assert_eq!(v["write"][0], "/a");
         assert_eq!(v["write"][1], "/b");
+    }
+
+    #[test]
+    fn stamp_载荷只拦写不拦读() {
+        let p = stamp_payload(&["/a".into(), "/b".into()]);
+        let v: serde_json::Value = serde_json::from_str(&p).expect("合法 JSON");
+        // 拦读会让沙箱内的 cargo 跑不了 `.cargo\bin` 里的 shim。
+        assert_eq!(v["denyRead"].as_array().expect("denyRead 是数组").len(), 0);
+        assert_eq!(v["denyWrite"][0], "/a");
+        assert_eq!(v["denyWrite"][1], "/b");
+    }
+
+    /// srt-win 用尾分隔符区分「建目录」和「建文件」,缺省建文件。`.cargo\bin`
+    /// 落成文件 = 永久占掉 rustup 的 shim 目录(placeholder 不会被 restore
+    /// 删掉),所以这条编码进类型的东西必须钉住。
+    #[test]
+    fn 目录型敏感面带尾分隔符而文件型不带() {
+        use crate::sandbox::ProtectedPath;
+        let dir = ProtectedPath {
+            path: PathBuf::from("C:\\u\\.cargo\\bin"),
+            is_dir: true,
+            plant: true,
+        };
+        let file = ProtectedPath {
+            path: PathBuf::from("C:\\u\\.cargo\\config.toml"),
+            is_dir: false,
+            plant: true,
+        };
+        assert_eq!(dir.stamp_target(), "C:\\u\\.cargo\\bin\\");
+        assert_eq!(file.stamp_target(), "C:\\u\\.cargo\\config.toml");
+    }
+
+    /// 已经带尾分隔符的不能变成两条。
+    #[test]
+    fn 目录型尾分隔符不重复叠加() {
+        use crate::sandbox::ProtectedPath;
+        let d = ProtectedPath {
+            path: PathBuf::from("C:\\u\\.cargo\\bin\\"),
+            is_dir: true,
+            plant: true,
+        };
+        assert_eq!(d.stamp_target(), "C:\\u\\.cargo\\bin\\");
     }
 
     /// 装过的判据是「标记在 **且** 凭证在」。少了凭证,exec 的两跳启动第一
