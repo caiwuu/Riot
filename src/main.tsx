@@ -22,7 +22,14 @@ import "./styles.css";
 
    材质明暗跟系统外观走。应用只有一套深色，所以宿主把窗口钉成 Dark
    （tauri.conf.json 的 theme，以及 src-tauri/src/vibrancy.rs），浅色
-   系统上侧栏才不会翻成浅灰。 */
+   系统上侧栏才不会翻成浅灰。
+
+   同样记在这里：additionalBrowserArgs 的 --enable-smooth-scrolling
+   是 Windows 滚轮的平滑滚动。WebView2 嵌入场景默认不开这个 Chromium
+   特性，离散滚轮的每一格就是一次上百像素的硬跳（macOS 触控板是
+   像素级增量 + 系统惯性，天生顺滑，不需要它）。注意这个字段一旦
+   设置会整体替换 Tauri 的默认参数，所以默认的 --disable-features
+   一并写回去了。 */
 const ua = navigator.userAgent;
 if (ua.includes("Mac")) {
   document.documentElement.dataset.vibrancy = "mac";

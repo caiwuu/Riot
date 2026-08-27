@@ -23,6 +23,7 @@
         "height": 900,
         "minWidth": 900,
         "minHeight": 600,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtocol --enable-smooth-scrolling",
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "dragDropEnabled": true,
