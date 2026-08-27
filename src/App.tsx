@@ -43,7 +43,7 @@ import {
   PermissionDialog,
 } from "./components/PermissionDialog";
 import { Settings } from "./components/Settings";
-import { TerminalPanel } from "./components/TerminalPanel";
+import { closeSessionTerminals, TerminalPanel } from "./components/TerminalPanel";
 import { hasActiveTodos, TodoPanel } from "./components/TodoPanel";
 import {
   forgetSession,
@@ -129,10 +129,16 @@ export function App() {
   const [renaming, setRenaming] = useState<string | null>(null);
   /** 右侧抽屉此刻装着谁。三个都是整列，只能开一个。 */
   const [drawer, setDrawer] = useState<"browser" | "changes" | "preview" | null>(null);
-  /** 预览面板打开着的文件（绝对路径），即标签页顺序。 */
+  /** 预览面板打开着的文件（绝对路径），即标签页顺序。当前会话的那份。 */
   const [previewTabs, setPreviewTabs] = useState<string[]>([]);
   /** 正在看的那个标签。 */
   const [previewActive, setPreviewActive] = useState<string | null>(null);
+  /** 每个会话自己的预览标签组（浏览器面板同款语义：工具窗跟会话走）。
+   *  切会话时把当前组存回来、换上目标会话的组；会话删除时由
+   *  dropSessionWorkbench 清掉。 */
+  const previewBySession = useRef(
+    new Map<string, { tabs: string[]; active: string | null }>(),
+  );
   /** 预览打开前抽屉里是谁。关掉预览回到它 —— 从改动列表点开预览、
    *  关掉回列表接着点下一个，这条路必须顺。 */
   const previewReturn = useRef<"browser" | "changes" | null>(null);
@@ -207,14 +213,38 @@ export function App() {
     });
   }, [drawer]);
 
-  // 切会话清空预览标签：预览的文件属于上一个会话的语境，
-  // 挂着不动会让新会话看起来"带着别人的文件"。
+  // 切会话：预览标签组随会话切换（每个会话一份，浏览器面板同款）。
+  // 把当前组存回 Map、换上目标会话的组；目标会话没有标签而抽屉正开着
+  // 预览时收起 —— 空面板没意义。
+  const prevSessionId = useRef<string | null>(null);
   useEffect(() => {
-    setPreviewTabs([]);
-    setPreviewActive(null);
-    setDrawer((d) => (d === "preview" ? null : d));
+    const prev = prevSessionId.current;
+    const next = activeSession?.id ?? null;
+    if (prev === next) return;
+    if (prev) {
+      previewBySession.current.set(prev, { tabs: previewTabs, active: previewActive });
+    }
+    prevSessionId.current = next;
+    const saved = next ? previewBySession.current.get(next) : undefined;
+    setPreviewTabs(saved?.tabs ?? []);
+    setPreviewActive(saved?.active ?? null);
     previewReturn.current = null;
+    if (!saved?.tabs.length) {
+      setDrawer((d) => (d === "preview" ? null : d));
+    }
+    // previewTabs/previewActive 是被保存的对象而不是触发条件 ——
+    // 只在会话切换那一刻读它们当时的值。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSession?.id]);
+
+  // 欢迎页没有工作台：浏览器、终端、预览都跟着会话走，最后一个会话
+  // 删掉后它们全部收起。残留的 drawer 值也一并清 —— 否则新建会话时
+  // 上一个会话临走前开着的面板会突兀地弹出来。
+  useEffect(() => {
+    if (activeSession) return;
+    setShowTerm(false);
+    setDrawer(null);
+  }, [activeSession]);
 
   // `[约束]` 链接点击的全局兜底，堵"整窗被导航走"的逃逸口。
   //
@@ -437,7 +467,8 @@ export function App() {
           return;
         case "j":
           e.preventDefault();
-          setShowTerm((v) => !v);
+          // 终端组跟着会话走，欢迎页上没有归属可言 —— 不开。
+          if (activeSession) setShowTerm((v) => !v);
           return;
         case "w":
           // 永远拦下，绝不让它冒泡去关窗口。收起一个面板：抽屉优先，
@@ -463,10 +494,17 @@ export function App() {
 
   /* ── 会话 / 项目操作 ──────────────────────── */
 
+  /** 会话没了，它的工作台（终端组、预览标签组）跟着走。 */
+  const dropSessionWorkbench = (id: string) => {
+    closeSessionTerminals(id);
+    previewBySession.current.delete(id);
+  };
+
   const doDeleteSession = async (id: string) => {
     await deleteSession(id);
     forgetSession(id);
     transcriptView.delete(id);
+    dropSessionWorkbench(id);
     setKept((prev) => prev.filter((x) => x !== id));
     const victim = sessions.find((s) => s.id === id);
     const next = sessions.filter((s) => s.id !== id);
@@ -501,6 +539,7 @@ export function App() {
     for (const id of gone) {
       forgetSession(id);
       transcriptView.delete(id);
+      dropSessionWorkbench(id);
     }
     setKept((prev) => prev.filter((id) => !gone.has(id)));
     setConfig(await getConfig());
@@ -534,6 +573,7 @@ export function App() {
       for (const id of dropped) {
         forgetSession(id);
         transcriptView.delete(id);
+        dropSessionWorkbench(id);
       }
       setKept((prev) => prev.filter((id) => !dropped.has(id)));
       setConfig(await getConfig());
@@ -703,6 +743,7 @@ export function App() {
             }
           }}
           terminalOpen={showTerm}
+          terminalEnabled={activeSession !== null}
           onToggleTerminal={() => setShowTerm((v) => !v)}
           sessionCfgOpen={showSessionCfg}
           sessionCfgEnabled={activeSession !== null}
@@ -828,6 +869,7 @@ export function App() {
         <TerminalPanel
           visible={showTerm}
           height={termH}
+          sessionId={activeSession?.id ?? null}
           defaultRoot={activeSession?.root ?? projects[0] ?? null}
           onHide={() => setShowTerm(false)}
           onAgentTerminal={() => setShowTerm(true)}
@@ -881,11 +923,14 @@ export function App() {
               </>
             ) : drawer === "preview" && previewActive ? (
               <FilePreviewPanel
+                // 跨会话重挂：每个会话的标签组独立，渲染器不跨会话保活
+                //（会话内的 tab 切换仍是零成本的 display 切换）。
+                key={activeSession.id}
                 paths={previewTabs}
                 active={previewActive}
                 onSelect={setPreviewActive}
                 onCloseTab={closePreviewTab}
-                // 收起面板不清标签 —— 回来接着看。切会话才清。
+                // 收起面板不清标签 —— 顶栏图标或点开文件随时回来。
                 onClose={() => {
                   setDrawer(previewReturn.current);
                   previewReturn.current = null;

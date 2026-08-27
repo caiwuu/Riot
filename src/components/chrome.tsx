@@ -43,6 +43,7 @@ export function TopBar({
   browserEnabled,
   onToggleBrowser,
   terminalOpen,
+  terminalEnabled,
   onToggleTerminal,
   sessionCfgOpen,
   sessionCfgEnabled,
@@ -63,6 +64,8 @@ export function TopBar({
   browserEnabled: boolean;
   onToggleBrowser: () => void;
   terminalOpen: boolean;
+  /** 终端组跟着会话走（每个会话一份），没有会话时置灰。 */
+  terminalEnabled: boolean;
   onToggleTerminal: () => void;
   sessionCfgOpen: boolean;
   /** 会话设置管的是单个会话的参数，没有会话时置灰。 */
@@ -139,7 +142,8 @@ export function TopBar({
       <button
         className={terminalOpen ? "tb-btn active" : "tb-btn"}
         onClick={onToggleTerminal}
-        title="终端面板"
+        disabled={!terminalEnabled}
+        title={terminalEnabled ? "终端面板" : "先打开一个会话再用终端"}
         aria-label="终端面板"
       >
         <PanelBottomIcon />

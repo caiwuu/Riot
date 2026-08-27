@@ -425,6 +425,12 @@ pre {
   color: var(--text);
 }
 
+/* 无会话时工具窗按钮全部置灰：不亮、不响应，一眼分得出能点不能点。 */
+.tb-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
 .tb-btn.active {
   background: var(--bg-hover);
   color: var(--text);

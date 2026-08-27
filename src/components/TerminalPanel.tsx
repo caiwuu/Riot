@@ -18,11 +18,22 @@ import {
 import { type ConfirmRequest, ConfirmDialog } from "./ConfirmDialog";
 import { basename } from "../pathDisplay";
 
+/** 会话删除的广播口。面板是单例、常驻挂载，模块级单听者足够。 */
+let sessionGoneListener: ((sessionId: string) => void) | null = null;
+
+/**
+ * 会话被删除：关掉它组里的全部终端（shell 进程一起终止）。
+ * 不关的话它们成了永远不可达的孤儿 —— 组只随会话显示，会话没了。
+ */
+export function closeSessionTerminals(sessionId: string) {
+  sessionGoneListener?.(sessionId);
+}
+
 /**
  * 底部终端面板。布局照 Codex：标签栏一行（目录名做标题），下面是终端。
  *
  * 画面是 xterm.js 画的，shell 是宿主里的真 PTY —— 输出按字节流推过来，
- * 键盘原样打回去。
+ * 键盘原样打回去。标签按会话分组，只显示当前会话的组。
  *
  * `[约束]` 这个组件**常驻挂载**，收起面板只是 display:none。卸载会杀掉
  * xterm 实例，而回滚缓冲和正在跑的进程状态就存在实例里 —— 用户收起面板
@@ -32,6 +43,7 @@ import { basename } from "../pathDisplay";
 export function TerminalPanel({
   visible,
   height,
+  sessionId,
   defaultRoot,
   onHide,
   onAgentTerminal,
@@ -39,6 +51,9 @@ export function TerminalPanel({
 }: {
   visible: boolean;
   height: number;
+  /** 当前会话。终端标签按会话分组（每个会话一份工作台），切会话只换
+   *  显示的组 —— xterm 实例和 shell 进程全部保活，切回原样。 */
+  sessionId: string | null;
   /** 新标签在哪个目录开 shell。null = 家目录。 */
   defaultRoot: string | null;
   /** 用户收面板、或最后一个标签关闭。shell 不一定死，见组件注释。 */
@@ -52,6 +67,16 @@ export function TerminalPanel({
     tabs: [],
     active: null,
   });
+  // 会话删除的清理闭包要读"此刻"的标签表，ref 兜最新值。
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  /** 本会话可见的标签组。其余会话的标签留在 state 里保活，只是不画。 */
+  const groupTabs = state.tabs.filter((t) => t.sessionId === sessionId);
+  // scan 认领等长寿闭包要读最新会话，ref 兜住。
+  const sessionRef = useRef(sessionId);
+  sessionRef.current = sessionId;
+  /** 每个会话上次活跃的标签，切回来还站在原处。 */
+  const lastActiveBySession = useRef(new Map<string | null, string>());
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
   /** 共享开关被宿主拒绝。不给一行字的话，用户会以为已经共享上了。 */
   const [shareError, setShareError] = useState(false);
@@ -78,16 +103,22 @@ export function TerminalPanel({
       return next;
     });
     setState((prev) => {
-      const i = prev.tabs.findIndex((t) => t.uid === uid);
-      if (i < 0) return prev;
+      const closed = prev.tabs.find((t) => t.uid === uid);
+      if (!closed) return prev;
       const tabs = prev.tabs.filter((t) => t.uid !== uid);
-      if (tabs.length === 0) {
-        // 最后一个标签关掉 = 收起面板，和浏览器面板关最后一页同一个逻辑
+      const group = tabs.filter((t) => t.sessionId === closed.sessionId);
+      if (group.length === 0 && closed.sessionId === sessionRef.current) {
+        // 本会话最后一个标签关掉 = 收起面板（别的会话的组不受影响）。
         onHide();
         return { tabs, active: null };
       }
-      const active =
-        prev.active === uid ? (tabs[Math.min(i, tabs.length - 1)]?.uid ?? null) : prev.active;
+      // 关的是正在看的：激活同组相邻标签（原顺序里被关标签的近邻）。
+      let active = prev.active;
+      if (prev.active === uid) {
+        const groupBefore = prev.tabs.filter((t) => t.sessionId === closed.sessionId);
+        const gi = groupBefore.findIndex((t) => t.uid === uid);
+        active = group[Math.min(gi, group.length - 1)]?.uid ?? null;
+      }
       return { tabs, active };
     });
   };
@@ -95,6 +126,19 @@ export function TerminalPanel({
   // 用 ref 兜住最新值，免得回调里捕获的是旧 props。
   const closeRef = useRef(closeTab);
   closeRef.current = closeTab;
+
+  // 会话被删除 → 它的终端组整个关掉（进程终止）。不问"忙不忙"：
+  // 删除会话本身已经过确认，工作台跟着走。
+  useEffect(() => {
+    sessionGoneListener = (sid) => {
+      const doomed = stateRef.current.tabs.filter((t) => t.sessionId === sid);
+      for (const t of doomed) closeRef.current(t.uid);
+      lastActiveBySession.current.delete(sid);
+    };
+    return () => {
+      sessionGoneListener = null;
+    };
+  }, []);
 
   /**
    * 用户点关闭。和 closeTab 分开：closeTab 是无条件收尾（exit 事件也走它），
@@ -125,9 +169,15 @@ export function TerminalPanel({
   };
 
   const addTab = (root: string | null) => {
-    // 标题去重要看现有标签，所以 mkTab 挪进 updater 里拿最新的 tabs
+    // 标题去重要看现有标签，所以 mkTab 挪进 updater 里拿最新的 tabs。
+    // 去重只看本会话的组 —— 别的会话里的同名标签互相看不见，撞了无碍。
     setState((prev) => {
-      const tab = mkTab(root, prev.tabs);
+      const sid = sessionRef.current;
+      const tab = mkTab(
+        root,
+        prev.tabs.filter((t) => t.sessionId === sid),
+        sid,
+      );
       return { tabs: [...prev.tabs, tab], active: tab.uid };
     });
   };
@@ -156,16 +206,26 @@ export function TerminalPanel({
             const claimed = new Set(prev.tabs.flatMap((t) => (t.hostId == null ? [] : [t.hostId])));
             const add = fresh
               .filter((t) => !claimed.has(t.id))
-              .map((t) => adoptTab(t.id, t.title));
+              // 服务归它的会话（宿主记的 owner）。owner 缺失时归当前
+              // 会话 —— 至少让用户立刻看得见，好过丢进不可见的组。
+              .map((t) => adoptTab(t.id, t.title, t.owner ?? sessionRef.current));
             if (add.length === 0) return prev;
             // 不抢 active —— 用户正看着/用着当前标签，服务在后台认领即可，
-            // 面板底部会亮出"模型"标签作为线索。只有面板原本空着（没有
-            // 任何标签）时才切过去，否则会打断正在进行的操作。
-            const last = add[add.length - 1];
-            const active = prev.active == null && last ? last.uid : prev.active;
+            // 面板底部会亮出"模型"标签作为线索。只有当前会话的组原本
+            // 空着、且新服务就属于当前会话时才切过去。
+            const sid = sessionRef.current;
+            const groupHasActive = prev.tabs.some(
+              (t) => t.sessionId === sid && t.uid === prev.active,
+            );
+            const lastOwn = [...add].reverse().find((t) => t.sessionId === sid);
+            const active = !groupHasActive && lastOwn ? lastOwn.uid : prev.active;
             return { tabs: [...prev.tabs, ...add], active };
           });
-          agentRef.current?.();
+          // 弹面板只为当前会话的服务 —— 别的会话起的服务在这里不可见，
+          // 弹出来只会让人对着无关的组困惑。
+          if (fresh.some((t) => (t.owner ?? sessionRef.current) === sessionRef.current)) {
+            agentRef.current?.();
+          }
         })
         .catch(() => {
           // 宿主还没起来 / 命令被拒。下一轮再说。
@@ -179,20 +239,49 @@ export function TerminalPanel({
     };
   }, []);
 
-  // 面板打开且一个标签都没有 → 自动开一个。第一次点开就该能用，
-  // 而不是先看到一个空面板再去找"+"。
+  // 面板打开且本会话组一个标签都没有 → 自动开一个。第一次点开就该
+  // 能用，而不是先看到一个空面板再去找"+"。欢迎页（无会话）不开 ——
+  // 终端组必须归属某个会话。
   //
   // 守卫写在函数式更新里：StrictMode 会把 effect 连跑两遍，第二遍的
-  // updater 看到的是第一遍之后的状态（tabs 已经有了）—— 直接在 effect
+  // updater 看到的是第一遍之后的状态（组里已经有了）—— 直接在 effect
   // 体里调 addTab 的写法会开出两个终端。
   useEffect(() => {
-    if (!visible) return;
-    const tab = mkTab(defaultRoot);
-    setState((prev) =>
-      prev.tabs.length > 0 ? prev : { tabs: [tab], active: tab.uid },
-    );
+    if (!visible || sessionId == null) return;
+    setState((prev) => {
+      const sid = sessionRef.current;
+      const group = prev.tabs.filter((t) => t.sessionId === sid);
+      if (group.length > 0) return prev;
+      const tab = mkTab(defaultRoot, [], sid);
+      return { tabs: [...prev.tabs, tab], active: tab.uid };
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible, state.tabs.length]);
+  }, [visible, sessionId, groupTabs.length]);
+
+  // 切会话：active 校正到目标会话的组里 —— 上次在那个会话看的标签，
+  // 没有记录就取组内最后一个，组空就置空（上面的 effect 会自动开新的）。
+  useEffect(() => {
+    setState((prev) => {
+      const cur = prev.tabs.find((t) => t.uid === prev.active);
+      if (cur && cur.sessionId === sessionId) return prev;
+      const group = prev.tabs.filter((t) => t.sessionId === sessionId);
+      const remembered = lastActiveBySession.current.get(sessionId);
+      const target =
+        (remembered && group.some((t) => t.uid === remembered) && remembered) ||
+        group[group.length - 1]?.uid ||
+        null;
+      return { ...prev, active: target };
+    });
+  }, [sessionId]);
+
+  // 记住每个会话正看着哪个标签，切回来还站在原处。
+  useEffect(() => {
+    if (!state.active) return;
+    const tab = state.tabs.find((t) => t.uid === state.active);
+    if (tab && tab.sessionId === sessionId) {
+      lastActiveBySession.current.set(sessionId, state.active);
+    }
+  }, [state.active, state.tabs, sessionId]);
 
   // 显示/切标签/改高度之后重新量尺寸。display:none 期间 xterm 量不到
   // 自己，切回来那一拍必须补一次 fit，否则列数还是上次的。
@@ -382,7 +471,7 @@ export function TerminalPanel({
           if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) e.currentTarget.scrollLeft += e.deltaY;
         }}
       >
-        {state.tabs.map((t) => (
+        {groupTabs.map((t) => (
           <button
             key={t.uid}
             className={t.uid === state.active ? "term-tab active" : "term-tab"}
@@ -483,11 +572,16 @@ export function TerminalPanel({
       </div>
 
       <div className="term-body">
+        {/* slot 渲染**全部**标签（含别的会话的）：xterm 实例和回滚缓冲
+            都活在 DOM 里，跨会话也保活，切回原样。显示只认"本组且激活"。 */}
         {state.tabs.map((t) => (
           <div
             key={t.uid}
             className="term-slot"
-            style={{ display: t.uid === state.active ? undefined : "none" }}
+            style={{
+              display:
+                t.uid === state.active && t.sessionId === sessionId ? undefined : "none",
+            }}
             ref={(el) => {
               if (el) mount(t, el);
             }}
@@ -503,6 +597,8 @@ interface Tab {
   uid: string;
   title: string;
   root: string | null;
+  /** 归属的会话（每个会话一份终端组）。null = 没有会话时开的。 */
+  sessionId: string | null;
   /** 已经在宿主那边跑着的终端（模型起的服务）。挂上去而不是新开。 */
   hostId?: number;
   /** 模型起的服务（不是用户自己开的 shell）。 */
@@ -513,7 +609,7 @@ interface Tab {
   shared?: boolean;
 }
 
-function mkTab(root: string | null, existing: Tab[] = []): Tab {
+function mkTab(root: string | null, existing: Tab[], sessionId: string | null): Tab {
   // 同目录开出来的标签标题一模一样，撞了就加序号 —— 三个"Riot"
   // 并排时用户只能挨个点开猜哪个是哪个。
   const base = (root ? basename(root) : "") || "终端";
@@ -523,15 +619,17 @@ function mkTab(root: string | null, existing: Tab[] = []): Tab {
     uid: `t-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     title,
     root,
+    sessionId,
   };
 }
 
-/** 认领一个模型起的终端。 */
-function adoptTab(hostId: number, title: string): Tab {
+/** 认领一个模型起的终端，归进它所属会话的组。 */
+function adoptTab(hostId: number, title: string, sessionId: string | null): Tab {
   return {
     uid: `t-agent-${hostId}`,
     title,
     root: null,
+    sessionId,
     hostId,
     fromAgent: true,
   };
