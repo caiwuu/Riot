@@ -733,43 +733,12 @@ mod tests {
             std::sync::Arc::new(active),
         );
 
-        let run = |target: std::path::PathBuf| {
-            let r = &runner;
-            let cwd = base.clone();
-            async move {
-                r.run(
-                    ProcessSpec {
-                        program: "cmd".to_owned(),
-                        args: vec![
-                            "/c".to_owned(),
-                            "echo".to_owned(),
-                            "hi".to_owned(),
-                            ">".to_owned(),
-                            target.display().to_string(),
-                        ],
-                        cwd,
-                        env: Vec::new(),
-                        timeout_ms: Some(10_000),
-                        sandbox_exempt: false,
-                    },
-                    CancellationToken::new(),
-                )
-                .await
-                .expect("跑得起来")
-            }
-        };
-
-        let inside = work.join("in.txt");
-        let ok = run(inside.clone()).await;
-        assert_eq!(ok.exit_code, 0, "工作区内该写得进：{}", ok.stderr);
-        assert!(inside.exists());
-
-        let out_file = outside.join("out.txt");
-        let denied = run(out_file.clone()).await;
-        assert_ne!(denied.exit_code, 0, "工作区外必须写不进");
-        assert!(!out_file.exists(), "文件不该被创建");
-
-        // 一条自定义命令的小工具，下面几个断言各用各的。
+        // `[约束]` 整条命令作为**一个** `cmd /c` 参数传，不要拆成
+        // `["/c", "echo", "hi", ">", path]`。拆开的写法依赖「谁来把 argv 重新
+        // 拼成命令行」：旧的 Low IL 后端手写 `build_command_line`、把参数裸拼
+        // 进去，于是 `>` 还是重定向；换成 srt-win 之后 argv 由它自己按
+        // CreateProcess 的规矩组装，`>` 就成了 echo 的字面参数 —— 命令照样
+        // 退出 0，文件却没建出来。这个测试为此红过一次。
         let exec = |cmd: &str| {
             let r = &runner;
             let cwd = base.clone();
@@ -790,6 +759,30 @@ mod tests {
                 .expect("跑得起来")
             }
         };
+        // 重定向目标加引号：临时目录路径里可能有空格。
+        let write_probe = |p: &std::path::Path| format!("echo hi > \"{}\"", p.display());
+
+        let inside = work.join("in.txt");
+        let ok = exec(&write_probe(&inside)).await;
+        assert_eq!(
+            ok.exit_code, 0,
+            "工作区内该写得进：stdout={:?} stderr={:?}",
+            ok.stdout, ok.stderr
+        );
+        assert!(
+            inside.exists(),
+            "命令退出 0 但文件没建出来 —— 多半是重定向被当成了字面参数：stdout={:?}",
+            ok.stdout
+        );
+
+        let out_file = outside.join("out.txt");
+        let denied = exec(&write_probe(&out_file)).await;
+        assert_ne!(
+            denied.exit_code, 0,
+            "工作区外必须写不进：stdout={:?}",
+            denied.stdout
+        );
+        assert!(!out_file.exists(), "文件不该被创建");
 
         // 整套设计成立与否的单点判据：沙箱里的命令**是另一个用户在跑**。
         //
