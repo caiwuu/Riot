@@ -70,10 +70,57 @@ jobs:
       - uses: ./.github/actions/prepare-host
       - run: cargo clippy -p riot-host --all-targets -- -D warnings
       - run: cargo test -p riot-host
-      # Windows 沙箱（Restricted Token + Low IL）的后端只在这个平台编译，
-      # 本机 Mac 碰不到 —— clippy 和 token 单测都得靠这里真跑。
+      # Windows 沙箱的后端只在这个平台编译，本机 Mac 碰不到 ——
+      # clippy 和 token 单测都得靠这里真跑。
       - run: cargo clippy -p riot-runtime --all-targets -- -D warnings
       - run: cargo test -p riot-runtime
+      # vendored 的 srt-win（见 vendor/srt-win/NOTICE.md）。只编不测：
+      # 便宜，但能在每次 push 上拦住「拷进来的树编不过」这一类问题。真机
+      # 行为验证在下面的 win-sandbox-smoke，那个太重、只按需跑。
+      #
+      # 不带 --all-targets：它的单测里有一处 include_bytes! 指向上游 npm
+      # 仓库的 fixture，不在 vendored 范围内（理由见 NOTICE.md）。
+      - run: cargo clippy -p srt-win -- -D warnings
+      - run: cargo test -p srt-win --test sd_access_check_matrix
+
+  # vendored srt-win 的**真机**验证：跑上游自带的冒烟脚本。
+  #
+  # 这是本机 Mac 完全够不到的那一层。`scripts/check-windows-sandbox.sh` 只能
+  # 证明 FFI 签名和类型对得上；「建出来的账户是不是真的建了、ACE 写下去沙箱
+  # 账户是不是真能写那棵树、受限令牌起的进程是不是真被关住」只有这里说了算。
+  #
+  # `[约束]` 这些脚本是**破坏性**的：真的建本地用户账户、装机器级 WFP 过滤
+  # 器、改 ACL。所以只在一次性的 runner 上跑，而且收尾的 cleanup 必须
+  # `if: always()` —— 中途 throw 的话残留会留在机器上（上游的 cleanup.ps1
+  # 头注释就是这么写的）。
+  #
+  # 各脚本用的是**互不相同的测试专用 sublayer GUID**，都不是生产默认值，
+  # cleanup.ps1 的默认参数与之一一对应 —— 所以不用给它传 GUID。
+  win-sandbox-smoke:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # release：冒烟脚本要起真进程、等超时，debug 构建慢到会把
+      # smoke-kill 的时序断言压垮。
+      - run: cargo build -p srt-win --release
+      - name: 安装/卸载生命周期
+        run: pwsh vendor/srt-win/ci/smoke.ps1 target\release\srt-win.exe
+      - name: 沙箱内执行（受限令牌 + job + 桌面）
+        run: pwsh vendor/srt-win/ci/smoke-exec.ps1 target\release\srt-win.exe
+      - name: 附加 ACE 的授予与回收
+        run: pwsh vendor/srt-win/ci/smoke-aces.ps1 target\release\srt-win.exe
+      - name: 进程树清理
+        run: pwsh vendor/srt-win/ci/smoke-kill.ps1 target\release\srt-win.exe
+      - name: 装机期的常设 deny
+        run: pwsh vendor/srt-win/ci/smoke-ambient.ps1 target\release\srt-win.exe
+      - name: 机器级状态（HKLM + 凭证 ACL）
+        run: pwsh vendor/srt-win/ci/smoke-machine-store.ps1 target\release\srt-win.exe
+      - name: 收尾（无论成败都要跑）
+        if: always()
+        run: pwsh vendor/srt-win/ci/cleanup.ps1 target\release\srt-win.exe
 
   host-macos:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

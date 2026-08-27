@@ -1,0 +1,79 @@
+# 第三方 vendored crate，见同目录 NOTICE.md。
+#
+# `[约束]` `src/`、`tests/`、`ci/` **一行都不要改**。上游更新时的做法是整个
+# 目录重新拷一遍，改过就得逐处 rebase —— 而这是 11,315 行 Win32 代码，
+# rebase 冲突的代价远大于「不需要的功能就不调用」。
+#
+# 这个文件是唯一的改动，相对上游只有三处：
+#   1. 删掉 `[profile.release]` —— profile 只在 workspace 根生效，留着
+#      cargo 会每次构建都警告一句"将被忽略"。
+#   2. 加了下面的 `[lints]` 段，关掉 Riot 自己的项目级 clippy 规则。
+#   3. 加了这些注释。
+#
+# 依赖**故意不走** `{ workspace = true }`：`windows` 那张 feature 表比 Riot
+# 自己用的大得多（WFP、窗口站、LSA、注册表……），合并到根 Cargo.toml 会让
+# 非沙箱代码也拖着一堆用不上的绑定，而且下次同步上游就要手工比对两张表。
+# Cargo 会把同一 semver 的 windows 解析成一份、feature 取并集。
+
+[package]
+name = "srt-win"
+version = "0.0.1"
+edition = "2024"
+publish = false
+description = "Windows network sandbox helper for sandbox-runtime"
+
+# Riot 的 clippy.toml 有项目级规则（比如禁 `SystemTime::now`，要求走注入的
+# Clock trait）。那些规则是为**我们自己的**代码定的，第三方代码没有理由遵守，
+# 而且真去改就破了「src/ 一行不动」。用 Cargo 的 lints 表在包级别关掉，
+# 源码保持逐字节一致。
+#
+# 只关项目级的自定义规则，clippy 的标准 lint 一律留着 —— 那些真报出来的话
+# 是上游的问题，值得看见。
+[lints.clippy]
+disallowed_methods = "allow"
+
+[lib]
+name = "srt_win"
+path = "src/lib.rs"
+
+[[bin]]
+name = "srt-win"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+windows = { version = "0.62.2", features = [
+  "Wdk_Foundation",
+  "Wdk_Storage_FileSystem",
+  "Win32_Foundation",
+  "Win32_System_RemoteDesktop",
+  "Win32_System_Threading",
+  "Win32_System_Memory",
+  "Win32_System_Rpc",
+  "Win32_System_SystemServices",
+  "Win32_System_JobObjects",
+  "Win32_System_StationsAndDesktops",
+  "Win32_System_Console",
+  "Win32_System_IO",
+  "Win32_System_Pipes",
+  "Win32_Graphics_Gdi",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Security_Authentication_Identity",
+  "Win32_Security_Cryptography",
+  "Win32_Storage_FileSystem",
+  "Win32_NetworkManagement_WindowsFilteringPlatform",
+  "Win32_NetworkManagement_NetManagement",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_System_Registry",
+] }
+# `bundled` 会用 cc 编译 sqlite3 amalgamation。Windows 上真编，交叉 check
+# 时由 scripts/check-windows-sandbox.sh 的 CC/AR 桩顶掉（check 不链接）。
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[dev-dependencies]
+pretty_assertions = "1"

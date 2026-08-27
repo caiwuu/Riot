@@ -2,7 +2,7 @@
 resolver = "2"
 # src-tauri 与内核共享 workspace，为的是协议类型由编译器保证一致 ——
 # 宿主和内核 depend 同一个 riot-protocol，对不上直接编译失败。
-members = ["crates/*", "src-tauri"]
+members = ["crates/*", "src-tauri", "vendor/srt-win"]
 
 # `[约束]` riot-browser 刻意**不进**这个 workspace。
 #
