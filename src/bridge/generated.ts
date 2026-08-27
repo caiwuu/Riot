@@ -389,7 +389,8 @@ export type SafetyKind =
   | "credentials"
   | "command_injection"
   | "unparseable_command"
-  | "out_of_scope";
+  | "out_of_scope"
+  | "sandbox_escape";
 /**
  * 结构化的"永久同意"。
  */
