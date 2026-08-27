@@ -797,9 +797,15 @@ mod tests {
             eprintln!("拿不到 home，跳过");
             return;
         };
+        // `[约束]` 工作区这条要**规范化后**再比。Windows 的 `temp_dir()` 本身
+        // 就在主目录下（`…\AppData\Local\Temp`），所以这条豁免是必经的；而
+        // `writable` 里的路径来自 `dedup_existing`（canonicalize 过、带 `\\?\`
+        // 扩展长度前缀），拿没规范化的原路径去比一律不匹配 —— 于是工作区
+        // 自己被当成"主目录缓存"判红。同一个前缀今天已经绊过两次了。
+        let work = dir.path().canonicalize().expect("规范化工作区");
         for w in &writable {
             assert!(
-                !w.starts_with(&home) || w.starts_with(dir.path()),
+                !w.starts_with(&home) || w.starts_with(&work),
                 "{} 在主目录下 —— 沙箱账户看不到它，授权只会白花激活时间",
                 w.display()
             );
