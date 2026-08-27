@@ -149,9 +149,39 @@ jobs:
         run: |
           target\release\srt-win.exe install
           target\release\srt-win.exe wfp uninstall
+      # 首跑挂在「exec 超时 10s、stdout/stderr 全空」上，而 win-sandbox-smoke
+      # 里的 smoke-exec.ps1 跑同一个 exec 是过的 —— 所以 exec 本身能用，差别在
+      # 我们怎么调它。三个变量：stdin 被设成 NUL、Riot 用 process-wrap 套了
+      # job object、多了 --env 覆盖。逐个探针，把猜变成数据。
+      #
+      # continue-on-error + timeout-minutes：让三条都跑完再看，别第一条挂住就
+      # 没了后面的信息。
+      - name: 探针 A｜裸调 exec（对照 smoke 的调用方式）
+        continue-on-error: true
+        timeout-minutes: 2
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          target\release\srt-win.exe exec --quiet -- cmd /c "echo hello-from-sandbox"
+          "A: exit=$LASTEXITCODE elapsed=$([int]$sw.Elapsed.TotalSeconds)s"
+      - name: 探针 B｜stdin 接 NUL
+        continue-on-error: true
+        timeout-minutes: 2
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          cmd /c "target\release\srt-win.exe exec --quiet -- cmd /c ""echo hello-nul"" < NUL"
+          "B: exit=$LASTEXITCODE elapsed=$([int]$sw.Elapsed.TotalSeconds)s"
+      - name: 探针 C｜带 --env 覆盖
+        continue-on-error: true
+        timeout-minutes: 2
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          target\release\srt-win.exe exec --quiet --env "TMP=$env:RUNNER_TEMP" --env "TEMP=$env:RUNNER_TEMP" --env "TMPDIR=$env:RUNNER_TEMP" -- cmd /c "echo hello-env & echo TMP=%TMP%"
+          "C: exit=$LASTEXITCODE elapsed=$([int]$sw.Elapsed.TotalSeconds)s"
       - name: 编排层端到端
         env:
           RIOT_SRT_WIN: ${{ github.workspace }}\target\release\srt-win.exe
+        # 这条超时短一点：挂住的话 10s 就能拿到结论，不用等 job 级超时。
+        timeout-minutes: 10
         run: cargo test -p riot-runtime windows_经装配路径的沙箱边界 -- --nocapture
       - name: 收尾（无论成败都要跑）
         if: always()

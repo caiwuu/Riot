@@ -759,6 +759,29 @@ mod tests {
                 .expect("跑得起来")
             }
         };
+        // 热身探针：一条**不依赖任何授权**的命令。先把它的结果打出来（不
+        // 断言），好把「沙箱里能不能跑命令」和「授权对不对」分开。
+        //
+        // 首跑失败时看到的是 exit=124（超时）+ stdout/stderr 全空，那形态
+        // 分不出是 exec 压根没起来、还是起来了但写不进去。这一条能分。
+        let warm = exec("echo probe-ok").await;
+        eprintln!(
+            "[probe] exit={} timed_out={} stdout={:?} stderr={:?}",
+            warm.exit_code, warm.timed_out, warm.stdout, warm.stderr
+        );
+        assert!(
+            !warm.timed_out,
+            "沙箱内连 `echo` 都没跑起来（超时）。这与授权无关 —— \
+             要么 srt-win exec 在这个调用环境下起不来（stdin/job object/桌面），\
+             要么参数拼错了。stdout={:?} stderr={:?}",
+            warm.stdout, warm.stderr
+        );
+        assert_eq!(
+            warm.exit_code, 0,
+            "沙箱内跑 `echo` 就失败了：stdout={:?} stderr={:?}",
+            warm.stdout, warm.stderr
+        );
+
         // 重定向目标加引号：临时目录路径里可能有空格。
         let write_probe = |p: &std::path::Path| format!("echo hi > \"{}\"", p.display());
 
