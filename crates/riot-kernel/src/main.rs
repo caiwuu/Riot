@@ -18,8 +18,37 @@ fn install_panic_hook() {
     }));
 }
 
+/// Windows 沙箱的 multicall 分发。
+///
+/// Windows 沙箱靠 vendored 的 `srt-win` 落地（见
+/// `riot_runtime::sandbox_win`）。它既是库也是 CLI,上游为「链接进宿主的
+/// 二进制、按 `argv[1]` 分发」这条路专门导出了
+/// `SRT_WIN_DISPATCH_ARG1` + `run_from_args`。走这条就不用额外发一个
+/// `srt-win.exe`,少一个要签名、要打包、要和主程序保持同版本的产物。
+///
+/// `[约束]` 必须抢在**一切**之前 —— 日志、panic hook、tokio 运行时都不能
+/// 先跑。这条路径上进程的身份是「srt-win 的 broker 或 runner」,不是内核:
+/// 它要读 stdin 上的 RunnerCmd、把子进程输出泵回自己的 stdio,任何抢先
+/// 写 stderr 的东西都会污染那条通道。
+///
+/// 分发不上也不会静默出错:`sandbox_win::activate` 起手就是一次
+/// `user status`,那一步失败就返回 None,决策链退回逐条询问。
+#[cfg(windows)]
+fn dispatch_srt_win() {
+    use std::ffi::OsStr;
+    if std::env::args_os().nth(1).as_deref() == Some(OsStr::new(srt_win::SRT_WIN_DISPATCH_ARG1)) {
+        std::process::exit(srt_win::run_from_args(std::env::args_os()));
+    }
+}
+
+fn main() {
+    #[cfg(windows)]
+    dispatch_srt_win();
+    kernel_main();
+}
+
 #[tokio::main]
-async fn main() {
+async fn kernel_main() {
     // `[约束]` 日志走 stderr。stdout 是 JSON-RPC 协议通道,一行日志混进去
     // 就会被宿主的读取器当成非法 JSON。宿主的 supervisor 已经把内核 stderr
     // 接进它自己的 tracing。
@@ -32,10 +61,10 @@ async fn main() {
 
     install_panic_hook();
 
-    // 上次崩溃可能留下带 Low 标签的目录(Windows 沙箱;非 Windows 空操作)。
-    // 必须赶在任何会话激活之前收干净 —— 残留标签让全机所有低完整性进程
-    // 都能写那些目录。同机双开时由独占锁跳过,不会踩活着的那个。
-    riot_runtime::recover_orphan_labels(&riot_kernel::config::sandbox_ledger_path());
+    // 上次崩溃可能给沙箱账户留下没回收的 ACE(Windows 沙箱;非 Windows
+    // 空操作)。赶在任何会话激活之前收一次 —— 跨进程互斥由 srt-win 自己的
+    // 状态库负责,同机双开不会踩到对方还在用的授权。
+    riot_runtime::recover_orphan_sandbox_state();
 
     // 会话 transcript 的落盘目录。宿主 spawn 内核时通过 RIOT_SESSIONS_DIR 传入
     // (决策:配置/路径由宿主定)。缺省给一个临时目录,只用于脱离宿主的调试。

@@ -23,6 +23,12 @@ url = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
 
+# 只为一条测试：钉住 `sandbox_win` 里写死的分发标记和上游常量一致。
+# 编排本身不链接它 —— 走的是 multicall 子进程（见 sandbox_win 模块头），
+# 链接它的是内核和宿主两个**二进制**。
+[target.'cfg(windows)'.dev-dependencies]
+srt-win = { path = "../../vendor/srt-win" }
+
 [dev-dependencies]
 libc = "0.2.189"
 pretty_assertions = { workspace = true }

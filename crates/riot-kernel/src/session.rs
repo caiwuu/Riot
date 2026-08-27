@@ -1328,28 +1328,13 @@ impl Session {
             if cached.policy == policy {
                 return Some(Arc::clone(&cached.active));
             }
-            // 策略换了。先把旧的放掉（Drop 会归还标签引用）再激活新的 ——
-            // 反过来的话两套标签会同时挂着，中间那段时间的可写面是两者之和。
+            // 策略换了。先把旧的放掉（Drop 会回收 Windows 那侧的授权）再
+            // 激活新的 —— 反过来的话两套授权会同时挂着，中间那段时间的
+            // 可写面是两者之和。
             *slot = None;
         }
 
-        // Low 标签清单放配置目录，全局一份（标签是全机器状态，孤儿回收
-        // 统一）。macOS 忽略这个 setup。now_ms 走真实时钟：它只进清单做
-        // 诊断，不参与任何黄金回放。
-        let ledger_path = crate::config::sandbox_ledger_path();
-        #[allow(clippy::disallowed_methods)]
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let active = Arc::new(
-            policy
-                .clone()
-                .activate(riot_runtime::SandboxSetup {
-                    ledger_path,
-                    now_ms,
-                })?,
-        );
+        let active = Arc::new(policy.clone().activate()?);
         *slot = Some(CachedSandbox {
             policy,
             active: Arc::clone(&active),

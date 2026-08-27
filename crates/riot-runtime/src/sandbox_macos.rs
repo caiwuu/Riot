@@ -99,7 +99,9 @@ pub(crate) fn profile(policy: &SandboxPolicy) -> String {
     // deny 按路径匹配，不要求文件存在：连"创建一个新的 config.toml"
     // 一并挡住（实测），所以 macOS 不需要 Windows 那样的预建。
     if let Some((_, protected)) = crate::sandbox::cargo_protected() {
-        p.push_str(&deny_section(protected.iter().map(|pp| pp.path.as_path())));
+        p.push_str(&deny_section(
+            protected.iter().map(std::path::PathBuf::as_path),
+        ));
     }
 
     p.push_str(&unix_socket_section());

@@ -18,21 +18,16 @@
 pub mod fs;
 pub mod proc;
 pub mod sandbox;
-// 跨平台：Windows spawn 的命令行 / 环境块拼接（纯字符串逻辑，见文件头）。
-// 同 sandbox_labels，只有 Windows 后端用，但不门控平台好让 mac 测。
-pub mod sandbox_cmdline;
-// 跨平台：Low 标签清单的孤儿回收逻辑，任何平台都能测（见文件头）。
-// 当前只有 Windows 后端会用它，但纯逻辑不门控平台，好让 mac 也跑测试。
-pub mod sandbox_labels;
 #[cfg(target_os = "macos")]
 pub mod sandbox_macos;
-#[cfg(windows)]
+// **不**门控平台。改成编排 srt-win 之后，这个模块里几乎没有 Win32 了 ——
+// 命令行拼装、grant 载荷、装机状态解析全是纯逻辑，而那些正是最容易写错、
+// 又最该在开发机上测的部分。只有「起子进程」那一下是 Windows 专属的，
+// 由 CI 的真机冒烟兜底。
 pub mod sandbox_win;
 pub mod web;
 
 pub use fs::{MemoryFileState, SystemFs};
 pub use proc::SystemProcessRunner;
-pub use sandbox::{
-    ActiveSandbox, SandboxPolicy, SandboxSetup, SandboxedRunner, recover_orphan_labels,
-};
+pub use sandbox::{ActiveSandbox, SandboxPolicy, SandboxedRunner, recover_orphan_sandbox_state};
 pub use web::SystemWebClient;

@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+# Windows 沙箱的底层实现（vendored，见 vendor/srt-win/NOTICE.md）。内核这里
+# 只用它一件事：`main.rs` 的 multicall 分发。真正的编排在 riot-runtime 的
+# `sandbox_win`，它通过 `current_exe()` 回头调这个二进制。
+[target.'cfg(windows)'.dependencies]
+srt-win = { path = "../../vendor/srt-win" }
+
 [dependencies]
 riot-core = { workspace = true }
 riot-mcp = { workspace = true }

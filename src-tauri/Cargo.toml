@@ -64,6 +64,10 @@ similar = { version = "3.1.2", default-features = false, features = ["text", "in
 tauri-plugin-notification = "2.3.3"
 
 [target.'cfg(windows)'.dependencies]
+# Windows 沙箱的底层实现（vendored，见 vendor/srt-win/NOTICE.md）。宿主这里
+# 只用它一件事：main.rs 的 multicall 分发。阶段 A 内核嵌在宿主进程里，
+# riot-runtime 的 sandbox_win 拿 current_exe() 回头调的就是这个二进制。
+srt-win = { path = "../vendor/srt-win" }
 # DataExchange/Ole/Shell 三个是读剪贴板里的 CF_HDROP 用的（见 src/pasteboard.rs）。
 # Dwm/Gdi/Controls/WindowsAndMessaging 是侧栏的系统材质（见 src/vibrancy.rs）：
 # Gdi 只为了 DWM_BLURBEHIND 里的 HRGN，Controls 只为了 MARGINS，

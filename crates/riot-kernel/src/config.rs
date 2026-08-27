@@ -1092,17 +1092,6 @@ pub fn config_path() -> PathBuf {
         .join("config.json")
 }
 
-/// 沙箱 Low 标签清单的落盘位置，全局一份。
-///
-/// 标签是全机器状态（Windows 上打在目录对象上），清单跟着全局：会话
-/// 装配（每轮 activate）和内核启动的孤儿回收都按这一条路径走 ——
-/// 两处各拼一遍的话，改了一处回收就会盯着一个空文件收不到东西。
-pub fn sandbox_ledger_path() -> PathBuf {
-    config_path()
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join("sandbox-labels.json")
-}
 
 /// 所有会话的浏览器 profile 都放在这个目录下，一个会话一个子目录。
 ///

@@ -1262,7 +1262,7 @@ Rust 这里有生态优势:`tree-sitter` 和 `tree-sitter-bash` 都是原生 cra
 `[约束]` 沙箱(OS 强制)和权限规则(策略)是两层,不要混。
 
 - macOS:`sandbox-exec` / seatbelt profile(**已落地**,`riot-runtime/src/sandbox.rs`)
-- Windows:Restricted Token + Low IL(**已落地**,见 `docs/SANDBOX_WINDOWS.md`;那份文档解释了为什么不是 AppContainer)
+- Windows:专用本地账户 + 附加 ACE,底层是 vendored 的 `srt-win`(**已落地**,见 `docs/SANDBOX_WINDOWS.md`;那份文档记了为什么从 Low IL 换过来)
 - Linux:bubblewrap + seccomp(未排期)
 
 沙箱内的 Bash 可以自动放行(既然 OS 层已经挡住了),模型也可以显式请求出沙箱(需要用户同意)。

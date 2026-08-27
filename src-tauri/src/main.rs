@@ -13,6 +13,16 @@ fn main() {
             let prompt = args.collect::<Vec<_>>().join(" ");
             std::process::exit(riot_host_lib::run_askpass(&prompt));
         }
+        // Windows 沙箱的 broker / runner。阶段 A 里内核嵌在宿主进程里，
+        // `sandbox_win` 拿 `current_exe()` 回头调的就是这个二进制。
+        //
+        // `[约束]` 要把**完整**的 args_os 交给它，包括 argv[0] 和这个
+        // `--srt-win` —— 它自己按 argv[1] 判断并剥掉。这条路径上不能有
+        // 任何别的输出：runner 的 stdio 是 broker 的管道。
+        #[cfg(windows)]
+        Some(a) if a == srt_win::SRT_WIN_DISPATCH_ARG1 => {
+            std::process::exit(srt_win::run_from_args(std::env::args_os()));
+        }
         _ => riot_host_lib::run(),
     }
 }
