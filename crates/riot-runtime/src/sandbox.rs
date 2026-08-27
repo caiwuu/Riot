@@ -723,6 +723,15 @@ mod tests {
             writable: vec![work.clone()],
             allow_network: true,
         };
+        // `[约束]` 装 subscriber，否则 `activate` 失败的原因（全走
+        // `tracing::warn!`）会被静默丢掉 —— 而这条测试只在 CI 的 Windows 上
+        // 跑，日志是唯一的断案材料。`try_init` 而不是 `init`：同进程里别的
+        // 测试可能已经装过。
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::DEBUG)
+            .try_init();
+
         let activated = policy.activate();
         // `[约束]` CI 里必须失败得响亮。`activate` 返回 None 有两个原因：
         // 没装（开发机的常态，该跳过），或者装了但冒烟没过（真问题）。这两个

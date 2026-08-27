@@ -181,9 +181,25 @@ jobs:
       # 它对工作目录所在盘调 GetDriveTypeW，DRIVE_REMOTE(4) 就拒绝启动
       # （seclogon 给沙箱账户建的登录会话里没有 per-user 盘符映射）。这台
       # runner 上 C:\ 报的正是 4，所以要知道哪个盘是本地盘。
-      - name: 诊断｜盘符类型（3=本地 4=网络）
+      - name: 诊断｜盘符类型（3=本地 4=网络）与装机状态
         continue-on-error: true
-        run: Get-CimInstance Win32_LogicalDisk | Select-Object DeviceID, DriveType, ProviderName | Format-Table
+        run: |
+          Get-CimInstance Win32_LogicalDisk | Select-Object DeviceID, DriveType, ProviderName | Format-Table
+          "TEMP=$env:TEMP"
+          "RUNNER_TEMP=$env:RUNNER_TEMP"
+          # activate 的第一步就是读它：cred_present 必须 true、
+          # marker_user_sid 必须有值，否则直接判定「没装」。
+          "--- srt-win user status ---"
+          target\release\srt-win.exe user status
+          # 从 RUNNER_TEMP（测试 cwd 的同一个盘）起一条，确认 exec 在那个
+          # 工作目录下走得通。exe 路径要先取绝对的 —— Push-Location 之后
+          # 相对路径就指不到了。
+          $exe = Join-Path $PWD "target\release\srt-win.exe"
+          "--- exec with cwd=$env:RUNNER_TEMP ---"
+          Push-Location $env:RUNNER_TEMP
+          & $exe exec --quiet -- cmd /c "cd"
+          "exec exit=$LASTEXITCODE"
+          Pop-Location
       - name: 编排层端到端
         env:
           RIOT_SRT_WIN: ${{ github.workspace }}\target\release\srt-win.exe

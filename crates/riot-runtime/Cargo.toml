@@ -34,3 +34,7 @@ libc = "0.2.189"
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+# 沙箱激活失败的原因只走 `tracing::warn!`。测试进程默认没有 subscriber，
+# 那些原因会被直接丢掉 —— 而 Windows 沙箱恰恰是最依赖这些原因的地方
+# （本机是 Mac，只能靠 CI 日志断案）。
+tracing-subscriber = { workspace = true }
