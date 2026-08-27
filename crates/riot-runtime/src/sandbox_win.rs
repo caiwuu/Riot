@@ -265,18 +265,23 @@ pub(crate) fn activate(policy: &crate::sandbox::SandboxPolicy) -> Option<WinSand
     let mut granted = writable.clone();
     granted.push(session_temp.clone());
 
-    // 分步计时。`acl grant` 会把可继承 ACE 传播到**已有子对象**，而
-    // `~/.cargo\registry` 动辄几万文件 —— CI 上量到整个 activate 17.8s。
+    // `[约束]` 读也要显式授权。见 `tool_reads`：Windows 上「读」不是默认
+    // 开着的，PATH 上解析得到的 per-user 工具链（rustup 那套）如果不给读+
+    // 执行权，沙箱里连 `where cargo` 都退 1。
+    let reads = tool_reads();
+
+    // 分步计时。`acl grant` 会把可继承 ACE 传播到**已有子对象**，树大就慢。
     // 光一个总数说不清是 grant 还是 stamp 贵，而这两条的优化方向完全不同。
     let t_grant = std::time::Instant::now();
-    if let Err(e) = grant(&srt, &sid, &granted) {
-        tracing::warn!(error = %e, "给沙箱账户授权可写目录失败,本轮不隔离");
+    if let Err(e) = grant(&srt, &sid, &granted, &reads) {
+        tracing::warn!(error = %e, "给沙箱账户授权目录失败,本轮不隔离");
         let _ = std::fs::remove_dir_all(&session_temp);
         return None;
     }
     tracing::info!(
         elapsed_ms = t_grant.elapsed().as_millis() as u64,
-        paths = granted.len(),
+        write = granted.len(),
+        read = reads.len(),
         "acl grant 完成"
     );
 
@@ -575,12 +580,39 @@ fn stamp_payload(paths: &[String]) -> String {
     serde_json::json!({ "denyRead": [], "denyWrite": paths }).to_string()
 }
 
-fn grant_payload(paths: &[PathBuf]) -> String {
-    let write: Vec<String> = paths
+fn grant_payload(write: &[PathBuf], read: &[PathBuf]) -> String {
+    let s = |v: &[PathBuf]| -> Vec<String> {
+        v.iter().map(|p| p.to_string_lossy().into_owned()).collect()
+    };
+    serde_json::json!({ "read": s(read), "write": s(write) }).to_string()
+}
+
+/// 主目录下**只读**就够的东西：per-user 装的工具链。
+///
+/// `[约束]` Windows 没有「读默认放开」这回事。macOS 的 seatbelt 包住同一个
+/// 进程，读全开、只收紧写；Windows 换成专用账户之后，能不能读某个对象完全
+/// 由那个对象的 ACL 说了算，而真实用户的 profile 只授权给他本人 ——
+/// `BUILTIN\Users` 一点权限都没有。于是 PATH 上解析得到的
+/// `C:\Users\<真人>\.cargo\bin\cargo.exe` **打不开**，沙箱里的 Rust 全废。
+///
+/// 这一条踩过：清空可写缓存表时我按 macOS 的直觉判断「读不受限，构建不依赖
+/// 那张表」，结果连 `where cargo` 都退 1 —— 之前能跑，靠的正是那张表的
+/// write grant **顺带**给出的读+执行权。
+///
+/// 所以拆成两列：工具链走 `read`（`FILE_GENERIC_READ|EXECUTE`），缓存走
+/// `write`。只读的授权不构成逃逸面 —— 改不了 `cargo.exe` 就换不到沙箱外的
+/// 执行权，`stamp` 那一整套也就不必跟上来。
+fn tool_reads() -> Vec<PathBuf> {
+    let Some(home) = crate::sandbox::home_dir() else {
+        return Vec::new();
+    };
+    // 只列 per-user 装的工具链根。机器级安装（`C:\Program Files\…`）本来就
+    // 对 `Users` 开着读+执行，不用授权。
+    [".cargo\\bin", ".rustup"]
         .iter()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect();
-    serde_json::json!({ "read": [], "write": write }).to_string()
+        .map(|p| home.join(p))
+        .filter(|p| p.exists())
+        .collect()
 }
 
 /// 从 `srt-win user status` 的 JSON 里取沙箱账户 SID。
@@ -609,7 +641,7 @@ fn sandbox_user_sid(srt: &SrtWin) -> std::io::Result<Option<String>> {
     )?))
 }
 
-fn grant(srt: &SrtWin, sid: &str, paths: &[PathBuf]) -> std::io::Result<()> {
+fn grant(srt: &SrtWin, sid: &str, write: &[PathBuf], read: &[PathBuf]) -> std::io::Result<()> {
     let pid = std::process::id().to_string();
     run_srt(
         srt,
@@ -621,7 +653,7 @@ fn grant(srt: &SrtWin, sid: &str, paths: &[PathBuf]) -> std::io::Result<()> {
             "--sandbox-user-sid",
             sid,
         ],
-        Some(&grant_payload(paths)),
+        Some(&grant_payload(write, read)),
     )
     .map(drop)
 }
@@ -882,13 +914,35 @@ mod tests {
         );
     }
 
+    /// 读和写是**两列**，不能混。
+    ///
+    /// 混进 write 的后果不是多给点权限那么轻：`.cargo\bin` 一旦可写，沙箱就
+    /// 能顶掉用户 PATH 上的 `cargo.exe`，而那是沙箱**外**的执行权 —— 于是
+    /// 又要把 `acl stamp` 那一整套 DENY 拉回来。只读则完全没有这个问题。
     #[test]
-    fn grant_载荷只给写不给读() {
-        let p = grant_payload(&[PathBuf::from("/a"), PathBuf::from("/b")]);
+    fn grant_载荷把读和写分开列() {
+        let p = grant_payload(
+            &[PathBuf::from("/w1"), PathBuf::from("/w2")],
+            &[PathBuf::from("/r1")],
+        );
         let v: serde_json::Value = serde_json::from_str(&p).expect("合法 JSON");
-        assert_eq!(v["read"].as_array().expect("read 是数组").len(), 0);
-        assert_eq!(v["write"][0], "/a");
-        assert_eq!(v["write"][1], "/b");
+        assert_eq!(v["write"][0], "/w1");
+        assert_eq!(v["write"][1], "/w2");
+        assert_eq!(v["read"][0], "/r1");
+        assert_eq!(v["read"].as_array().expect("read 是数组").len(), 1);
+    }
+
+    /// 工具链只进读列。进了写列就是逃逸面 —— 见上一条。
+    #[test]
+    fn 工具链只读不写() {
+        for p in tool_reads() {
+            let name = p.to_string_lossy().to_lowercase();
+            assert!(
+                name.ends_with(".rustup") || name.ends_with("\\bin"),
+                "只该列 per-user 工具链根：{}",
+                p.display()
+            );
+        }
     }
 
     /// 授权了 `~/.cargo`，就必须筛出它的敏感面。

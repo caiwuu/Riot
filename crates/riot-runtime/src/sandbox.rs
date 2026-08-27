@@ -1362,6 +1362,22 @@ mod tests {
             "[cache] rustup 怎么找到工具链的：exit={} stdout={} stderr={}",
             rust_env.exit_code, rust_env.stdout, rust_env.stderr
         );
+        // `[约束]` 这条必须**硬断言**，不能只打印。
+        //
+        // 它守的是「PATH 上解析得到的 per-user 工具链，沙箱里打得开」——
+        // 一条只有真机能回答、而且已经被打断过一次的性质：清空可写缓存表时
+        // 我按 macOS 的直觉认为「读不受限」，结果连 `where cargo` 都退 1。
+        // 那一轮 e2e 是**绿的**，因为它只断言「真实用户的 .cargo 写不进」，
+        // 而在工具完全跑不了时那同样成立。
+        //
+        // 不联网、确定性强，没有 flake 空间。
+        assert_eq!(
+            rust_env.exit_code, 0,
+            "沙箱里够不到 rustup 工具链 —— PATH 上解析得到但打不开。\
+             Windows 的读不是默认放开的，per-user 装的工具链要显式给读+执行权\
+             （见 sandbox_win::tool_reads）。stdout={} stderr={}",
+            rust_env.stdout, rust_env.stderr
+        );
 
         // 真构建。带一个依赖，因为要验的正是「registry 写得进去吗」——
         // 无依赖的 crate 碰不到缓存，验了等于没验。
@@ -1382,6 +1398,15 @@ mod tests {
         eprintln!(
             "[cache] 沙箱内 cargo build：exit={} timed_out={}\nstdout={}\nstderr={}",
             build.exit_code, build.timed_out, build.stdout, build.stderr
+        );
+        // 同样硬断言：整个 Windows 沙箱存在的意义就是让 agent 能在里面干活，
+        // 而「跑一次带依赖的构建」是最低限度的干活。不联网这条会挂，但这个
+        // job 更早的 `cargo build -p srt-win --release` 就已经依赖网络了 ——
+        // 网断的话轮不到这里红，所以没有额外的 flake 面。
+        assert_eq!(
+            build.exit_code, 0,
+            "沙箱里跑不了一次带依赖的 cargo build。\nstdout={}\nstderr={}",
+            build.stdout, build.stderr
         );
 
         // 决定性的一条：那个依赖的 .crate 落到谁的 registry 里了。
