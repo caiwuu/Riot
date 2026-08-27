@@ -221,12 +221,30 @@ cargo build → exit 0，stderr："Updating crates.io index / Downloaded cfg-if 
 代价是沙箱账户第一次构建要重下依赖 —— 但它的 profile 是真实目录、跨会话留着，
 所以这是**每台机器一次**，不是每会话一次。
 
-工具链不受影响：`.rustup` 本来就不在表里，沙箱内 `rustup show active-toolchain`
-照样报 `stable`（读不受限，PATH 上是真实用户的 shim）。构建能跑通这件事，从来
-没依赖过这张表。
-
 想加回来的话，光加路径没用 —— 必须同时用 `--env` 把 `CARGO_HOME` /
 `RUSTUP_HOME` / npm 那套变量显式指过去，并重新面对上面第二、三条代价。
+
+**但读要单独授权，而且不能省。** 这一条我判断错过一次，值得写下来：清空可写
+表时我按 macOS 的直觉认为「读不受限，构建不依赖那张表」—— 结果沙箱里连
+`where cargo` 都退 1。macOS 的 seatbelt 包住同一个进程，读确实全开；Windows
+换成专用账户之后，能不能读某个对象完全由它自己的 ACL 决定，而真实用户的
+profile 只授权给他本人，`BUILTIN\Users` 一点权限都没有。之前能执行
+`C:\Users\<真人>\.cargo\bin\cargo.exe`，靠的正是可写表**顺带**给出的读+执行权。
+
+所以工具链走 `acl grant` 的 **read** 那一列（`FILE_GENERIC_READ|EXECUTE`，见
+`sandbox_win::tool_reads`）：`~/.cargo\bin` 和 `~/.rustup`。只读不构成逃逸面
+—— 改不了 `cargo.exe` 就换不到沙箱外的执行权，`acl stamp` 那一整套不必跟上来。
+
+三轮实测下来的账：
+
+| | activate | 说明 |
+|---|---|---|
+| 原来（整棵 `.cargo` 可写） | 17.8s | grant 5.1s + stamp 12.7s |
+| 清空表（工具链够不着） | 0.26s | 快，但 Rust 全废 |
+| 现在（缓存不给、工具链只读） | 2.55s | grant 2.4s + stamp 0 |
+
+剩下那 2.4s 主要是 `~/.rustup` 的树传播。还能再收（只授权当前 active 的
+toolchain），但它是**每会话**一次不是每命令一次，暂时没动。
 
 ### 4.7 授权的树里要再挖掉逃逸面
 
