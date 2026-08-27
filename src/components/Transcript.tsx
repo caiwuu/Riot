@@ -54,11 +54,14 @@ export const transcriptView = new Map<string, { top: number; stick: boolean }>()
 const distFromBottom = (box: HTMLElement) => Math.max(0, -box.scrollTop);
 
 /**
- * 子层（思考正文、代码块、工具详情）还能吃掉这次滚轮吗。
- * overflow-x:auto 会把 overflow-y 算成 auto，即使竖向没溢出也像
- * 滚动容器 —— 必须看真实 overflow 量，不能只看 computed style。
+ * 这次滚轮会不会被目标和对话流之间的子层截住。
+ *
+ * 只有这种时候才自己写 scrollTop：一律 preventDefault 会关掉系统
+ * 平滑 / 触控板惯性，中间对话就一格一格跳，左边会话栏却是原生的。
+ * overflow:clip 不是滚动容器，不必接手。overflow:auto 没竖向溢出
+ * 时也不接手（overflow-x:auto 会把 overflow-y 算成 auto）。
  */
-function nestedScrollerTookWheel(start: EventTarget | null, box: HTMLElement, deltaY: number): boolean {
+function wheelNeedsHijack(start: EventTarget | null, box: HTMLElement, deltaY: number): boolean {
   let el: HTMLElement | null =
     start instanceof HTMLElement ? start : start instanceof Element ? start.parentElement : null;
   while (el && el !== box) {
@@ -69,8 +72,11 @@ function nestedScrollerTookWheel(start: EventTarget | null, box: HTMLElement, de
         const goingUp = deltaY < 0;
         const atTop = el.scrollTop <= 1;
         const atBottom = el.scrollTop >= max - 1;
-        if (!((goingUp && atTop) || (!goingUp && atBottom))) return true;
+        if ((goingUp && atTop) || (!goingUp && atBottom)) return true;
+        return false;
       }
+    } else if (oy === "hidden") {
+      return true;
     }
     el = el.parentElement;
   }
@@ -460,19 +466,20 @@ export function Transcript({
     return () => box.removeEventListener("scroll", onScroll);
   }, [sessionId]);
 
-  // 滚轮接管：子层吃不掉的滚量自己写到倒排容器上。WebView2 对
-  // overflow:hidden / clip 的链式滚动经常不交，思考过程、工具卡、
-  // 代码块上原生滚轮等于没反应。passive:false 才能 preventDefault，
-  // 免得浏览器再滚一次变成双倍。
+  // 只在子层会吞掉滚轮时才接手。平时交给浏览器，才能跟左边会话栏
+  // 一样走系统平滑和触控板惯性。passive:false 才能 preventDefault。
   useEffect(() => {
     const box = boxRef.current;
     if (!box) return;
     const onWheel = (e: WheelEvent) => {
       if (e.defaultPrevented) return;
       if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
-      if (nestedScrollerTookWheel(e.target, box, e.deltaY)) return;
+      if (!wheelNeedsHijack(e.target, box, e.deltaY)) return;
       if (box.scrollHeight - box.clientHeight < 2) return;
-      box.scrollTop += e.deltaY;
+      let dy = e.deltaY;
+      if (e.deltaMode === WheelEvent.DOM_DELTA_LINE) dy *= 16;
+      else if (e.deltaMode === WheelEvent.DOM_DELTA_PAGE) dy *= box.clientHeight;
+      box.scrollTop += dy;
       e.preventDefault();
     };
     box.addEventListener("wheel", onWheel, { passive: false });
