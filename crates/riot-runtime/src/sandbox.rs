@@ -1101,7 +1101,7 @@ mod tests {
         // 进去，于是 `>` 还是重定向；换成 srt-win 之后 argv 由它自己按
         // CreateProcess 的规矩组装，`>` 就成了 echo 的字面参数 —— 命令照样
         // 退出 0，文件却没建出来。这个测试为此红过一次。
-        let exec = |cmd: &str| {
+        let exec_t = |cmd: &str, timeout_ms: u64| {
             let r = &runner;
             let cwd = base.clone();
             let cmd = cmd.to_owned();
@@ -1112,7 +1112,7 @@ mod tests {
                         args: vec!["/c".to_owned(), cmd],
                         cwd,
                         env: Vec::new(),
-                        timeout_ms: Some(10_000),
+                        timeout_ms: Some(timeout_ms),
                         sandbox_exempt: false,
                     },
                     CancellationToken::new(),
@@ -1121,6 +1121,8 @@ mod tests {
                 .expect("跑得起来")
             }
         };
+        // 边界探针都是瞬时命令，10s 足够；真构建要拉 registry，单独放宽。
+        let exec = |cmd: &str| exec_t(cmd, 10_000);
         // 热身探针：一条**不依赖任何授权**的命令。先把它的结果打出来（不
         // 断言），好把「沙箱里能不能跑命令」和「授权对不对」分开。
         //
@@ -1256,6 +1258,60 @@ mod tests {
                 );
             }
         }
+
+        // ── 缓存表到底有没有被用上 ───────────────────────────────────
+        //
+        // `[约束]` 这一段**只打印不断言**，因为它要回答的是一个我还不知道
+        // 答案的问题，而不是守一条已知的线。
+        //
+        // srt-win 用 `CreateProcessWithLogonW(…, LOGON_WITH_PROFILE, …)`
+        // 且 `lpEnvironment = NULL`，于是沙箱进程拿到的是**沙箱账户自己的**
+        // profile 环境（它的模块头明说 `USERPROFILE` / `LOCALAPPDATA` 是
+        // 隔离的，只有 PATH 被我们的 `--env` 盖成 broker 的）。
+        //
+        // 如果真是这样，那 `HOME_CACHES` 整张表都指错了人：我们花 5s 给
+        // **真实用户**的 `~/.cargo` 写可继承 ACE，而沙箱里的 cargo 从它
+        // 自己的 `%USERPROFILE%` 推 CARGO_HOME，压根不看那里。连带地，
+        // `acl stamp` 那 12.7s 也只是在补 grant 捅出来的窟窿 —— 不 grant
+        // 就没有逃逸面，也就不需要 stamp。
+        //
+        // 先把事实打出来：环境变量指到哪、rustup shim 起不起得来、真构建
+        // 成不成。三个都拿到才谈得上改。
+        let envs = exec("echo UP=%USERPROFILE%^&LAD=%LOCALAPPDATA%^&CH=%CARGO_HOME%").await;
+        eprintln!(
+            "[cache] 沙箱内的环境：{:?}（宿主 USERPROFILE={:?}）",
+            envs.stdout.trim(),
+            std::env::var("USERPROFILE").unwrap_or_default()
+        );
+
+        let cargo_v = exec("cargo --version").await;
+        eprintln!(
+            "[cache] 沙箱内 cargo --version：exit={} stdout={:?} stderr={:?}",
+            cargo_v.exit_code,
+            cargo_v.stdout.trim(),
+            cargo_v.stderr.trim()
+        );
+
+        // 真构建。带一个依赖，因为要验的正是「registry 写得进去吗」——
+        // 无依赖的 crate 碰不到缓存，验了等于没验。
+        let proj = work.join("cachep");
+        std::fs::create_dir_all(proj.join("src")).expect("建探针工程");
+        std::fs::write(
+            proj.join("Cargo.toml"),
+            "[package]\nname=\"cachep\"\nversion=\"0.0.0\"\nedition=\"2021\"\n\
+             [dependencies]\ncfg-if=\"1\"\n",
+        )
+        .expect("写 Cargo.toml");
+        std::fs::write(proj.join("src").join("lib.rs"), "pub fn f() {}\n").expect("写 lib.rs");
+        let build = exec_t(
+            &format!("cd /d \"{}\" && cargo build", proj.display()),
+            180_000,
+        )
+        .await;
+        eprintln!(
+            "[cache] 沙箱内 cargo build：exit={} timed_out={}\nstdout={}\nstderr={}",
+            build.exit_code, build.timed_out, build.stdout, build.stderr
+        );
 
         // 整套设计成立与否的单点判据：沙箱里的命令**是另一个用户在跑**。
         //

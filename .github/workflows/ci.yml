@@ -232,8 +232,10 @@ jobs:
           # （和 checkout 出来的工作区同盘），改指到那儿。
           TMP: ${{ runner.temp }}
           TEMP: ${{ runner.temp }}
-        # 这条超时短一点：挂住的话很快能拿到结论，不用等 job 级超时。
-        timeout-minutes: 10
+        # 挂住的话要能较快拿到结论，不用等 job 级超时。给到 15 分钟是因为
+        # 里面有一条真 `cargo build` 探针（要拉 registry index），比其它
+        # 瞬时探针慢一个量级。
+        timeout-minutes: 15
         run: cargo test -p riot-runtime windows_经装配路径的沙箱边界 -- --nocapture
       - name: 收尾（无论成败都要跑）
         if: always()
