@@ -155,9 +155,17 @@ pub(crate) fn activate(policy: &crate::sandbox::SandboxPolicy) -> Option<WinSand
         Ok(None) => {
             // 装机是一次性的提权动作,不能在这里偷偷做——建本地账户 + 写
             // HKLM 需要 UAC,而这里可能跑在后台会话里。给一句能照做的话。
+            //
+            // `[约束]` 两步,第二步不能省。`install` 会把账户**和 WFP 出网
+            // 栅栏**一起装上,而那道栅栏会拦掉沙箱账户的全部外连、只放行
+            // loopback 上的代理端口段——Riot 没有代理层,留着它沙箱内就
+            // 彻底断网(`npm install` / `cargo build` 全死),而策略层还以为
+            // allow_network 是 true。`wfp uninstall` 只摘过滤器,账户和凭证
+            // 都留着。
             tracing::warn!(
-                "Windows 沙箱尚未安装,本轮不隔离。以管理员身份跑一次 \
-                 `srt-win install` 即可(会建一个专用本地账户)"
+                "Windows 沙箱尚未安装,本轮不隔离。以管理员身份依次跑:\
+                 `srt-win install` 然后 `srt-win wfp uninstall`\
+                 (后者摘掉出网栅栏,只留专用账户 —— 见 docs/SANDBOX_WINDOWS.md §4)"
             );
             return None;
         }

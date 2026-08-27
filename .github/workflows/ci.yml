@@ -122,6 +122,43 @@ jobs:
         if: always()
         run: pwsh vendor/srt-win/ci/cleanup.ps1 target\release\srt-win.exe
 
+  # Riot **自己那层编排**的真机验证。
+  #
+  # 上面的 win-sandbox-smoke 验的是 srt-win，这个验的是我们怎么用它：
+  # `acl grant` 的路径对不对、`srt-win exec` 起的命令能不能写工作区、写工作区
+  # 外会不会被拒、退出后 ACE 有没有回收干净。跑的是 sandbox.rs 里那条
+  # `windows_经装配路径的沙箱边界` —— 它平时在没装 srt-win 的机器上自动跳过，
+  # 这里先装好再跑，于是真的会执行。
+  #
+  # `[约束]` 必须设 `RIOT_SRT_WIN`。编排默认走 multicall（`current_exe()` +
+  # `--srt-win`），而 `cargo test` 里 current_exe 是测试二进制，它没有那个
+  # 分发分支。指向真实的 srt-win.exe 才走得通。
+  win-sandbox-e2e:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p srt-win --release
+      # `[约束]` 两步。install 会把账户和 WFP 出网栅栏一起装上，而 Riot 不用
+      # 那道栅栏（它会拦掉沙箱账户的全部外连，只放行 loopback 代理端口段）。
+      # 不摘掉的话这里测不出问题（用例不联网），但和生产装法就不一致了 ——
+      # 而生产上留着它等于沙箱内彻底断网。见 docs/SANDBOX_WINDOWS.md §4。
+      - name: 装沙箱账户（并摘掉出网栅栏）
+        run: |
+          target\release\srt-win.exe install
+          target\release\srt-win.exe wfp uninstall
+      - name: 编排层端到端
+        env:
+          RIOT_SRT_WIN: ${{ github.workspace }}\target\release\srt-win.exe
+        run: cargo test -p riot-runtime windows_经装配路径的沙箱边界 -- --nocapture
+      - name: 收尾（无论成败都要跑）
+        if: always()
+        run: |
+          target\release\srt-win.exe acl recover --force
+          target\release\srt-win.exe uninstall
+
   host-macos:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: macos-latest

@@ -130,10 +130,23 @@ holder 是**内核进程的 pid**，不是 `srt-win acl` 那个短命进程的�
 的地方。所以仍然建一个会话专属 temp（在真实用户的 `%TEMP%` 下），单独授权
 给沙箱账户，并用 `--env` 把 `TMP`/`TEMP`/`TMPDIR` 三个都指过去。
 
-## 4. 需要一次提权安装
+## 4. 需要一次提权安装，而且是**两步**
 
-`srt-win install` 会建本地用户账户、建本地组、把随机密码 DPAPI 加密写进
-`HKLM\SOFTWARE\sandbox-runtime`。**需要 UAC。**
+```powershell
+srt-win install         # 建本地账户 + 组 + DPAPI 凭证；顺带装 WFP 过滤器
+srt-win wfp uninstall   # 把 WFP 过滤器摘掉，账户和凭证留着
+```
+
+两步都要跑，**第二步不能省**。`install` 没有 `--no-wfp` 之类的开关，它把
+账户和出网栅栏一起装。而那道栅栏会拦掉沙箱账户的**全部**外连、只放行
+loopback 上的代理端口段（默认 60080-60089）—— Riot 没有代理层，留着它的
+后果是沙箱内彻底断网：`npm install`、`cargo build` 全死，而策略层还以为
+`allow_network` 是 true。这是最糟的一类不一致：策略说通，现实说不通，
+而报错里没有任何东西指向沙箱。
+
+`wfp uninstall` 只调 `wfp::uninstall_filters`，账户、组、凭证、装机标记
+都不动。之后 `srt-win user status` 照样报 `cred_present: true`，
+`activate` 就能拿到 SID。
 
 没装时 `activate` 返回 `None` 并打一句能照做的日志。不在 `activate` 里偷偷
 装：那需要提权，而这里可能跑在后台会话里。

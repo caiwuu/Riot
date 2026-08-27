@@ -791,8 +791,26 @@ mod tests {
             }
         };
 
-        // 文档 §6 用例 3：TMP/TEMP/TMPDIR 都被重写到会话专属子目录，而且
-        // 那里真能写。全局 %TEMP% 没打标签，不重写的话所有临时文件都失败。
+        // 整套设计成立与否的单点判据：沙箱里的命令**是另一个用户在跑**。
+        //
+        // 上面那两条写入断言只能证明「有个边界」；这一条证明边界是**身份**
+        // 而不是完整性级别。两跳启动（broker → CreateProcessWithLogonW →
+        // runner → 受限令牌）任何一环没接上，whoami 都会回落成宿主用户，
+        // 而那时文件系统断言可能仍然是绿的（工作区本来就能写）。
+        let who = exec("whoami").await;
+        assert_eq!(who.exit_code, 0, "whoami 该跑得起来：{}", who.stderr);
+        let host_who = std::process::Command::new("whoami")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_lowercase())
+            .expect("宿主 whoami");
+        let sandbox_who = who.stdout.trim().to_lowercase();
+        assert!(
+            !sandbox_who.is_empty() && sandbox_who != host_who,
+            "沙箱内该是另一个账户：沙箱={sandbox_who:?} 宿主={host_who:?}"
+        );
+
+        // TMP/TEMP/TMPDIR 都被重写到会话专属子目录，而且那里真能写。
+        // 沙箱账户对宿主的全局 %TEMP% 没有授权，不重写的话临时文件全失败。
         // `^|` 转义：args 对 cmd 是裸拼进命令行的，`|` 不转义就是管道，
         // %TEMP% 展开出来的路径会被当成管道下游的命令去执行。
         let tmp = exec("echo %TMP%^|%TEMP%^|%TMPDIR%").await;
