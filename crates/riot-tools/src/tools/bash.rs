@@ -83,10 +83,25 @@ impl Tool for Bash {
         } else {
             ""
         };
+        // Windows 上命令不是交给 cmd/PowerShell，而是 Git Bash（见
+        // shell_program）。但模型看到「平台：windows」后最自然的联想就是
+        // CMD 语法 —— `dir /a`、`2>nul`、用 `&` 顺序执行 —— 在 bash 里
+        // 全不成立，其中 `&` 还会把命令放到后台，错得很隐蔽。给出具体的
+        // 反例对照，比一句抽象的「用 POSIX 语法」拦截率高得多。
+        let windows_note = if ctx.platform == "windows" {
+            "- **语法是 POSIX bash（Git Bash），不是 cmd.exe / PowerShell**：\
+             `dir /a` → `ls -la`，`2>nul` → `2>/dev/null`，`del` / `copy` → \
+             `rm` / `cp`，`%VAR%` → `$VAR`。`&` 在 bash 里是把命令放到后台，\
+             顺序执行用 `;`，失败即停用 `&&`。Windows 路径加引号可以直接用\
+             （`cd \"D:\\proj\"`），写成 `D:/proj` 也行。\n"
+        } else {
+            ""
+        };
         format!(
             "在工作目录下执行一条 shell 命令。\n\
              {sandbox}\
              \n\
+             {windows_note}\
              - 每次调用都是**独立的一次执行**。`cd` 只在这一条命令内有效，\
              不会影响下一次调用。需要切目录就写成 `cd sub && cmd`，或者直接用相对\
              工作目录的路径。\n\

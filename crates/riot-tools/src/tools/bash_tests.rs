@@ -761,6 +761,22 @@ async fn prompt_引导用专用工具() {
 }
 
 #[tokio::test]
+async fn prompt_windows_给出_cmd_语法对照() {
+    // Windows 上命令由 Git Bash 执行，但模型看到「平台：windows」就爱写
+    // CMD 语法（dir /a、2>nul、用 & 顺序执行），静默地得到错误行为。
+    // 提示词必须给出具体的反例对照来拦截。
+    let mut ctx = prompt_ctx();
+    ctx.platform = "windows".into();
+    let p = Bash.prompt(&ctx);
+    assert!(p.contains("cmd.exe"), "{p}");
+    assert!(p.contains("2>/dev/null"), "{p}");
+
+    // 其它平台没有这个失败模式，不付这段 token 税
+    let p = Bash.prompt(&prompt_ctx());
+    assert!(!p.contains("cmd.exe"), "{p}");
+}
+
+#[tokio::test]
 async fn describe_优先用模型给的描述() {
     let d = Bash.describe(&serde_json::json!({
         "command": "cargo test --workspace --all-features",
