@@ -130,11 +130,24 @@ impl Client {
             let list_changed = Arc::clone(&list_changed);
             let out = out_tx.clone();
             tokio::spawn(async move {
-                let mut lines = BufReader::new(reader).lines();
+                let mut reader = BufReader::new(reader);
+                let mut buf = Vec::new();
+                // `[约束]` 按字节读行、有损解码，不能用 `lines()`：它一遇到
+                // 非 UTF-8 字节就返回 Err，整条连接被判死。Windows 上
+                // Python / node 混进 stdout 的日志走 ANSI 码页（GBK），
+                // 一行坏字节只是坏行；真正的 JSON-RPC 帧规范保证是 UTF-8，
+                // 有损解码不会碰坏它。
                 // EOF 或读错误退出循环：连接结束。挂着的请求全部立刻失败 ——
                 // 让它们等到超时的话，用户看到的是工具卡片转满十分钟。
-                while let Ok(Some(line)) = lines.next_line().await {
-                    route_line(&line, &pending, &list_changed, &out).await;
+                loop {
+                    buf.clear();
+                    match reader.read_until(b'\n', &mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            let line = String::from_utf8_lossy(&buf);
+                            route_line(&line, &pending, &list_changed, &out).await;
+                        }
+                    }
                 }
                 alive.store(false, Ordering::SeqCst);
                 // 直接 drop 发送端：等待方收到 RecvError → ClientError::Closed。

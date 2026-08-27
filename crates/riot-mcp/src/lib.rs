@@ -280,6 +280,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn 非_utf8_的坏行不断连() {
+        // Windows 上 Python / node 会把 ANSI 码页（GBK）编码的日志混进
+        // stdout。一行坏字节只是坏行 —— `lines()` 遇到它会 Err 退出读循环，
+        // 把整条连接判死（真实案例：服务器 stdout 混入 GBK 日志后，
+        // 状态页报"进程可能退出了"，其实进程活得好好的）。
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (server_read, mut server_write) = tokio::io::split(server_io);
+
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(server_read).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let msg: Value = match serde_json::from_str(&line) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                let Some(id) = msg.get("id").cloned() else {
+                    continue;
+                };
+                match msg.get("method").and_then(Value::as_str) {
+                    Some("initialize") => {
+                        let resp = json!({
+                            "jsonrpc": "2.0", "id": id,
+                            "result": {
+                                "protocolVersion": "2025-06-18",
+                                "serverInfo": { "name": "gbk", "version": "0" },
+                                "capabilities": {}
+                            }
+                        });
+                        let _ = server_write
+                            .write_all(format!("{resp}\n").as_bytes())
+                            .await;
+                        // 紧跟一行 GBK 编码的"达梦"（0xB4EF 0xC3CE），
+                        // 是非法 UTF-8 —— 客户端必须跳过而不是断连。
+                        let _ = server_write
+                            .write_all(b"\xB4\xEF\xC3\xCE INFO starting\n")
+                            .await;
+                    }
+                    Some("tools/list") => {
+                        let resp = json!({
+                            "jsonrpc": "2.0", "id": id, "result": { "tools": [] }
+                        });
+                        let _ = server_write
+                            .write_all(format!("{resp}\n").as_bytes())
+                            .await;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let (r, w) = tokio::io::split(client_io);
+        let timeouts = Timeouts {
+            connect: Duration::from_secs(5),
+            request: Duration::from_secs(5),
+            call: Duration::from_secs(5),
+        };
+        let (c, _) = Client::connect(r, w, timeouts).await.expect("握手");
+
+        // 坏行在 initialize 响应之后已进入管道；tools/list 的往返必须照常。
+        let tools = c.list_tools().await.expect("坏行之后请求还能往返");
+        assert!(tools.is_empty());
+        assert!(c.is_alive(), "非 UTF-8 行不该把连接判死");
+    }
+
+    #[tokio::test]
     async fn 清单变更通知置位() {
         let (c, _) = connect_scripted(|m, _| match m {
             "initialize" => vec![

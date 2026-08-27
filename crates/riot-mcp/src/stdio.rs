@@ -82,9 +82,22 @@ pub(crate) fn spawn_server(spec: &ServerSpec) -> std::io::Result<SpawnedServer> 
 
     let server_id = spec.id.clone();
     tokio::spawn(async move {
-        let mut lines = tokio::io::BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            tracing::debug!(server = %server_id, "{line}");
+        let mut reader = tokio::io::BufReader::new(stderr);
+        let mut buf = Vec::new();
+        // `[约束]` 按字节读行、有损解码，不能用 `lines()`：它一遇到非 UTF-8
+        // 字节就返回 Err，循环退出、stderr 读端被 drop —— 服务器下一次写
+        // stderr 直接撞上断掉的管道，Python 会带着打不出来的 traceback
+        // 整个退出（真实案例：FastMCP 的启动横幅经 Windows ANSI 码页编码，
+        // 横幅打到一半进程就死，表象是"握手前连接断开"）。排水必须活到 EOF。
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    let line = String::from_utf8_lossy(&buf);
+                    tracing::debug!(server = %server_id, "{}", line.trim_end());
+                }
+            }
         }
     });
 
