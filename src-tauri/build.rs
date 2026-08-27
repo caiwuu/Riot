@@ -64,6 +64,7 @@ const COMMANDS: &[&str] = &[
     "mcp_import_json",
     "skills_list",
     "packs_status",
+    "sandbox_status",
     "packs_install",
     "packs_uninstall",
     "queue_list",

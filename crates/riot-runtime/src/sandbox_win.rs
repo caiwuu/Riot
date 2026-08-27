@@ -183,6 +183,22 @@ impl Drop for WinSandbox {
     }
 }
 
+/// 装机状态。`Ok(false)` = 没装过（要用户跑一次提权安装），`Err` = 探不出来。
+///
+/// 和 [`activate`] 的区别是它**只查不改**：不建会话 temp、不写 ACE、不起
+/// 沙箱进程。给设置页那种随时可能调的地方用。
+///
+/// `[约束]` 判据要和 `activate` 用同一条 —— 两边分头判会漂：状态说"装好了"
+/// 而激活说"没装"，用户看着一个绿点却还在逐条点确认，没有比这更难查的。
+pub(crate) fn installed() -> Result<bool, String> {
+    let Some(srt) = SrtWin::locate() else {
+        return Err("找不到 srt-win".to_owned());
+    };
+    sandbox_user_sid(&srt)
+        .map(|sid| sid.is_some())
+        .map_err(|e| e.to_string())
+}
+
 /// 尝试激活 Windows 沙箱。
 ///
 /// `None` = 这台机器上做不到。三种情况:找不到 `srt-win`、没装过(用户还没

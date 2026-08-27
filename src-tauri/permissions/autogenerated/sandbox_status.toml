@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-sandbox-status"
+description = "Enables the sandbox_status command without any pre-configured scope."
+commands.allow = ["sandbox_status"]
+
+[[permission]]
+identifier = "deny-sandbox-status"
+description = "Denies the sandbox_status command without any pre-configured scope."
+commands.deny = ["sandbox_status"]

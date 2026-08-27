@@ -493,6 +493,85 @@ impl ProtectedPath {
     }
 }
 
+/// OS 级隔离在**这台机器**上的实际可用性。
+///
+/// `[约束]` 这是给用户看的，所以报的必须是「现在真能不能隔离」，而不是
+/// 「这个平台理论上支持不支持」。配置里那个开关只是**意图** —— Windows 上
+/// 没装 srt-win 时 `activate` 返回 `None`，命令照常裸跑（决策链退回逐条
+/// 询问，方向是安全的），但界面上看不出任何区别。用户以为自己开着隔离、
+/// 实际没有，还得多点一堆确认框却不知道为什么。
+///
+/// 只报事实，不带给用户看的句子：措辞归前端，那边才知道上下文（是设置页
+/// 的一行状态，还是切换开关时的一句提示）。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxStatus {
+    /// 这个平台实现了 OS 级隔离没有。false = 代码里根本没有这一半
+    /// （目前的 Linux），跟用户装没装无关。
+    pub implemented: bool,
+    /// 现在这一刻能不能真隔离。前端该按它决定显示"生效中"还是别的。
+    pub ready: bool,
+    /// 「隔离并断网」那一档能不能真断网。false 时选它会整档退回不隔离
+    /// （Windows 就是这样 —— 断网要靠 srt-win 的 WFP，而那一半我们刻意
+    /// 不装，见 docs/SANDBOX_WINDOWS.md §2）。
+    pub network_isolation: bool,
+    /// `implemented && !ready` 时，差的是什么。
+    pub blocker: Option<SandboxBlocker>,
+}
+
+/// 平台支持、但当前用不了的原因。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum SandboxBlocker {
+    /// 差一次**需要管理员**的一次性安装（Windows 建专用账户 + 写 HKLM）。
+    /// 前端据此显示安装入口。
+    NeedsElevatedInstall,
+    /// 装过了但探测不通 —— 找不到 srt-win、状态读不出来、装了一半。
+    /// 这种要把原因原样端出去，不然用户和我们都没法往下查。
+    Broken { error: String },
+}
+
+/// 探一次 [`SandboxStatus`]。不激活、不改任何状态，可以随便调。
+pub fn status() -> SandboxStatus {
+    #[cfg(target_os = "macos")]
+    {
+        let ok = crate::sandbox_macos::supported();
+        SandboxStatus {
+            implemented: true,
+            ready: ok,
+            network_isolation: true,
+            blocker: (!ok).then(|| SandboxBlocker::Broken {
+                // 系统自带，正常机器上不会缺。缺了多半是被裁过的系统镜像。
+                error: "找不到 /usr/bin/sandbox-exec".to_owned(),
+            }),
+        }
+    }
+    #[cfg(windows)]
+    {
+        let (ready, blocker) = match crate::sandbox_win::installed() {
+            Ok(true) => (true, None),
+            Ok(false) => (false, Some(SandboxBlocker::NeedsElevatedInstall)),
+            Err(e) => (false, Some(SandboxBlocker::Broken { error: e })),
+        };
+        SandboxStatus {
+            implemented: true,
+            ready,
+            // WFP 那一半我们不装,所以断网档在 Windows 一直是降级的。
+            network_isolation: false,
+            blocker,
+        }
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        SandboxStatus {
+            implemented: false,
+            ready: false,
+            network_isolation: false,
+            blocker: None,
+        }
+    }
+}
+
 /// 用户主目录。Windows 的约定是 `USERPROFILE`；`HOME` 是 Unix 的，
 /// GUI 启动的 Windows 进程环境里通常没有它（Git Bash 会设，但从宿主
 /// 起的内核继承不到）—— 读错变量的后果是缓存目录一条都进不了

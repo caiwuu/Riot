@@ -326,6 +326,19 @@ async fn get_config(state: tauri::State<'_, AppState>) -> HostResult<config::Con
     Ok(config::ConfigStatus::of(state.config().await))
 }
 
+/// 这台机器上 OS 级隔离**现在**能不能用。
+///
+/// 配置里那个「命令隔离」开关只是意图。Windows 上没跑过提权安装时，
+/// 每轮激活都会静默失败、命令照常裸跑（决策链退回逐条询问，方向安全），
+/// 而界面上看不出任何区别 —— 用户以为开着隔离，还得多点一堆确认框却不
+/// 知道为什么。设置页要能把这两者分开显示，就得先能查到真实状态。
+///
+/// 只查不改，随时可调。
+#[tauri::command]
+async fn sandbox_status() -> riot_runtime::SandboxStatus {
+    riot_runtime::sandbox::status()
+}
+
 /// 和 `tauri.conf.json` 的 version 同一份，设置 → 关于用来显示。
 #[tauri::command]
 fn app_version(app: tauri::AppHandle) -> String {
@@ -1009,6 +1022,7 @@ pub fn run() {
             mcp_export_json,
             mcp_import_json,
             skills_list,
+            sandbox_status,
             packs_status,
             packs_install,
             packs_uninstall,

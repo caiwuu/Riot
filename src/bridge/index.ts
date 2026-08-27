@@ -607,6 +607,36 @@ export function skillsList(root: string | null): Promise<SkillInfo[]> {
   return invoke<SkillInfo[]>("skills_list", { root });
 }
 
+/** 平台支持 OS 级隔离、但当前用不了的原因。 */
+export type SandboxBlocker =
+  /** 差一次需要管理员的一次性安装。前端据此显示安装入口。 */
+  | { kind: "needsElevatedInstall" }
+  /** 装过但探测不通（找不到 srt-win、装了一半）。原因原样端出来，否则没法查。 */
+  | { kind: "broken"; error: string };
+
+/**
+ * OS 级隔离在这台机器上**现在**能不能用。
+ *
+ * 和配置里的 `sandbox` 字段是两回事：那个是意图，这个是现实。Windows 上
+ * 没装时两者会分叉 —— 意图开着、现实没有，命令照常裸跑（安全，但用户会
+ * 莫名其妙多点很多确认框）。
+ */
+export interface SandboxStatus {
+  /** 这个平台实现了没有。false = 代码里就没这一半，和用户装没装无关。 */
+  implemented: boolean;
+  /** 现在这一刻能不能真隔离。 */
+  ready: boolean;
+  /** 「隔离并断网」那档能不能真断网。false 时选它会整档退回不隔离。 */
+  networkIsolation: boolean;
+  /** `implemented && !ready` 时差的是什么。 */
+  blocker: SandboxBlocker | null;
+}
+
+/** 探一次沙箱的真实可用性。只查不改，随时可调。 */
+export function sandboxStatus(): Promise<SandboxStatus> {
+  return invoke<SandboxStatus>("sandbox_status");
+}
+
 /** 一个可下载的能力包。 */
 export interface PackStatus {
   id: string;
