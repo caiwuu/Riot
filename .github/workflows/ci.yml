@@ -8,7 +8,25 @@ on:
   pull_request:
   schedule:
     - cron: '0 18 * * *'
+  # 手动触发默认是「全开」，而重活 job 里 mutation / chaos / chaos-host 都是
+  # 几十分钟起步。想验的往往只有一个（典型：改完 Windows 沙箱只要
+  # win-sandbox-e2e），所以给一个挑 job 的入口 —— 不然为看一条断言要等一
+  # 整轮长跑，代价高到让人干脆不验。
   workflow_dispatch:
+    inputs:
+      only:
+        description: '只跑哪个重活 job（all = 全部，等同 nightly）'
+        type: choice
+        default: all
+        options:
+          - all
+          - win-sandbox-smoke
+          - win-sandbox-e2e
+          - host-macos
+          - extra
+          - mutation
+          - chaos
+          - chaos-host
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,6 +40,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # 放在最前面：不花钱，而且它挡的是「手动选了某个 job 却一个都没跑、
+      # workflow 照样绿」这种静默失败。
+      - run: python3 scripts/check-ci-dispatch.py
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: pnpm/action-setup@v4
@@ -97,7 +118,7 @@ jobs:
   # 各脚本用的是**互不相同的测试专用 sublayer GUID**，都不是生产默认值，
   # cleanup.ps1 的默认参数与之一一对应 —— 所以不用给它传 GUID。
   win-sandbox-smoke:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || inputs.only == 'all' || inputs.only == 'win-sandbox-smoke'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -134,7 +155,7 @@ jobs:
   # `--srt-win`），而 `cargo test` 里 current_exe 是测试二进制，它没有那个
   # 分发分支。指向真实的 srt-win.exe 才走得通。
   win-sandbox-e2e:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || inputs.only == 'all' || inputs.only == 'win-sandbox-e2e'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -221,7 +242,7 @@ jobs:
           target\release\srt-win.exe uninstall
 
   host-macos:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || inputs.only == 'all' || inputs.only == 'host-macos'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -234,7 +255,7 @@ jobs:
       - run: cargo test -p riot-host
 
   extra:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || inputs.only == 'all' || inputs.only == 'extra'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -244,7 +265,7 @@ jobs:
       - run: cargo test ${{ env.KERNEL_ONLY }} --release
 
   mutation:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || inputs.only == 'all' || inputs.only == 'mutation'
     strategy:
       fail-fast: false
       matrix:
@@ -258,7 +279,7 @@ jobs:
       - run: python3 scripts/mutate.py ${{ matrix.layer }}
 
   chaos:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || inputs.only == 'all' || inputs.only == 'chaos'
     strategy:
       fail-fast: false
       matrix:
@@ -271,7 +292,7 @@ jobs:
       - run: cargo test -p riot-core --release chaos_soak -- --nocapture
 
   chaos-host:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || inputs.only == 'all' || inputs.only == 'chaos-host'
     strategy:
       fail-fast: false
       matrix:
