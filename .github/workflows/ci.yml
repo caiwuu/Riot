@@ -253,6 +253,11 @@ jobs:
       - uses: ./.github/actions/prepare-host
       - run: cargo clippy -p riot-host --all-targets -- -D warnings
       - run: cargo test -p riot-host
+      # macOS 的沙箱边界测试是 `#[cfg(target_os = "macos")]` 的，而 test job
+      # 在 ubuntu、host job 在 windows —— 不在这儿跑的话，seatbelt 那半
+      # （profile 拼装、逃逸面 deny 真被内核执行）在 CI 里一次都不会执行。
+      # Windows 那半由 host job 对称覆盖。
+      - run: cargo test -p riot-runtime
 
   extra:
     if: github.event_name == 'schedule' || inputs.only == 'all' || inputs.only == 'extra'

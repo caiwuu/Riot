@@ -1141,9 +1141,22 @@ mod tests {
         //
         // 配对断言：`.cargo` 本身要写得进（否则下面那半证明不了任何事 ——
         // 可能只是整棵树压根没授权），`.cargo\bin` 要写不进。
-        if let Some(cargo) = home_dir().map(|h| h.join(".cargo"))
-            && cargo.join("bin").is_dir()
-        {
+        //
+        // `[约束]` CI 里「没有 ~/.cargo\bin」要判红，不能跳过。整段包在一个
+        // `if` 里，条件不成立就**静默**不验 —— 而这条 job 存在的理由就是验它。
+        // 一个绿灯背后什么都没跑，比红灯更糟：它会让人以为这条路已经有人守着。
+        let cargo = home_dir().map(|h| h.join(".cargo"));
+        let has_cargo_bin = cargo.as_ref().is_some_and(|c| c.join("bin").is_dir());
+        if !has_cargo_bin {
+            let msg = "这台机器没有 ~/.cargo\\bin，验不了「DENY 压得过继承来的 \
+                       ALLOW」—— 而那是这条测试最要紧的一半。";
+            assert!(
+                std::env::var_os("RIOT_SANDBOX_TEST_REQUIRE").is_none(),
+                "{msg}"
+            );
+            eprintln!("{msg} 跳过。");
+        }
+        if let Some(cargo) = cargo.filter(|_| has_cargo_bin) {
             let tag = format!("riot-esc-{}.txt", std::process::id());
             for (probe, writable) in [
                 (cargo.join(&tag), true),
