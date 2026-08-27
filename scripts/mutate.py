@@ -66,7 +66,7 @@ MUTANTS = [
     (
         "分类器压过安全检查",
         "gate",
-        "session.rs",
+        "gate.rs",
         """        if !reason.yields_to_bypass() {
             return None;
         }""",
