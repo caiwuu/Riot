@@ -83,21 +83,28 @@ const MODES: { id: PermissionMode; name: string; desc: string; danger?: boolean 
  */
 function SandboxReality({
   sbx,
+  error,
   wanted,
   installing,
   onInstall,
 }: {
   sbx: SandboxStatus | null;
+  error: string;
   wanted: SandboxMode;
   installing: boolean;
   onInstall: () => void;
 }) {
-  if (!sbx || wanted === "off") return null;
   const line = (cls: string, text: string) => (
     <p className={cls} style={{ margin: "8px 0 0" }}>
       {text}
     </p>
   );
+  // 探测失败先报，且不受「选了不隔离就不出声」的约束：这说明的是应用自己
+  // 有问题，和用户选了哪一档无关。
+  if (error) {
+    return line("form-error", `查不到隔离是否生效（${error}）—— 下面的选择可能不反映实际情况。`);
+  }
+  if (!sbx || wanted === "off") return null;
 
   if (!sbx.implemented) {
     return line("hint", "这个平台还没有系统级隔离，选了也不会生效 —— 实际仍然逐条询问。");
@@ -219,12 +226,23 @@ export function PermissionPane({
   // 时，每轮激活都静默失败、命令照常裸跑，而界面上看不出区别 —— 用户以为
   // 开着隔离，还得多点一堆确认框却不知道为什么。
   const [sbx, setSbx] = useState<SandboxStatus | null>(null);
+  const [sbxError, setSbxError] = useState("");
   const [installing, setInstalling] = useState(false);
   const refreshSbx = () => {
     sandboxStatus()
-      .then(setSbx)
-      // 查不到就不显示状态行。这一行是帮助信息，它自己失败不该盖住整个页面。
-      .catch(() => setSbx(null));
+      .then((s) => {
+        setSbx(s);
+        setSbxError("");
+      })
+      // `[约束]` 探测失败要说出来，不能静默不显示。这一整块的存在意义就是
+      // 「别让用户以为隔离着、其实没有」—— 而查不到状态时什么都不画，和
+      // 「一切正常」在屏幕上长得一模一样，正好复刻了它要解决的那个问题。
+      // （实际踩到过：dev server 是在这两个命令加进去之前起的，invoke 被
+      // ACL 拒掉，界面上什么都没有，看起来像功能没做。）
+      .catch((e: unknown) => {
+        setSbx(null);
+        setSbxError(String(e));
+      });
   };
   useEffect(() => {
     refreshSbx();
@@ -342,6 +360,7 @@ export function PermissionPane({
         </div>
         <SandboxReality
           sbx={sbx}
+          error={sbxError}
           wanted={sandbox}
           installing={installing}
           onInstall={runInstall}
