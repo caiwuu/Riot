@@ -583,6 +583,28 @@ pub fn status() -> SandboxStatus {
     }
 }
 
+/// 跑那次一次性的提权安装。**Windows 上会弹两次 UAC。**
+///
+/// 只有 [`status`] 报 `NeedsElevatedInstall` 时才该调。装完之后再查一次
+/// `status` 应当变成 `ready`。
+///
+/// `[约束]` 阻塞，而且阻塞的是**用户在看系统对话框**。调用方必须放到后台
+/// 线程上 —— 挂在 UI 线程上会把整个界面冻住，而冻住的时长完全取决于用户
+/// 什么时候去点那两个 UAC。
+///
+/// 不在 `activate` 里偷偷装：提权要弹窗，而 `activate` 可能跑在后台会话里，
+/// 那样用户会莫名其妙收到一个 UAC 提示。装机是显式动作，入口在设置页。
+pub fn install() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        crate::sandbox_win::install()
+    }
+    #[cfg(not(windows))]
+    {
+        Err("这个平台不需要安装".to_owned())
+    }
+}
+
 /// 用户主目录。Windows 的约定是 `USERPROFILE`；`HOME` 是 Unix 的，
 /// GUI 启动的 Windows 进程环境里通常没有它（Git Bash 会设，但从宿主
 /// 起的内核继承不到）—— 读错变量的后果是缓存目录一条都进不了

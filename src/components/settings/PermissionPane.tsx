@@ -1,9 +1,12 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   type ConfigStatus,
   type PermissionMode,
   type SandboxMode,
+  type SandboxStatus,
+  sandboxInstall,
+  sandboxStatus,
   setConfig,
 } from "../../bridge";
 import {
@@ -71,6 +74,62 @@ const MODES: { id: PermissionMode; name: string; desc: string; danger?: boolean 
     danger: true,
   },
 ];
+
+/**
+ * 「开关说开着」和「这台机器上真的隔离着」之间的差额。
+ *
+ * 只在两者不一致、或有事要用户做时才出声：一切正常时多一行"生效中"是噪音，
+ * 而噪音会让真正要紧的那次提示也被略过。
+ */
+function SandboxReality({
+  sbx,
+  wanted,
+  installing,
+  onInstall,
+}: {
+  sbx: SandboxStatus | null;
+  wanted: SandboxMode;
+  installing: boolean;
+  onInstall: () => void;
+}) {
+  if (!sbx || wanted === "off") return null;
+  const line = (cls: string, text: string) => (
+    <p className={cls} style={{ margin: "8px 0 0" }}>
+      {text}
+    </p>
+  );
+
+  if (!sbx.implemented) {
+    return line("hint", "这个平台还没有系统级隔离，选了也不会生效 —— 实际仍然逐条询问。");
+  }
+  if (sbx.blocker?.kind === "needsElevatedInstall") {
+    return (
+      <>
+        {line(
+          "form-error",
+          "还没安装，所以当前并没有隔离：命令照常直接跑，只剩规则判断和逐条询问拦着。",
+        )}
+        <div className="pack-actions" style={{ marginTop: 6 }}>
+          <button disabled={installing} onClick={onInstall}>
+            {installing ? "等待权限确认…" : "安装（需要管理员）"}
+          </button>
+        </div>
+      </>
+    );
+  }
+  if (sbx.blocker?.kind === "broken") {
+    return line("form-error", `装过但用不了，当前没有隔离：${sbx.blocker.error}`);
+  }
+  // 这一档在 Windows 上会整档降级成不隔离（断网要靠 WFP，而那一半没装）。
+  // 不说的话，用户选了更严的档位反而什么都没得到。
+  if (wanted === "workspaceWriteNoNet" && !sbx.networkIsolation) {
+    return line(
+      "form-error",
+      "这个平台还断不了网，所以整档退回不隔离 —— 想要隔离请改选「隔离（推荐）」。",
+    );
+  }
+  return null;
+}
 
 export function PermissionPane({
   status,
@@ -156,6 +215,43 @@ export function PermissionPane({
     }
   };
 
+  // 开关是**意图**，这个是**现实**。两者会分叉：Windows 上没跑过提权安装
+  // 时，每轮激活都静默失败、命令照常裸跑，而界面上看不出区别 —— 用户以为
+  // 开着隔离，还得多点一堆确认框却不知道为什么。
+  const [sbx, setSbx] = useState<SandboxStatus | null>(null);
+  const [installing, setInstalling] = useState(false);
+  const refreshSbx = () => {
+    sandboxStatus()
+      .then(setSbx)
+      // 查不到就不显示状态行。这一行是帮助信息，它自己失败不该盖住整个页面。
+      .catch(() => setSbx(null));
+  };
+  useEffect(() => {
+    refreshSbx();
+    // 只在打开设置时探一次。它不会自己变 —— 唯一会改变它的是下面那个安装
+    // 按钮，而那条路径装完自己会刷。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const runInstall = () => {
+    askConfirm({
+      title: "现在安装命令隔离？",
+      // 两次不是笔误，要提前说 —— 不说的话第二个弹窗看起来像出了问题。
+      body: "会弹出两次 Windows 权限确认（UAC）：第一次建一个专用的低权限账户，第二次摘掉它自带的联网限制（不摘的话沙箱内会彻底断网）。只需要装一次。",
+      confirmLabel: "开始安装",
+      action: () => {
+        setInstalling(true);
+        setError("");
+        sandboxInstall()
+          .catch((e: unknown) => setError(String(e)))
+          .finally(() => {
+            setInstalling(false);
+            refreshSbx();
+          });
+      },
+    });
+  };
+
   const sandbox = status.config.sandbox ?? "workspaceWrite";
   const pickSandbox = (mode: SandboxMode) => {
     // 关沙箱要确认一次。它和"无人值守"是同一类决定：关掉之后唯一挡在
@@ -224,7 +320,7 @@ export function PermissionPane({
           命令隔离
           <HintTip>
             由操作系统限制命令能改什么。开着时，没有规则命中、也不是只读的命令可以直接放行 ——
-            边界由内核守着。目前只有 macOS 能真正生效。
+            边界由内核守着。macOS 开箱可用；Windows 需要装一次（下面会提示）。
           </HintTip>
         </h2>
         <div className="mode-cards" role="radiogroup" aria-label="命令隔离">
@@ -244,6 +340,12 @@ export function PermissionPane({
             </button>
           ))}
         </div>
+        <SandboxReality
+          sbx={sbx}
+          wanted={sandbox}
+          installing={installing}
+          onInstall={runInstall}
+        />
       </section>
       <section>
         <h2>

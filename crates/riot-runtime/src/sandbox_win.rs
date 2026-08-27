@@ -199,6 +199,43 @@ pub(crate) fn installed() -> Result<bool, String> {
         .map_err(|e| e.to_string())
 }
 
+/// UAC 被用户取消时 srt-win 的退出码。
+const SRT_EXIT_UAC_CANCELLED: i32 = 10;
+
+/// 跑一次性的提权安装。**会弹两次 UAC。**
+///
+/// `[约束]` 两步，第二步不能省。`install` 把专用账户**和 WFP 出网栅栏**一起
+/// 装上，而那道栅栏会拦掉沙箱账户的全部外连、只放行 loopback 上的代理端口段
+/// —— Riot 没有代理层，留着它沙箱内就彻底断网（`npm install` / `cargo build`
+/// 全死），而策略层还以为 `allow_network` 是 true。`wfp uninstall` 只摘过滤器，
+/// 账户和凭证都留着。
+///
+/// `[取舍]` 两次 UAC 而不是一次。srt-win 的每个提权子命令自己走
+/// `ShellExecuteExW(runas)`，合成一次要我们另写一套提权再套一层
+/// `cmd /c "… && …"` —— 多出几十行只能在 Windows 上跑的 Win32，还和上游那套
+/// 重复。这是**每台机器一次**的操作，代价是在按钮旁边说清楚会弹两次。
+///
+/// 阻塞：里面等的是用户点 UAC 对话框。调用方要放到后台线程上。
+pub(crate) fn install() -> Result<(), String> {
+    let srt = SrtWin::locate().ok_or_else(|| "找不到 srt-win".to_owned())?;
+    for (what, args) in [
+        ("装沙箱账户", vec!["install"]),
+        ("摘掉出网栅栏", vec!["wfp", "uninstall"]),
+    ] {
+        let (code, stderr) =
+            run_srt_code(&srt, &args).map_err(|e| format!("{what}时起不了 srt-win：{e}"))?;
+        // 取消不是错误，是用户的选择。混成一句"安装失败"的话，用户明明自己
+        // 点的取消，却收到一条像是程序坏了的报错。
+        if code == SRT_EXIT_UAC_CANCELLED {
+            return Err("你取消了权限确认，系统没有被改动。".to_owned());
+        }
+        if code != 0 {
+            return Err(format!("{what}失败（退出码 {code}）：{stderr}"));
+        }
+    }
+    Ok(())
+}
+
 /// 尝试激活 Windows 沙箱。
 ///
 /// `None` = 这台机器上做不到。三种情况:找不到 `srt-win`、没装过(用户还没
@@ -672,6 +709,29 @@ fn run_srt(srt: &SrtWin, args: &[&str], stdin: Option<&str>) -> std::io::Result<
         .chain(args.iter().copied())
         .collect();
     run_srt_in(&program, &full, stdin, None)
+}
+
+/// 跑一次并把**退出码原样交出来**，不把非零当错误。
+///
+/// 给 `install` 用：srt-win 拿退出码区分「用户取消了 UAC」（10）和真失败，
+/// 而 [`run_srt`] 把非零一律裹成 `io::Error`，再从错误文本里抠数字就太脆了。
+fn run_srt_code(srt: &SrtWin, args: &[&str]) -> std::io::Result<(i32, String)> {
+    use std::process::{Command, Stdio};
+
+    let (program, prefix) = srt.argv_prefix();
+    let full: Vec<&str> = prefix
+        .iter()
+        .map(String::as_str)
+        .chain(args.iter().copied())
+        .collect();
+    let mut cmd = Command::new(&program);
+    cmd.args(&full).stdin(Stdio::null()).stderr(Stdio::piped());
+    no_window(&mut cmd);
+    let out = cmd.output()?;
+    Ok((
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+    ))
 }
 
 /// [`run_srt`] 的底座：参数已经拼全，可以指定工作目录。

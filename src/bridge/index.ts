@@ -648,6 +648,18 @@ export function sandboxStatus(): Promise<SandboxStatus> {
   return invoke<SandboxStatus>("sandbox_status");
 }
 
+/**
+ * 跑那次一次性的提权安装。**会弹两次系统权限确认（UAC）。**
+ *
+ * 两步是分开提权的：第一步建专用账户，第二步摘掉出网栅栏（不摘的话沙箱内
+ * 彻底断网）。调用前要让用户知道会弹两次，否则第二个弹窗看起来像出了问题。
+ *
+ * 慢，而且慢在等用户点对话框 —— 没有超时，取消会以一条给人看的话 reject。
+ */
+export function sandboxInstall(): Promise<void> {
+  return invoke("sandbox_install");
+}
+
 /** 一个可下载的能力包。 */
 export interface PackStatus {
   id: string;

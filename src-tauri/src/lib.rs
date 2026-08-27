@@ -71,6 +71,10 @@ pub enum HostError {
     Pack(String),
     #[error("{0}")]
     Update(String),
+    /// 沙箱的提权安装。文案已经是给用户看的（含"你取消了权限确认"这种
+    /// 非故障结局），前端直接显示即可。
+    #[error("{0}")]
+    Sandbox(String),
 }
 
 // Tauri 要求错误类型可序列化。thiserror 不给 Serialize，手写一层。
@@ -337,6 +341,18 @@ async fn get_config(state: tauri::State<'_, AppState>) -> HostResult<config::Con
 #[tauri::command]
 async fn sandbox_status() -> riot_runtime::SandboxStatus {
     riot_runtime::sandbox::status()
+}
+
+/// 跑那次一次性的提权安装。**Windows 上会弹两次 UAC。**
+///
+/// `[约束]` 走 `spawn_blocking`。这个调用里等的是**用户去点系统对话框**，
+/// 时长完全不可控；占着 tokio 的工作线程会把别的命令一起拖住。
+#[tauri::command]
+async fn sandbox_install() -> HostResult<()> {
+    tokio::task::spawn_blocking(riot_runtime::sandbox::install)
+        .await
+        .map_err(|e| HostError::Sandbox(format!("安装任务没跑完：{e}")))?
+        .map_err(HostError::Sandbox)
 }
 
 /// 和 `tauri.conf.json` 的 version 同一份，设置 → 关于用来显示。
@@ -1062,6 +1078,7 @@ pub fn run() {
             mcp_import_json,
             skills_list,
             sandbox_status,
+            sandbox_install,
             packs_status,
             packs_install,
             packs_uninstall,

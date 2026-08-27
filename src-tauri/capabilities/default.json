@@ -79,6 +79,7 @@
     "allow-mcp-import-json",
     "allow-skills-list",
     "allow-sandbox-status",
+    "allow-sandbox-install",
     "allow-packs-status",
     "allow-packs-install",
     "allow-packs-uninstall",
