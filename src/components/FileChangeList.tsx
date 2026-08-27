@@ -6,11 +6,14 @@
 //! 行是无边框的紧凑列表(Cursor 同款):图标认文件类型、颜色认状态,
 //! 一屏能扫二十个文件。每行一个框的话,十个文件就把面板占满了。
 
-import { useLayoutEffect, useRef, useState } from "react";
+import { useContext, useLayoutEffect, useRef, useState } from "react";
 
 import type { FileChange } from "../bridge";
 import { SETI_BY_EXT, SETI_BY_NAME, SETI_DEFAULT, type SetiIcon } from "../lib/fileIcons";
+import { joinRoot, looksAbsPath } from "../pathDisplay";
 import { Chevron } from "./Chevron";
+import { openFilePreview } from "./FilePreview";
+import { ProjectRootContext } from "./Markdown";
 
 const STATUS_LABEL: Record<FileChange["status"], string> = {
   created: "新增",
@@ -33,6 +36,8 @@ export function FileChangeList({ changes }: { changes: FileChange[] }) {
   /** 刚复制过路径的那一行。给"复制路径"按钮一个"已复制"的确认拍。 */
   const [copied, setCopied] = useState<string | null>(null);
   const copiedTimer = useRef<number | undefined>(undefined);
+  /** 改动路径是相对项目根的，预览要拼成绝对的。 */
+  const root = useContext(ProjectRootContext);
 
   const copyPath = (path: string) => {
     void navigator.clipboard.writeText(path).then(() => {
@@ -72,7 +77,28 @@ export function FileChangeList({ changes }: { changes: FileChange[] }) {
               ) : null}
               <span className="change-head-grow" />
               {/* 操作钮平时藏着：扫列表时只要图标、路径、行数。
-                  复制在前、展开在最后 —— 点整行也能展开，箭头只是明示。 */}
+                  预览、复制在前，展开在最后 —— 点整行也能展开，箭头只是明示。 */}
+              {c.status !== "deleted" ? (
+                <span
+                  className="change-copy"
+                  role="button"
+                  tabIndex={0}
+                  title="预览文件"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openFilePreview(looksAbsPath(c.path) ? c.path : joinRoot(root, c.path));
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      openFilePreview(looksAbsPath(c.path) ? c.path : joinRoot(root, c.path));
+                    }
+                  }}
+                >
+                  <EyeIcon />
+                </span>
+              ) : null}
               <span
                 className={copied === c.path ? "change-copy done" : "change-copy"}
                 role="button"
@@ -251,6 +277,20 @@ function CheckIcon() {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
+    </svg>
+  );
+}
+
+function EyeIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M1.8 8s2.3-4.2 6.2-4.2S14.2 8 14.2 8s-2.3 4.2-6.2 4.2S1.8 8 1.8 8z"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
+      />
+      <circle cx="8" cy="8" r="1.9" stroke="currentColor" strokeWidth="1.3" />
     </svg>
   );
 }

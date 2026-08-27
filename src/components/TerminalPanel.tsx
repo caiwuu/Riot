@@ -572,12 +572,15 @@ function b64ToBytes(b64: string): Uint8Array {
  * 透明度 —— 深底上是一条很亮的灰。
  */
 const THEME = {
-  background: "#121212",
+  // 和聊天区同底（--bg）。曾经用侧栏的 #121212，深一档的结果是终端、
+  // 抽屉、主区三种灰凑在一屏上。
+  background: "#181818",
   foreground: "#ececf1",
   cursor: "#ececf1",
-  cursorAccent: "#121212",
+  cursorAccent: "#181818",
   selectionBackground: "#3d3d3d",
-  black: "#181818",
+  // ANSI black 不能和背景同色：TUI 拿它画分隔和填充。
+  black: "#121212",
   red: "#f87171",
   green: "#4ade80",
   yellow: "#fbbf24",

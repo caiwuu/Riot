@@ -10,6 +10,7 @@
 import {
   memo,
   type ReactNode,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -20,11 +21,12 @@ import {
 import type { PermissionAsk, PermissionResponse } from "../bridge";
 import type { Item } from "../hooks/useSession";
 import { SLASH_HEAD_RE, extractMentionSpans, mentionCovers } from "../lib/promptText";
-import { basename } from "../pathDisplay";
-import { LazyMarkdown, Markdown } from "./Markdown";
+import { basename, joinRoot, looksAbsPath } from "../pathDisplay";
+import { openFilePreview } from "./FilePreview";
+import { LazyMarkdown, Markdown, ProjectRootContext } from "./Markdown";
 import { AskChoiceCard, PlanApprovalCard, PlanDraft } from "./PermissionDialog";
 import { groupBlocks, ProcessGroup, ThinkingBlock } from "./ProcessFold";
-import { ToolCard } from "./ToolCard";
+import { ShotViewer, ToolCard } from "./ToolCard";
 
 /**
  * 对话流滚到哪、跟不跟随底部。
@@ -230,6 +232,16 @@ export function Transcript({
   const stick = useRef(true);
   /** 程序化贴底时挡住 onScroll，免得自己把 stick 打成 false。 */
   const pinning = useRef(false);
+  /**
+   * 向上翻看时的滚动锚点：视口里第一个顶边完整可见的块 + 它到视口顶的距离。
+   *
+   * 上方的行是懒水合的（content-visibility 按 60px 估高、LazyMarkdown
+   * 纯文本占位），第一次往上翻时真实高度陆续落地，scrollHeight 一变
+   * 画面就跳。WKWebView 不支持 overflow-anchor 的浏览器原生锚定 ——
+   * 只能自己记住「正看着哪个块」，高度变了把 scrollTop 补回去
+   * （补偿在下面的 ResizeObserver 里）。贴底时用不上，锚点清空。
+   */
+  const anchor = useRef<{ el: Element; top: number } | null>(null);
   // 渲染期就写：正式包隐藏面板时 scroll 发生在 commit 里，
   // effect 还没跑，闭包里的 armed 仍是 true，会把清零后的 0 记进去。
   const armedRef = useRef(armed);
@@ -238,6 +250,49 @@ export function Transcript({
   const rememberView = (box: HTMLElement) => {
     if (!armedRef.current) return;
     transcriptView.set(sessionId, { top: box.scrollTop, stick: stick.current });
+  };
+
+  const captureAnchor = () => {
+    if (stick.current) {
+      anchor.current = null;
+      return;
+    }
+    const box = boxRef.current;
+    const col = box?.querySelector(".thread-col");
+    if (!box || !col || !col.children.length) {
+      anchor.current = null;
+      return;
+    }
+    const kids = col.children;
+    const boxTop = box.getBoundingClientRect().top;
+    // 二分找第一个底边越过视口顶的块。块按文档序从上到下单调排列，
+    // 长会话逐块量 getBoundingClientRect 太贵 —— 这里每次滚动都要跑。
+    let lo = 0;
+    let hi = kids.length - 1;
+    let first = kids.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const el = kids[mid];
+      if (!el) break;
+      if (el.getBoundingClientRect().bottom > boxTop) {
+        first = mid;
+        hi = mid - 1;
+      } else {
+        lo = mid + 1;
+      }
+    }
+    let el = kids[first];
+    if (!el) {
+      anchor.current = null;
+      return;
+    }
+    // 跨着视口顶边的块锚不住：它水合长高时顶边不动、内部整体重排，
+    // 补偿无从算起。锚下一个块（顶边在视口内的）—— 除非它一块占满全屏。
+    if (el.getBoundingClientRect().top < boxTop - 1) {
+      const next = kids[first + 1];
+      if (next && next.getBoundingClientRect().top - boxTop < box.clientHeight) el = next;
+    }
+    anchor.current = { el, top: el.getBoundingClientRect().top - boxTop };
   };
 
   /** 离底超过一屏时浮现「回到底部」按钮。 */
@@ -251,6 +306,7 @@ export function Transcript({
     pinning.current = true;
     box.scrollTop = box.scrollHeight;
     stick.current = true;
+    anchor.current = null;
     rememberView(box);
     // 程序化滚动被 pinning 挡掉 onScroll，这里自己收按钮 ——
     // 不收的话点了「回到底部」它还挂着。
@@ -271,6 +327,7 @@ export function Transcript({
     stick.current = false;
     pinning.current = true;
     box.scrollTop = saved.top;
+    captureAnchor();
     const gap = box.scrollHeight - box.scrollTop - box.clientHeight;
     setAwayFromBottom(gap > box.clientHeight);
     requestAnimationFrame(() => {
@@ -326,6 +383,7 @@ export function Transcript({
       }
       rememberView(box);
       setAwayFromBottom(gap > box.clientHeight);
+      captureAnchor();
     };
     box.addEventListener("scroll", onScroll, { passive: true });
     return () => box.removeEventListener("scroll", onScroll);
@@ -349,6 +407,23 @@ export function Transcript({
       if (stick.current) {
         pinBottom();
         return;
+      }
+      // 向上翻看时高度变了（懒水合落地、图片 / mermaid 出图），把锚点
+      // 块拉回原位，否则第一次翻历史每水合一块画面就跳一下。
+      // ResizeObserver 回调在 layout 之后、paint 之前跑，这里补写
+      // scrollTop 用户看不到中间态。pinning 帧（restoreView 正在二次
+      // 补写）不掺和；隐藏的保活面板（!armed）量出来的是假布局，也不动。
+      const a = anchor.current;
+      if (a && a.el.isConnected && armedRef.current && !pinning.current) {
+        const dy = a.el.getBoundingClientRect().top - box.getBoundingClientRect().top - a.top;
+        if (Math.abs(dy) > 0.5) {
+          pinning.current = true;
+          box.scrollTop += dy;
+          rememberView(box);
+          requestAnimationFrame(() => {
+            pinning.current = false;
+          });
+        }
       }
       // 交出跟随后内容还在下面长，gap 变大但不触发 scroll 事件 ——
       // 「回到底部」得靠这里浮出来，不然用户翻上去就找不到回程。
@@ -522,7 +597,7 @@ const Row = memo(function Row({
           {item.images?.length ? (
             <div className="msg-images">
               {item.images.map((src, i) => (
-                <img key={i} src={src} alt="" />
+                <UserImage key={i} src={src} />
               ))}
             </div>
           ) : null}
@@ -741,7 +816,7 @@ function UserText({ text, files = [] }: { text: string; files?: string[] }) {
     let last = 0;
     for (const s of spans) {
       if (s.index > last) out.push(src.slice(last, s.index));
-      out.push(<FileChip key={`${s.path}-${s.index}`} path={s.path} />);
+      out.push(<FileChip key={`${s.path}-${s.index}`} path={s.path} preview />);
       seen.add(s.path);
       last = s.index + s.length;
     }
@@ -751,7 +826,7 @@ function UserText({ text, files = [] }: { text: string; files?: string[] }) {
       <>
         {out}
         {orphans.map((p) => (
-          <FileChip key={`orphan-${p}`} path={p} />
+          <FileChip key={`orphan-${p}`} path={p} preview />
         ))}
       </>
     );
@@ -769,12 +844,51 @@ function UserText({ text, files = [] }: { text: string; files?: string[] }) {
   );
 }
 
-export function FileChip({ path }: { path: string }) {
+/** 用户消息里附的图。点击全屏放大 —— 附完图想核对细节是常事。 */
+function UserImage({ src }: { src: string }) {
+  const [viewer, setViewer] = useState(false);
   return (
-    <span className="ref-chip static" title={path}>
+    <>
+      <button
+        type="button"
+        className="msg-image-btn"
+        onClick={() => setViewer(true)}
+        aria-label="放大查看图片"
+      >
+        <img src={src} alt="" />
+      </button>
+      {viewer ? <ShotViewer src={src} alt="消息附图" onClose={() => setViewer(false)} /> : null}
+    </>
+  );
+}
+
+/**
+ * 文件引用块。`preview` 置真时渲染成按钮、点击打开应用内预览 ——
+ * 消息气泡里用；Composer 的 `@` 候选列表里它套在候选按钮内部，
+ * 保持纯展示（button 嵌 button 不合法，点击语义也归外层）。
+ */
+export function FileChip({ path, preview = false }: { path: string; preview?: boolean }) {
+  // 引用块记的是项目内相对路径，预览要拼成绝对的。
+  const root = useContext(ProjectRootContext);
+  if (!preview) {
+    return (
+      <span className="ref-chip static" title={path}>
+        <FileIcon />
+        {basename(path)}
+      </span>
+    );
+  }
+  const full = looksAbsPath(path) ? path : joinRoot(root, path);
+  return (
+    <button
+      type="button"
+      className="ref-chip static clickable"
+      title={`预览 ${path}`}
+      onClick={() => openFilePreview(full)}
+    >
       <FileIcon />
       {basename(path)}
-    </span>
+    </button>
   );
 }
 

@@ -15,6 +15,7 @@ export const IS_MAC = navigator.userAgent.includes("Mac");
 import {
   BrowserIcon,
   DiffIcon,
+  FileDocIcon,
   GearIcon,
   PanelBottomIcon,
   SidebarToggleIcon,
@@ -49,6 +50,9 @@ export function TopBar({
   changesOpen,
   changesEnabled,
   onToggleChanges,
+  previewOpen,
+  previewEnabled,
+  onTogglePreview,
 }: {
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
@@ -67,6 +71,10 @@ export function TopBar({
   changesOpen: boolean;
   changesEnabled: boolean;
   onToggleChanges: () => void;
+  previewOpen: boolean;
+  /** 预览抽屉里得先有标签（点过文件）才有东西可看，空着时置灰。 */
+  previewEnabled: boolean;
+  onTogglePreview: () => void;
 }) {
   // 侧栏收起后 macOS 的红绿灯悬在主区左上角，工具栏给它们让位。
   // 全屏没有红绿灯（见 shell[data-fullscreen]），Windows/Linux 的窗口
@@ -101,6 +109,15 @@ export function TopBar({
           它的可见性不能跟着面板走。 */}
       {session ? <ScopeBadge sessionId={session.id} onOpen={onToggleBrowser} browserOpen={browserOpen} /> : null}
 
+      <button
+        className={previewOpen ? "tb-btn active" : "tb-btn"}
+        onClick={onTogglePreview}
+        disabled={!previewEnabled}
+        title={previewEnabled ? "文件预览" : "点击一个文件后这里可以回到预览"}
+        aria-label="文件预览"
+      >
+        <FileDocIcon />
+      </button>
       <button
         className={changesOpen ? "tb-btn active" : "tb-btn"}
         onClick={onToggleChanges}

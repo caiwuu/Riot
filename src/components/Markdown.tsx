@@ -12,6 +12,8 @@ import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 
 import { openInBrowser, openPath } from "../bridge";
+import { joinRoot, looksAbsPath } from "../pathDisplay";
+import { openFilePreview } from "./FilePreview";
 import { MermaidBlock } from "./Mermaid";
 
 import "highlight.js/styles/github-dark-dimmed.css";
@@ -199,7 +201,8 @@ export const LazyMarkdown = memo(function LazyMarkdown({
  * `http://localhost:1420/…`（开发时的 Vite 页，打包后是 webview 自己的
  * origin）。点下去不是打开文件，而是把应用导航走 —— 而且没有后退按钮。
  *
- * 本地路径（含模型误写成应用 origin 的假网址）走系统默认应用；真正的
+ * 本地路径（含模型误写成应用 origin 的假网址）在应用内预览 —— 模型交付
+ * 的 docx / PDF 点开就能看，预览窗里有"系统应用打开"兜底；真正的
  * http(s) 走系统浏览器。
  */
 function MdLink({
@@ -218,9 +221,11 @@ function MdLink({
 
   const onClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
     e.preventDefault();
-    const go =
-      target.kind === "url" ? openInBrowser(target.value) : openPath(target.value);
-    go.catch(() => {
+    if (target.kind === "file") {
+      openFilePreview(target.value);
+      return;
+    }
+    openInBrowser(target.value).catch(() => {
       setErr(true);
       setTimeout(() => setErr(false), 2000);
     });
@@ -294,17 +299,6 @@ function tryDecodePath(s: string): string {
 
 function fileTarget(path: string): MdLinkTarget {
   return { kind: "file", value: path, href: toFileHref(path), title: path };
-}
-
-function looksAbsPath(s: string): boolean {
-  return s.startsWith("/") || s.startsWith("\\\\") || /^[A-Za-z]:[\\/]/.test(s);
-}
-
-function joinRoot(root: string, rel: string): string {
-  const cleaned = rel.replace(/^\.[\\/]+/, "");
-  if (!root) return cleaned;
-  const sep = root.includes("\\") ? "\\" : "/";
-  return `${root.replace(/[\\/]+$/, "")}${sep}${cleaned.replace(/[\\/]+/g, sep)}`;
 }
 
 function toFileHref(absPath: string): string {

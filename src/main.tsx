@@ -50,9 +50,36 @@ function installMacOverlayScrollbar() {
   document.body.appendChild(thumb);
 
   let hide = 0;
+
+  /* 滑块位置只在 scroll 事件里算一次。拖抽屉 / 拖终端高度时容器在
+     变形，右缘持续移动却不再来 scroll 事件 —— 滑块会滞留在旧右缘，
+     看起来像一条拖影。观察显示中的容器，尺寸一变立即藏：变形期间
+     滚动指示本来就没意义。 */
+  let watched: HTMLElement | null = null;
+  let baseW = -1;
+  let baseH = -1;
+  const ro = new ResizeObserver((entries) => {
+    const rect = entries[entries.length - 1]?.contentRect;
+    if (!rect) return;
+    if (baseW < 0) {
+      // observe() 的首次回调是基准，不算"变形"。
+      baseW = rect.width;
+      baseH = rect.height;
+      return;
+    }
+    if (rect.width !== baseW || rect.height !== baseH) {
+      baseW = rect.width;
+      baseH = rect.height;
+      thumb.classList.remove("show");
+    }
+  });
+
   const show = (el: EventTarget | null) => {
     if (!(el instanceof HTMLElement)) return;
     if (el === document.documentElement || el === document.body) return;
+    // 拖分隔条时聊天区贴底逻辑会程序化滚动、连发 scroll 事件，而容器
+    // 右缘正在移动 —— 滑块跟不上就是一条拖影。拖动期间整个静默。
+    if (document.querySelector(".rz.dragging")) return;
     const overflowY = getComputedStyle(el).overflowY;
     if (overflowY !== "auto" && overflowY !== "scroll" && overflowY !== "overlay") {
       return;
@@ -61,6 +88,13 @@ function installMacOverlayScrollbar() {
     if (scrollHeight - clientHeight < 2) {
       thumb.classList.remove("show");
       return;
+    }
+    if (watched !== el) {
+      if (watched) ro.unobserve(watched);
+      watched = el;
+      baseW = -1;
+      baseH = -1;
+      ro.observe(el);
     }
     const r = el.getBoundingClientRect();
     const pad = 3;

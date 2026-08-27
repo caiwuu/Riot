@@ -14,6 +14,19 @@ export function parentOf(path: string): string {
   return i === 0 ? "/" : trimmed.slice(0, i);
 }
 
+/** 像不像绝对路径（Unix `/`、UNC `\\`、Windows 盘符）。 */
+export function looksAbsPath(s: string): boolean {
+  return s.startsWith("/") || s.startsWith("\\\\") || /^[A-Za-z]:[\\/]/.test(s);
+}
+
+/** 相对路径拼到项目根上，分隔符跟着根走。已是绝对路径的调用方自己先判。 */
+export function joinRoot(root: string, rel: string): string {
+  const cleaned = rel.replace(/^\.[\\/]+/, "");
+  if (!root) return cleaned;
+  const sep = root.includes("\\") ? "\\" : "/";
+  return `${root.replace(/[\\/]+$/, "")}${sep}${cleaned.replace(/[\\/]+/g, sep)}`;
+}
+
 /** 家目录换成 `~`。macOS 是 `/Users/xxx`，Windows 是 `C:\Users\xxx`。 */
 export function tildify(path: string): string {
   const unix = /^\/Users\/[^/]+/.exec(path);

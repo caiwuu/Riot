@@ -14,12 +14,20 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@file-viewer/react": "^2.4.0",
+    "@file-viewer/renderer-pdf": "^2.4.0",
+    "@file-viewer/renderer-presentation": "^2.4.0",
+    "@file-viewer/renderer-spreadsheet": "^2.4.0",
+    "@file-viewer/renderer-text": "^2.4.0",
+    "@file-viewer/renderer-word": "^2.4.0",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-notification": "^2.3.3",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "highlight.js": "^11.11.1",
     "mermaid": "^11.16.1",
+    "micromark": "^4.0.2",
+    "micromark-extension-gfm": "^3.0.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-markdown": "^10.1.0",
@@ -27,6 +35,7 @@
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
+    "@file-viewer/vite-plugin": "^2.4.0",
     "@tauri-apps/cli": "^2.11.4",
     "@tauri-apps/plugin-dialog": "^2.7.2",
     "@tauri-apps/plugin-opener": "^2.5.4",

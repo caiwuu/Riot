@@ -32,6 +32,11 @@ import { SessionChangesBar } from "./components/SessionChangesBar";
 import { ScopePanel } from "./components/ScopePanel";
 import { SessionSettings } from "./components/SessionSettings";
 import { ConfirmDialog, type ConfirmRequest } from "./components/ConfirmDialog";
+import {
+  FilePreviewPanel,
+  ImageLightboxHost,
+  subscribeFilePreview,
+} from "./components/FilePreview";
 import { MissingProjectDialog } from "./components/MissingProjectDialog";
 import { ProjectRootContext } from "./components/Markdown";
 import {
@@ -122,8 +127,15 @@ export function App() {
   /** 探测过、确认不存在的项目根。用来在侧栏和欢迎页标「已失效」。 */
   const [missing, setMissing] = useState<Set<string>>(() => new Set());
   const [renaming, setRenaming] = useState<string | null>(null);
-  /** 右侧抽屉此刻装着谁。两个都是整列，只能二选一。 */
-  const [drawer, setDrawer] = useState<"browser" | "changes" | null>(null);
+  /** 右侧抽屉此刻装着谁。三个都是整列，只能开一个。 */
+  const [drawer, setDrawer] = useState<"browser" | "changes" | "preview" | null>(null);
+  /** 预览面板打开着的文件（绝对路径），即标签页顺序。 */
+  const [previewTabs, setPreviewTabs] = useState<string[]>([]);
+  /** 正在看的那个标签。 */
+  const [previewActive, setPreviewActive] = useState<string | null>(null);
+  /** 预览打开前抽屉里是谁。关掉预览回到它 —— 从改动列表点开预览、
+   *  关掉回列表接着点下一个，这条路必须顺。 */
+  const previewReturn = useRef<"browser" | "changes" | null>(null);
   /**
    * 用户主动关过浏览器抽屉的会话。模型在这些会话里再用浏览器工具，
    * 抽屉不再自动弹出 —— 用户已经表过态，每次工具调用都弹回去等于
@@ -182,6 +194,73 @@ export function App() {
   const activeSession = sessions.find((s) => s.id === active) ?? null;
   const update = useAppUpdate(!booting && !bootError);
   const updateNotice = update.banner;
+
+  // 预览请求来自聊天引用、改动列表、Markdown 链接的模块级入口。
+  // 已开过的文件只激活标签不重复开。跟着 drawer 重订阅：回调要在
+  // 切换前记住"预览打开前抽屉里是谁"。
+  useEffect(() => {
+    return subscribeFilePreview((p) => {
+      setPreviewTabs((tabs) => (tabs.includes(p) ? tabs : [...tabs, p]));
+      setPreviewActive(p);
+      if (drawer !== "preview") previewReturn.current = drawer;
+      setDrawer("preview");
+    });
+  }, [drawer]);
+
+  // 切会话清空预览标签：预览的文件属于上一个会话的语境，
+  // 挂着不动会让新会话看起来"带着别人的文件"。
+  useEffect(() => {
+    setPreviewTabs([]);
+    setPreviewActive(null);
+    setDrawer((d) => (d === "preview" ? null : d));
+    previewReturn.current = null;
+  }, [activeSession?.id]);
+
+  // `[约束]` 链接点击的全局兜底，堵"整窗被导航走"的逃逸口。
+  //
+  // 预览面板渲染的 markdown / PDF 注释 / PPT 超链接是第三方库自己的
+  // <a>，没有组件替它 preventDefault —— webview 的默认行为是把**主窗口
+  // 整个导航到目标网址**：Riot 瞬间变成一个无边框浏览器，关掉它等于
+  // 关掉应用。挂在 bubble 末端而不是 capture：聊天里的 MdLink 等组件
+  // 自己处理过的点击（defaultPrevented）在这里直接放过，不会双开。
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      if (e.defaultPrevented) return;
+      const a = e
+        .composedPath()
+        .find(
+          (el): el is HTMLAnchorElement =>
+            el instanceof HTMLAnchorElement && el.hasAttribute("href"),
+        );
+      if (!a) return;
+      const href = a.getAttribute("href") ?? "";
+      // 文档内锚点（目录跳转）不产生真实导航，放行。
+      if (href.startsWith("#")) return;
+      // 其余一律不许在应用 webview 里发生导航。
+      e.preventDefault();
+      if (/^https?:\/\//i.test(href) || href.startsWith("mailto:")) {
+        void openInBrowser(href);
+      }
+      // 相对路径 / file: 静默拦下：导航过去只会是 404 白屏或裸文件页。
+    };
+    window.addEventListener("click", onClick);
+    return () => window.removeEventListener("click", onClick);
+  }, []);
+
+  /** 关一个预览标签。关的是正在看的就激活右邻（没有则左邻，浏览器
+   *  同款）；关到一个不剩，面板让位给预览前开着的东西。 */
+  const closePreviewTab = (p: string) => {
+    const idx = previewTabs.indexOf(p);
+    const next = previewTabs.filter((t) => t !== p);
+    setPreviewTabs(next);
+    if (next.length === 0) {
+      setPreviewActive(null);
+      setDrawer(previewReturn.current);
+      previewReturn.current = null;
+    } else if (previewActive === p) {
+      setPreviewActive(next[Math.min(idx, next.length - 1)] ?? null);
+    }
+  };
 
   // 项目列表不会因为用户在访达里删了文件夹而自己更新。启动和窗口
   // 回到前台时探一次，侧栏才能把失效项标出来，而不必等点「新会话」才知道。
@@ -638,6 +717,21 @@ export function App() {
             }
             setDrawer((d) => (d === "changes" ? null : "changes"));
           }}
+          previewOpen={drawer === "preview"}
+          previewEnabled={previewTabs.length > 0}
+          onTogglePreview={() => {
+            if (drawer === "preview") {
+              // 顶栏开关是显式的"收起"，不回退到之前的面板。
+              setDrawer(null);
+              previewReturn.current = null;
+              return;
+            }
+            if (drawer === "browser" && activeSession) {
+              browserDismissed.current.add(activeSession.id);
+            }
+            previewReturn.current = drawer;
+            setDrawer("preview");
+          }}
         />
 
         {updateNotice ? (
@@ -785,6 +879,18 @@ export function App() {
                 />
                 <ScopePanel sessionId={activeSession.id} />
               </>
+            ) : drawer === "preview" && previewActive ? (
+              <FilePreviewPanel
+                paths={previewTabs}
+                active={previewActive}
+                onSelect={setPreviewActive}
+                onCloseTab={closePreviewTab}
+                // 收起面板不清标签 —— 回来接着看。切会话才清。
+                onClose={() => {
+                  setDrawer(previewReturn.current);
+                  previewReturn.current = null;
+                }}
+              />
             ) : (
               <GitChangesPanel
                 key={activeSession.id}
@@ -826,6 +932,7 @@ export function App() {
       ) : null}
 
       {menu ? <ContextMenu menu={menu} onClose={() => setMenu(null)} /> : null}
+      <ImageLightboxHost />
       {confirm ? <ConfirmDialog c={confirm} onClose={() => setConfirm(null)} /> : null}
       {goneRoot ? (
         <MissingProjectDialog

@@ -416,6 +416,17 @@ export function readImage(path: string): Promise<ImageInput & { name: string }> 
 }
 
 /**
+ * 读一个文件的原始字节，给应用内预览用。
+ *
+ * 宿主走 Tauri 的二进制通道返回（不经 JSON / base64），这里拿到的就是
+ * ArrayBuffer。超过宿主的预览上限（128 MB）或读不到时 reject，调用方
+ * 把错误文案摆出来并给"用系统应用打开"的退路。
+ */
+export function readFileBytes(path: string): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("read_file_bytes", { path });
+}
+
+/**
  * 弹系统的文件选择框，返回绝对路径。
  *
  * 只回路径不回内容:选中的非图片文件在输入框里变成 `@` 引用块，内容由
@@ -429,9 +440,9 @@ export async function pickFiles(imagesOnly = false): Promise<string[]> {
   // 显式的 undefined 和"不传"是两件事。
   const picked = imagesOnly
     ? await open({
-        multiple: true,
-        filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "gif", "webp"] }],
-      })
+      multiple: true,
+      filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "gif", "webp"] }],
+    })
     : await open({ multiple: true });
   if (!picked) return [];
   return Array.isArray(picked) ? picked : [picked];

@@ -113,6 +113,10 @@
 
 * {
   box-sizing: border-box;
+  /* 桌面应用不要橡皮筋。属性不继承，打在通配上：任何滚动容器
+     （对话流、预览文档、终端、改动列表）滚到边界都不弹，也不把
+     滚动链传给外层带着整页晃。 */
+  overscroll-behavior: none;
 }
 
 /* 全局细滚动条。系统默认那条在深色面板上又宽又亮。
@@ -1097,7 +1101,7 @@ pre {
   overflow-y: auto;
   border-top: 1px solid var(--border);
   border-left: 1px solid var(--border);
-  background: var(--bg-side);
+  background: var(--bg);
   padding: 6px 8px;
   font-size: 12px;
 }
@@ -1166,7 +1170,7 @@ pre {
   display: flex;
   flex-direction: column;
   border-left: 1px solid var(--border);
-  background: var(--bg-side);
+  background: var(--bg);
 }
 
 /* 标签栏。窄面板上标签会被压扁，所以给个最小宽度然后允许横向滚动 ——
@@ -1469,13 +1473,16 @@ pre {
 
 /* 高度由内联样式给（用户拖出来的值）。窗口变矮时允许被压缩，
    但压到下限为止 —— 一条看不见内容的终端不如收起来。 */
+/* 底部与右侧的工作面板都和聊天区同底（--bg）：终端、抽屉、主区在
+   一屏里拼在一起，各用一种灰会像三块补丁。--bg-side 留给左侧会话栏
+   （它配的是毛玻璃）。 */
 .term-panel {
   flex-shrink: 1;
   min-height: 110px;
   display: flex;
   flex-direction: column;
   border-top: 1px solid var(--border);
-  background: var(--bg-side);
+  background: var(--bg);
 }
 
 /* 标签栏。窄面板上允许横向滚，规则同浏览器标签栏。 */
@@ -1782,7 +1789,9 @@ pre {
   /* 关掉浏览器滚动锚定。思考块收尾时从展开变折叠，底部内容一次矮掉
      几百像素，锚定会自动回调 scrollTop 保持画面不动 —— 这次非用户的
      scroll 事件让 gap 超过阈值，把贴底跟随误判成「用户往上翻了」。
-     贴底由 App.tsx 里的 stick 逻辑自己管，不需要浏览器插手。 */
+     滚动语义由 Transcript.tsx 自己管：贴底走 stick/pinBottom，向上
+     翻看走手动锚点补偿（captureAnchor）。WKWebView 本来也不支持
+     overflow-anchor，这行是给支持的引擎表态：别插手。 */
   overflow-anchor: none;
 }
 
@@ -1897,7 +1906,9 @@ pre {
 
    contain-intrinsic-size 的 auto 关键字：渲染过一次的行记住真实高度，
    没渲染过的按 60px 估 —— 估偏了 scrollHeight 会抖，贴底逻辑靠
-   ResizeObserver + pinBottom 自愈，恢复位置有二次 rAF 补写兜着。
+   ResizeObserver + pinBottom 自愈，恢复位置有二次 rAF 补写兜着，
+   向上翻历史时由 Transcript 的锚点补偿把 scrollTop 拉回来（不然
+   第一次打开会话往上滑，上方的行水合落高度画面就跳）。
    不支持的 WebView（Safari 18 之前）按普通渲染，只是不省。 */
 .thread-col > * {
   content-visibility: auto;
@@ -2640,6 +2651,20 @@ pre {
   display: block;
 }
 
+/* 图片外面包了放大按钮：抹掉按钮壳，hover 微亮提示可点。 */
+.msg-image-btn {
+  padding: 0;
+  border: none;
+  background: none;
+  border-radius: 8px;
+  cursor: zoom-in;
+}
+
+.msg-image-btn:hover:not(:disabled) {
+  background: none;
+  filter: brightness(1.08);
+}
+
 /* 输入区。contenteditable 而不是 textarea —— 引用块要和文字排在同一
    行（见 App.tsx 的 Seg 注释）。行为上要尽量装得像 textarea：换行保留、
    长单词断开、超高了自己滚。 */
@@ -3071,6 +3096,327 @@ pre {
 .preview-more {
   color: var(--text-faint);
   padding-top: 2px;
+}
+
+/* ── 文件预览（右侧抽屉） ────────────────────── */
+
+/* 和改动面板同一种壳：整列、左描边、聊天区同底。 */
+.preview-panel {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: var(--bg);
+}
+
+/* 标签行。视觉抄终端标签：透明底、激活的浮出一张卡。 */
+.preview-tabs {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.preview-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.preview-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 1 160px;
+  min-width: 92px;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.preview-tab:hover:not(.active) {
+  background: var(--bg-hover);
+  color: var(--text-dim);
+}
+
+.preview-tab.active {
+  background: var(--bg-card);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.preview-tab-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+/* 关闭键 hover / 激活才显形，命中区 ≥20px（同终端标签的取舍）。 */
+.preview-tab-close {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin: -2px -4px -2px 0;
+  border-radius: 5px;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.preview-tab:hover .preview-tab-close {
+  opacity: 0.6;
+}
+
+.preview-tab.active .preview-tab-close {
+  opacity: 0.85;
+}
+
+.preview-tab-close:hover {
+  opacity: 1;
+  background: var(--bg-hover);
+}
+
+.preview-tab-close:focus-visible {
+  opacity: 1;
+}
+
+.preview-panel-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px 4px 12px;
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+
+.preview-panel-path {
+  font-size: 12px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.preview-panel-spacer {
+  flex: 1;
+  min-width: 0;
+}
+
+.preview-panel-err {
+  font-size: 12px;
+  color: var(--danger);
+  flex-shrink: 0;
+}
+
+/* viewer 自带工作区底色（深色主题），这里只负责把空间全给它。
+   translateZ(0)：把预览区钉在一个常驻 GPU 合成层上。从 canvas 类内容
+   （表格/PDF）切到纯文本内容（markdown）时，WKWebView 在透明窗口 +
+   vibrancy 下的层合成模式切换会把事件循环挂起十几秒（探针实测，
+   RemoteLayerTree 的 displayID 日志同步出现）——层常驻后不再切换。 */
+.preview-panel-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  transform: translateZ(0);
+}
+
+/* viewer 固定浅色主题（文档就是白纸，Quick Look 同款），用它自带的
+   整套浅色皮。styleIsolation: none —— 渲染在普通 DOM 里，下面这些
+   规则负责收拾它的内置样式；不 fork 上游，皮在宿主这层改。 */
+.preview-panel-viewer {
+  flex: 1;
+  min-height: 0;
+}
+
+/* Riot 的全局控件样式（深色 button / input）会渗进浅色皮。viewer
+   自己声明过的属性优先级更高不受影响，这里把它**没**声明的那些送回
+   浏览器默认（revert），别让浅色文档区里冒出深色控件。 */
+.preview-panel-viewer :is(button, input, textarea, select) {
+  font-family: revert;
+  font-size: revert;
+  background: revert;
+  color: revert;
+  border: revert;
+  border-radius: revert;
+  padding: revert;
+}
+
+/* 内容贴边。fit.padding 已给 0（那是官方唯一统一的边距口子，管的是
+   缩放计算），但各渲染管线的**容器装饰留白**没有统一配置 —— 这里是
+   已装 8 条管线（preset-office + preset-lite）逐个排查后的完整清单，
+   四向统一归零；页与页**之间**的间距是内容节奏，保留（见下面的
+   last-child 规则，只去掉尾页拖出的底部空带）。
+   docx 特别注意：它的 JS 按"容器宽 − 28"算贴宽比例，fit 按全宽算，
+   留白不压平两个数就打架，表现为一条永远存在的横向滚动。
+   以后新装 preset 时按同样办法补这份清单。 */
+.preview-panel-viewer .pdf-shell,
+.preview-panel-viewer .pdf-wrapper,
+.preview-panel-viewer .pdfViewer,
+.preview-panel-viewer .docx-fit-viewer .docx-wrapper,
+.preview-panel-viewer .pptx-viewer-shell,
+.preview-panel-viewer .ppt-binary-shell,
+.preview-panel-viewer .markdown-viewer,
+.preview-panel-viewer .ofd-stage,
+.preview-panel-viewer .image-stage,
+.preview-panel-viewer .tiff-stage,
+.preview-panel-viewer .fv-audio-viewer,
+.preview-panel-viewer .fv-midi-viewer,
+.preview-panel-viewer .fv-video-viewer {
+  padding: 0 !important;
+}
+
+/* markdown 预览：聊天同款 .md 排版（全局样式直接生效），深色、
+   居中阅读列宽。 */
+.markdown-doc {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg);
+  padding: 20px 24px 40px;
+}
+
+.markdown-doc .md {
+  max-width: 760px;
+  margin: 0 auto;
+}
+
+/* 代码预览：深色、等宽、hljs 配色（github-dark-dimmed 全局主题）。
+   长行横向滚，和终端 / 聊天代码块一个阅读习惯。 */
+.code-view {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg);
+}
+
+.code-view pre {
+  margin: 0;
+  padding: 12px 16px;
+  min-width: max-content;
+}
+
+.code-view code {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.65;
+  background: transparent;
+  padding: 0;
+  display: block;
+  white-space: pre;
+}
+
+.code-view-note {
+  position: sticky;
+  top: 0;
+  left: 0;
+  padding: 6px 16px;
+  font-size: 12px;
+  color: var(--warn);
+  background: var(--warn-bg);
+  border-bottom: 1px solid var(--border);
+}
+
+/* 大图缩到容器宽（小图保持原尺寸，强行放大只会糊）——不出横向滚动。
+   表格是唯一保留横滚的：宽表缩进容器等于没法读，fork 里已禁用它的
+   默认初始缩放。 */
+.preview-panel-viewer .image-stage img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* pdf.js 每页自带 9px 透明边框（历史上用来贴页阴影图），在工作台底色
+   上就是一圈"四周边距"，压掉。页与页的间隔本来也是这个边框撑的，
+   用 margin 补回 —— margin 在页面盒子外面，不吃 canvas 宽度，
+   不会把左右边距带回来。 */
+.preview-panel-viewer .pdfViewer .page {
+  border: 0 !important;
+  margin: 0 auto 12px !important;
+}
+
+/* 尾页不拖底部空带。 */
+.preview-panel-viewer .pdfViewer .page:last-child {
+  margin-bottom: 0 !important;
+}
+
+.preview-panel-viewer .docx-page-frame:last-child,
+.preview-panel-viewer .docx-flow-frame:last-child {
+  margin-bottom: 0 !important;
+}
+
+/* markdown 卡片走它暴露的官方变量：铺满宽度，收窄默认 45px 的卡内
+   边距。铺满之后卡片的描边 / 圆角 / 投影就没意义了，一并摘掉，
+   让它看起来是"文档视图"而不是悬浮卡。 */
+.preview-panel-viewer .markdown-viewer {
+  --markdown-max-width: none;
+  --markdown-padding: 24px 20px;
+}
+
+.preview-panel-viewer .markdown-body {
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+/* toolbar:false 的兜底：个别管线仍会渲染右下角的浮动胶囊工具栏
+   （搜索/缩放），窄抽屉里被裁一半还挡内容，藏掉。缩放走拖抽屉宽。 */
+.preview-panel-viewer .file-viewer-web-toolbar {
+  display: none !important;
+}
+
+/* 读取中 / 读取失败：居中一段说明，错误时下面跟一个系统打开的退路。 */
+.preview-panel-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 24px;
+  text-align: center;
+}
+
+.preview-panel-fallback {
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.preview-panel-fallback:hover {
+  color: var(--text);
+  background: var(--bg-input-hover);
+}
+
+/* 气泡里的引用块升级成按钮后要抹掉 UA 的按钮壳，外观向 span 版对齐。 */
+button.ref-chip.clickable {
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+button.ref-chip.clickable:hover {
+  background: rgba(90, 141, 214, 0.22);
+  border-color: rgba(90, 141, 214, 0.55);
 }
 
 /* ── 设置 ───────────────────────────────────── */
@@ -5600,7 +5946,7 @@ pre {
   display: flex;
   flex-direction: column;
   border-left: 1px solid var(--border);
-  background: var(--bg-side);
+  background: var(--bg);
 }
 
 .changes-head {
@@ -5645,7 +5991,8 @@ pre {
   min-width: 0;
 }
 
-.changes-head .icon {
+.changes-head .icon,
+.preview-panel-head .icon {
   flex: none;
   width: 28px;
   height: 28px;
@@ -5658,7 +6005,8 @@ pre {
   color: var(--text-dim);
 }
 
-.changes-head .icon:hover:not(:disabled) {
+.changes-head .icon:hover:not(:disabled),
+.preview-panel-head .icon:hover:not(:disabled) {
   background: var(--bg-hover);
   color: var(--text);
 }

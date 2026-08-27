@@ -426,9 +426,9 @@ function ShotImage({
  * 图片查看器:全屏遮罩，原尺寸（超宽时缩到视口宽）显示，长图纵向滚动。
  *
  * portal 到 body —— 卡片在带 overflow 的滚动容器里，fixed 遮罩留在原地
- * 会被裁掉。
+ * 会被裁掉。导出给聊天区图片和磁盘图片文件的放大查看共用。
  */
-function ShotViewer({
+export function ShotViewer({
   src,
   alt = "工具结果图片",
   onClose,

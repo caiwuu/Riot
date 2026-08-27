@@ -61,6 +61,27 @@ export function DiffIcon() {
   );
 }
 
+/** 文件预览开关：折角文档 + 两行正文。 */
+export function FileDocIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M9.2 1.8H4.5a1 1 0 0 0-1 1v10.4a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1V5.1L9.2 1.8z"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
+      />
+      <path d="M9 2v3.3h3.4" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+      <path
+        d="M5.6 9h4.8M5.6 11.4h3.2"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 export function PlusIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>

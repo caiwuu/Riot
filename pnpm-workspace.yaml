@@ -1,0 +1,13 @@
+# 文件预览的渲染库（@file-viewer）指向本地 fork：~/code/file-viewer
+# （github.com/flyfish-dev/file-viewer 的克隆，定制以本地 commit 叠在
+# upstream 上，升级 = git pull --rebase 后重跑 pnpm build）。
+# 只需覆盖 Riot 直接声明的依赖：link 包自己的 @file-viewer/* 依赖
+# （core、doc/pptx 引擎等）由 fork 的 workspace 解析，不经过这里。
+overrides:
+  '@file-viewer/react': link:../file-viewer/packages/components/react
+  '@file-viewer/renderer-pdf': link:../file-viewer/packages/renderers/pdf
+  '@file-viewer/renderer-presentation': link:../file-viewer/packages/renderers/presentation
+  '@file-viewer/renderer-spreadsheet': link:../file-viewer/packages/renderers/spreadsheet
+  '@file-viewer/renderer-text': link:../file-viewer/packages/renderers/text
+  '@file-viewer/renderer-word': link:../file-viewer/packages/renderers/word
+  '@file-viewer/vite-plugin': link:../file-viewer/packages/presets/vite-plugin

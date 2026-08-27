@@ -550,7 +550,10 @@ async fn browser_open(
             buf.extend_from_slice(&f.width.to_le_bytes());
             buf.extend_from_slice(&f.height.to_le_bytes());
             buf.extend_from_slice(&f.data);
-            if on_frame.send(tauri::ipc::InvokeResponseBody::Raw(buf)).is_err() {
+            if on_frame
+                .send(tauri::ipc::InvokeResponseBody::Raw(buf))
+                .is_err()
+            {
                 break; // 前端不听了
             }
         }
@@ -785,6 +788,41 @@ async fn read_image(path: String) -> HostResult<content::ImageOutput> {
         .map_err(HostError::Provider)
 }
 
+/// 文件预览一次能读进来的上限。
+///
+/// 预览是在 webview 里渲染的：字节要过一次 IPC、再在 JS 侧解析成
+/// DOM / canvas，太大的文件两头都扛不住。超限让用户走系统应用打开，
+/// 那条路是流式的。
+const MAX_PREVIEW_FILE: u64 = 128 * 1024 * 1024;
+
+/// 读一个文件的原始字节，给应用内预览（Office / PDF / 图片等）用。
+///
+/// 返回 `tauri::ipc::Response`，走 Tauri 的原始二进制通道 —— 不经
+/// JSON 也不做 base64，几十 MB 的文档不会因为编码把界面卡住。
+///
+/// 只在用户点击界面上已展示的路径时调用，语义与 `read_image` 一致：
+/// 读的是用户自己机器上、自己点开的文件。
+#[tauri::command]
+async fn read_file_bytes(path: String) -> HostResult<tauri::ipc::Response> {
+    let meta = tokio::fs::metadata(&path)
+        .await
+        .map_err(|e| HostError::Provider(format!("读不到文件：{e}")))?;
+    if !meta.is_file() {
+        return Err(HostError::Provider("这个路径不是文件".into()));
+    }
+    if meta.len() > MAX_PREVIEW_FILE {
+        return Err(HostError::Provider(format!(
+            "文件太大（{} MB），应用内预览最多 {} MB。请用系统应用打开。",
+            meta.len() / (1024 * 1024),
+            MAX_PREVIEW_FILE / (1024 * 1024),
+        )));
+    }
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| HostError::Provider(format!("读文件失败：{e}")))?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 /// 把一个目录加进项目列表（验证它存在、可 canonicalize），返回规范化的根。
 ///
 /// 只是登记，不创建会话 —— 项目和会话是两层：项目是侧边栏的分组，
@@ -1011,6 +1049,7 @@ pub fn run() {
             term_share,
             term_busy,
             read_image,
+            read_file_bytes,
             clipboard_paths,
             get_config,
             app_version,

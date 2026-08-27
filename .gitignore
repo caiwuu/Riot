@@ -11,6 +11,11 @@ dist
 *.db
 *.db-journal
 
+# @file-viewer/vite-plugin 在 dev/build 时从 node_modules 复制的
+# 渲染器资产（Worker / WASM / 字体，约 30 MB），不进版本库
+public/vendor/
+public/flyfish-viewer-assets.json
+
 # tauri-build 生成的 capability schema，首次 build 后才存在
 src-tauri/gen/
 # externalBin 产物，由构建脚本从 cargo 输出拷入

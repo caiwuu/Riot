@@ -4,10 +4,37 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  '@file-viewer/react': link:../file-viewer/packages/components/react
+  '@file-viewer/renderer-pdf': link:../file-viewer/packages/renderers/pdf
+  '@file-viewer/renderer-presentation': link:../file-viewer/packages/renderers/presentation
+  '@file-viewer/renderer-spreadsheet': link:../file-viewer/packages/renderers/spreadsheet
+  '@file-viewer/renderer-text': link:../file-viewer/packages/renderers/text
+  '@file-viewer/renderer-word': link:../file-viewer/packages/renderers/word
+  '@file-viewer/vite-plugin': link:../file-viewer/packages/presets/vite-plugin
+
 importers:
 
   .:
     dependencies:
+      '@file-viewer/react':
+        specifier: link:../file-viewer/packages/components/react
+        version: link:../file-viewer/packages/components/react
+      '@file-viewer/renderer-pdf':
+        specifier: link:../file-viewer/packages/renderers/pdf
+        version: link:../file-viewer/packages/renderers/pdf
+      '@file-viewer/renderer-presentation':
+        specifier: link:../file-viewer/packages/renderers/presentation
+        version: link:../file-viewer/packages/renderers/presentation
+      '@file-viewer/renderer-spreadsheet':
+        specifier: link:../file-viewer/packages/renderers/spreadsheet
+        version: link:../file-viewer/packages/renderers/spreadsheet
+      '@file-viewer/renderer-text':
+        specifier: link:../file-viewer/packages/renderers/text
+        version: link:../file-viewer/packages/renderers/text
+      '@file-viewer/renderer-word':
+        specifier: link:../file-viewer/packages/renderers/word
+        version: link:../file-viewer/packages/renderers/word
       '@tauri-apps/api':
         specifier: ^2.11.1
         version: 2.11.1
@@ -26,6 +53,12 @@ importers:
       mermaid:
         specifier: ^11.16.1
         version: 11.17.1
+      micromark:
+        specifier: ^4.0.2
+        version: 4.0.2
+      micromark-extension-gfm:
+        specifier: ^3.0.0
+        version: 3.0.0
       react:
         specifier: ^19.2.0
         version: 19.2.8
@@ -42,6 +75,9 @@ importers:
         specifier: ^4.0.1
         version: 4.0.1
     devDependencies:
+      '@file-viewer/vite-plugin':
+        specifier: link:../file-viewer/packages/presets/vite-plugin
+        version: link:../file-viewer/packages/presets/vite-plugin
       '@tauri-apps/cli':
         specifier: ^2.11.4
         version: 2.11.4
