@@ -3892,6 +3892,11 @@ button.ref-chip.clickable:hover {
   margin-top: 0;
 }
 
+/* 底部操作条在设置页里不画分隔线：上面就是卡片，卡片自己有边，再来一条
+   等宽的横线像是卡片漏了条底边。弹窗里的 .editor-foot 保留那条线 ——
+   它分隔的是滚动内容和固定底栏，是另一回事。
+   两个选择器分别对应：编辑器直接挂在正文里（服务方），和挂在分组里（MCP）。 */
+.settings-inner > .editor-foot,
 .set-group > .editor-foot {
   margin-top: 14px;
   padding-top: 0;
