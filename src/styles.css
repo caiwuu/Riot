@@ -1797,8 +1797,19 @@ pre {
   cursor: pointer;
 }
 
+/* 对话流外壳：给「回到底部」当定位根。倒排滚动容器里 sticky
+   钉不住圆钮（见 .jump-bottom），按钮必须叠在滚动层外面。 */
+.transcript-shell {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
 .transcript {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   /* 对话流自己滚到顶/底不弹。不要写在孩子上 —— 思考块 / 折叠层
      必须把剩余滚量交回来，否则指针停在那些块上等于锁死。 */
@@ -1824,21 +1835,24 @@ pre {
   overflow-anchor: none;
 }
 
-/* 回到底部：sticky 钉在滚动视口下缘。倒排容器里它是第一个子元素，
-   自然位置在视觉底部 —— 往上翻时被 bottom 钳在可视区内。负下边距
-   抵掉自身高度，不占滚动高度。 */
+/* 回到底部：绝对钉在外壳下缘，不进倒排滚动流。 */
 .jump-bottom {
-  position: sticky;
+  position: absolute;
+  left: 50%;
   bottom: 14px;
+  transform: translateX(-50%);
   display: flex;
   align-items: center;
   justify-content: center;
   width: 30px;
   height: 30px;
+  min-width: 30px;
+  min-height: 30px;
+  flex-shrink: 0;
   /* 全局 button 有 6×14 的 padding。box-sizing:border-box 下
      30px 圆钮内容区会被挤成 0，箭头裁没了只剩一圈底。 */
   padding: 0;
-  margin: 0 auto -30px;
+  margin: 0;
   border-radius: 50%;
   background: var(--bg-card);
   border: 1px solid var(--border-strong);

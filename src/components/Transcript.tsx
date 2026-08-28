@@ -585,33 +585,9 @@ export function Transcript({
   const hydrateFrom = Math.max(0, blocks.length - 12);
 
   return (
-    <main className="transcript" ref={boxRef}>
-      {/* 倒排容器：DOM 首子元素排在视觉底部，「回到底部」在前、查找条
-          在后，sticky 才各自吸到正确的边。按钮往上翻超过一屏才出现 ——
-          贴底时它只是噪音；点了重新贴底，流式输出继续跟随。 */}
-      {awayFromBottom ? (
-        <button
-          type="button"
-          className="jump-bottom"
-          title="回到底部"
-          aria-label="回到底部"
-          onClick={() => {
-            stick.current = true;
-            pinBottom();
-          }}
-        >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
-            <path
-              d="M8 3v10M3.5 8.5L8 13l4.5-4.5"
-              stroke="currentColor"
-              strokeWidth="1.8"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </button>
-      ) : null}
-      <div className="thread-col">
+    <div className="transcript-shell">
+      <main className="transcript" ref={boxRef}>
+        <div className="thread-col">
         {blocks.map((b, i) =>
           b.kind === "row" ? (
             <Row
@@ -670,9 +646,35 @@ export function Transcript({
         ) : busy && !planAsk && !choiceAsk ? (
           <Dots label={waitLabel} timed since={waitSince} />
         ) : null}
-      </div>
-      {findOpen && armed ? <FindBar box={boxRef} onClose={() => setFindOpen(false)} /> : null}
-    </main>
+        </div>
+        {findOpen && armed ? <FindBar box={boxRef} onClose={() => setFindOpen(false)} /> : null}
+      </main>
+      {/* 叠在滚动容器外面。倒排 flex 里 sticky + 负边距：WebKit 把按钮
+          挤出视口（Mac 上看不见），Chromium 把它压扁（Windows 上不圆）。
+          往上翻超过一屏才出现 —— 贴底时它只是噪音。 */}
+      {awayFromBottom ? (
+        <button
+          type="button"
+          className="jump-bottom"
+          title="回到底部"
+          aria-label="回到底部"
+          onClick={() => {
+            stick.current = true;
+            pinBottom();
+          }}
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+            <path
+              d="M8 3v10M3.5 8.5L8 13l4.5-4.5"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </button>
+      ) : null}
+    </div>
   );
 }
 
