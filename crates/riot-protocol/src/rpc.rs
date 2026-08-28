@@ -71,6 +71,27 @@ pub enum RpcRequest {
         entry_id: String,
     },
 
+    /// 上下文编辑：把一条历史消息的文本段替换成新文本。
+    ///
+    /// 只动文本 —— 思考、工具调用/结果、附件原位保留（见
+    /// `Message::edit_text`）。只对活历史生效；空闲时才能做。
+    #[serde(rename = "history.edit")]
+    HistoryEdit {
+        session_id: SessionId,
+        /// 内核消息 id（不是界面条目 id）。
+        message_id: String,
+        text: String,
+    },
+    /// 上下文删除：按"轮"成对删 —— 这条消息所属的用户提问，连同它
+    /// 引出的全部回应（工具调用、结果、回复），整段从历史移除。提问
+    /// 没有得到任何回应（被停止/出错）时就只删提问自己。
+    /// 只对活历史生效；空闲时才能做。
+    #[serde(rename = "history.delete")]
+    HistoryDelete {
+        session_id: SessionId,
+        message_id: String,
+    },
+
     /// 手动压缩(/compact)。带模型端点 —— 压缩要调 LLM。
     #[serde(rename = "session.compact")]
     SessionCompact {

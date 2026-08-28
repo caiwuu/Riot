@@ -76,6 +76,78 @@ impl Message {
             _ => Vec::new(),
         }
     }
+
+    /// 上下文编辑：把消息的文本段替换成一段新文本。
+    ///
+    /// 只动文本：思考（签名与模型绑定）、工具调用/结果（配对不能断）、
+    /// 附件（图和系统注入）一律原位保留。多个文本段合并成一段，落在原
+    /// 第一个文本段的位置；本来没有文本段时，Assistant 插在第一个工具
+    /// 调用前（模型输出的自然顺序），User 插在最前。
+    ///
+    /// 返回 `false` = System 消息，没有可编辑的文本，原样未动。
+    ///
+    /// `[约束]` 内核的内存操作和 store 的加载重放都走这一个函数 ——
+    /// 两边各写一份的话，重启后的历史和编辑当刻的历史差一个字都算 bug。
+    pub fn edit_text(&mut self, new_text: &str) -> bool {
+        match self {
+            Message::User { content, .. } => {
+                let at = content
+                    .iter()
+                    .position(|c| matches!(c, UserContent::Text { .. }))
+                    .unwrap_or(0);
+                content.retain(|c| !matches!(c, UserContent::Text { .. }));
+                content.insert(
+                    at.min(content.len()),
+                    UserContent::Text {
+                        text: new_text.to_owned(),
+                    },
+                );
+                true
+            }
+            Message::Assistant { content, .. } => {
+                let at = content
+                    .iter()
+                    .position(|c| matches!(c, AssistantContent::Text { .. }))
+                    .or_else(|| {
+                        content
+                            .iter()
+                            .position(|c| matches!(c, AssistantContent::ToolUse { .. }))
+                    })
+                    .unwrap_or(content.len());
+                content.retain(|c| !matches!(c, AssistantContent::Text { .. }));
+                content.insert(
+                    at.min(content.len()),
+                    AssistantContent::Text {
+                        text: new_text.to_owned(),
+                    },
+                );
+                true
+            }
+            Message::System { .. } => false,
+        }
+    }
+
+    /// 真正的用户提问：有正文、附图或 `@` 文件的用户消息。工具结果的
+    /// 合成消息、纯系统注入都不算。
+    ///
+    /// 这是"一轮问答"的边界判定：上下文删除按轮成对删（提问连同它引出
+    /// 的全部回应），轮的起点就是提问、终点是下一条提问。内核删除和
+    /// 重新生成的截断（`cut_at_user_prompt`）都以它为准 —— 两边各写
+    /// 一份的话，"一轮"的边界会在某天悄悄分叉。
+    pub fn is_user_prompt(&self) -> bool {
+        match self {
+            Message::User { content, .. } => content.iter().any(|c| match c {
+                UserContent::Text { text } => !text.trim().is_empty(),
+                UserContent::Attachment(
+                    Attachment::Image { .. }
+                    | Attachment::DescribedImage { .. }
+                    | Attachment::UserFile { .. },
+                ) => true,
+                _ => false,
+            }),
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -353,5 +425,118 @@ mod tests {
             meta: MessageMeta::default(),
         };
         assert_eq!(m.tool_use_ids(), vec![&ToolUseId::from_raw("t1")]);
+    }
+
+    /// 编辑只换文本，思考和工具调用原位不动。
+    ///
+    /// 思考签名与模型绑定、工具调用与结果配对 —— 编辑碰了它们，轻则
+    /// 服务方 400，重则历史重放对不上。文本的位置也要保住：模型输出的
+    /// 自然顺序是 thinking → text → tool_use，编辑不该把它重排。
+    #[test]
+    fn edit_text_only_touches_text() {
+        let mut m = Message::Assistant {
+            id: MessageId::from_raw("m1"),
+            content: vec![
+                AssistantContent::Thinking {
+                    text: "想一想".into(),
+                    signature: Some("sig".into()),
+                },
+                AssistantContent::Text {
+                    text: "旧话".into(),
+                },
+                AssistantContent::ToolUse {
+                    id: ToolUseId::from_raw("t1"),
+                    name: "Read".into(),
+                    input: serde_json::json!({}),
+                },
+            ],
+            usage: None,
+            meta: MessageMeta::default(),
+        };
+        assert!(m.edit_text("新话"));
+        let Message::Assistant { content, .. } = &m else {
+            unreachable!()
+        };
+        assert!(matches!(&content[0], AssistantContent::Thinking { .. }));
+        assert!(matches!(&content[1], AssistantContent::Text { text } if text == "新话"));
+        assert!(matches!(&content[2], AssistantContent::ToolUse { .. }));
+    }
+
+    /// 用户消息的编辑保留附件（图和 `@` 文件）：用户改的是字，不是图。
+    #[test]
+    fn edit_text_keeps_user_attachments() {
+        let mut m = Message::User {
+            id: MessageId::from_raw("m1"),
+            content: vec![
+                UserContent::Text {
+                    text: "旧话".into(),
+                },
+                UserContent::Attachment(Attachment::Image {
+                    media_type: "image/png".into(),
+                    data: "x".into(),
+                }),
+            ],
+            meta: MessageMeta::default(),
+        };
+        assert!(m.edit_text("新话"));
+        let Message::User { content, .. } = &m else {
+            unreachable!()
+        };
+        assert_eq!(content.len(), 2);
+        assert!(matches!(&content[0], UserContent::Text { text } if text == "新话"));
+        assert!(matches!(&content[1], UserContent::Attachment(_)));
+    }
+
+    /// 轮边界的判定：真实输入（文字/图/`@` 文件）算提问，工具结果的
+    /// 合成消息和纯系统注入不算。
+    ///
+    /// 判错的代价在两头：把 tool_result 当提问，成对删除会把一轮从中间
+    /// 劈开（配对断、下一轮 400）；把带图无文字的输入不当提问，那一轮
+    /// 会被并进上一轮，删上一轮把它也吞掉。
+    #[test]
+    fn user_prompt_boundary() {
+        let prompt = Message::User {
+            id: MessageId::from_raw("m1"),
+            content: vec![UserContent::Text { text: "问题".into() }],
+            meta: MessageMeta::default(),
+        };
+        assert!(prompt.is_user_prompt());
+
+        let image_only = Message::User {
+            id: MessageId::from_raw("m2"),
+            content: vec![UserContent::Attachment(Attachment::Image {
+                media_type: "image/png".into(),
+                data: "x".into(),
+            })],
+            meta: MessageMeta::default(),
+        };
+        assert!(image_only.is_user_prompt(), "只发图也是提问");
+
+        let tool_result = Message::User {
+            id: MessageId::from_raw("m3"),
+            content: vec![UserContent::ToolResult {
+                tool_use_id: ToolUseId::from_raw("t1"),
+                content: ToolResultContent::text("ok"),
+                is_error: false,
+            }],
+            meta: MessageMeta::default(),
+        };
+        assert!(!tool_result.is_user_prompt(), "工具结果不是提问");
+
+        let reminder_only = Message::User {
+            id: MessageId::from_raw("m4"),
+            content: vec![UserContent::Attachment(Attachment::SystemReminder {
+                text: "提醒".into(),
+            })],
+            meta: MessageMeta::default(),
+        };
+        assert!(!reminder_only.is_user_prompt(), "纯系统注入不是提问");
+
+        let system = Message::System {
+            id: MessageId::from_raw("m5"),
+            level: SystemLevel::Info,
+            text: "提示".into(),
+        };
+        assert!(!system.is_user_prompt());
     }
 }

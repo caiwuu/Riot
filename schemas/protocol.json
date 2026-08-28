@@ -2373,6 +2373,69 @@
           "type": "object"
         },
         {
+          "description": "上下文编辑：把一条历史消息的文本段替换成新文本。\n\n只动文本 —— 思考、工具调用/结果、附件原位保留（见\n`Message::edit_text`）。只对活历史生效；空闲时才能做。",
+          "properties": {
+            "method": {
+              "const": "history.edit",
+              "type": "string"
+            },
+            "params": {
+              "properties": {
+                "message_id": {
+                  "description": "内核消息 id（不是界面条目 id）。",
+                  "type": "string"
+                },
+                "session_id": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session_id",
+                "message_id",
+                "text"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "上下文删除：按\"轮\"成对删 —— 这条消息所属的用户提问，连同它\n引出的全部回应（工具调用、结果、回复），整段从历史移除。提问\n没有得到任何回应（被停止/出错）时就只删提问自己。\n只对活历史生效；空闲时才能做。",
+          "properties": {
+            "method": {
+              "const": "history.delete",
+              "type": "string"
+            },
+            "params": {
+              "properties": {
+                "message_id": {
+                  "type": "string"
+                },
+                "session_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session_id",
+                "message_id"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
           "description": "手动压缩(/compact)。带模型端点 —— 压缩要调 LLM。",
           "properties": {
             "method": {

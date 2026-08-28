@@ -140,6 +140,27 @@ async fn session_compact(state: tauri::State<'_, AppState>, session_id: String) 
     state.compact_session(&session_id).await
 }
 
+/// 上下文编辑：替换一条历史消息的文本段（思考、工具调用、附件不动）。
+#[tauri::command]
+async fn edit_message(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    message_id: String,
+    text: String,
+) -> HostResult<()> {
+    state.edit_message(&session_id, &message_id, &text).await
+}
+
+/// 上下文删除：抹掉一条历史消息的可见内容；消息因此空心则整条移除。
+#[tauri::command]
+async fn delete_message(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    message_id: String,
+) -> HostResult<()> {
+    state.delete_message(&session_id, &message_id).await
+}
+
 /// 可用的斜杠命令（内置 + 项目 + 全局）。`root` 为 null 时只列内置和全局。
 #[tauri::command]
 async fn slash_commands(root: Option<String>) -> HostResult<Vec<slash::SlashCommand>> {
@@ -1057,6 +1078,8 @@ pub fn run() {
             subscribe_session,
             send_turn,
             regenerate_turn,
+            edit_message,
+            delete_message,
             queue_list,
             queue_remove,
             queue_take,

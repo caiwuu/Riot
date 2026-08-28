@@ -646,6 +646,24 @@ export type RpcRequest =
       };
     }
   | {
+      method: "history.edit";
+      params: {
+        /**
+         * 内核消息 id（不是界面条目 id）。
+         */
+        message_id: string;
+        session_id: string;
+        text: string;
+      };
+    }
+  | {
+      method: "history.delete";
+      params: {
+        message_id: string;
+        session_id: string;
+      };
+    }
+  | {
       method: "session.compact";
       params: {
         model: ModelEndpoint;

@@ -374,6 +374,24 @@ impl SessionManager {
         s.compact_now(model, sink).await
     }
 
+    /// 上下文编辑:替换一条活历史消息的文本段。空闲时才能做。
+    pub async fn edit_message(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> Result<(), String> {
+        let s = self.get(session_id).await.ok_or("会话不存在")?;
+        s.edit_message(message_id, text).await
+    }
+
+    /// 上下文删除:抹掉一条活历史消息的可见内容,空心则整条移除。
+    /// 空闲时才能做。
+    pub async fn delete_message(&self, session_id: &str, message_id: &str) -> Result<(), String> {
+        let s = self.get(session_id).await.ok_or("会话不存在")?;
+        s.delete_message(message_id).await
+    }
+
     pub async fn queue_list(&self, session_id: &str) -> Vec<riot_protocol::QueuedSummary> {
         match self.get(session_id).await {
             Some(s) => s.queue_snapshot(),

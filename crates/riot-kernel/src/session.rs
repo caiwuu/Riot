@@ -20,6 +20,7 @@
 //! 攒起来得到的。这样宿主和 UI 看到的是同一份东西 —— 如果它们各自维护
 //! 一份，两者的分歧只会在几十轮之后以"模型突然失忆"的形式暴露出来。
 
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -442,20 +443,10 @@ fn fold_live(live: &mut LiveStream, ev: &AgentEvent) {
     }
 }
 
-/// 真正的用户提示：有正文、附图或 `@` 文件。工具结果不算。
+/// 真正的用户提示。定义挪去了 [`Message::is_user_prompt`]（上下文删除
+/// 按轮成对删，轮边界必须和这里同一个判定），这里留一个薄委托。
 fn is_user_prompt(m: &Message) -> bool {
-    match m {
-        Message::User { content, .. } => content.iter().any(|c| match c {
-            UserContent::Text { text } => !text.trim().is_empty(),
-            UserContent::Attachment(
-                Attachment::Image { .. }
-                | Attachment::DescribedImage { .. }
-                | Attachment::UserFile { .. },
-            ) => true,
-            _ => false,
-        }),
-        _ => false,
-    }
+    m.is_user_prompt()
 }
 
 /// 重新生成的截断点：指定助手消息前面最近一条用户提示的下标。
@@ -1103,6 +1094,123 @@ impl Session {
         Ok(keep_id)
     }
 
+    /// 上下文编辑：把一条活历史消息的文本段替换成新文本。
+    ///
+    /// 只动文本（见 [`Message::edit_text`]）：思考、工具调用/结果、附件
+    /// 原位保留，配对和签名都不受影响。空闲时才能做 —— 和正在写历史的
+    /// 轮子并发，transcript 的追加顺序和界面都会打架。
+    ///
+    /// 只对活历史生效。归档（压缩前）的消息模型已经看不见，改它对上下文
+    /// 没有任何效果 —— 与其静默假装成功，不如把这层告诉用户。
+    pub async fn edit_message(&self, message_id: &str, text: &str) -> Result<(), String> {
+        if text.trim().is_empty() {
+            return Err("内容不能为空。想去掉这条消息的话，用删除。".into());
+        }
+        self.with_idle_lock(async {
+            let mut live = self.history.lock().await;
+            let Some(msg) = live.iter_mut().find(|m| m.id().as_str() == message_id) else {
+                drop(live);
+                return Err(self.missing_message_error(message_id).await);
+            };
+            if !msg.edit_text(text) {
+                return Err("这条是系统提示，没有可编辑的文本。".into());
+            }
+            drop(live);
+            if let Some(p) = &self.persist {
+                p.log.append_edit(message_id, text);
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// 上下文删除：按"轮"成对删 —— 从这条消息所属的用户提问起，到
+    /// 下一条提问之前，整段移除（提问、工具调用、工具结果、回复一起走）。
+    ///
+    /// 成对是结构的要求，不只是产品选择：只删提问会让前后两段回复贴在
+    /// 一起（Anthropic 拒绝的形状），只删回复会留下悬空的工具配对。
+    /// 按轮删两个坑都不存在 —— 区间以提问开头、结束在下一条提问前，
+    /// 工具配对总在轮内。
+    ///
+    /// 例外自动成立：提问发出后模型没来得及回应（被停止/出错），这一轮
+    /// 只有提问自己，删除也就只删它。
+    pub async fn delete_message(&self, message_id: &str) -> Result<(), String> {
+        self.with_idle_lock(async {
+            let mut live = self.history.lock().await;
+            let Some(at) = live.iter().position(|m| m.id().as_str() == message_id) else {
+                drop(live);
+                return Err(self.missing_message_error(message_id).await);
+            };
+            if matches!(live[at], Message::System { .. }) {
+                return Err("这条是系统提示，不支持删除。".into());
+            }
+            // 轮的起点：目标自己是提问就是它，否则向前找最近的提问；
+            // 找不到（历史以回应开头的病态形状）就从目标本身删起。
+            // 起点和目标之间不会有别的提问（"最近"保证了这一点），
+            // 区间因此恰好罩住目标所在的这一轮。
+            let start = (0..=at)
+                .rev()
+                .find(|&i| live[i].is_user_prompt())
+                .unwrap_or(at);
+            let end = (at + 1..live.len())
+                .find(|&i| live[i].is_user_prompt())
+                .unwrap_or(live.len());
+            let removed: Vec<String> = live
+                .drain(start..end)
+                .map(|m| m.id().as_str().to_owned())
+                .collect();
+            drop(live);
+            if let Some(p) = &self.persist {
+                for id in &removed {
+                    p.log.append_delete(id);
+                }
+            }
+            // 环境指纹归零，理由同 rewind_to_prompt：删掉的轮可能带走了
+            // 最近那份环境快照，指纹还记着"已发过"的话，下一轮差分判定
+            // "没变化"，模型对着被改的上下文失明。
+            *self.env_seen.lock().await = None;
+            *self.env_band.lock().await = 0;
+            Ok(())
+        })
+        .await
+    }
+
+    /// 占住 `running` 跑一段短操作（上下文编辑/删除）。
+    ///
+    /// 和 [`Self::compact_now`] 同一个理由：改写历史不能和跑动中的轮子
+    /// 并发。期间到达的插话照常排队，下一轮的收尾 drain 会捞到。
+    async fn with_idle_lock<T>(
+        &self,
+        op: impl Future<Output = Result<T, String>>,
+    ) -> Result<T, String> {
+        {
+            let mut g = self.running.lock().await;
+            if g.is_some() {
+                return Err("正在跑一轮，等它结束再修改上下文。".into());
+            }
+            *g = Some(CancellationToken::new());
+        }
+        self.hydrate().await;
+        let result = op.await;
+        *self.running.lock().await = None;
+        result
+    }
+
+    /// 编辑/删除的目标不在活历史里时，说清它到底去了哪。
+    async fn missing_message_error(&self, message_id: &str) -> String {
+        if self
+            .ui_archive
+            .lock()
+            .await
+            .iter()
+            .any(|m| m.id().as_str() == message_id)
+        {
+            "这条消息已被压缩进摘要，模型看的是摘要 —— 改它不会影响上下文。".into()
+        } else {
+            "这条消息已经不在当前上下文里。".into()
+        }
+    }
+
     /// 把半截流里已经吐出来的正文定稿成一条助手消息（历史 + transcript）。
     ///
     /// 用户按停止常常是"够了，别说了"，不是"当你没说过" —— 而取消时
@@ -1331,9 +1439,13 @@ impl Session {
             if cached.policy == policy {
                 return Some(Arc::clone(&cached.active));
             }
-            // 策略换了。先把旧的放掉（Drop 会回收 Windows 那侧的授权）再
-            // 激活新的 —— 反过来的话两套授权会同时挂着，中间那段时间的
-            // 可写面是两者之和。
+            // 策略换了，放掉旧的、激活新的。
+            //
+            // 注意：Windows 那侧 Drop **不再**即时撤授权（holder 是内核 pid、
+            // 多会话共享，会话级撤会连累并发会话 —— 见 riot_runtime 的
+            // sandbox_win::WinSandbox 的 Drop）。所以换档后旧授权会留到内核
+            // 退出（或下次启动 recover）才撤，这中间可写面是新旧两套之和。
+            // 对单用户桌面有界、可接受；要即时收窄得引入进程级引用计数（未做）。
             *slot = None;
         }
 
@@ -3597,6 +3709,204 @@ mod tests {
         s.flush_log().await;
         let parts = store.load_parts(&id).await;
         assert!(parts.live.is_empty(), "重启后不该再读回来：{parts:?}");
+    }
+
+    /// 上下文编辑改的是活历史和 transcript 两份，重启后必须还是改过的样子。
+    #[tokio::test]
+    async fn 编辑消息改历史也改记录() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let store = Arc::new(riot_store::Transcripts::new(dir.path()));
+        let id = SessionId::from_raw("s1");
+        let log = store.open(riot_store::TranscriptMeta {
+            id: id.clone(),
+            root: dir.path().to_path_buf(),
+            created_at_ms: 0,
+        });
+        let s = Session::new(
+            id.clone(),
+            dir.path().to_path_buf(),
+            Some(SessionPersist {
+                store: Arc::clone(&store),
+                log,
+            }),
+        );
+        for m in [hist_user("m1", "第一句"), hist_assistant("a1", "答错了")] {
+            s.history.lock().await.push(m.clone());
+            if let Some(p) = &s.persist {
+                p.log.append(&m);
+            }
+        }
+
+        s.edit_message("a1", "改对了").await.expect("能编辑");
+
+        let hist = s.history().await;
+        assert_eq!(hist[1], hist_assistant("a1", "改对了"), "内存里是新文本");
+
+        s.flush_log().await;
+        let parts = store.load_parts(&id).await;
+        assert_eq!(parts.live[1], hist_assistant("a1", "改对了"), "重启后也是");
+
+        // 空文本不是编辑，指路删除。
+        assert!(s.edit_message("a1", "  ").await.is_err());
+        // 不存在的消息要报得出来。
+        assert!(s.edit_message("ghost", "x").await.is_err());
+    }
+
+    /// 删除按轮成对：点回复删的是"提问 + 回复"这一轮，历史和
+    /// transcript 都不留，前后两轮原样。
+    #[tokio::test]
+    async fn 删除回复连提问一起删() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let store = Arc::new(riot_store::Transcripts::new(dir.path()));
+        let id = SessionId::from_raw("s1");
+        let log = store.open(riot_store::TranscriptMeta {
+            id: id.clone(),
+            root: dir.path().to_path_buf(),
+            created_at_ms: 0,
+        });
+        let s = Session::new(
+            id.clone(),
+            dir.path().to_path_buf(),
+            Some(SessionPersist {
+                store: Arc::clone(&store),
+                log,
+            }),
+        );
+        for m in [
+            hist_user("m1", "第一句"),
+            hist_assistant("a1", "不想要的回复"),
+            hist_user("m2", "第二句"),
+            hist_assistant("a2", "留下的回复"),
+        ] {
+            s.history.lock().await.push(m.clone());
+            if let Some(p) = &s.persist {
+                p.log.append(&m);
+            }
+        }
+
+        s.delete_message("a1").await.expect("能删除");
+
+        let hist = s.history().await;
+        assert_eq!(
+            hist.iter().map(|m| m.id().as_str()).collect::<Vec<_>>(),
+            vec!["m2", "a2"],
+            "回复连着它的提问一起删，后一轮不动"
+        );
+
+        s.flush_log().await;
+        let parts = store.load_parts(&id).await;
+        assert_eq!(
+            parts
+                .live
+                .iter()
+                .map(|m| m.id().as_str())
+                .collect::<Vec<_>>(),
+            vec!["m2", "a2"],
+            "重启后也不回来：{parts:?}"
+        );
+    }
+
+    /// 删除中间一轮：前后两轮贴上，形状仍是 user 开头、user/assistant
+    /// 交替 —— 成对删除天然不会造出服务方拒绝的历史。
+    #[tokio::test]
+    async fn 删除中间一轮前后保留() {
+        let s = Session::new(
+            SessionId::from_raw("s1"),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        );
+        s.history.lock().await.extend([
+            hist_user("m1", "第一轮"),
+            hist_assistant("a1", "第一轮回复"),
+            hist_user("m2", "中间那轮"),
+            hist_assistant("a2", "中间那轮回复"),
+            hist_user("m3", "第三轮"),
+            hist_assistant("a3", "第三轮回复"),
+        ]);
+
+        // 点提问和点回复删的是同一轮。
+        s.delete_message("m2").await.expect("能删中间一轮");
+        assert_eq!(
+            s.history()
+                .await
+                .iter()
+                .map(|m| m.id().as_str())
+                .collect::<Vec<_>>(),
+            vec!["m1", "a1", "m3", "a3"]
+        );
+    }
+
+    /// 例外：提问发出去、模型没来得及回应就被停了 —— 这一轮只有提问，
+    /// 删除也就只删它，不碰前一轮的回复。
+    #[tokio::test]
+    async fn 没有回应的提问只删自己() {
+        let s = Session::new(
+            SessionId::from_raw("s1"),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        );
+        s.history.lock().await.extend([
+            hist_user("m1", "第一句"),
+            hist_assistant("a1", "回复"),
+            hist_user("m2", "被取消的提问"),
+        ]);
+
+        s.delete_message("m2").await.expect("能删");
+        assert_eq!(
+            s.history()
+                .await
+                .iter()
+                .map(|m| m.id().as_str())
+                .collect::<Vec<_>>(),
+            vec!["m1", "a1"],
+            "只删没有回应的提问自己"
+        );
+    }
+
+    /// 带工具调用的轮整轮消失：tool_use 和 tool_result 一起走，
+    /// 不留悬空配对；插话开启的下一轮不受影响。
+    #[tokio::test]
+    async fn 删除带工具调用的轮不留悬空配对() {
+        let s = Session::new(
+            SessionId::from_raw("s1"),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        );
+        let with_tool = Message::Assistant {
+            id: MessageId::from_raw("a1"),
+            content: vec![
+                riot_protocol::message::AssistantContent::Text {
+                    text: "我来读一下".into(),
+                },
+                riot_protocol::message::AssistantContent::ToolUse {
+                    id: riot_protocol::id::ToolUseId::from_raw("tu1"),
+                    name: "Read".into(),
+                    input: serde_json::json!({}),
+                },
+            ],
+            usage: None,
+            meta: MessageMeta::default(),
+        };
+        s.history.lock().await.extend([
+            hist_user("m1", "读一下"),
+            with_tool,
+            hist_tool_result("t1", "tu1"),
+            hist_assistant("a2", "读完了"),
+            hist_user("m2", "插话开启的下一轮"),
+            hist_assistant("a3", "下一轮回复"),
+        ]);
+
+        s.delete_message("a1").await.expect("能删");
+        let hist = s.history().await;
+        assert_eq!(
+            hist.iter().map(|m| m.id().as_str()).collect::<Vec<_>>(),
+            vec!["m2", "a3"],
+            "提问、工具调用、工具结果、收尾回复一轮全走"
+        );
+        assert!(
+            hist.iter().all(|m| m.tool_use_ids().is_empty()),
+            "不留悬空的 tool_use"
+        );
     }
 
     /// 已经说出口的半截回答要留下，而且要留得住（重启还在）。

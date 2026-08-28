@@ -1029,6 +1029,34 @@ impl AppState {
         })
     }
 
+    /// 上下文编辑：替换一条历史消息的文本段。空闲时才能做，内核会拒绝并发。
+    pub async fn edit_message(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> HostResult<()> {
+        self.ensure_hydrated(session_id).await?;
+        self.kernel_call(RpcRequest::HistoryEdit {
+            session_id: sid(session_id),
+            message_id: message_id.to_owned(),
+            text: text.to_owned(),
+        })
+        .await?;
+        Ok(())
+    }
+
+    /// 上下文删除：抹掉一条历史消息的可见内容，空心则整条移除。
+    pub async fn delete_message(&self, session_id: &str, message_id: &str) -> HostResult<()> {
+        self.ensure_hydrated(session_id).await?;
+        self.kernel_call(RpcRequest::HistoryDelete {
+            session_id: sid(session_id),
+            message_id: message_id.to_owned(),
+        })
+        .await?;
+        Ok(())
+    }
+
     /// 手动压缩会话历史（`/compact`）。完成时发 Compacted 事件。
     pub async fn compact_session(&self, session_id: &str) -> HostResult<()> {
         self.require_sink(session_id).await?;

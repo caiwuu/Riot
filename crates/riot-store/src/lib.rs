@@ -70,6 +70,21 @@ pub enum Record {
     /// 复用一个，是因为被撤的可能是会话的**第一条**消息，那时没有任何
     /// "保留到这里"的锚点可用。
     Withdraw { id: String },
+    /// 上下文编辑：把 `id` 这条消息的文本段替换成 `text`。
+    ///
+    /// 加载时经 `Message::edit_text` 重放 —— 和内核编辑当刻的内存操作是
+    /// 同一个函数，重启后的历史必须和编辑时看到的一字不差。
+    /// 旧加载器不认识这行会当坏行跳过，代价是编辑丢失（原文回来），
+    /// 不会读出损坏的历史。
+    Edit { id: String, text: String },
+    /// 上下文删除：整条移除 `id` 这条消息。
+    ///
+    /// 删除按"轮"成对做（提问连同它引出的全部回应），轮边界由**内核**
+    /// 判定（`Message::is_user_prompt`），这里每条记录只负责移除一条
+    /// 消息 —— 内核把一轮拆成 N 条 Delete 逐条落盘。边界逻辑不进 store：
+    /// 记录写下的是"删了哪些"这个**结果**，重放不需要再判定一遍；
+    /// 判定逻辑将来变了，旧记录的重放结果也不会跟着漂移。
+    Delete { id: String },
 }
 
 /// 会话的不变事实，写在 transcript 首行。
@@ -194,6 +209,12 @@ impl Transcripts {
                 Ok(Record::Withdraw { id }) => {
                     apply_withdraw(&mut live, &mut archived, &id);
                 }
+                Ok(Record::Edit { id, text }) => {
+                    apply_edit(&mut live, &mut archived, &id, &text);
+                }
+                Ok(Record::Delete { id }) => {
+                    apply_delete(&mut live, &mut archived, &id);
+                }
                 Err(e) => {
                     skipped += 1;
                     tracing::debug!(line = i + 1, error = %e, "transcript 有读不懂的行");
@@ -279,6 +300,28 @@ fn apply_withdraw(live: &mut Vec<Message>, archived: &mut Vec<Message>, id: &str
     }
 }
 
+/// 加载时应用一条上下文编辑。写入时消息一定在活历史里（内核只允许编辑
+/// 活历史），归档那边是防御：坏行跳过后顺序可能错乱，找得到就照改。
+/// 找不到就不动（文件坏了也不该把整份历史扔掉）。
+fn apply_edit(live: &mut [Message], archived: &mut [Message], id: &str, text: &str) {
+    for list in [live, archived] {
+        if let Some(m) = list.iter_mut().find(|m| m.id().as_str() == id) {
+            m.edit_text(text);
+            return;
+        }
+    }
+}
+
+/// 加载时应用一条上下文删除：整条移除。找不到就不动。
+fn apply_delete(live: &mut Vec<Message>, archived: &mut Vec<Message>, id: &str) {
+    for list in [live, archived] {
+        if let Some(i) = list.iter().position(|m| m.id().as_str() == id) {
+            list.remove(i);
+            return;
+        }
+    }
+}
+
 fn scan_one(path: &Path) -> Option<ScannedTranscript> {
     let f = std::fs::File::open(path).ok()?;
     let mut lines = std::io::BufReader::new(f).lines();
@@ -322,6 +365,15 @@ enum Cmd {
     },
     /// 撤回：连这条消息一起丢掉。
     Withdraw {
+        id: String,
+    },
+    /// 上下文编辑：替换这条消息的文本段。
+    Edit {
+        id: String,
+        text: String,
+    },
+    /// 上下文删除：抹掉这条消息的可见内容。
+    Delete {
         id: String,
     },
     /// 等所有已提交的追加真正写进文件。
@@ -407,6 +459,31 @@ impl SessionLog {
         }
     }
 
+    /// 记下一次上下文编辑。必须在内存历史已经改完之后调用。
+    pub fn append_edit(&self, id: &str, text: &str) {
+        if self
+            .sender()
+            .send(Cmd::Edit {
+                id: id.to_owned(),
+                text: text.to_owned(),
+            })
+            .is_err()
+        {
+            tracing::debug!(path = %self.path.display(), "写入任务已关闭，丢弃编辑记录");
+        }
+    }
+
+    /// 记下一次上下文删除。必须在内存历史已经删完之后调用。
+    pub fn append_delete(&self, id: &str) {
+        if self
+            .sender()
+            .send(Cmd::Delete { id: id.to_owned() })
+            .is_err()
+        {
+            tracing::debug!(path = %self.path.display(), "写入任务已关闭，丢弃删除记录");
+        }
+    }
+
     /// 等所有已提交的追加落盘。退出钩子用；从没写过东西时是空操作。
     pub async fn flush(&self) {
         self.ack(Cmd::Flush).await;
@@ -454,6 +531,8 @@ async fn write_loop(path: PathBuf, meta: TranscriptMeta, mut rx: mpsc::Unbounded
                 }),
                 Cmd::Rewind { keep_until } => Some(Record::Rewind { keep_until }),
                 Cmd::Withdraw { id } => Some(Record::Withdraw { id }),
+                Cmd::Edit { id, text } => Some(Record::Edit { id, text }),
+                Cmd::Delete { id } => Some(Record::Delete { id }),
                 Cmd::Flush(ack) => {
                     acks.push(ack);
                     None
@@ -913,5 +992,75 @@ mod tests {
         let log = store.open(meta("s1"));
         log.flush().await;
         log.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn 编辑过的消息重启后是新文本() {
+        // 编辑记录是 append-only 的重放，不改原来那行 —— 原文留在文件里
+        // 可审计，加载出来的必须已经是编辑后的样子。
+        let d = dir();
+        let store = Transcripts::new(d.path());
+        let log = store.open(meta("s1"));
+        log.append(&user("m1", "第一句"));
+        log.append(&assistant("a1", "答错了的回复"));
+        log.append_edit("a1", "改对之后的回复");
+        log.flush().await;
+
+        let (_, msgs) = store.load(&SessionId::from_raw("s1")).await;
+        assert_eq!(
+            msgs,
+            vec![user("m1", "第一句"), assistant("a1", "改对之后的回复")]
+        );
+
+        let raw = std::fs::read_to_string(d.path().join("s1.jsonl")).expect("读原文");
+        assert!(raw.contains("答错了的回复"), "原文留在文件里可审计");
+    }
+
+    #[tokio::test]
+    async fn 删除的纯文本消息重启后不再出现() {
+        // 与 Withdraw 的区别：只删自己这一条，后面的对话原样保留。
+        let d = dir();
+        let store = Transcripts::new(d.path());
+        let log = store.open(meta("s1"));
+        log.append(&user("m1", "第一句"));
+        log.append(&assistant("a1", "要删掉的回复"));
+        log.append(&user("m2", "第二句"));
+        log.append_delete("a1");
+        log.flush().await;
+
+        let (_, msgs) = store.load(&SessionId::from_raw("s1")).await;
+        assert_eq!(msgs, vec![user("m1", "第一句"), user("m2", "第二句")]);
+    }
+
+    #[tokio::test]
+    async fn 成对删除的一轮逐条落记录重放后整轮消失() {
+        // 内核按轮删（提问 + 工具调用 + 工具结果 + 回复），每条一个
+        // Delete 记录。重放必须把整轮收干净 —— 少删一条工具消息，
+        // 悬空的配对会让下一轮请求 400。
+        let d = dir();
+        let store = Transcripts::new(d.path());
+        let log = store.open(meta("s1"));
+        let with_tool = Message::Assistant {
+            id: MessageId::from_raw("a1"),
+            content: vec![riot_protocol::message::AssistantContent::ToolUse {
+                id: riot_protocol::id::ToolUseId::from_raw("t1"),
+                name: "Read".into(),
+                input: serde_json::json!({}),
+            }],
+            usage: None,
+            meta: MessageMeta::default(),
+        };
+        log.append(&user("m1", "读一下"));
+        log.append(&with_tool);
+        log.append(&user("r1", "结果"));
+        log.append(&assistant("a2", "读完了"));
+        log.append(&user("m2", "下一轮"));
+        for id in ["m1", "a1", "r1", "a2"] {
+            log.append_delete(id);
+        }
+        log.flush().await;
+
+        let (_, msgs) = store.load(&SessionId::from_raw("s1")).await;
+        assert_eq!(msgs, vec![user("m2", "下一轮")], "整轮消失，后面的保留");
     }
 }

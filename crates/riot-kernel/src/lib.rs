@@ -343,6 +343,45 @@ async fn dispatch(request: RpcRequest, manager: &manager::SessionManager) -> Rpc
                 },
             }
         }
+        Req::HistoryEdit {
+            session_id,
+            message_id,
+            text,
+        } => match manager
+            .edit_message(session_id.as_str(), &message_id, &text)
+            .await
+        {
+            Ok(()) => RpcResponse::Ok,
+            Err(e) => RpcResponse::Error {
+                error: RpcError {
+                    code: if e.contains("正在跑") {
+                        RpcErrorCode::TurnInProgress
+                    } else {
+                        RpcErrorCode::Internal
+                    },
+                    message: e,
+                },
+            },
+        },
+        Req::HistoryDelete {
+            session_id,
+            message_id,
+        } => match manager
+            .delete_message(session_id.as_str(), &message_id)
+            .await
+        {
+            Ok(()) => RpcResponse::Ok,
+            Err(e) => RpcResponse::Error {
+                error: RpcError {
+                    code: if e.contains("正在跑") {
+                        RpcErrorCode::TurnInProgress
+                    } else {
+                        RpcErrorCode::Internal
+                    },
+                    message: e,
+                },
+            },
+        },
         Req::SessionChanges { session_id } => RpcResponse::Changes {
             changes: manager.changes(session_id.as_str()).await,
         },

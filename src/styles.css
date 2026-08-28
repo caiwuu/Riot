@@ -3047,6 +3047,19 @@ pre {
   z-index: var(--z-modal);
 }
 
+/* 对话流内的确认弹窗（删除一轮问答）相对**聊天区域**居中，不是整个
+   窗口 —— 遮罩只罩对话列、不盖左侧会话栏。作用域覆盖：把通用 Modal
+   的全屏 fixed 遮罩改成相对 .transcript-shell 的 absolute。 */
+.transcript-confirm {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-modal);
+}
+
+.transcript-confirm .modal-backdrop {
+  position: absolute;
+}
+
 .modal {
   width: min(620px, 100%);
   max-height: calc(100vh - 48px);
@@ -6034,6 +6047,93 @@ button.ref-chip.clickable:hover {
 
 .msg-action.done {
   color: var(--text);
+}
+
+/* 用户消息行：操作按钮排在气泡右下方的流内位置（和助手消息的操作
+   位置对称）。不用绝对定位 —— thread-col 的 content-visibility 隐含
+   paint containment，定位到气泡边界外的东西会被整块裁掉。 */
+.user-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  min-width: 0;
+}
+
+.user-row .msg-actions {
+  margin: 4px 2px 0 0;
+  flex-shrink: 0;
+}
+
+.user-row:hover .msg-actions,
+.user-row .msg-actions:focus-within {
+  opacity: 1;
+}
+
+/* ── 消息内联编辑（上下文修改） ───────────────── */
+
+/* 编辑态永远完整渲染。
+   `.thread-col > *` 开了 content-visibility: auto 省渲染 —— 但在一条
+   消息从气泡（几十像素）动态膨胀成大编辑框的这一帧，它偶发把该 row
+   判为"不在视口附近"而跳过渲染，套用 contain-intrinsic-size 的占位高度
+   并施加 size + paint containment：编辑框被压到占位高度、底部的保存/取消
+   按钮被裁掉半截，直到 hover / 滚动触发重新评估才冒出来（偶现）。编辑态
+   只有一个 row，放弃这处渲染优化换按钮稳定可见。 */
+.thread-col > .msg.editing {
+  content-visibility: visible;
+}
+
+/* 用户气泡进入编辑态时撑满整行 —— 85% 宽的小卡片里改长文太憋屈。 */
+.msg.user.editing {
+  width: 100%;
+  max-width: 100%;
+}
+
+.msg-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.msg-editor textarea {
+  width: 100%;
+  min-height: 64px;
+  resize: vertical;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.msg-editor textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.msg-editor-btns {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.msg-editor-hint {
+  flex: 1;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.msg-editor-save {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.msg-editor-save:hover:not(:disabled) {
+  background: var(--accent);
+  filter: brightness(1.1);
 }
 
 /* ── 思考过程（折叠） ───────────────────────── */

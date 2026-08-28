@@ -24,6 +24,8 @@
     "allow-subscribe-session",
     "allow-send-turn",
     "allow-regenerate-turn",
+    "allow-edit-message",
+    "allow-delete-message",
     "allow-interrupt",
     "allow-respond-permission",
     "allow-set-permission-mode",

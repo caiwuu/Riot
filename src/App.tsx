@@ -1219,6 +1219,8 @@ function Chat({
           waitSince={waitStartedAt(sessionId)}
           armed={visible}
           onRegenerate={session.regenerate}
+          onEditEntry={session.editEntry}
+          onDeleteEntry={session.deleteEntry}
           {...(planAsk ? { planAsk } : {})}
           {...(choiceAsk ? { choiceAsk } : {})}
           onAnswerPlan={(r) => planAsk && void session.answer(r, planAsk.requestId)}

@@ -10,6 +10,8 @@ const COMMANDS: &[&str] = &[
     "subscribe_session",
     "send_turn",
     "regenerate_turn",
+    "edit_message",
+    "delete_message",
     "interrupt",
     "respond_permission",
     "set_permission_mode",

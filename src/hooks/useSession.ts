@@ -9,6 +9,8 @@ import {
   type PermissionAsk,
   type PermissionMode,
   type PermissionResponse,
+  deleteMessage as deleteMessageBridge,
+  editMessage as editMessageBridge,
   getHistory,
   interrupt as interruptSession,
   queueList,
@@ -1009,6 +1011,65 @@ export function useSession(
     [sessionId, mutateQueued],
   );
 
+  /**
+   * 上下文修改（编辑/删除）的共用骨架：定位消息 → 执行 → 用快照对账。
+   *
+   * 操作前先拉一次快照，两个理由：
+   * - 确认宿主真的空闲。本地 busy 只是镜像，忙时内核也会拒绝，
+   *   提前拦下省一次注定失败的往返；
+   * - 把界面条目换算成内核消息 id —— 乐观气泡（`local-*`）和流式期间
+   *   就地落定的块（前缀是 tool_use id）带的都不是消息 id，得按
+   *   角色 + 原文在快照里找到真身。
+   *
+   * 成功后再拉一次快照整份对齐（空心消息整条消失、多段文本合并成一段，
+   * 这些边界自己在前端模拟一遍，等于把内核逻辑抄一份）。
+   */
+  const mutateHistory = useCallback(
+    async (item: TextItem, op: (messageId: string) => Promise<void>): Promise<boolean> => {
+      if (busyRef.current) return false;
+      try {
+        const hist = await getHistory(sessionId);
+        if (hist.busy) return false;
+        const messageId = locateMessage(hist.messages ?? [], item);
+        if (!messageId) {
+          throw new Error("这条消息已经不在当前上下文里（可能已被压缩进摘要）。");
+        }
+        await op(messageId);
+        const after = await getHistory(sessionId);
+        setState((s) => rebuildFromSnap(s, after));
+        return true;
+      } catch (e) {
+        setState((s) => ({
+          ...s,
+          items: [
+            ...s.items,
+            { kind: "error", id: `err-${Date.now()}`, text: humanizeError(e) },
+          ],
+        }));
+        return false;
+      }
+    },
+    [sessionId],
+  );
+
+  /**
+   * 上下文编辑：把这条气泡对应消息的文本换掉。之后的轮次模型看到的
+   * 就是改过的历史。返回 false = 没改成（忙、消息没了、内核拒绝），
+   * 编辑框应保留草稿。
+   */
+  const editEntry = useCallback(
+    (item: TextItem, text: string) =>
+      mutateHistory(item, (messageId) => editMessageBridge(sessionId, messageId, text)),
+    [sessionId, mutateHistory],
+  );
+
+  /** 上下文删除：按轮成对删（这条气泡所属的提问连同全部回应）。 */
+  const deleteEntry = useCallback(
+    (item: TextItem) =>
+      mutateHistory(item, (messageId) => deleteMessageBridge(sessionId, messageId)),
+    [sessionId, mutateHistory],
+  );
+
   const stop = useCallback(() => {
     void interruptSession(sessionId).then((cancelled) => {
       if (cancelled) return;
@@ -1065,11 +1126,61 @@ export function useSession(
     stop,
     answer,
     regenerate,
+    editEntry,
+    deleteEntry,
     queueDelete,
     queueEdit,
     queueSendNow,
     clearWithdrawn,
   };
+}
+
+/** 能做上下文修改的条目：用户气泡和助手文本气泡。 */
+export type TextItem = Extract<Item, { kind: "user" } | { kind: "assistant" }>;
+
+/**
+ * 上下文修改（编辑/删除）成功后的对账：快照就是真相，整份重建。
+ *
+ * 不走 applyHistorySnap —— 那是"切回活会话"的对齐语义，带两个照顾：
+ * 空历史时保留旧条目、把不在快照里的乐观气泡（`local-*`）拼回来。
+ * 这两个照顾在"刚刚确定性地删掉/改掉了什么"的场景里恰好是反效果：
+ * 删掉唯一一轮后界面纹丝不动（看起来像没删，再点一次就报"消息不在
+ * 上下文里"），编辑乐观气泡后旧文本又被拼回来显示成两条。
+ */
+function rebuildFromSnap(s: SessionState, hist: HistorySnap): SessionState {
+  const messages = hist.messages ?? [];
+  const archived = hist.archived ?? [];
+  return {
+    ...s,
+    busy: hist.busy,
+    compacting: hist.compacting ?? false,
+    items: historyToItems(messages, archived, false),
+    tokens: sumUsage([...archived, ...messages]),
+    streaming: "",
+    thinking: "",
+    streamingPlan: null,
+    asks: [],
+  };
+}
+
+/**
+ * 界面条目 → 内核消息 id。
+ *
+ * 历史水合的条目 id 是 `msg_x-t3` / `msg_x-u1` / `msg_x-k2`，剥掉后缀就是
+ * 消息 id；实时路径还有两种带不了消息 id 的形态 —— 乐观用户气泡
+ * （`local-*`）和工具卡出现时就地落定的块（前缀是 tool_use id）——
+ * 按角色 + 原文在快照里倒序找（同文出现多次时取最近那条）。
+ */
+function locateMessage(messages: Message[], item: TextItem): string | null {
+  const bare = item.id.replace(/-[tuk]\d*$/, "");
+  if (messages.some((m) => m.id === bare)) return bare;
+  const role = item.kind === "user" ? "user" : "assistant";
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (!m || m.role !== role) continue;
+    if (m.content.some((c) => c.type === "text" && c.text === item.text)) return m.id;
+  }
+  return null;
 }
 
 /** 活历史 + 压缩前归档 → 界面条目。归档画在分割线上面。 */

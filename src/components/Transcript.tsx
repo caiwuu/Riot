@@ -16,6 +16,7 @@
 import {
   memo,
   type ReactNode,
+  useCallback,
   useContext,
   useEffect,
   useLayoutEffect,
@@ -25,9 +26,10 @@ import {
 } from "react";
 
 import type { PermissionAsk, PermissionResponse } from "../bridge";
-import type { Item } from "../hooks/useSession";
+import type { Item, TextItem } from "../hooks/useSession";
 import { SLASH_HEAD_RE, extractMentionSpans, mentionCovers } from "../lib/promptText";
 import { basename, joinRoot, looksAbsPath } from "../pathDisplay";
+import { ConfirmDialog, type ConfirmRequest } from "./ConfirmDialog";
 import { openFilePreview } from "./FilePreview";
 import { LazyMarkdown, Markdown, ProjectRootContext } from "./Markdown";
 import { AskChoiceCard, PlanApprovalCard, PlanDraft } from "./PermissionDialog";
@@ -249,6 +251,8 @@ export function Transcript({
   onAnswerPlan,
   onAnswerChoice,
   onRegenerate,
+  onEditEntry,
+  onDeleteEntry,
 }: {
   sessionId: string;
   items: Item[];
@@ -272,6 +276,10 @@ export function Transcript({
   onAnswerPlan?: (r: PermissionResponse) => void;
   onAnswerChoice?: (r: PermissionResponse) => void;
   onRegenerate?: (itemId: string) => void;
+  /** 上下文编辑：把这条气泡的文本换掉。false = 没改成，编辑框保留草稿。 */
+  onEditEntry?: (item: TextItem, text: string) => Promise<boolean>;
+  /** 上下文删除：把这条气泡从历史里抹掉。 */
+  onDeleteEntry?: (item: TextItem) => Promise<boolean>;
 }) {
   const boxRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -369,6 +377,24 @@ export function Transcript({
   const [awayFromBottom, setAwayFromBottom] = useState(false);
   /** ⌘F 查找条。长对话找不到历史内容是真实痛点。 */
   const [findOpen, setFindOpen] = useState(false);
+  /** 待确认的上下文删除。删的是一整轮，动手前必须看得见后果。 */
+  const [confirmDel, setConfirmDel] = useState<ConfirmRequest | null>(null);
+
+  /** 点删除按钮 → 弹确认框，确认后才真删。 */
+  const requestDelete = useCallback(
+    (item: TextItem) => {
+      if (!onDeleteEntry) return;
+      setConfirmDel({
+        title: "删除这一轮问答",
+        body:
+          "这条消息所属的提问，连同它引出的全部回应（回复、工具调用），" +
+          "会一起从上下文中删除，之后的对话不再受这一轮影响。",
+        confirmLabel: "删除",
+        action: () => void onDeleteEntry(item),
+      });
+    },
+    [onDeleteEntry],
+  );
 
   const pinBottom = () => {
     const box = boxRef.current;
@@ -595,7 +621,10 @@ export function Transcript({
               item={b.item}
               hydrate={findOpen || i >= hydrateFrom}
               regenEnabled={!busy}
+              mutateEnabled={!busy}
               {...(onRegenerate ? { onRegenerate } : {})}
+              {...(onEditEntry ? { onEditEntry } : {})}
+              {...(onDeleteEntry ? { onDeleteEntry: requestDelete } : {})}
             />
           ) : (
             <ProcessGroup
@@ -649,6 +678,15 @@ export function Transcript({
         </div>
         {findOpen && armed ? <FindBar box={boxRef} onClose={() => setFindOpen(false)} /> : null}
       </main>
+      {/* 删除确认放在滚动容器**外**、shell 内：main 是倒排滚动容器、
+          内部 thread-col 带 transform，把 fixed 遮罩的包含块从视口改成了
+          滚动区，弹窗会偏移错位。挂到 shell 层用 absolute 罩住聊天区域，
+          既躲开那个包含块陷阱，又正好相对聊天区域居中（不盖侧栏）。 */}
+      {confirmDel ? (
+        <div className="transcript-confirm">
+          <ConfirmDialog c={confirmDel} onClose={() => setConfirmDel(null)} />
+        </div>
+      ) : null}
       {/* 叠在滚动容器外面。倒排 flex 里 sticky + 负边距：WebKit 把按钮
           挤出视口（Mac 上看不见），Chromium 把它压扁（Windows 上不圆）。
           往上翻超过一屏才出现 —— 贴底时它只是噪音。 */}
@@ -688,31 +726,83 @@ const Row = memo(function Row({
   onRegenerate,
   regenEnabled,
   hydrate,
+  onEditEntry,
+  onDeleteEntry,
+  mutateEnabled,
 }: {
   item: Item;
   onRegenerate?: (itemId: string) => void;
   regenEnabled?: boolean;
   /** 贴底 / 查找中：立刻解析 markdown 和工具详情。 */
   hydrate?: boolean;
+  /** 上下文编辑（见 Transcript 的同名 prop）。 */
+  onEditEntry?: (item: TextItem, text: string) => Promise<boolean>;
+  /** 上下文删除。收到的是 Transcript 的确认包装 —— 点击先弹确认框。 */
+  onDeleteEntry?: (item: TextItem) => void;
+  /** 编辑/删除此刻可用（空闲）。生成中改历史会和正在写的轮子打架。 */
+  mutateEnabled?: boolean;
 }) {
+  // 编辑态挂在 Row 上（hooks 不能进 switch 分支），只有文本气泡用它。
+  const [editing, setEditing] = useState(false);
+
   switch (item.kind) {
     case "user":
-      // 用户输入按原文显示，不走 markdown —— 渲染会篡改他说的话
+      if (editing && onEditEntry) {
+        return (
+          <div className="msg user editing">
+            <MsgEditor
+              initial={item.text}
+              onCancel={() => setEditing(false)}
+              onSave={async (text) => {
+                const ok = await onEditEntry(item, text);
+                if (ok) setEditing(false);
+                return ok;
+              }}
+            />
+          </div>
+        );
+      }
+      // 用户输入按原文显示，不走 markdown —— 渲染会篡改他说的话。
+      // 操作按钮排在气泡右下方的流内位置（不用绝对定位：thread-col 的
+      // content-visibility 隐含 paint containment，定位出气泡边界会被裁掉）。
       return (
-        <div className="msg user">
-          {/* 自己附的图要看得见。不回显的话，发完之后附件条一清空，
-              用户就再也确认不了刚才发出去的是哪张。 */}
-          {item.images?.length ? (
-            <div className="msg-images">
-              {item.images.map((src, i) => (
-                <UserImage key={i} src={src} />
-              ))}
-            </div>
-          ) : null}
-          <UserText text={item.text} {...(item.files ? { files: item.files } : {})} />
+        <div className="user-row">
+          <div className="msg user">
+            {/* 自己附的图要看得见。不回显的话，发完之后附件条一清空，
+                用户就再也确认不了刚才发出去的是哪张。 */}
+            {item.images?.length ? (
+              <div className="msg-images">
+                {item.images.map((src, i) => (
+                  <UserImage key={i} src={src} />
+                ))}
+              </div>
+            ) : null}
+            <UserText text={item.text} {...(item.files ? { files: item.files } : {})} />
+          </div>
+          <MsgActions
+            text={item.text}
+            mutateEnabled={!!mutateEnabled}
+            {...(onEditEntry ? { onEdit: () => setEditing(true) } : {})}
+            {...(onDeleteEntry ? { onDelete: () => onDeleteEntry(item) } : {})}
+          />
         </div>
       );
     case "assistant":
+      if (editing && onEditEntry) {
+        return (
+          <div className="msg assistant editing">
+            <MsgEditor
+              initial={item.text}
+              onCancel={() => setEditing(false)}
+              onSave={async (text) => {
+                const ok = await onEditEntry(item, text);
+                if (ok) setEditing(false);
+                return ok;
+              }}
+            />
+          </div>
+        );
+      }
       return (
         <div className="msg assistant">
           <LazyMarkdown text={item.text} eager={!!hydrate} />
@@ -722,7 +812,10 @@ const Row = memo(function Row({
           <MsgActions
             text={item.text}
             regenEnabled={!!regenEnabled && !!onRegenerate}
+            mutateEnabled={!!mutateEnabled}
             {...(onRegenerate ? { onRegenerate: () => onRegenerate(item.id) } : {})}
+            {...(onEditEntry ? { onEdit: () => setEditing(true) } : {})}
+            {...(onDeleteEntry ? { onDelete: () => onDeleteEntry(item) } : {})}
           />
         </div>
       );
@@ -743,15 +836,25 @@ const Row = memo(function Row({
   }
 });
 
-/** 悬停出现的消息操作：复制 + 重新生成。占位始终在，hover 才可见。 */
+/** 悬停出现的消息操作：复制 / 重新生成 / 上下文编辑 / 删除。
+ *  占位始终在，hover 才可见。 */
 function MsgActions({
   text,
   onRegenerate,
   regenEnabled,
+  onEdit,
+  onDelete,
+  mutateEnabled,
 }: {
   text: string;
   onRegenerate?: () => void;
-  regenEnabled: boolean;
+  regenEnabled?: boolean;
+  /** 进入编辑态。undefined = 这条不可编辑。 */
+  onEdit?: () => void;
+  /** 从上下文删除。undefined = 这条不可删。 */
+  onDelete?: () => void;
+  /** 编辑/删除此刻可用（空闲）。 */
+  mutateEnabled?: boolean;
 }) {
   const [copied, setCopied] = useState(false);
   return (
@@ -781,6 +884,113 @@ function MsgActions({
           <RegenIcon />
         </button>
       ) : null}
+      {onEdit ? (
+        <button
+          type="button"
+          className="msg-action"
+          title={mutateEnabled ? "编辑（替换上下文里的原文）" : "生成中，结束后才能编辑"}
+          aria-label="编辑消息"
+          disabled={!mutateEnabled}
+          onClick={onEdit}
+        >
+          <EditIcon />
+        </button>
+      ) : null}
+      {onDelete ? (
+        <button
+          type="button"
+          className="msg-action"
+          title={
+            mutateEnabled ? "删除这一轮问答（提问连同回复）" : "生成中，结束后才能删除"
+          }
+          aria-label="删除这一轮问答"
+          disabled={!mutateEnabled}
+          onClick={onDelete}
+        >
+          <TrashIcon />
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * 消息的内联编辑框（上下文修改）。
+ *
+ * ⌘/Ctrl+Enter 保存、Esc 取消，和输入框同一套肌肉记忆。保存失败
+ * （忙、消息已被压缩、内核拒绝）时编辑框留着 —— 草稿不能丢。
+ */
+function MsgEditor({
+  initial,
+  onSave,
+  onCancel,
+}: {
+  initial: string;
+  onSave: (text: string) => Promise<boolean>;
+  onCancel: () => void;
+}) {
+  const [text, setText] = useState(initial);
+  const [saving, setSaving] = useState(false);
+  const ref = useRef<HTMLTextAreaElement>(null);
+
+  // 高度贴内容长（封顶四成屏），别让用户在一个两行的小框里改长文。
+  const fit = (el: HTMLTextAreaElement) => {
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight + 2, Math.round(window.innerHeight * 0.4))}px`;
+  };
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+    fit(el);
+  }, []);
+
+  const save = async () => {
+    if (saving || !text.trim()) return;
+    setSaving(true);
+    try {
+      await onSave(text);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="msg-editor">
+      <textarea
+        ref={ref}
+        value={text}
+        disabled={saving}
+        onChange={(e) => {
+          setText(e.target.value);
+          fit(e.currentTarget);
+        }}
+        onKeyDown={(e) => {
+          if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+            e.preventDefault();
+            void save();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            e.stopPropagation();
+            onCancel();
+          }
+        }}
+      />
+      <div className="msg-editor-btns">
+        <span className="msg-editor-hint">保存后替换上下文里的原文，之后的对话按新内容走</span>
+        <button type="button" onClick={onCancel} disabled={saving}>
+          取消
+        </button>
+        <button
+          type="button"
+          className="msg-editor-save"
+          onClick={() => void save()}
+          disabled={saving || !text.trim()}
+        >
+          {saving ? "保存中…" : "保存"}
+        </button>
+      </div>
     </div>
   );
 }
@@ -807,6 +1017,40 @@ function CheckIcon() {
         strokeWidth="1.6"
         strokeLinecap="round"
         strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function EditIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M9.9 3.1l3 3L6.4 12.6l-3.6.6.6-3.6L9.9 3.1z"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
+      />
+      <path d="M8.6 4.4l3 3" stroke="currentColor" strokeWidth="1.3" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M3 4.5h10M6.4 4.5V3.3a.8.8 0 0 1 .8-.8h1.6a.8.8 0 0 1 .8.8v1.2M4.4 4.5l.5 8.2a1 1 0 0 0 1 .95h4.2a1 1 0 0 0 1-.95l.5-8.2"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M6.7 7.2v3.8M9.3 7.2v3.8"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
       />
     </svg>
   );

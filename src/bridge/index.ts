@@ -314,6 +314,25 @@ export function regenerateTurn(sessionId: string, messageId: string): Promise<vo
   return invoke("regenerate_turn", { sessionId, messageId });
 }
 
+/**
+ * 上下文编辑：把一条历史消息的文本段替换成新文本。
+ *
+ * 只动文本 —— 思考、工具调用/结果、附件原位保留。之后的轮次模型看到的
+ * 就是改过的历史。空闲时才能做，忙时宿主会拒绝。
+ */
+export function editMessage(sessionId: string, messageId: string, text: string): Promise<void> {
+  return invoke("edit_message", { sessionId, messageId, text });
+}
+
+/**
+ * 上下文删除：按"轮"成对删 —— 这条消息所属的提问，连同它引出的全部
+ * 回应（工具调用、结果、回复）一起从历史移除。提问没有得到任何回应
+ * （被停止/出错）时就只删提问自己。空闲时才能做，忙时宿主会拒绝。
+ */
+export function deleteMessage(sessionId: string, messageId: string): Promise<void> {
+  return invoke("delete_message", { sessionId, messageId });
+}
+
 /** 一条斜杠命令。模板正文留在宿主，展开走 slashExpand。 */
 export interface SlashCommand {
   name: string;
