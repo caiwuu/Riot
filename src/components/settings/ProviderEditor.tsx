@@ -10,7 +10,12 @@ import {
   setApiKey,
   testConnection,
 } from "../../bridge";
-import { parseSampling, sameSampling, samplingDraft } from "../../lib/sampling";
+import {
+  type SamplingDraft,
+  parseSampling,
+  sameSampling,
+  samplingDraft,
+} from "../../lib/sampling";
 import { SamplingSliders } from "../FieldSlider";
 import { ModelDialog } from "../ModelDialog";
 import { Card, CardBlock, Group, Row } from "./layout";
@@ -79,9 +84,7 @@ export function ProviderEditor({
   const [fetching, setFetching] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
-  const [sampDraft, setSampDraft] = useState<Record<string, string>>(() =>
-    samplingDraft(p.sampling),
-  );
+  const [sampDraft, setSampDraft] = useState<SamplingDraft>(() => samplingDraft(p.sampling));
 
   const blurCommit = () => {
     const patch: Partial<ProviderConfig> = {};
@@ -104,7 +107,7 @@ export function ProviderEditor({
     });
   };
 
-  const commitSampling = (draft: Record<string, string>) => {
+  const commitSampling = (draft: SamplingDraft) => {
     const next = parseSampling(draft);
     if (sameSampling(next, p.sampling)) return;
     void onPatch({ sampling: next }).then((ok) => {
@@ -423,7 +426,7 @@ export function ProviderEditor({
 
       <Group
         title="采样参数"
-        desc="这一家的默认值。模型没单独设的字段用这里的值；单个模型在它的编辑弹窗里改，对话里还能按会话临时覆盖。"
+        desc="这一家的默认值。写着「模型默认」的字段一个都不发，由模型自己定；模型没单独设的字段用这里的值，单个模型在它的编辑弹窗里改，对话里还能按会话临时覆盖。"
       >
         <Card>
           <CardBlock>

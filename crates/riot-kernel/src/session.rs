@@ -323,7 +323,7 @@ pub struct Session {
     pending_asks: Arc<PendingAsks>,
     /// 进行中的半截流（见 [`LiveStream`]）。随 session.resume 快照回给界面。
     live_stream: Mutex<LiveStream>,
-    /// 会话级采样覆盖。字段为 None 表示继承 provider 的设置。
+    /// 会话级采样覆盖。字段为 None 表示继承模型/provider 那两层。
     /// 模型本身不存这里 —— 每轮由宿主按当前激活配置解析传入，
     /// 用户在对话中途切换模型，下一轮立即生效。
     sampling_override: Mutex<Sampling>,
@@ -1222,7 +1222,7 @@ impl Session {
     ///
     /// 返回 `None` = 没有半截正文可留（模型还没开口，或这一轮正常收尾时
     /// 缓冲已经被 [`fold_live`] 清空了）。
-    async fn finalize_partial(&self, model: &str) -> Option<Message> {
+    async fn finalize_partial(&self, model: &str, now_ms: u64) -> Option<Message> {
         let text = {
             let mut live = self.live_stream.lock().await;
             live.thinking.clear();
@@ -1239,6 +1239,9 @@ impl Session {
             meta: MessageMeta {
                 interrupted: true,
                 model_origin: Some(model.to_owned()),
+                // 时刻由调用方给：这条消息不走事件循环那段打戳逻辑
+                //（它是本地合成的），而会话本身没有时钟。
+                created_at_ms: Some(now_ms),
                 ..Default::default()
             },
         };
@@ -1947,12 +1950,19 @@ impl Session {
         if let Some(input) = input {
             // 这条消息的 id 先定下来：占位版和定稿版用同一个，前端认 id。
             let user_id = MessageId::from_raw(self.ids.next_id("msg"));
+            // 时刻也在这里定下来，占位版和定稿版共用。定稿要等主动压缩、
+            // 图片转述、`@` 展开跑完，慢的时候十几秒 —— 各取各的时钟，
+            // 界面上同一条消息会在定稿那一刻跳掉一分钟。
+            let sent_at_ms = clock.now_ms();
             // 占位先立起来 —— 底下压缩和转述都是模型调用，这段时间里切走
             // 再切回来必须还看得见自己刚发的话（见 `pending_user`）。
             *self.pending_user.lock().await = Some(Message::User {
                 id: user_id.clone(),
                 content: crate::content::pending_user_content(&input),
-                meta: MessageMeta::default(),
+                meta: MessageMeta {
+                    created_at_ms: Some(sent_at_ms),
+                    ..Default::default()
+                },
             });
 
             // ── 主动压缩：历史超阈值就先总结再开工 ────────────────────
@@ -2018,7 +2028,10 @@ impl Session {
             let user_msg = Message::User {
                 id: user_id.clone(),
                 content,
-                meta: MessageMeta::default(),
+                meta: MessageMeta {
+                    created_at_ms: Some(sent_at_ms),
+                    ..Default::default()
+                },
             };
             // 边产生边追加（两家共识）：轮次结束才写盘的话，中途崩溃丢的是
             // 整轮对话；这里丢的最多是后台通道里还没落盘的几条。
@@ -2071,7 +2084,13 @@ impl Session {
         let mut produced = false;
 
         use futures::StreamExt;
-        while let Some(ev) = stream.next().await {
+        while let Some(mut ev) = stream.next().await {
+            // 打戳打在这里：内核是消息流上唯一一个既有注入时钟、又能看到
+            // **全部**消息（模型产出、合成、错误）的位置。往下走它同时进
+            // 前端、内存历史和磁盘，三边拿到的是同一个数。
+            if let AgentEvent::Message(m) = &mut ev {
+                m.stamp(clock.now_ms());
+            }
             if leaves_a_trace(&ev) {
                 produced = true;
             }
@@ -2083,7 +2102,7 @@ impl Session {
                 // 已经说出口的半截话先定稿。排在撤回判定**之前**：它一旦
                 // 落地，这一轮就算有产出，提问不能再撤（撤了那半截回答
                 // 就悬空了）。
-                if let Some(m) = self.finalize_partial(&model.model).await {
+                if let Some(m) = self.finalize_partial(&model.model, clock.now_ms()).await {
                     produced = true;
                     let _ = sink.send(AgentEvent::Message(m));
                 }
@@ -3938,13 +3957,18 @@ mod tests {
             live.thinking.push_str("想了很久");
         }
         let msg = s
-            .finalize_partial("deepseek-chat")
+            .finalize_partial("deepseek-chat", 1_700_000_000_000)
             .await
             .expect("有半截正文就该定稿");
         match &msg {
             Message::Assistant { content, meta, .. } => {
                 assert_eq!(content.len(), 1, "思考不定稿：没有签名，回喂给模型是错的");
                 assert!(meta.interrupted, "界面靠它标注'已中断'");
+                assert_eq!(
+                    meta.created_at_ms,
+                    Some(1_700_000_000_000),
+                    "半截回答也是一条消息，界面要显示它的时间"
+                );
             }
             other => panic!("该是一条助手消息：{other:?}"),
         }
@@ -3959,7 +3983,11 @@ mod tests {
         assert_eq!(parts.live.len(), 1, "重启后还得在：{parts:?}");
 
         // 没说过话的那一轮不该凭空长出一条空消息。
-        assert!(s.finalize_partial("deepseek-chat").await.is_none());
+        assert!(
+            s.finalize_partial("deepseek-chat", 1_700_000_001_000)
+                .await
+                .is_none()
+        );
     }
 
     /// 思考不算产出：模型转了几秒圈就被停，那句提问照样回输入框。

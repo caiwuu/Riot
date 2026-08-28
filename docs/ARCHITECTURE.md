@@ -1633,6 +1633,8 @@ Composer 发出去的标记和 Transcript 画回来的块靠同一份规则对�
 
 `[约束]` **组件里不允许出现 `invoke(...)` 或 `listen(...)`。**全部走 `bridge/`。这层抽象是以后换宿主(Tauri → Electron 或反之)的唯一保险,一旦被绕过就失效了。
 
+这条由 `eslint.config.js` 机器强制,`pnpm lint` 在 CI 的 contract job 里跑。**两条规则缺一不可**:`no-restricted-imports` 只看静态 `import ... from`,而实际漏进来的那次是 `await import("@tauri-apps/plugin-notification")`——动态那半要靠 `no-restricted-syntax` 的 `ImportExpression` 选择器。在 lint 接上之前这里只有一句注释,而 `bridge/index.ts` 的文件头甚至已经写着"由 eslint 强制"——那个配置文件当时并不存在。
+
 `[现状]` 状态管理就是 `useSession` + 本地 state,**没有状态库**(zustand 依赖已删)。等出现"多个不相关组件要读同一份会话状态"这类真实痛点再引入,不为将来可能的需求先付一层间接。
 
 长会话的渲染预算分三层,各管一段(都已落地):

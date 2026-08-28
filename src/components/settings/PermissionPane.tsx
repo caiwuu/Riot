@@ -290,7 +290,6 @@ export function PermissionPane({
     refreshSbx();
     // 只在打开设置时探一次。它不会自己变 —— 唯一会改变它的是下面那个安装
     // 按钮，而那条路径装完自己会刷。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const runInstall = () => {

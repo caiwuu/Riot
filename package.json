@@ -1,7 +1,7 @@
 {
   "name": "riot",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,7 +11,8 @@
     "gen:schema": "cargo run -p riot-protocol --bin gen_schema",
     "gen:types": "json2ts --input schemas/protocol.json --output src/bridge/generated.ts --bannerComment \"/* 由 schemas/protocol.json 生成，勿手改。改 crates/riot-protocol 里的 Rust 类型后跑 pnpm gen */\" --additionalProperties false",
     "gen": "pnpm gen:schema && pnpm gen:types",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src --max-warnings 0"
   },
   "dependencies": {
     "@file-viewer/react": "workspace:*",
@@ -35,6 +36,7 @@
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
     "@file-viewer/vite-plugin": "workspace:*",
     "@tauri-apps/cli": "^2.11.4",
     "@tauri-apps/plugin-dialog": "^2.7.2",
@@ -42,8 +44,11 @@
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "eslint": "^9.39.5",
+    "eslint-plugin-react-hooks": "^5.2.0",
     "json-schema-to-typescript": "^15.0.4",
     "typescript": "^5.9.0",
+    "typescript-eslint": "^8.68.0",
     "vite": "^7.0.0"
   }
 }

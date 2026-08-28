@@ -58,6 +58,9 @@ jobs:
             exit 1
           }
       - run: pnpm typecheck
+      # bridge 边界（宿主 API 只准在 src/bridge/ 里出现）靠这一步守。
+      # 在它接上之前，那条约束只是一句注释，已经漏进过一处直连插件。
+      - run: pnpm lint
 
   # clippy 的 disallowed-methods 是安全闸；debug 测试带着 L2 不变量。
   # golden / fault / e2e 都在 --workspace 里，不再拆 job 重编一遍。

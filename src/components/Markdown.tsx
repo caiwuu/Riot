@@ -65,10 +65,51 @@ const EXT_LANG: Record<string, string> = {
 
 type MdNode = {
   type: string;
+  value?: string;
   lang?: string | null;
   data?: { hProperties?: Record<string, string> };
   children?: MdNode[];
 };
+
+/** 软换行前后的空白：断行时要吃掉，否则新行开头挂着缩进。 */
+const SOFT_BREAK = /[\t ]*\n[\t ]*/;
+
+/**
+ * 段内的单换行渲染成真断行（`<br>`），给思考过程用。
+ *
+ * markdown 的规矩是把连续的行并成一段，那是给"写出来的文章"定的。
+ * 模型的思考是流水账，常拿单换行分句、列条目，并成整段就是一堵墙 ——
+ * 比不渲染还难读。
+ *
+ * 做在 mdast 层而不是拿 CSS 的 `white-space: pre-line` 糊：换行是继承
+ * 属性，而 mdast 转 HTML 时会在 `<li>`、`<blockquote>`、表格行里垫
+ * 排版用的换行（松散列表是 `<li>⏎<p>…</p>⏎</li>`）。那些换行不该
+ * 显示出来，pre-line 会把它们一并断掉，序号和正文当场错开两行。
+ */
+function remarkSoftBreaks() {
+  return (tree: MdNode) => {
+    walk(tree, (node) => {
+      const kids = node.children;
+      if (!kids) return;
+      let split = false;
+      const out: MdNode[] = [];
+      for (const kid of kids) {
+        // 只拆纯文本。代码块 / 行内代码是别的节点类型，天然不会进来。
+        const parts = kid.type === "text" ? (kid.value ?? "").split(SOFT_BREAK) : [];
+        if (parts.length < 2) {
+          out.push(kid);
+          continue;
+        }
+        split = true;
+        parts.forEach((part, i) => {
+          if (i > 0) out.push({ type: "break" });
+          if (part) out.push({ ...kid, value: part });
+        });
+      }
+      if (split) node.children = out;
+    });
+  };
+}
 
 /**
  * 把 `12:14:src/foo.rs` 这样的 info string 拆成 data 属性，并把 lang 换成
@@ -117,11 +158,20 @@ function walk(node: MdNode, visit: (n: MdNode) => void) {
  * 用户消息**不走这里**：用户输入的 `# 标题` 就是字面上的井号标题，
  * 按 markdown 渲染等于篡改他说的话。
  */
-export const Markdown = memo(function Markdown({ text }: { text: string }) {
+export const Markdown = memo(function Markdown({
+  text,
+  breaks = false,
+}: {
+  text: string;
+  /** 段内单换行照原样断行。见 [`remarkSoftBreaks`]，只有思考过程要。 */
+  breaks?: boolean;
+}) {
   return (
     <div className="md">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkCodeRefs]}
+        remarkPlugins={
+          breaks ? [remarkGfm, remarkCodeRefs, remarkSoftBreaks] : [remarkGfm, remarkCodeRefs]
+        }
         rehypePlugins={[[rehypeHighlight, { ignoreMissing: true, detect: false }]]}
         urlTransform={keepFileUrls}
         components={{

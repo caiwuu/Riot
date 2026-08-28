@@ -174,7 +174,10 @@ function FindBar({
     jump(ranges, next);
   };
 
-  // 关闭（含卸载）时清掉高亮，别在页面上留一堆黄块
+  // 关闭（含卸载）时清掉高亮，别在页面上留一堆黄块。
+  // clear 不能进依赖：它是每次渲染新建的函数，进去之后每渲染一次就跑一遍
+  // cleanup —— 也就是每敲一个字都把刚画上的高亮擦掉。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => clear, []);
 
   return (
@@ -490,6 +493,10 @@ export function Transcript({
     };
     box.addEventListener("scroll", onScroll, { passive: true });
     return () => box.removeEventListener("scroll", onScroll);
+    // rememberView / captureAnchor 每次渲染都是新函数，但它们只读 ref。
+    // 放进依赖等于流式输出时每帧解绑重绑一次 scroll 监听，白付开销。
+    // 监听的生命周期就该跟着会话走。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
   // 只在子层会吞掉滚轮时才接手。平时交给浏览器，才能跟左边会话栏
@@ -519,6 +526,11 @@ export function Transcript({
     restoreView();
     const again = requestAnimationFrame(() => restoreView());
     return () => cancelAnimationFrame(again);
+    // `[约束]` restoreView 绝不能进依赖。它每次渲染都是新引用，进去之后
+    // 这个 effect 每渲染一次就把滚动位置写回缓存值一次 —— 流式输出期间
+    // 等于每帧把用户拽回上次记录的位置，页面再也滚不动。
+    // 位置恢复只该发生在"切回来"这一刻，也就是 armed / sessionId 变化时。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [armed, sessionId]);
 
   // 内容高度一变（流式追加、懒水合落地、图片 / mermaid 出图）就到这里
@@ -563,6 +575,10 @@ export function Transcript({
     });
     ro.observe(col);
     return () => ro.disconnect();
+    // pinBottom / rememberView 同上：只读 ref 的新引用函数。放进依赖会让
+    // ResizeObserver 每次渲染 disconnect 再重建，而它正是用来观测流式
+    // 长高的 —— 每帧重建既贵又会丢掉观测基线。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // 自己发的消息无条件回到底部。没有这条的话，在上面翻历史时发了新
@@ -579,6 +595,9 @@ export function Transcript({
       break;
     }
     if (stick.current) pinBottom();
+    // pinBottom 不进依赖：依赖列的是"什么变化该重新贴底"，那是内容本身。
+    // 把每帧新建的函数混进去只会让这个列表失去表达力。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, streaming, thinking, streamingPlan, planAsk?.requestId, choiceAsk?.requestId, busy]);
 
   // 还在转圈的工具。底部状态行靠它说清此刻在等谁 —— 一次 build 跑两
@@ -782,6 +801,7 @@ const Row = memo(function Row({
           <MsgActions
             text={item.text}
             mutateEnabled={!!mutateEnabled}
+            {...(item.at ? { at: item.at } : {})}
             {...(onEditEntry ? { onEdit: () => setEditing(true) } : {})}
             {...(onDeleteEntry ? { onDelete: () => onDeleteEntry(item) } : {})}
           />
@@ -813,6 +833,7 @@ const Row = memo(function Row({
             text={item.text}
             regenEnabled={!!regenEnabled && !!onRegenerate}
             mutateEnabled={!!mutateEnabled}
+            {...(item.at ? { at: item.at } : {})}
             {...(onRegenerate ? { onRegenerate: () => onRegenerate(item.id) } : {})}
             {...(onEditEntry ? { onEdit: () => setEditing(true) } : {})}
             {...(onDeleteEntry ? { onDelete: () => onDeleteEntry(item) } : {})}
@@ -836,10 +857,29 @@ const Row = memo(function Row({
   }
 });
 
-/** 悬停出现的消息操作：复制 / 重新生成 / 上下文编辑 / 删除。
+/**
+ * 气泡上的时刻只到分钟。
+ *
+ * 秒对读对话没有意义，而且这个格式化器是模块级单例 —— 每条消息每帧
+ * 现造一个 Intl 实例，流式输出时是几百次没有产出的构造。
+ */
+const HHMM = new Intl.DateTimeFormat(undefined, {
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+/** hover 提示给完整日期：长会话里光看"15:18"分不出是哪天。 */
+const FULL_STAMP = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "long",
+  timeStyle: "medium",
+});
+
+/** 悬停出现的消息操作：复制 / 重新生成 / 上下文编辑 / 删除，末尾是时刻。
  *  占位始终在，hover 才可见。 */
 function MsgActions({
   text,
+  at,
   onRegenerate,
   regenEnabled,
   onEdit,
@@ -847,6 +887,8 @@ function MsgActions({
   mutateEnabled,
 }: {
   text: string;
+  /** 消息产生的时刻（Unix 毫秒）。undefined = 老记录没有，不显示。 */
+  at?: number;
   onRegenerate?: () => void;
   regenEnabled?: boolean;
   /** 进入编辑态。undefined = 这条不可编辑。 */
@@ -910,7 +952,18 @@ function MsgActions({
           <TrashIcon />
         </button>
       ) : null}
+      {at ? <MsgTime at={at} /> : null}
     </div>
+  );
+}
+
+/** 消息时刻。跟在操作按钮后面，和它们一起 hover 出现。 */
+function MsgTime({ at }: { at: number }) {
+  const d = new Date(at);
+  return (
+    <time className="msg-time" dateTime={d.toISOString()} title={FULL_STAMP.format(d)}>
+      {HHMM.format(d)}
+    </time>
   );
 }
 

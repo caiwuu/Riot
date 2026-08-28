@@ -10,6 +10,7 @@ import { IS_MAC } from "./chrome";
 import { useEscLayer } from "./Modal";
 import { PaneHead } from "./settings/layout";
 import {
+  BookmarkIcon,
   GlobeIcon,
   HookIcon,
   InfoIcon,
@@ -26,6 +27,7 @@ import { HooksPane } from "./settings/HooksPane";
 import { McpPane } from "./settings/McpPane";
 import { PacksPane } from "./settings/PacksPane";
 import { PermissionPane } from "./settings/PermissionPane";
+import { PromptsPane } from "./settings/PromptsPane";
 import { ProviderPane } from "./settings/ProviderPane";
 import { SkillsPane } from "./settings/SkillsPane";
 import { WebPane } from "./settings/WebPane";
@@ -47,6 +49,7 @@ interface Props {
 type Tab =
   | "provider"
   | "web"
+  | "prompts"
   | "permission"
   | "mcp"
   | "packs"
@@ -67,7 +70,7 @@ interface TabDef {
 /**
  * 导航分区，按"改它会影响什么"分组。
  *
- * 九项平铺时每次切页都得从头读一遍标签；分成四组之后，找一项先定位组、
+ * 十项平铺时每次切页都得从头读一遍标签；分成四组之后，找一项先定位组、
  * 再在两三项里挑，扫视快得多。
  */
 const NAV: { group: string; tabs: TabDef[] }[] = [
@@ -87,6 +90,13 @@ const NAV: { group: string; tabs: TabDef[] }[] = [
         icon: GlobeIcon,
         title: "联网",
         desc: "模型能不能抓网页、能不能搜索，以及正文用什么模型压缩。",
+      },
+      {
+        id: "prompts",
+        label: "提示词",
+        icon: BookmarkIcon,
+        title: "提示词",
+        desc: "收藏常用的系统提示词，开会话时挑一条填进去，不用每次重打。",
       },
     ],
   },
@@ -286,6 +296,14 @@ export function Settings({
               ) : null}
               {tab === "web" ? (
                 <WebPane status={status} onStatus={onStatus} onSaved={flashSaved} />
+              ) : null}
+              {tab === "prompts" ? (
+                <PromptsPane
+                  status={status}
+                  onStatus={onStatus}
+                  askConfirm={setConfirm}
+                  onSaved={flashSaved}
+                />
               ) : null}
               {tab === "permission" ? (
                 <PermissionPane

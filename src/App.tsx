@@ -15,6 +15,7 @@ import {
   getConfig,
   type ImageInput,
   listSessions,
+  notify,
   type PermissionMode,
   openInBrowser,
   pickDirectory,
@@ -23,6 +24,7 @@ import {
   renameSession,
   revealInFinder,
   type SessionInfo,
+  setConfig as saveConfig,
   setWindowTitle,
   subscribeFullscreen,
 } from "./bridge";
@@ -51,11 +53,13 @@ import {
   waitStartedAt,
 } from "./hooks/useSession";
 import { useAppUpdate } from "./hooks/useAppUpdate";
+import { newPresetId } from "./lib/prompts";
+import { inheritedSampling } from "./lib/sampling";
 import { Transcript, transcriptView } from "./components/Transcript";
 import { ContextMenu, type MenuState, Resizer, TopBar } from "./components/chrome";
 import { Sidebar } from "./components/Sidebar";
 import { Welcome } from "./components/Welcome";
-import { Composer } from "./components/Composer";
+import { Composer, forgetComposerSession } from "./components/Composer";
 import {
   FolderIcon,
   RiotMark,
@@ -196,7 +200,9 @@ export function App() {
   }, []);
 
   const projectList = config?.config.projects;
-  const projects = projectList ?? [];
+  // 走 useMemo 而不是就地 `?? []`：后者每次渲染都产出新数组，而快捷键
+  // effect 依赖它 —— 等于每渲染一次就把 window 的 keydown 解绑重绑一次。
+  const projects = useMemo(() => projectList ?? [], [projectList]);
   const activeSession = sessions.find((s) => s.id === active) ?? null;
   const update = useAppUpdate(!booting && !bootError);
   const updateNotice = update.banner;
@@ -421,6 +427,24 @@ export function App() {
     setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
   }, []);
 
+  /**
+   * 会话设置里的「存为提示词」：把当前正文追加进提示词库。
+   *
+   * 不带标题存 —— 界面会拿正文首行顶上。写提示词的那一刻让人先给它
+   * 取个名，是在打断他手头正在做的事；想改名去设置里改。
+   */
+  const savePromptPreset = useCallback(
+    async (body: string) => {
+      const cfg = config?.config;
+      if (!cfg) return;
+      const list = cfg.prompts ?? [];
+      setConfig(
+        await saveConfig({ ...cfg, prompts: [...list, { id: newPresetId(list), body }] }),
+      );
+    },
+    [config],
+  );
+
   // 后台会话的忙碌状态没有事件可订阅（只有挂载中的会话有事件流），
   // 侧栏的"正在跑"指示点只能靠轮询对齐。只在确实有会话在跑时才轮 ——
   // 全员空闲时一次都不发。
@@ -494,16 +518,24 @@ export function App() {
 
   /* ── 会话 / 项目操作 ──────────────────────── */
 
-  /** 会话没了，它的工作台（终端组、预览标签组）跟着走。 */
+  /**
+   * 会话没了，它在前端留下的一切跟着走：内存里的对话、滚动位置、
+   * 输入框草稿与待发图、终端组、预览标签组。
+   *
+   * 收在一个函数里而不是在每个删除路径上各写一遍 —— 这些缓存都挂在
+   * 模块级 Map 上，漏掉一处不会有任何报错，只是那份数据（含 base64
+   * 图片）再也没人回收。删除会话有三条路径，以前每条都得记住三行。
+   */
   const dropSessionWorkbench = (id: string) => {
+    forgetSession(id);
+    transcriptView.delete(id);
+    forgetComposerSession(id);
     closeSessionTerminals(id);
     previewBySession.current.delete(id);
   };
 
   const doDeleteSession = async (id: string) => {
     await deleteSession(id);
-    forgetSession(id);
-    transcriptView.delete(id);
     dropSessionWorkbench(id);
     setKept((prev) => prev.filter((x) => x !== id));
     const victim = sessions.find((s) => s.id === id);
@@ -537,8 +569,6 @@ export function App() {
       ...sessions.filter((s) => s.root === root).map((s) => s.id),
     ]);
     for (const id of gone) {
-      forgetSession(id);
-      transcriptView.delete(id);
       dropSessionWorkbench(id);
     }
     setKept((prev) => prev.filter((id) => !gone.has(id)));
@@ -571,8 +601,6 @@ export function App() {
       const closed = root === oldRoot ? [] : await removeProject(oldRoot);
       const dropped = new Set(closed);
       for (const id of dropped) {
-        forgetSession(id);
-        transcriptView.delete(id);
         dropSessionWorkbench(id);
       }
       setKept((prev) => prev.filter((id) => !dropped.has(id)));
@@ -967,10 +995,11 @@ export function App() {
         <SessionSettings
           key={activeSession.id}
           session={activeSession}
-          inherited={
-            config.config.providers.find((p) => p.id === config.config.activeProvider)
-              ?.sampling ?? {}
-          }
+          // 会话继承到的是"模型叠在服务方之上"的结果，和宿主 resolve() 同序。
+          // 只传服务方的话，模型上单独设过的字段在这里会显示成另一个数。
+          inherited={inheritedSampling(config.config)}
+          presets={config.config.prompts ?? []}
+          onSavePreset={savePromptPreset}
           onPatch={(patch) => patchSession(activeSession.id, patch)}
           onClose={() => setShowSessionCfg(false)}
         />
@@ -994,21 +1023,9 @@ export function App() {
 
 /* ── 对话 ───────────────────────────────────── */
 
-/**
- * 长任务在后台跑完时发系统通知。权限只在第一次要 —— 被拒绝就永远
- * 沉默，不反复骚扰。失败静默：通知是锦上添花，不值得报错。
- */
-async function notifyTurnDone() {
-  try {
-    const { isPermissionGranted, requestPermission, sendNotification } = await import(
-      "@tauri-apps/plugin-notification"
-    );
-    let ok = await isPermissionGranted();
-    if (!ok) ok = (await requestPermission()) === "granted";
-    if (ok) sendNotification({ title: "Riot", body: "任务完成了，回来看看结果吧。" });
-  } catch {
-    // 平台不支持或用户拒绝 —— 无声跳过
-  }
+/** 长任务在后台跑完时发系统通知。权限与失败处理见 bridge 的 `notify`。 */
+function notifyTurnDone() {
+  void notify("Riot", "任务完成了，回来看看结果吧。");
 }
 
 function Chat({

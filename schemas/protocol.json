@@ -1336,6 +1336,15 @@
             "null"
           ]
         },
+        "created_at_ms": {
+          "description": "这条消息产生的时刻（Unix 毫秒）。只给界面显示用。\n\n`None` = 这条消息早于本字段（老 transcript），界面那里不显示时间\n—— 编一个出来的话，几个月前的对话会全部标成\"刚刚\"。\n\n由内核在消息进历史/落盘的同一处打上（见 [`Message::stamp`]）。\n不在 provider 解码层打：那里拿不到注入的 `Clock`，要打就得让每个\nprovider 都持有一份时钟，顺带把黄金回放的确定性也搭进去。",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "interrupted": {
           "description": "这条回答是被用户按停止**截断**的，不是模型自己说完的。\n\n只给界面标注用。模型那边不需要额外说明 —— 它看到的就是一句\n半截话后面紧跟着用户的下一条消息，而 meta 从来不进 wire 格式。",
           "type": "boolean"

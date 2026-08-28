@@ -1,6 +1,7 @@
 import { type PointerEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import {
+  type PromptPreset,
   type Sampling,
   type SessionInfo,
   type ThinkingPolicy,
@@ -11,7 +12,14 @@ import {
   setSessionSystemPrompt,
   setSessionThinking,
 } from "../bridge";
-import { SAMPLING_FIELDS, parseSampling, sameSampling } from "../lib/sampling";
+import { findPreset, presetLabel, presetSummary } from "../lib/prompts";
+import {
+  type SamplingDraft,
+  SAMPLING_FIELDS,
+  parseSampling,
+  sameSampling,
+  samplingDraft,
+} from "../lib/sampling";
 import { SamplingSliders } from "./FieldSlider";
 import { FieldSelect, type FieldOption } from "./FieldSelect";
 import { HintTip } from "./HintTip";
@@ -38,6 +46,9 @@ const THINKING_OPTIONS: FieldOption[] = [
   { value: "disabled", label: "关闭思考", hint: "部分端点不支持" },
 ];
 
+/** 下拉里表示「正文是手写的，不对应库里任何一条」。不会是真的 id。 */
+const CUSTOM_PROMPT = "\u0000custom";
+
 function thinkingKey(p: ThinkingPolicy): string {
   return p.mode === "fixed" ? p.level : p.mode;
 }
@@ -51,22 +62,24 @@ function thinkingFromKey(k: string): ThinkingPolicy {
 export function SessionSettings({
   session,
   inherited,
+  presets,
+  onSavePreset,
   onPatch,
   onClose,
 }: {
   session: SessionInfo;
   /** 继承来的采样默认值（当前激活 provider 的），没覆盖时数字格就显示它。 */
   inherited: Sampling;
+  /** 设置里收藏的提示词。空 = 只能自己写。 */
+  presets: PromptPreset[];
+  /** 把当前正文存进提示词库。 */
+  onSavePreset: (body: string) => Promise<void>;
   /** 提交成功后回写 App 里的会话信息。 */
   onPatch: (patch: Partial<SessionInfo>) => void;
   onClose: () => void;
 }) {
   // 数字字段走字符串草稿：绑成 number 的话 "0."、"-" 这种中间态会被吃掉。
-  const [samp, setSamp] = useState<Record<string, string>>(() =>
-    Object.fromEntries(
-      SAMPLING_FIELDS.map((f) => [f.key, session.sampling[f.key]?.toString() ?? ""]),
-    ),
-  );
+  const [samp, setSamp] = useState<SamplingDraft>(() => samplingDraft(session.sampling));
   const [venv, setVenv] = useState(session.pythonVenv ?? "");
   const [prompt, setPrompt] = useState(session.systemPrompt ?? "");
   const [thinking, setThinking] = useState(() => thinkingKey(session.thinking));
@@ -82,6 +95,11 @@ export function SessionSettings({
   /** 「全部恢复继承」的点击回执。没有它，点下去唯一的变化是按钮自己变灰。 */
   const [resetDone, setResetDone] = useState(false);
   const resetTimer = useRef(0);
+  /** 选预设时被顶掉的旧正文。null = 没有可撤的东西。 */
+  const [replaced, setReplaced] = useState<string | null>(null);
+  /** 「存为提示词」的点击回执。存完按钮自己会消失，但那个变化太安静。 */
+  const [presetSaved, setPresetSaved] = useState(false);
+  const presetTimer = useRef(0);
 
   /**
    * 关窗前把焦点从输入框上拿走，让"失焦提交"先落地。不做的话，
@@ -93,9 +111,11 @@ export function SessionSettings({
     onClose();
   }, [onClose]);
 
-  const overrides = SAMPLING_FIELDS.filter(
-    (f) => (samp[f.key] ?? "").trim() !== "",
-  ).length;
+  // 选了「模型默认」（null）也是一次覆盖 —— 它同样要能被"全部恢复继承"收回去。
+  const overrides = SAMPLING_FIELDS.filter((f) => {
+    const v = samp[f.key];
+    return v === null || (v ?? "").trim() !== "";
+  }).length;
 
   const commitSampling = (next: Sampling) => {
     if (sameSampling(next, session.sampling)) return;
@@ -154,6 +174,53 @@ export function SessionSettings({
       .catch((e: unknown) => setError(String(e)));
   };
 
+  /** 当前正文对应库里的哪一条。靠内容反查而不是存 id —— 存 id 的话，
+   *  用户手改两个字之后下拉还理直气壮地显示着预设名。 */
+  const matched = findPreset(presets, prompt);
+  const promptChoice = matched ? matched.id : prompt.trim() ? CUSTOM_PROMPT : "";
+
+  const promptOptions: FieldOption[] = [
+    { value: "", label: "不使用", hint: "只用内置提示词" },
+    ...presets.map((p) => ({ value: p.id, label: presetLabel(p), hint: presetSummary(p) })),
+  ];
+  // 「自定义」是当前状态的名字，不是一个能选的目标 —— 手写的内容没有
+  // 第二份可以切回来。它只在正文确实脱离库时出现，让触发框有话可说。
+  if (promptChoice === CUSTOM_PROMPT) {
+    promptOptions.push({ value: CUSTOM_PROMPT, label: "自定义", hint: "手写的，不在库里" });
+  }
+
+  const choosePreset = (id: string) => {
+    if (id === promptChoice || id === CUSTOM_PROMPT) return;
+    const body = presets.find((p) => p.id === id)?.body.trim() ?? "";
+    // 顶掉手写的内容才留后路：那可能是刚斟酌了几分钟的长文本，库里没有
+    // 第二份。顶掉的是库里另一条时不吭声 —— 再挑一次就回去了，不算丢。
+    // 事前弹确认更差：每次换预设都要点一下，而多数时候框里本来就空着。
+    setReplaced(prompt.trim() && !matched ? prompt : null);
+    setPrompt(body);
+    commitPrompt(body);
+  };
+
+  const undoReplace = () => {
+    const back = replaced ?? "";
+    setReplaced(null);
+    setPrompt(back);
+    commitPrompt(back);
+  };
+
+  const savePreset = async () => {
+    const body = prompt.trim();
+    if (!body || matched) return;
+    setError("");
+    try {
+      await onSavePreset(body);
+      setPresetSaved(true);
+      window.clearTimeout(presetTimer.current);
+      presetTimer.current = window.setTimeout(() => setPresetSaved(false), 1800);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   return (
     <Modal className="session-dialog" label="会话设置" onClose={requestClose}>
         <div className="modal-head">
@@ -169,7 +236,23 @@ export function SessionSettings({
           <p className="session-path">{session.root}</p>
           <h3 className="dialog-section" style={{ marginTop: 0 }}>
             采样参数
-            <HintTip>数字是继承来的值（或常见默认）。拖过或改过的字段才写入覆盖。</HintTip>
+            <HintTip>
+              灰字是继承来的值。拖过或改过的字段才写入覆盖；点滑块底下那行字可以切到「模型默认」——
+              这一项就完全不发，由模型自己定。
+            </HintTip>
+            {/* 按钮常驻：忽隐忽现的按钮像 bug，disabled 才说明"现在没有可恢复的"。 */}
+            <button
+              className="ghost samp-reset"
+              onClick={resetSampling}
+              disabled={!overrides}
+            >
+              全部恢复继承
+            </button>
+            {resetDone ? (
+              <span className="hint samp-reset-done" role="status">
+                已恢复
+              </span>
+            ) : null}
           </h3>
           <SamplingSliders
             draft={samp}
@@ -177,17 +260,6 @@ export function SessionSettings({
             onChange={(key, value) => setSamp((s) => ({ ...s, [key]: value }))}
             onCommit={(next) => commitSampling(parseSampling(next))}
           />
-          {/* 按钮常驻：忽隐忽现的按钮像 bug，disabled 才说明"现在没有可恢复的"。 */}
-          <div className="samp-reset">
-            <button className="ghost" onClick={resetSampling} disabled={!overrides}>
-              全部恢复继承
-            </button>
-            {resetDone ? (
-              <span className="hint" role="status" style={{ margin: 0 }}>
-                已恢复
-              </span>
-            ) : null}
-          </div>
 
           <h3 className="dialog-section">
             思考力度
@@ -252,13 +324,50 @@ export function SessionSettings({
 
           <h3 className="dialog-section">
             系统提示词
-            <HintTip>追加在内置提示词之后，不替换它。留空只用内置提示词。</HintTip>
+            <HintTip>
+              追加在内置提示词之后，不替换它。留空只用内置提示词。挑一条收藏的会把正文
+              填进下面的框，填完照样能改 —— 改完就只属于这个会话，不会动到库里那条。
+            </HintTip>
+            {prompt.trim() && !matched ? (
+              <button className="ghost prompt-save" onClick={() => void savePreset()}>
+                存为提示词
+              </button>
+            ) : null}
+            {presetSaved ? (
+              <span className="hint prompt-saved" role="status">
+                已存入
+              </span>
+            ) : null}
           </h3>
+          {/* 库是空的时候不摆下拉：只有「不使用」一项的菜单点开是一场空。
+              这时「存为提示词」就是攒第一条的入口。 */}
+          {presets.length > 0 ? (
+            <div className="field-row">
+              <FieldSelect
+                value={promptChoice}
+                onChange={choosePreset}
+                options={promptOptions}
+                title="从收藏的提示词里挑一条"
+              />
+            </div>
+          ) : null}
           <PromptField
             value={prompt}
-            onChange={setPrompt}
+            onChange={(v) => {
+              setPrompt(v);
+              // 一旦动手改，"撤销回替换前"就不再是用户想要的那个状态了。
+              setReplaced(null);
+            }}
             onCommit={commitPrompt}
           />
+          {replaced !== null ? (
+            <div className="prompt-undo" role="status">
+              <span className="hint">原来写的内容被替换了</span>
+              <button className="ghost" onClick={undoReplace}>
+                撤销
+              </button>
+            </div>
+          ) : null}
 
           {error ? <p className="form-error">{error}</p> : null}
         </div>

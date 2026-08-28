@@ -65,7 +65,8 @@ pub struct ProviderConfig {
     /// 过载时降级到的模型。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_model: Option<String>,
-    /// 这个服务方的采样参数。会话可以临时覆盖单个字段。
+    /// 这个服务方的采样参数。模型和会话可以逐字段覆盖，也可以把某一项
+    /// 改成"不发"（见 [`Sampling`] 的三态）。
     #[serde(default)]
     pub sampling: Sampling,
     /// **已废弃**：视觉能力按模型记（[`ModelConfig::vision`]）。字段保留只为
@@ -115,7 +116,8 @@ pub struct ModelConfig {
     /// [`vision`]: ModelConfig::vision
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
-    /// 这个模型的采样参数。空字段继承 provider 的设置。
+    /// 这个模型的采样参数。空字段继承 provider 的设置，`null` 表示这一项
+    /// 连 provider 的值也不要，一个都不发。
     #[serde(default, skip_serializing_if = "Sampling::is_empty")]
     pub sampling: Sampling,
 }
@@ -227,31 +229,85 @@ impl ProviderConfig {
     }
 }
 
-/// 采样参数。`None` = 不设置：在 provider 层表示用服务端默认，
-/// 在会话覆盖层表示继承 provider 的值。
+/// 采样参数。每个字段**三态**，和 JSON 的三种形状一一对应：
+///
+/// | JSON | 值 | 含义 |
+/// | --- | --- | --- |
+/// | 键不在 | `None` | 继承下一层（会话 → 模型 → 服务方 → 不发） |
+/// | `null` | `Some(None)` | 显式不发这个参数，用模型自己的默认值 |
+/// | 数字 | `Some(Some(v))` | 就用这个值 |
+///
+/// `[取舍]` 第三态看着多余，少了它却有一整类设置表达不出来。
+///
+/// 两态时 `None` 同时兼着"继承"和"不发"，于是**上层一设值，下层就再也
+/// 回不到不发**：服务方设了 `temperature: 0.2`，这家的推理模型偏偏拒收
+/// temperature，用户在模型上只能填另一个数 —— 而他要的是一个都别发。
+/// 顶层同理，"没设"和"用模型默认"本是一回事，界面却因此说不清自己是哪个。
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Sampling {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f32>,
+    #[serde(default, with = "tri", skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<Option<f32>>,
+    #[serde(default, with = "tri", skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<Option<f32>>,
     /// 仅 Anthropic 协议发送。OpenAI 官方端点会拒绝未知参数。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub top_k: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_output_tokens: Option<u32>,
+    #[serde(default, with = "tri", skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<Option<u32>>,
+    #[serde(default, with = "tri", skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<Option<u32>>,
+}
+
+/// `Option<Option<T>>` 的三态编解码（社区里叫 double option）。
+///
+/// serde 默认把 `null` 读成 `None` —— 和"键不在"撞成同一个值，而这里这两个
+/// 含义相反。这一层只做一件事：让 `null` 落到 `Some(None)`。
+mod tri {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<T, S>(v: &Option<Option<T>>, s: S) -> Result<S::Ok, S::Error>
+    where
+        T: Serialize,
+        S: Serializer,
+    {
+        // 外层的 None 由 skip_serializing_if 拦掉，走不到这儿。
+        match v {
+            Some(inner) => inner.serialize(s),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, T, D>(d: D) -> Result<Option<Option<T>>, D::Error>
+    where
+        T: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        Option::deserialize(d).map(Some)
+    }
 }
 
 impl Sampling {
-    /// 字段级合并：self 设置了的字段赢，没设置的用 `base` 的。
-    /// 会话覆盖 provider 默认时用 —— 只改 temperature 不该把 max_tokens 也清掉。
+    /// 字段级合并：self 表过态的字段赢，没表态（继承）的用 `base` 的。
+    ///
+    /// 会话覆盖模型、模型覆盖服务方时用 —— 只改 temperature 不该把
+    /// max_tokens 也清掉。`Option::or` 的语义正好：`Some(None)`（显式
+    /// 不发）也是一次表态，同样赢过 `base`。
     pub fn or(self, base: Sampling) -> Sampling {
         Sampling {
             temperature: self.temperature.or(base.temperature),
             top_p: self.top_p.or(base.top_p),
             top_k: self.top_k.or(base.top_k),
             max_output_tokens: self.max_output_tokens.or(base.max_output_tokens),
+        }
+    }
+
+    /// 摊平成"这一轮到底发什么"。链路末端调用一次，三态在这里收成两态：
+    /// 继承到底也没人设值（`None`）和显式不发（`Some(None)`）都是不发。
+    pub fn effective(self) -> riot_protocol::EndpointSampling {
+        riot_protocol::EndpointSampling {
+            temperature: self.temperature.flatten(),
+            top_p: self.top_p.flatten(),
+            top_k: self.top_k.flatten(),
+            max_output_tokens: self.max_output_tokens.flatten(),
         }
     }
 
@@ -393,6 +449,26 @@ impl McpServerConfig {
             &self.name
         }
     }
+}
+
+/// 一条收藏的提示词。用户在设置里维护，会话设置里挑一条填进系统提示词。
+///
+/// `[取舍]` 会话存的是正文的**副本**，不是这条的 id。引用式会让"改一条
+/// 预设"悄悄改掉几十个已有会话的行为 —— 提示词是会话的一部分，不该在
+/// 用户背后变。代价是改了预设老会话不跟着更新，而那正是想要的。
+///
+/// 内核不读这份清单，它只是界面用的素材库。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptPreset {
+    /// 稳定标识。只用来在界面上定位这一条，不进模型请求。
+    pub id: String,
+    /// 显示名。空 = 界面拿正文首行顶上。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    /// 正文。选中时原样填进会话的系统提示词。
+    #[serde(default)]
+    pub body: String,
 }
 
 // ── MCP 的标准 JSON 配置（生态通用格式） ─────────────────────
@@ -638,6 +714,9 @@ pub struct AppConfig {
     /// MCP 服务器。连接是应用级的（会话共享），工具每轮快照。
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+    /// 收藏的提示词。设置里维护，会话设置里挑一条填进「系统提示词」。
+    #[serde(default)]
+    pub prompts: Vec<PromptPreset>,
     /// 历史估算超过这个 token 数时，轮次开始前做 LLM 总结压缩。
     ///
     /// 可配置是因为窗口大小 Riot 猜不到：各家模型 32k 到 200k+ 都有，
@@ -813,6 +892,7 @@ impl Default for AppConfig {
             max_turns: default_max_turns(),
             web: WebConfig::default(),
             mcp_servers: Vec::new(),
+            prompts: Vec::new(),
             compact_threshold_tokens: default_compact_threshold_tokens(),
             vision_model: String::new(),
             subagent_model: String::new(),
@@ -871,6 +951,7 @@ impl AppConfig {
         // 空 active 是合法状态:一个还没配过任何服务方的新用户、或者刚把
         // 最后一家删掉的用户,都停在这里。拒绝保存的话,用户就再也删不掉
         // 最后一个服务方了 —— 那是把"没有"当成非法,而它只是"还没有"。
+        self.validate_prompts()?;
         if self.active_provider.is_empty() {
             self.validate_mcp()?;
             return Ok(());
@@ -881,6 +962,24 @@ impl AppConfig {
                 ConfigError::Parse(format!("找不到 provider「{}」", self.active_provider))
             })?;
         self.validate_mcp()
+    }
+
+    /// 提示词库的保存前校验。
+    ///
+    /// 只管 id 唯一：它是列表选中和界面 key 的依据，重了的表现是"改一条
+    /// 另一条跟着变"。标题和正文允许为空 —— "刚点了添加还没写"是设置页
+    /// 的正常中间态，同 [`Self::validate_mcp`] 不校验 command。
+    fn validate_prompts(&self) -> Result<(), ConfigError> {
+        let mut seen = std::collections::HashSet::new();
+        for p in &self.prompts {
+            if p.id.trim().is_empty() {
+                return Err(ConfigError::Parse("提示词的 id 不能为空".into()));
+            }
+            if !seen.insert(p.id.as_str()) {
+                return Err(ConfigError::Parse(format!("提示词 id「{}」重复了", p.id)));
+            }
+        }
+        Ok(())
     }
 
     /// MCP 配置的保存前校验。
@@ -1006,10 +1105,9 @@ impl ResolvedModel {
     /// 里一个模型都没填窗口，于是每一个都走 `fallback` —— 行为和加这个字段
     /// 之前逐字节一致。
     pub fn compact_threshold(&self, fallback: u32) -> u32 {
-        self.context_window
-            .map_or(fallback, |w| {
-                compact_threshold_for_window(w, self.sampling.max_output_tokens)
-            })
+        self.context_window.map_or(fallback, |w| {
+            compact_threshold_for_window(w, self.sampling.max_output_tokens.flatten())
+        })
     }
 
     pub fn api_key(&self) -> Result<String, ConfigError> {
@@ -1047,12 +1145,7 @@ impl ResolvedModel {
             api_key: self.api_key()?,
             model: self.model.clone(),
             fallback_model: self.fallback_model.clone(),
-            sampling: riot_protocol::EndpointSampling {
-                temperature: self.sampling.temperature,
-                top_p: self.sampling.top_p,
-                top_k: self.sampling.top_k,
-                max_output_tokens: self.sampling.max_output_tokens,
-            },
+            sampling: self.sampling.effective(),
         })
     }
 }
@@ -1449,7 +1542,8 @@ fn migrate(old: LegacyConfig) -> AppConfig {
         active_provider: old.provider,
         active_model: old.model,
         sampling: Sampling {
-            max_output_tokens: old.max_output_tokens,
+            // 老格式的 None 是"没填"，也就是继承 —— 不是"显式不发"。
+            max_output_tokens: old.max_output_tokens.map(Some),
             ..Default::default()
         },
         projects: old.projects,
@@ -1459,6 +1553,7 @@ fn migrate(old: LegacyConfig) -> AppConfig {
         // 老格式里没有联网配置，用默认值（抓取开、搜索开、空地址走内置）。
         web: WebConfig::default(),
         mcp_servers: Vec::new(),
+        prompts: Vec::new(),
         compact_threshold_tokens: default_compact_threshold_tokens(),
         vision_model: String::new(),
         subagent_model: String::new(),
@@ -1643,24 +1738,74 @@ mod tests {
     fn 模型级采样参数盖住服务方的() {
         let mut c = one_provider();
         c.providers[0].sampling = Sampling {
-            temperature: Some(0.2),
-            max_output_tokens: Some(1000),
+            temperature: Some(Some(0.2)),
+            max_output_tokens: Some(Some(1000)),
             ..Sampling::default()
         };
         c.providers[0].models = vec![ModelConfig {
             sampling: Sampling {
-                temperature: Some(0.9),
+                temperature: Some(Some(0.9)),
                 ..Sampling::default()
             },
             ..ModelConfig::new("m1")
         }];
 
         let r = c.resolve().expect("解析");
-        assert_eq!(r.sampling.temperature, Some(0.9), "模型上动过的字段要赢");
+        let s = r.sampling.effective();
+        assert_eq!(s.temperature, Some(0.9), "模型上动过的字段要赢");
         assert_eq!(
-            r.sampling.max_output_tokens,
+            s.max_output_tokens,
             Some(1000),
             "模型没动的字段要继承服务方，而不是被清掉"
+        );
+    }
+
+    /// `[约束]` 模型上的"用模型默认"必须能否掉服务方设的值。
+    ///
+    /// 这条守的是三态本身。塌回两态时它会失败：模型上的 `Some(None)` 变成
+    /// `None`，于是服务方那个 0.2 又漏下来 —— 表现是"我明明选了不发，
+    /// 它还是发了"，而对拒收 temperature 的推理模型就是一个 400。
+    #[test]
+    fn 模型上的模型默认否掉服务方的值() {
+        let mut c = one_provider();
+        c.providers[0].sampling = Sampling {
+            temperature: Some(Some(0.2)),
+            max_output_tokens: Some(Some(1000)),
+            ..Sampling::default()
+        };
+        c.providers[0].models = vec![ModelConfig {
+            sampling: Sampling {
+                temperature: Some(None),
+                ..Sampling::default()
+            },
+            ..ModelConfig::new("m1")
+        }];
+
+        let s = c.resolve().expect("解析").sampling.effective();
+        assert_eq!(s.temperature, None, "显式不发要赢过服务方的值");
+        assert_eq!(
+            s.max_output_tokens,
+            Some(1000),
+            "否掉一个字段不该连累其它字段的继承"
+        );
+    }
+
+    /// 键不在（继承）和 `null`（显式不发）在 JSON 上必须分得开 ——
+    /// serde 默认会把两者都读成 `None`，那样存下去再读回来语义就变了。
+    #[test]
+    fn 三态在json上往返不丢() {
+        let s: Sampling =
+            serde_json::from_str(r#"{"temperature": null, "topP": 0.9}"#).expect("读得懂");
+        assert_eq!(s.temperature, Some(None), "null = 显式不发");
+        assert_eq!(s.top_p, Some(Some(0.9)));
+        assert_eq!(s.top_k, None, "键不在 = 继承");
+
+        let raw = serde_json::to_string(&s).expect("写得出");
+        assert_eq!(raw, r#"{"temperature":null,"topP":0.9}"#);
+        assert_eq!(
+            serde_json::from_str::<Sampling>(&raw).expect("读得回"),
+            s,
+            "往返一趟不能变味"
         );
     }
 
@@ -1697,7 +1842,7 @@ mod tests {
         c.providers[0].models = vec![ModelConfig {
             context_window: Some(200_000),
             sampling: Sampling {
-                max_output_tokens: Some(4_096),
+                max_output_tokens: Some(Some(4_096)),
                 ..Sampling::default()
             },
             ..ModelConfig::new("m1")
@@ -1948,6 +2093,62 @@ mod tests {
         // 删掉最后一家服务方之后就是这个状态。校验必须放行 ——
         // 拒绝的话用户永远删不掉最后一个。
         assert!(AppConfig::default().validate().is_ok());
+    }
+
+    fn preset(id: &str, body: &str) -> PromptPreset {
+        PromptPreset {
+            id: id.into(),
+            title: String::new(),
+            body: body.into(),
+        }
+    }
+
+    #[test]
+    fn 提示词_id_重了要挡在保存之前() {
+        let c = AppConfig {
+            prompts: vec![preset("p1", "甲"), preset("p1", "乙")],
+            ..Default::default()
+        };
+        let msg = c.validate().unwrap_err().to_string();
+        assert!(msg.contains("p1"), "报错要点名是哪个 id，实际：{msg}");
+    }
+
+    #[test]
+    fn 刚添加的空提示词是合法的() {
+        // 点「添加」之后标题和正文都还空着。这时校验必须放行 ——
+        // 拒绝的表现是"添加按钮点了没反应"，同 validate_mcp 不校验 command。
+        let c = AppConfig {
+            prompts: vec![preset("prompt-1", "")],
+            ..Default::default()
+        };
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn 老配置没有提示词字段也能读() {
+        let json = r#"{"providers":[],"activeProvider":"","activeModel":""}"#;
+        let c: AppConfig = serde_json::from_str(json).expect("老配置要能读");
+        assert!(c.prompts.is_empty());
+    }
+
+    #[test]
+    fn 提示词能原样往返一圈() {
+        // 前端把整份配置发回来保存，字段名对不上就会静默丢内容 ——
+        // 表现是"在设置里写的提示词，关掉再打开就没了"。
+        let c = AppConfig {
+            prompts: vec![
+                preset("prompt-1", "只说中文。"),
+                PromptPreset {
+                    id: "prompt-2".into(),
+                    title: "代码审查".into(),
+                    body: "先找 bug，再谈风格。".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&c).expect("序列化");
+        let back: AppConfig = serde_json::from_str(&json).expect("反序列化");
+        assert_eq!(back.prompts, c.prompts);
     }
 
     #[test]
@@ -2293,7 +2494,7 @@ mod tests {
                 .expect("有 deepseek")
                 .sampling
                 .max_output_tokens,
-            Some(4096)
+            Some(Some(4096))
         );
         // 迁移只搬用户配过的那一家，不附赠出厂预设
         assert_eq!(

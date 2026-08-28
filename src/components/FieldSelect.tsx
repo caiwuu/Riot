@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { Chevron } from "./Chevron";
@@ -44,7 +44,7 @@ export function FieldSelect({
     up: boolean;
   } | null>(null);
 
-  const place = () => {
+  const place = useCallback(() => {
     const el = btnRef.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
@@ -65,7 +65,7 @@ export function FieldSelect({
       maxH: Math.min(280, Math.max(120, up ? above : below)),
       up,
     });
-  };
+  }, [menuMinWidth]);
 
   useEffect(() => {
     if (!open) return;
@@ -84,7 +84,7 @@ export function FieldSelect({
       window.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("mousedown", onDown);
     };
-  }, [open]);
+  }, [open, place]);
 
   useEffect(() => {
     if (!open) return;

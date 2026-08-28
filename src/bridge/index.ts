@@ -5,7 +5,9 @@
  * 其余代码只能 import 本模块导出的函数。违反这条会让前端无法在浏览器里
  * 单独跑起来（调试、Storybook、组件测试全部失效），也让 mock 无处下手。
  *
- * 这条约束由 eslint 的 no-restricted-imports 强制，见 eslint.config.js。
+ * 这条约束由 eslint 强制，见 eslint.config.js：静态 import 归
+ * no-restricted-imports，`await import(...)` 归 no-restricted-syntax ——
+ * 只配前者的话，逃逸会从动态那半漏过去（曾漏进过一处系统通知）。
  */
 
 import { Channel, invoke } from "@tauri-apps/api/core";
@@ -15,11 +17,14 @@ import type {
   ApiProtocol,
   FileChange,
   GitChanges,
+  ImageInput as GeneratedImageInput,
+  McpServerStatus as GeneratedMcpServerStatus,
   Message,
   PendingAsk,
   PermissionAsk,
   PermissionMode,
   PermissionResponse,
+  QueuedSummary as GeneratedQueuedSummary,
   ThinkingEffort,
   ThinkingPolicy as GeneratedThinkingPolicy,
 } from "./generated";
@@ -40,7 +45,16 @@ export type {
  * 这边不会有任何报错，只会在运行时变成一个"未知协议"。 */
 export type Protocol = ApiProtocol;
 
-/** 采样参数。null/undefined = 不设置：provider 层表示用服务端默认，会话覆盖层表示继承 provider。 */
+/**
+ * 采样参数。每个字段三态，和宿主的 `config::Sampling` 逐字段对应：
+ *
+ * - 键不在（`undefined`）= 继承下一层（会话 → 模型 → 服务方 → 不发）
+ * - `null` = 显式不发这个参数，用模型自己的默认值
+ * - 数字 = 就用这个值
+ *
+ * `[约束]` `undefined` 和 `null` 在这里含义相反，不能用 `??` 抹平 ——
+ * 抹平之后"用模型默认"就退化成"继承"，上层设的值会重新漏下来。
+ */
 export interface Sampling {
   temperature?: number | null;
   topP?: number | null;
@@ -145,6 +159,20 @@ export interface McpServerConfig {
   enabled?: boolean;
 }
 
+/**
+ * 一条收藏的提示词。设置里维护，会话设置里挑一条填进「系统提示词」。
+ *
+ * 会话存的是正文副本而不是这条的 id：改一条预设不该悄悄改掉已有会话的行为。
+ */
+export interface PromptPreset {
+  /** 稳定标识，只用于界面定位。 */
+  id: string;
+  /** 显示名。宿主在空的时候不发这个字段 —— 界面拿正文首行顶上。 */
+  title?: string;
+  /** 正文。选中时原样填进会话的系统提示词。 */
+  body: string;
+}
+
 /** 应用配置，整个结构持久化到 config.json。 */
 export interface AppConfig {
   providers: ProviderConfig[];
@@ -161,6 +189,8 @@ export interface AppConfig {
   web: WebConfig;
   /** MCP 服务器。连接是应用级的（会话共享），工具每轮快照。 */
   mcpServers: McpServerConfig[];
+  /** 收藏的提示词。老配置可能没有这个字段。 */
+  prompts?: PromptPreset[];
   /** 历史估算超过这个 token 数时自动摘要压缩。宿主侧夹在 8k–1M。 */
   compactThresholdTokens: number;
   /**
@@ -201,7 +231,7 @@ export interface SessionInfo {
   root: string;
   title: string | null;
   seq: number;
-  /** 会话级采样覆盖。空字段 = 继承 provider。 */
+  /** 会话级采样覆盖。空字段 = 继承模型/服务方那两层。 */
   sampling: Sampling;
   /** 宿主侧的当前权限模式。UI 显示必须以它为准，不能拿全局默认值顶替。 */
   mode: PermissionMode;
@@ -401,12 +431,8 @@ export function compactSession(sessionId: string): Promise<void> {
 }
 
 /** 排队面板的一条插话摘要。images 是图片张数（全量 base64 回传太重）。 */
-export interface QueuedSummary {
-  id: string;
-  text: string;
-  images: number;
-  refs: string[];
-}
+/** 排队面板的一条插话摘要。生成类型的别名，同 Protocol 的理由。 */
+export type QueuedSummary = GeneratedQueuedSummary;
 
 /** 当前排着的插话。切回会话时重建排队面板用。 */
 export function queueList(sessionId: string): Promise<QueuedSummary[]> {
@@ -429,11 +455,9 @@ export function queueTake(
   });
 }
 
-/** 随消息附上的一张图。data 是 base64，不含 `data:` 前缀。 */
-export interface ImageInput {
-  mediaType: string;
-  data: string;
-}
+/** 随消息附上的一张图。data 是 base64，不含 `data:` 前缀。
+ *  生成类型的别名，同 Protocol 的理由。 */
+export type ImageInput = GeneratedImageInput;
 
 /** 读一个图片文件（拖进来的、或从对话框选的）。太大或类型不认时 reject。 */
 export function readImage(path: string): Promise<ImageInput & { name: string }> {
@@ -516,7 +540,7 @@ export function respondPermission(
   return invoke("respond_permission", { sessionId, askId, response });
 }
 
-/** 会话级采样覆盖。空字段继承 provider 的设置；下一轮生效。 */
+/** 会话级采样覆盖。空字段继承下面几层，`null` 表示这一项干脆不发；下一轮生效。 */
 export function setSessionSampling(sessionId: string, sampling: Sampling): Promise<void> {
   return invoke("set_session_sampling", { sessionId, sampling });
 }
@@ -594,14 +618,16 @@ export function listModels(providerId: string): Promise<string[]> {
 /* ── MCP 与 Skills ─────────────────────────── */
 
 /** 一个 MCP 服务器此刻的连接状态。 */
-export interface McpServerStatus {
-  id: string;
+/**
+ * MCP 连接状态快照，给设置页看。
+ *
+ * 从生成类型派生而不是另写一份：字段增删跟着 `pnpm gen` 走。只把
+ * `state` 收窄成三个字面量 —— Rust 那边是个 enum，但 JSON Schema
+ * 落到 TS 只剩 `string`，界面要靠它分支画状态点。
+ */
+export type McpServerStatus = Omit<GeneratedMcpServerStatus, "state"> & {
   state: "connecting" | "connected" | "failed";
-  /** connected 时是服务器自报的名字和版本；failed 时是错误原因。 */
-  detail: string;
-  /** 对外的完整工具名（`mcp__…`）。 */
-  tools: string[];
-}
+};
 
 /** MCP 服务器的连接状态。设置页轮询它显示状态点和工具数。 */
 export function mcpStatus(): Promise<McpServerStatus[]> {
@@ -767,8 +793,9 @@ export function listSessions(): Promise<SessionInfo[]> {
  * 忙碌状态跟着历史一起回：分两次问会在中间留一个窗口，那一瞬间界面
  * 显示空闲（没有停止键），而模型正在干活。
  */
-export function getHistory(sessionId: string): Promise<{
+export interface HistorySnapshot {
   messages: Message[];
+  /** 压缩边界之前的消息。模型看不见，界面画在分割线上面。 */
   archived: Message[];
   busy: boolean;
   compacting: boolean;
@@ -778,8 +805,10 @@ export function getHistory(sessionId: string): Promise<{
   liveText: string;
   /** 正在流式生成的思考。缺了它思考块的字数会清零重数。 */
   liveThinking: string;
-}> {
-  return invoke("get_history", { sessionId });
+}
+
+export function getHistory(sessionId: string): Promise<HistorySnapshot> {
+  return invoke<HistorySnapshot>("get_history", { sessionId });
 }
 
 /** 删除会话（正在跑的轮子会被中断）。幂等。 */
@@ -1102,6 +1131,25 @@ export async function openPath(path: string): Promise<void> {
 export async function openInBrowser(url: string): Promise<void> {
   const { openUrl } = await import("@tauri-apps/plugin-opener");
   await openUrl(url);
+}
+
+/**
+ * 发一条系统通知。权限只在第一次要 —— 被拒绝就永远沉默，不反复骚扰。
+ *
+ * 失败静默：通知是锦上添花，平台不支持、用户拒绝、插件没装都不值得
+ * 打断调用方。文案由调用方给，这层只负责把能力接出来。
+ */
+export async function notify(title: string, body: string): Promise<void> {
+  try {
+    const { isPermissionGranted, requestPermission, sendNotification } = await import(
+      "@tauri-apps/plugin-notification"
+    );
+    let ok = await isPermissionGranted();
+    if (!ok) ok = (await requestPermission()) === "granted";
+    if (ok) sendNotification({ title, body });
+  } catch {
+    // 平台不支持或用户拒绝 —— 无声跳过
+  }
 }
 
 /** 弹系统的目录选择框。`defaultPath` 指定起始目录（如会话根）。 */

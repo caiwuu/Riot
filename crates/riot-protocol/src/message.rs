@@ -51,6 +51,22 @@ impl Message {
         !matches!(self, Message::System { .. })
     }
 
+    /// 补上产生时刻（见 [`MessageMeta::created_at_ms`]）。
+    ///
+    /// 已经打过的不动：同一条消息可能被重新写回历史（定稿、修复、重放），
+    /// 每次都盖一遍的话，界面上一条三小时前的提问会随着重启变成"刚刚"。
+    ///
+    /// System 消息没有 meta，跳过 —— 它在界面上是一条通知，不是对话气泡，
+    /// 没有承载时间的位置。
+    pub fn stamp(&mut self, now_ms: u64) {
+        match self {
+            Message::User { meta, .. } | Message::Assistant { meta, .. } => {
+                meta.created_at_ms.get_or_insert(now_ms);
+            }
+            Message::System { .. } => {}
+        }
+    }
+
     pub fn tool_use_ids(&self) -> Vec<&ToolUseId> {
         match self {
             Message::Assistant { content, .. } => content
@@ -330,6 +346,16 @@ pub struct MessageMeta {
     /// 半截话后面紧跟着用户的下一条消息，而 meta 从来不进 wire 格式。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub interrupted: bool,
+    /// 这条消息产生的时刻（Unix 毫秒）。只给界面显示用。
+    ///
+    /// `None` = 这条消息早于本字段（老 transcript），界面那里不显示时间
+    /// —— 编一个出来的话，几个月前的对话会全部标成"刚刚"。
+    ///
+    /// 由内核在消息进历史/落盘的同一处打上（见 [`Message::stamp`]）。
+    /// 不在 provider 解码层打：那里拿不到注入的 `Clock`，要打就得让每个
+    /// provider 都持有一份时钟，顺带把黄金回放的确定性也搭进去。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at_ms: Option<u64>,
 }
 
 impl MessageMeta {
@@ -538,5 +564,45 @@ mod tests {
             text: "提示".into(),
         };
         assert!(!system.is_user_prompt());
+    }
+
+    /// 老 transcript 里没有 `created_at_ms`，照样要能读回来。
+    ///
+    /// 缺字段让整份 transcript 解析失败，用户看到的是"升级之后聊天记录
+    /// 全没了"—— 比不显示时间严重得多。
+    #[test]
+    fn old_transcript_without_timestamp_still_loads() {
+        let line = r#"{"role":"assistant","id":"m1","content":[{"type":"text","text":"hi"}],"meta":{"interrupted":true}}"#;
+        let m: Message = serde_json::from_str(line).expect("老格式缺 created_at_ms 也要能读");
+        let Message::Assistant { meta, .. } = &m else {
+            unreachable!()
+        };
+        assert!(meta.interrupted);
+        assert_eq!(meta.created_at_ms, None, "老消息不该被编出一个时间");
+    }
+
+    /// 打戳只补空缺。重放、修复、定稿都会把同一条消息再写一次历史，
+    /// 每次盖新值的话，三小时前的提问会在重启后显示成"刚刚"。
+    #[test]
+    fn stamp_does_not_overwrite() {
+        let mut m = Message::User {
+            id: MessageId::from_raw("m1"),
+            content: vec![UserContent::Text { text: "问题".into() }],
+            meta: MessageMeta::default(),
+        };
+        m.stamp(1_000);
+        m.stamp(9_999);
+        let Message::User { meta, .. } = &m else {
+            unreachable!()
+        };
+        assert_eq!(meta.created_at_ms, Some(1_000));
+
+        // System 没有 meta，打戳是空操作而不是 panic。
+        let mut sys = Message::System {
+            id: MessageId::from_raw("m2"),
+            level: SystemLevel::Info,
+            text: "提示".into(),
+        };
+        sys.stamp(1_000);
     }
 }

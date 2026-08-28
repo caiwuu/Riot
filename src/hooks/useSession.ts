@@ -1,8 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import type { AgentError, DecisionReason, ToolResultContent, Usage } from "../bridge/generated";
+import type {
+  AgentError,
+  DecisionReason,
+  MessageMeta,
+  ToolResultContent,
+  Usage,
+} from "../bridge/generated";
 import {
   type AgentEvent,
+  type HistorySnapshot,
   type ImageInput,
   type Message,
   type PendingAsk,
@@ -35,10 +42,12 @@ export type Item =
   /**
    * `images` 是 data URL，只给界面回显自己发过什么用。
    * `files` 是消息里 `@` 引用过的文件路径（内容进了模型，界面只列路径）。
+   * `at` 是消息产生的时刻（Unix 毫秒，见 MessageMeta.created_at_ms）；
+   * undefined = 本字段之前的老记录，界面那里不显示时间。
    */
-  | { kind: "user"; id: string; text: string; images?: string[]; files?: string[] }
+  | { kind: "user"; id: string; text: string; images?: string[]; files?: string[]; at?: number }
   /** `stopped` = 用户按停止截断的半截回答（内核定稿的，见 finalize_partial）。 */
-  | { kind: "assistant"; id: string; text: string; stopped?: boolean }
+  | { kind: "assistant"; id: string; text: string; stopped?: boolean; at?: number }
   | { kind: "thinking"; id: string; text: string }
   | {
       kind: "tool";
@@ -173,18 +182,14 @@ const SEND_GRACE_MS = 8_000;
 /** 切到别的 app 不到这么久、事件还在流，不要重订阅（避免把正在流的正文闪掉）。 */
 const AWAY_RESYNC_MS = 30_000;
 
-type HistorySnap = {
-  messages: Message[];
-  archived: Message[];
-  busy: boolean;
-  compacting?: boolean;
-  /** 还在等用户回答的权限询问。见 reconcileAsks。 */
-  pendingAsks?: PendingAsk[];
-  /** 正在流式生成的正文。流式增量不进历史，切回来靠它接着显示。 */
-  liveText?: string;
-  /** 正在流式生成的思考。缺了它思考块的字数会清零重数。 */
-  liveThinking?: string;
-};
+/**
+ * 宿主的历史快照。
+ *
+ * `[约束]` 类型只有 `bridge` 里那一份（对着 Rust 的 `HistoryOut`）。
+ * 这里以前另写了一份把四个字段标成可选的副本，于是满地 `?? false` /
+ * `?? []` 兜着永远不会发生的情况，而真出现字段增删时两份都不会红。
+ */
+type HistorySnap = HistorySnapshot;
 
 /**
  * 每个会话当前这轮等待的起点（epoch ms）。
@@ -214,8 +219,33 @@ const EMPTY_STATE: SessionState = {
  * 切走会话后界面树可能被卸掉，条目先记在这里。下一次挂上这个 id
  * 时立刻还原，不用干等 getHistory —— 等的那段时间主区是空的，长
  * 会话看起来就是白屏。
+ *
+ * `[约束]` 必须有上限。`items` 里的图片是 base64 data URL（一张 Retina
+ * 截图 base64 之后一兆多），不淘汰的话，今天切过的每个会话都把自己
+ * 的整份对话连图留在内存里，直到用户显式删除它 —— 而正常使用根本
+ * 不会去删会话。挂载中的界面树由 App 的 KEEP_CHATS 管，这里放宽一档：
+ * 淘汰的代价只是下次切回要等一次 getHistory，不是白屏。
  */
+const SESSION_CACHE_MAX = 8;
 const sessionCache = new Map<string, SessionState>();
+
+/** 写缓存，并把这个会话顶到最近使用的一端。超限时淘汰最久没碰的。 */
+function cacheSession(id: string, state: SessionState) {
+  // Map 保持插入顺序：先删再插就是"移到队尾"。
+  sessionCache.delete(id);
+  sessionCache.set(id, state);
+  if (sessionCache.size > SESSION_CACHE_MAX) {
+    const oldest = sessionCache.keys().next();
+    if (!oldest.done) sessionCache.delete(oldest.value);
+  }
+}
+
+/** 读缓存并顺手续命。只读不续的话，一直空闲的会话会被自己的邻居挤掉。 */
+function touchSession(id: string): SessionState | undefined {
+  const hit = sessionCache.get(id);
+  if (hit) cacheSession(id, hit);
+  return hit;
+}
 
 /** 状态行计时的起点。null = 此刻没有在等的东西。 */
 export function waitStartedAt(sessionId: string): number | null {
@@ -238,16 +268,14 @@ export function useSession(
     onBrowserOpen?: () => void;
   },
 ) {
-  const [state, setStateRaw] = useState<SessionState>(
-    () => sessionCache.get(sessionId) ?? EMPTY_STATE,
-  );
+  const [state, setStateRaw] = useState<SessionState>(() => touchSession(sessionId) ?? EMPTY_STATE);
   /** 历史快照到过（或缓存里已有）。没到之前不要把长会话画成空招呼页。 */
   const [ready, setReady] = useState(() => sessionCache.has(sessionId));
   const setState = useCallback<typeof setStateRaw>(
     (update) => {
       setStateRaw((prev) => {
         const next = typeof update === "function" ? update(prev) : update;
-        sessionCache.set(sessionId, next);
+        cacheSession(sessionId, next);
         return next;
       });
     },
@@ -260,6 +288,9 @@ export function useSession(
   const pendingText = useRef("");
   const pendingThinking = useRef("");
   const pendingToolJson = useRef<{ id: string; chunk: string }[]>([]);
+  /** 工具进度行也要合批：`cargo build` 一秒能吐几百行，逐条 setState
+   *  等于逐行重渲染整棵树。走和 delta 同一个 rAF 出口。 */
+  const pendingProgress = useRef<{ id: string; text: string }[]>([]);
   const toolJsonById = useRef(new Map<string, string>());
   /**
    * 工具卡片出现时就地落定的流式内容。
@@ -295,11 +326,14 @@ export function useSession(
   /** 换一条活 Channel，并在宿主已空闲时用历史把界面追上。 */
   const ensureLiveRef = useRef<(() => Promise<void>) | null>(null);
 
-  const mutateQueued = useCallback((fn: (q: QueuedItem[]) => QueuedItem[]) => {
-    queuedRef.current = fn(queuedRef.current);
-    const next = queuedRef.current;
-    setState((s) => ({ ...s, queued: next }));
-  }, []);
+  const mutateQueued = useCallback(
+    (fn: (q: QueuedItem[]) => QueuedItem[]) => {
+      queuedRef.current = fn(queuedRef.current);
+      const next = queuedRef.current;
+      setState((s) => ({ ...s, queued: next }));
+    },
+    [setState],
+  );
 
   useEffect(() => {
     const flush = () => {
@@ -307,10 +341,12 @@ export function useSession(
       const t = pendingText.current;
       const k = pendingThinking.current;
       const chunks = pendingToolJson.current;
-      if (!t && !k && chunks.length === 0) return;
+      const lines = pendingProgress.current;
+      if (!t && !k && chunks.length === 0 && lines.length === 0) return;
       pendingText.current = "";
       pendingThinking.current = "";
       pendingToolJson.current = [];
+      pendingProgress.current = [];
 
       let plan: string | undefined;
       // 工具参数边流边填进卡片：id → 此刻已经到齐的那些字段。
@@ -323,13 +359,20 @@ export function useSession(
         partial.set(id, extractTopLevelStringFields(next));
       }
 
-      setState((s) => ({
-        ...s,
-        streaming: s.streaming + t,
-        thinking: s.thinking + k,
-        ...(plan !== undefined ? { streamingPlan: plan } : {}),
-        ...(partial.size ? { items: fillToolInput(s.items, partial) } : {}),
-      }));
+      setState((s) => {
+        // 两处都改 items，必须串起来改：各自从 s.items 出发的话，
+        // 后写的那份会把先写的覆盖掉。
+        let items = s.items;
+        if (partial.size) items = fillToolInput(items, partial);
+        if (lines.length) items = appendToolOutput(items, lines);
+        return {
+          ...s,
+          streaming: s.streaming + t,
+          thinking: s.thinking + k,
+          ...(plan !== undefined ? { streamingPlan: plan } : {}),
+          ...(items !== s.items ? { items } : {}),
+        };
+      });
     };
 
     const schedule = () => {
@@ -396,6 +439,10 @@ export function useSession(
                   kind: "assistant",
                   id: `${event.tool_use_id}-t`,
                   text: s.streaming,
+                  // 这段话没有对应的完整消息（它会从消息里被 dropSettled
+                  // 摘掉），拿不到内核的戳 —— 就地记一个。切回会话时整份
+                  // 重建，那时用的是内核那份。
+                  at: Date.now(),
                 });
                 if (!settled.current.text.includes(s.streaming)) {
                   settled.current.text.push(s.streaming);
@@ -468,6 +515,7 @@ export function useSession(
                     text: hit.text,
                     images: hit.images.map((i) => `data:${i.mediaType};base64,${i.data}`),
                     ...(hit.refs.length ? { files: hit.refs } : {}),
+                    ...stampOf(event.meta),
                   },
                 ],
               }));
@@ -482,7 +530,13 @@ export function useSession(
         }
 
         case "progress":
-          setState((s) => applyProgress(s, event));
+          if (event.payload.kind === "line") {
+            pendingProgress.current.push({
+              id: event.tool_use_id,
+              text: event.payload.text,
+            });
+            schedule();
+          }
           break;
 
         case "permission_request":
@@ -564,6 +618,12 @@ export function useSession(
             mutateQueued(() => []);
             void (async () => {
               for (const it of pending) {
+                // 每条之间都要重查：逐条 await 期间用户可能切走会话
+                // （超出 KEEP_CHATS 就卸载了），剩下的不该继续发出去。
+                if (cancelled) {
+                  mutateQueued((q) => [...q, it]);
+                  continue;
+                }
                 // 重发被拒（hook 拦了、模型没配好）就放回面板 ——
                 // 接力的前提是"这些话用户还想说"，发不出去更不该丢。
                 const ok = await sendRef.current?.(it.text, it.images, it.refs);
@@ -624,7 +684,7 @@ export function useSession(
 
     const applySnap = (hist: HistorySnap) => {
       const busy = hist.busy;
-      const compacting = hist.compacting ?? false;
+      const compacting = hist.compacting;
       // 等待起点跟着快照对齐：还在等而起点丢了（应用重启）就从现在
       // 起数；已经空闲就清掉，免得下一轮从陈旧起点开始。
       if (busy || compacting) {
@@ -695,14 +755,14 @@ export function useSession(
             applySnap(hist);
           } else {
             busyRef.current = true;
-            compactingRef.current = hist.compacting ?? false;
+            compactingRef.current = hist.compacting;
             setState((s) => ({
               ...s,
               busy: true,
-              compacting: hist.compacting ?? false,
+              compacting: hist.compacting,
               // 弹窗也要对账：睡眠期间到的询问，事件早发进死通道了，
               // 只有快照里有它。
-              asks: reconcileAsks(s.asks, hist.pendingAsks ?? []),
+              asks: reconcileAsks(s.asks, hist.pendingAsks),
               // 通道死掉的那段思考/正文只在内核缓冲里。不 catchUp 条目
               // 以免盖掉正在流的工具输出，但半截流要接上，否则字数停住。
               streaming: mergeLive(hist.liveText, s.streaming),
@@ -766,7 +826,7 @@ export function useSession(
       window.clearInterval(watchdog);
       if (rafId.current) cancelAnimationFrame(rafId.current);
     };
-  }, [sessionId, mutateQueued]);
+  }, [sessionId, mutateQueued, setState]);
 
   /**
    * 发一条消息。返回 false = 宿主没收下（UserPromptSubmit hook 拦了、
@@ -786,7 +846,10 @@ export function useSession(
       if (Date.now() - lastHeardAt.current >= SINK_STALE_MS) {
         await ensureLiveRef.current?.();
       }
-      const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      // 乐观气泡上的时刻。内核那份（MessageMeta.created_at_ms）要等消息
+      // 定稿才回来，而气泡现在就要显示 —— 差的只是一次 IPC 往返。
+      const sentAt = Date.now();
+      const localId = `local-${sentAt}-${Math.random().toString(36).slice(2, 8)}`;
       const dataUrls = images.map((i) => `data:${i.mediaType};base64,${i.data}`);
       // 立刻放上去（等宿主回声的话，用户会看到自己输入的内容凭空消失
       // 几百毫秒）：空闲 → 对话气泡；忙 → 排队面板。排队的插话在被
@@ -812,6 +875,7 @@ export function useSession(
               text,
               images: dataUrls,
               ...(refs.length ? { files: refs } : {}),
+              at: sentAt,
             },
           ],
         }));
@@ -852,6 +916,7 @@ export function useSession(
               text,
               images: dataUrls,
               ...(refs.length ? { files: refs } : {}),
+              at: sentAt,
             },
           ],
           }));
@@ -874,7 +939,7 @@ export function useSession(
         return false;
       }
     },
-    [sessionId, mutateQueued],
+    [sessionId, mutateQueued, setState],
   );
   sendRef.current = send;
 
@@ -1008,7 +1073,7 @@ export function useSession(
         }
       }
     },
-    [sessionId, mutateQueued],
+    [sessionId, mutateQueued, setState],
   );
 
   /**
@@ -1030,7 +1095,7 @@ export function useSession(
       try {
         const hist = await getHistory(sessionId);
         if (hist.busy) return false;
-        const messageId = locateMessage(hist.messages ?? [], item);
+        const messageId = locateMessage(hist.messages, item);
         if (!messageId) {
           throw new Error("这条消息已经不在当前上下文里（可能已被压缩进摘要）。");
         }
@@ -1049,7 +1114,7 @@ export function useSession(
         return false;
       }
     },
-    [sessionId],
+    [sessionId, setState],
   );
 
   /**
@@ -1091,12 +1156,12 @@ export function useSession(
         ),
       }));
     });
-  }, [sessionId]);
+  }, [sessionId, setState]);
 
   /** 输入框收下了撤回的那条提问。不清的话切走再回来它会被再放一次。 */
   const clearWithdrawn = useCallback(() => {
     setState((s) => (s.withdrawn ? { ...s, withdrawn: null } : s));
-  }, []);
+  }, [setState]);
 
   const answer = useCallback(
     async (response: PermissionResponse, requestId?: string) => {
@@ -1116,7 +1181,7 @@ export function useSession(
       }));
       await respondPermission(sessionId, ask.requestId, response);
     },
-    [sessionId, state.asks],
+    [sessionId, state.asks, setState],
   );
 
   return {
@@ -1148,12 +1213,12 @@ export type TextItem = Extract<Item, { kind: "user" } | { kind: "assistant" }>;
  * 上下文里"），编辑乐观气泡后旧文本又被拼回来显示成两条。
  */
 function rebuildFromSnap(s: SessionState, hist: HistorySnap): SessionState {
-  const messages = hist.messages ?? [];
-  const archived = hist.archived ?? [];
+  const messages = hist.messages;
+  const archived = hist.archived;
   return {
     ...s,
     busy: hist.busy,
-    compacting: hist.compacting ?? false,
+    compacting: hist.compacting,
     items: historyToItems(messages, archived, false),
     tokens: sumUsage([...archived, ...messages]),
     streaming: "",
@@ -1203,10 +1268,10 @@ function historyToItems(live: Message[], archived: Message[], liveTurn = false):
  * 忙碌：条目追上已落盘的消息，但保留还没进历史的流式正文和工具输出。
  */
 function applyHistorySnap(s: SessionState, hist: HistorySnap): SessionState {
-  const messages = hist.messages ?? [];
-  const archived = hist.archived ?? [];
+  const messages = hist.messages;
+  const archived = hist.archived;
   const busy = hist.busy;
-  const compacting = hist.compacting ?? false;
+  const compacting = hist.compacting;
 
   if (messages.length === 0 && archived.length === 0) {
     return {
@@ -1222,7 +1287,7 @@ function applyHistorySnap(s: SessionState, hist: HistorySnap): SessionState {
             items: finalizeIdleItems(s.items, "未完成"),
           }
         : {
-            asks: reconcileAsks(s.asks, hist.pendingAsks ?? []),
+            asks: reconcileAsks(s.asks, hist.pendingAsks),
             streaming: mergeLive(
               hist.liveText,
               keepIfNotSettled(s.streaming, s.items, "assistant"),
@@ -1255,7 +1320,7 @@ function applyHistorySnap(s: SessionState, hist: HistorySnap): SessionState {
         hist.liveThinking,
         keepIfNotSettled(s.thinking, items, "thinking"),
       ),
-      asks: reconcileAsks(s.asks, hist.pendingAsks ?? []),
+      asks: reconcileAsks(s.asks, hist.pendingAsks),
     };
   }
   return {
@@ -1397,6 +1462,17 @@ function finalizeIdleItems(items: Item[], result: string): Item[] {
   return hit ? out : items;
 }
 
+/**
+ * 消息上的时刻，摊成一段可展开的属性。
+ *
+ * 老 transcript 没有这个字段（也不该编一个出来），展开成空 —— 气泡上
+ * 就没有时间，而不是标成"刚刚"。
+ */
+function stampOf(meta: MessageMeta | null | undefined): { at?: number } {
+  const at = meta?.created_at_ms;
+  return at ? { at } : {};
+}
+
 function messagesToItems(msgs: Message[], skipSynthetic = false): Item[] {
   const items: Item[] = [];
 
@@ -1438,6 +1514,7 @@ function messagesToItems(msgs: Message[], skipSynthetic = false): Item[] {
             text: c.text,
             ...(images.length && !imagesShown ? { images } : {}),
             ...(files.length && !imagesShown ? { files } : {}),
+            ...stampOf(msg.meta),
           });
           imagesShown = true;
         } else if (c.type === "tool_result") {
@@ -1463,6 +1540,7 @@ function messagesToItems(msgs: Message[], skipSynthetic = false): Item[] {
             id: `${msg.id}-t${items.length}`,
             text: c.text,
             ...(msg.meta?.interrupted ? { stopped: true as const } : {}),
+            ...stampOf(msg.meta),
           });
         } else if (c.type === "thinking" && c.text.trim()) {
           items.push({ kind: "thinking", id: `${msg.id}-k${items.length}`, text: c.text });
@@ -1557,9 +1635,10 @@ function applyMessage(s: SessionState, event: Extract<AgentEvent, { type: "messa
 
   if (msg.role === "assistant") {
     const stopped = msg.meta?.interrupted ? { stopped: true as const } : {};
+    const at = stampOf(msg.meta);
     for (const c of msg.content) {
       if (c.type === "text" && c.text.trim()) {
-        items.push({ kind: "assistant", id: `${msg.id}-t`, text: c.text, ...stopped });
+        items.push({ kind: "assistant", id: `${msg.id}-t`, text: c.text, ...stopped, ...at });
       } else if (c.type === "thinking" && c.text.trim()) {
         items.push({ kind: "thinking", id: `${msg.id}-k`, text: c.text });
       } else if (c.type === "tool_use") {
@@ -1600,21 +1679,33 @@ function applyMessage(s: SessionState, event: Extract<AgentEvent, { type: "messa
   return { ...s, items };
 }
 
-function applyProgress(
-  s: SessionState,
-  event: Extract<AgentEvent, { type: "progress" }>,
-): SessionState {
-  if (event.payload.kind !== "line") return s;
-  const i = findLast(s.items, (it) => it.kind === "tool" && it.id === event.tool_use_id);
-  if (i < 0) return s;
+/**
+ * 把一帧里攒下的进度行追加到各自的工具卡片。
+ *
+ * 按工具分组后每张卡只重建一次：同一个 build 一帧内来几十行是常态，
+ * 逐行复制 items 数组等于把开销乘上行数。找不到卡片的行直接丢 ——
+ * 那是 tool_start 还没到（或已经被历史覆盖）的进度，没有归宿。
+ */
+function appendToolOutput(items: Item[], lines: { id: string; text: string }[]): Item[] {
+  const byTool = new Map<string, string[]>();
+  for (const { id, text } of lines) {
+    const bucket = byTool.get(id);
+    if (bucket) bucket.push(text);
+    else byTool.set(id, [text]);
+  }
 
-  const items = [...s.items];
-  const t = items[i] as Extract<Item, { kind: "tool" }>;
-  // 只留尾部。一个 build 能吐几万行，全留着会让页面卡死，而有用的
-  // 信息（错误摘要）总是在最后。
-  const output = [...t.output, event.payload.text].slice(-MAX_TOOL_LINES);
-  items[i] = { ...t, output };
-  return { ...s, items };
+  let out = items;
+  for (const [id, texts] of byTool) {
+    const i = findLast(out, (it) => it.kind === "tool" && it.id === id);
+    if (i < 0) continue;
+    // 第一次命中才复制，全都没命中时保持引用不变（memo 才挡得住）。
+    if (out === items) out = [...items];
+    const t = out[i] as Extract<Item, { kind: "tool" }>;
+    // 只留尾部。一个 build 能吐几万行，全留着会让页面卡死，而有用的
+    // 信息（错误摘要）总是在最后。
+    out[i] = { ...t, output: [...t.output, ...texts].slice(-MAX_TOOL_LINES) };
+  }
+  return out;
 }
 
 function applyDone(s: SessionState, event: Extract<AgentEvent, { type: "done" }>): SessionState {

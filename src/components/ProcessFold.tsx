@@ -2,6 +2,7 @@ import { memo, useEffect, useRef, useState } from "react";
 
 import type { Item } from "../hooks/useSession";
 import { Chevron } from "./Chevron";
+import { Markdown } from "./Markdown";
 import { SmoothFold } from "./SmoothFold";
 import { summarize, ToolCard } from "./ToolCard";
 
@@ -256,39 +257,60 @@ export const ProcessGroup = memo(
 );
 
 /**
- * 思考过程：始终默认折叠（过程不是结论，铺开会把回答挤走）。
+ * 手动展开过的思考块，键是正文前缀。
  *
- * 正在流的那条不展开正文，而是在标题右侧滚过最新的思考文字 ——
- * 既能看出"没卡住"，收尾落定时高度又几乎不变。早先直播时整块展开，
- * 收尾一折叠底部内容瞬间矮掉几百像素，贴底跟随会被这次跳变打断。
+ * `[约束]` 展开状态不能只存在组件里。直播中的那段思考和它落定后的
+ * 条目是**两个不同的 React 实例** —— 直播的挂在列表尾部（见
+ * ProcessGroup 和 Transcript 的 thinkingText 分支），落定的进 items.map，
+ * key 也对不上。`open` 作为组件内 state 会随重挂载归零：用户正读到
+ * 一半，轮次一结束整块就被收起来。
+ *
+ * 用正文前缀而不是条目 id 当身份：落定前根本没有 id（内核那边的
+ * `msg_x-k` 到不了直播这一侧），而思考文本只追加不改写，同一段思考
+ * 在落定前后前缀完全一致。
+ */
+const expandedThinks = new Map<string, true>();
+/** 认人够用就行，键留太长白占内存。 */
+const thinkKey = (text: string) => text.slice(0, 80);
+/** 展开过的块不清会一直攒着。上限之外按最早展开的先丢。 */
+const EXPANDED_MAX = 200;
+
+function rememberThink(key: string, open: boolean) {
+  if (!open) {
+    expandedThinks.delete(key);
+    return;
+  }
+  expandedThinks.set(key, true);
+  if (expandedThinks.size > EXPANDED_MAX) {
+    const oldest = expandedThinks.keys().next();
+    if (!oldest.done) expandedThinks.delete(oldest.value);
+  }
+}
+
+/**
+ * 思考过程：默认折叠（过程不是结论，铺开会把回答挤走），但用户
+ * 展开过就一直开着 —— 包括轮次结束、这块从直播实例换成落定条目。
+ *
+ * 正在流而**没有**展开的那条在标题右侧滚过最新文字，既看得出没卡住，
+ * 又不占高度。展开之后正文完整铺开、不限高也不套内层滚动条。
+ *
+ * 正文走和回答同一套 markdown：模型思考时照样写列表、代码块、`标记`，
+ * 摊成纯文本就是满屏的星号和井号，比渲染过的更难读。收起时 SmoothFold
+ * 不挂载孩子，历史里的思考不会白白 parse 一遍。
  */
 export function ThinkingBlock({ text, live }: { text: string; live?: boolean }) {
-  const [open, setOpen] = useState(false);
-  const bodyRef = useRef<HTMLDivElement>(null);
-  // 展开的直播正文是否贴底跟随。同主消息流的规则:向上滚立即交出
-  // 控制权，自己滚回底部才恢复 —— 早先无条件贴底，每个字都把用户
-  // 拽回最下面，流式期间根本翻不上去。
-  const bodyStick = useRef(true);
-  const bodyTop = useRef(0);
+  const [open, setOpen] = useState(() => expandedThinks.has(thinkKey(text)));
 
+  // 直播期间正文在长，短思考的前缀会跟着变（长到 80 字后才定）。
+  // 展开状态得跟着搬家，否则落定时按最终文本去查，扑空。
+  const keyRef = useRef(thinkKey(text));
   useEffect(() => {
-    if (!live || !open || !bodyStick.current) return;
-    const el = bodyRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [text, live, open]);
-
-  const onBodyScroll = () => {
-    const el = bodyRef.current;
-    if (!el) return;
-    const top = el.scrollTop;
-    const delta = top - bodyTop.current;
-    bodyTop.current = top;
-    const gap = el.scrollHeight - top - el.clientHeight;
-    // 程序化贴底只发生在 stick 为真时且方向向下，不会误触解锁，
-    // 所以这里不需要主消息流那样的 pinning 挡板。
-    if (delta < 0 && gap > 1) bodyStick.current = false;
-    else if (delta > 0 && gap < 16) bodyStick.current = true;
-  };
+    const next = thinkKey(text);
+    const prev = keyRef.current;
+    if (next === prev) return;
+    keyRef.current = next;
+    if (expandedThinks.delete(prev)) expandedThinks.set(next, true);
+  }, [text]);
 
   // 最近一段文字压成一行当预览。换行换成空格 —— 预览框只有一行高。
   const peek = live && !open ? text.slice(-160).replace(/\s+/g, " ").trim() : "";
@@ -302,9 +324,9 @@ export function ThinkingBlock({ text, live }: { text: string; live?: boolean }) 
         // button 会默认滚进视野，正好滚到这条思考、离开底部。
         onMouseDown={(e) => e.preventDefault()}
         onClick={() => {
-          // 重新展开时从底部（最新内容）看起，跟随也一并恢复。
-          bodyStick.current = true;
-          setOpen(!open);
+          const next = !open;
+          setOpen(next);
+          rememberThink(keyRef.current, next);
         }}
       >
         <Chevron open={open} />
@@ -317,8 +339,8 @@ export function ThinkingBlock({ text, live }: { text: string; live?: boolean }) 
         ) : null}
       </button>
       <SmoothFold open={open}>
-        <div className="think-body" ref={bodyRef} onScroll={onBodyScroll}>
-          {text}
+        <div className="think-body">
+          <Markdown text={text} breaks />
         </div>
       </SmoothFold>
     </div>

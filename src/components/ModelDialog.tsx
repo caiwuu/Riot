@@ -12,7 +12,12 @@ import {
   compactThresholdForWindow,
   fmtTokens,
 } from "../lib/contextWindow";
-import { parseSampling, samplingDraft } from "../lib/sampling";
+import {
+  type SamplingDraft,
+  mergeSampling,
+  parseSampling,
+  samplingDraft,
+} from "../lib/sampling";
 import { FieldNumber } from "./FieldNumber";
 import { SamplingSliders } from "./FieldSlider";
 import { HintTip } from "./HintTip";
@@ -48,9 +53,7 @@ export function ModelDialog({
   const [ctxWindow, setCtxWindow] = useState(model?.contextWindow?.toString() ?? "");
   // 数字字段走字符串草稿:输入过程中会经过 "0."、"-" 这种还不是合法数字的
   // 中间态，直接绑成 number 的话那些字符会被吃掉，表现是"打不出小数点"。
-  const [samp, setSamp] = useState<Record<string, string>>(() =>
-    samplingDraft(model?.sampling ?? {}),
-  );
+  const [samp, setSamp] = useState<SamplingDraft>(() => samplingDraft(model?.sampling ?? {}));
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
 
@@ -89,7 +92,9 @@ export function ModelDialog({
   const windowNote = (() => {
     const w = contextWindow();
     if (w === undefined) return "留空 = 跟随设置里的全局压缩阈值。";
-    const maxOut = sampling().maxOutputTokens ?? provider.sampling?.maxOutputTokens ?? undefined;
+    // 选了「模型默认」就是不发上限，和从没设过一样按没有上限算。
+    const maxOut =
+      mergeSampling(sampling(), provider.sampling ?? {}).maxOutputTokens ?? undefined;
     return `历史约 ${fmtTokens(compactThresholdForWindow(w, maxOut))} 时自动压缩（窗口减去回复和摘要的预留）。`;
   })();
 
@@ -180,7 +185,10 @@ export function ModelDialog({
 
           <h3 className="model-dialog-section">
             采样参数
-            <HintTip>数字是服务方的值（或常见默认）。改过的字段才写入覆盖。</HintTip>
+            <HintTip>
+              灰字是服务方那一层的值。改过的字段才写入覆盖；想让某一项干脆别发（推理模型常拒收
+              temperature），点滑块底下那行字切到「模型默认」。
+            </HintTip>
           </h3>
           <SamplingSliders
             draft={samp}

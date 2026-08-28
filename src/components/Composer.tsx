@@ -42,6 +42,7 @@ import {
   compactThresholdForWindow,
   fmtTokens,
 } from "../lib/contextWindow";
+import { mergeSampling } from "../lib/sampling";
 import { basename } from "../pathDisplay";
 import { Chevron } from "./Chevron";
 import { ConfirmDialog, type ConfirmRequest } from "./ConfirmDialog";
@@ -374,6 +375,20 @@ interface Shot {
 const shotsCache = new Map<string, Shot[]>();
 
 /**
+ * 会话没了，它在输入框这边留下的东西也该走。
+ *
+ * 这三个 Map 都按会话 id 长期存活，正常收敛只发生在"内容被清空"那条
+ * 路上（草稿删干净、图发出去）。而用户删掉一个还留着草稿和待发截图的
+ * 会话时，那条路根本不会走 —— 截图是 base64，留下就是几兆内存挂到
+ * 进程退出。由 App 的 dropSessionWorkbench 统一调用。
+ */
+export function forgetComposerSession(sessionId: string) {
+  drafts.delete(sessionId);
+  modeCache.delete(sessionId);
+  shotsCache.delete(sessionId);
+}
+
+/**
  * 一条消息最多附几张图。
  *
  * 不是技术上限，是成本上限:每张图都要过一遍模型的视觉编码，五张已经能吃掉
@@ -625,7 +640,6 @@ export function Composer({
     setMode(hostMode);
     modeCache.set(sessionId, hostMode);
     void setPermissionMode(sessionId, hostMode).catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hostMode, sessionId]);
   const [modeConfirm, setModeConfirm] = useState<ConfirmRequest | null>(null);
   /** 这个会话可用的斜杠命令 + 技能。每次挂载拉一次（用户加了 .md 切一下会话就有）。 */
@@ -726,9 +740,9 @@ export function Composer({
   const compactAt = activeModelCfg?.contextWindow
     ? compactThresholdForWindow(
         activeModelCfg.contextWindow,
-        activeModelCfg.sampling?.maxOutputTokens ??
-          activeProvider?.sampling?.maxOutputTokens ??
-          undefined,
+        // 模型上选了「模型默认」就是不发上限，别再让服务方那层漏下来。
+        mergeSampling(activeModelCfg.sampling ?? {}, activeProvider?.sampling ?? {})
+          .maxOutputTokens ?? undefined,
       )
     : (cfg.compactThresholdTokens ?? DEFAULT_COMPACT_THRESHOLD);
 

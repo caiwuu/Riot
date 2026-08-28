@@ -42,38 +42,7 @@ pnpm tauri dev
 
 第一次启动会选择项目目录。在设置里添加服务方、粘贴 API key、选中模型即可对话。
 
-从 Dock 或访达启动的应用继承不到 shell 环境变量，这是 macOS 的行为。日常开发用 `pnpm tauri dev`；key 已经在设置里存过，不必再 `export`。环境变量与存档同名时优先于存档，用来临时覆盖。
-
-只看前端布局（宿主 bridge 不可用）：
-
-```bash
-pnpm dev
-```
-
-想先在终端确认模型链路（GUI 会把 key 没读到、base URL 写错、模型名不存在都表现成「没反应」）：
-
-```bash
-export DEEPSEEK_API_KEY=sk-...
-cargo run -p riot-providers --example smoke
-
-MODEL=deepseek-reasoner cargo run -p riot-providers --example smoke
-
-BASE_URL=https://api.moonshot.cn MODEL=kimi-k2-turbo-preview \
-  KEY_ENV=MOONSHOT_API_KEY cargo run -p riot-providers --example smoke
-```
-
-打包桌面端（`.app` / `.dmg` / NSIS）：
-
-```bash
-# mac
-./scripts/build-browser.sh    # 内置浏览器；没有它时聊天仍可用
-# win
-powershell -ExecutionPolicy Bypass -File .\scripts\build-browser.ps1
-
-pnpm tauri build
-```
-
-产物在 `src-tauri/target/release/bundle/`。浏览器是可选能力：没打过包也能起主应用，只是 Browser 工具和面板不可用。
+测试、打包、发版见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
 
 ## 日常用法
 
@@ -106,42 +75,7 @@ Riot 默认不信任工具，也不把执行权交给远端。
 - **崩溃隔离**：内核是独立进程。Agent 卡住或崩溃时，窗口还能提示重启，不会整窗一起掉。
 - **错误回到对话**：工具失败会作为结果喂回模型，让它自己纠正，而不是把主循环打断。
 
-内核实现、权限决策和验证分层见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 与 [docs/VERIFICATION.md](docs/VERIFICATION.md)。标了 `[约束]` 的段落是硬性要求。
-
-## 开发
-
-```bash
-cargo check --workspace
-cargo test --workspace          # 不变量断言只在 debug 下 panic，不要只跑 release
-cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt
-pnpm typecheck
-
-# 改了 riot-protocol 里的类型之后必须重新生成，CI 会检查是否同步
-pnpm gen
-```
-
-`--workspace` 不包含 `riot-browser`（独立 Cargo workspace，避免把 CEF 编进日常构建）。首次使用内置浏览器：
-
-```bash
-# 将 CEF 拉到 $HOME/.local/share/cef（或设置 CEF_PATH）
-# 二进制来自 https://github.com/tauri-apps/cef-rs 的 export-cef-dir
-./scripts/build-browser.sh
-```
-
-macOS 上浏览器必须从 `.app` bundle 启动。`pnpm tauri dev` 已经在跑的话，打完包要重启一次，宿主只在启动时定位浏览器。Windows 用 `scripts/build-browser.ps1`，需要 VS 的「使用 C++ 的桌面开发」工作负载。
-
-仓库分层：
-
-```
-crates/          内核、工具、权限、模型适配、协议
-src-tauri/       宿主：窗口、会话、终端、浏览器、权限弹窗
-src/             React 界面；只有 src/bridge/ 可以调用 Tauri
-schemas/         从 Rust 类型生成，勿手改
-docs/            架构与验证
-```
-
-依赖方向是 `protocol ← core ← kernel`。`core` 不得依赖 UI。前端不得在 `bridge/` 以外 `import @tauri-apps/api`。
+内核实现、权限决策和验证分层见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 与 [docs/VERIFICATION.md](docs/VERIFICATION.md)。标了 `[约束]` 的段落是硬性要求。从源码开发见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
 
 ## 许可
 

@@ -423,6 +423,12 @@ export function TerminalPanel({
           return;
         }
         inst.hostId = id;
+        // 也回写进标签：共享开关和关闭前的"忙不忙"都读 tab.hostId，
+        // 只记在 inst 上的话它们永远看不到这个 PTY。
+        setState((prev) => ({
+          ...prev,
+          tabs: prev.tabs.map((t) => (t.uid === tab.uid ? { ...t, hostId: id } : t)),
+        }));
         for (const d of inst.pending) void termWrite(id, d).catch(() => {});
         inst.pending = [];
         // 等待期间尺寸可能变了，按现在的实际列数对齐一次
@@ -484,11 +490,13 @@ export function TerminalPanel({
                 requestClose(t);
               }
             }}
-            title={t.hostId != null ? `${t.title}（模型起的服务）` : (t.root ?? "~")}
+            title={t.fromAgent ? `${t.title}（模型起的服务）` : (t.root ?? "~")}
           >
             {/* 标出哪些不是自己开的。用户看到一个没印象的标签在跑东西，
-                第一反应是"这哪来的" —— 这个点直接回答它。 */}
-            {t.hostId != null ? (
+                第一反应是"这哪来的" —— 这个点直接回答它。
+                判据是 fromAgent 而不是 hostId：用户自己的 shell 落地后
+                同样有 hostId，拿它区分会把每个终端都标成"模型"。 */}
+            {t.fromAgent ? (
               <span className={t.exited ? "term-tab-badge exited" : "term-tab-badge"}>
                 {t.exited ? "已退出" : "模型"}
               </span>
@@ -599,7 +607,9 @@ interface Tab {
   root: string | null;
   /** 归属的会话（每个会话一份终端组）。null = 没有会话时开的。 */
   sessionId: string | null;
-  /** 已经在宿主那边跑着的终端（模型起的服务）。挂上去而不是新开。 */
+  /** 宿主侧的终端 id。模型起的服务建标签时就有（挂上去而不是新开），
+   *  用户自己的 shell 等 termOpen 落地后回写 —— 共享开关和关闭前的
+   *  "忙不忙"都读它，缺了它这两件事对用户的终端就永远不会发生。 */
   hostId?: number;
   /** 模型起的服务（不是用户自己开的 shell）。 */
   fromAgent?: boolean;

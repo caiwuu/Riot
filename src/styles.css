@@ -235,7 +235,7 @@ html[data-vibrancy] .main {
    打架；太实就只是一块灰。65% 下背后是隐约可辨的形状和明暗，侧栏
    自己的色调还认得出。 */
 html[data-vibrancy] .sidebar {
-  background: color-mix(in srgb, var(--bg-nav) 65%, transparent);
+  background: color-mix(in srgb, var(--bg-nav) 30%, transparent);
   /* hover / 选中也得让材质透过去：实心灰会在磨砂上抠出一块不透明的
      补丁，材质的色相进不来。白透明叠在任何底上都是「抬一档」。 */
   --bg-nav-hover: #ffffff0d;
@@ -274,11 +274,31 @@ button:disabled {
   cursor: default;
 }
 
-/* 不要焦点描边。WKWebView 默认会沿圆角画一圈系统色光环，
-   点一下卡片/按钮就贴在边上看着像脏边。键盘可达靠 hover 同款
-   底色/显形，不另套一圈。 */
-:focus,
+/* 鼠标点出来的焦点不要描边。WKWebView 默认会沿圆角画一圈系统色光环，
+   点一下卡片/按钮就贴在边上看着像脏边。 */
+:focus {
+  outline: none;
+}
+
+/* 但键盘焦点必须看得见。
+   `[约束]` 这里不能跟着 :focus 一起关掉 —— 关掉之后 Tab 走遍整个界面
+   不会有任何视觉变化，键盘用户彻底失去定位能力。这条规则以前是和
+   :focus 并在一起的，注释写着"靠 hover 同款底色显形"，但那句底色规则
+   （button:hover）只认 hover，键盘焦点根本不触发它。
+   :focus-visible 只在键盘导航时命中，鼠标点击不触发 —— 所以脏边不会
+   回来。用自带 accent 描边而不是系统光环：颜色可控，且会跟着元素的
+   border-radius 走。个别元素另有更强的显形方式（隐藏的关闭键提 opacity），
+   那些是增强，与这圈描边叠加不冲突。 */
 :focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* 文本输入是例外：闪烁的光标本身就是焦点指示。而且按规范 :focus-visible
+   对文本输入在**鼠标点击**时也命中（不像按钮只认键盘），套上去等于打字
+   全程挂着一圈蓝边。用 :where() 压成 0 优先级，个别输入框想要描边时
+   随便一个类选择器就能盖回来。 */
+:where(input, textarea, [contenteditable]):focus-visible {
   outline: none;
 }
 
@@ -1583,8 +1603,14 @@ pre {
    "这哪来的" —— 这个角标直接回答它。 */
 .term-tab-badge {
   flex: none;
+  /* 高度锁在标题的行盒里（16px —— 关闭键也是靠负 margin 收到这个数）。
+     徽章一旦更高就会把整个标签顶起来，"模型"那几个比邻座高出一截，
+     一条栏上两种标签高度，比徽章本身还抢眼。 */
+  display: flex;
+  align-items: center;
+  height: 16px;
   font-size: 11px;
-  line-height: 1.5;
+  line-height: 1;
   padding: 0 4px;
   border-radius: 4px;
   color: var(--accent);
@@ -4025,6 +4051,30 @@ button.ref-chip.clickable:hover {
   color: var(--text-faint);
 }
 
+/* 提示词正文。同 .paths-input 的框，但走正文字体和更松的行距 ——
+   这里躺的是给模型读的一段中文，等宽字体会让它看起来像配置片段。 */
+.preset-body-input {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.7;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 10px 12px;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.preset-body-input::placeholder {
+  color: var(--text-faint);
+}
+
 .empty-actions {
   display: flex;
   gap: 8px;
@@ -4399,9 +4449,12 @@ button.ref-chip.clickable:hover {
   overflow-y: auto;
 }
 
-/* 服务器列表：竖排行，名字截断，超高滚动。
+/* 设置页的选择列表：竖排行，名字截断，超高滚动。MCP 服务器和提示词
+   共用一套 —— 两处都是"左边一列条目、右边跟着编辑器"，长得不一样只会
+   让人以为它们的操作方式也不一样。
    pill 铺排在几十个条目 + 长名字下会糊成一片（踩过）。 */
-.mcp-list {
+.mcp-list,
+.preset-list {
   list-style: none;
   margin: 8px 0 0;
   padding: 3px;
@@ -4414,7 +4467,8 @@ button.ref-chip.clickable:hover {
   border-radius: 10px;
 }
 
-.mcp-row {
+.mcp-row,
+.preset-row {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -4428,17 +4482,20 @@ button.ref-chip.clickable:hover {
   color: var(--text-dim);
 }
 
-.mcp-row:hover {
+.mcp-row:hover,
+.preset-row:hover {
   background: var(--bg);
   color: var(--text);
 }
 
-.mcp-row.active {
+.mcp-row.active,
+.preset-row.active {
   background: var(--bg-active);
   color: var(--text);
 }
 
-.mcp-row-name {
+.mcp-row-name,
+.preset-row-name {
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -4446,10 +4503,26 @@ button.ref-chip.clickable:hover {
   white-space: nowrap;
 }
 
-.mcp-row-meta {
-  flex-shrink: 0;
+.mcp-row-meta,
+.preset-row-meta {
   font-size: 11px;
   color: var(--text-faint);
+}
+
+/* MCP 的是「3 个工具」这类短标签，占不了多少地方。 */
+.mcp-row-meta {
+  flex-shrink: 0;
+}
+
+/* 提示词的摘要是截断过的正文，长度不可控。封顶到小半行并自己省略 ——
+   名字才是找东西的依据，摘要只是确认，不能反过来把名字挤没。 */
+.preset-row-meta {
+  flex: 0 1 auto;
+  max-width: 45%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ── MCP 分区 ─────────────────────────────── */
@@ -4965,7 +5038,6 @@ button.ref-chip.clickable:hover {
   color: var(--danger-soft);
 }
 
-
 .update-banner {
   flex-shrink: 0;
   display: flex;
@@ -5428,8 +5500,40 @@ button.ref-chip.clickable:hover {
   box-shadow: 0 0 0 1px var(--border-strong);
 }
 
+/* 状态字和两端刻度同一行：这一格现在到底会发什么，就写在滑块底下。 */
+.field-slider-state {
+  min-width: 0;
+  padding: 0 4px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  font: inherit;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+button.field-slider-state {
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+button.field-slider-state:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+/* 「模型默认」是用户挑的一个状态，不是"什么都没设"，比继承那行显眼一档。 */
+.field-slider-state.on {
+  color: var(--text-dim);
+}
+
 .field-slider-bounds {
   display: flex;
+  align-items: center;
+  gap: 6px;
   justify-content: space-between;
   margin-top: 2px;
   font-size: 10px;
@@ -6060,6 +6164,18 @@ button.ref-chip.clickable:hover {
   color: var(--text);
 }
 
+/* 消息时刻。和按钮同一层 hover 出现 —— 常驻的话每条气泡下面都挂一个
+   灰数字，长会话里全是噪音。和按钮之间留的空比按钮彼此之间的 gap 大：
+   它不是按钮，不该看起来像多出来的一个图标。 */
+.msg-time {
+  margin-left: 6px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+  user-select: none;
+  white-space: nowrap;
+}
+
 /* 用户消息行：操作按钮排在气泡右下方的流内位置（和助手消息的操作
    位置对称）。不用绝对定位 —— thread-col 的 content-visibility 隐含
    paint containment，定位到气泡边界外的东西会被整块裁掉。 */
@@ -6078,6 +6194,15 @@ button.ref-chip.clickable:hover {
 .user-row:hover .msg-actions,
 .user-row .msg-actions:focus-within {
   opacity: 1;
+}
+
+/* 用户行是右对齐的，时刻挪到按钮之前 —— 两边的时刻这才都落在各自那
+   一侧的最外缘，和助手行成镜像。用 order 而不是在 JSX 里分两种排法：
+   两种气泡共用同一个操作栏，DOM 里只有一种顺序才不会分叉。 */
+.user-row .msg-time {
+  order: -1;
+  margin-left: 0;
+  margin-right: 6px;
 }
 
 /* ── 消息内联编辑（上下文修改） ───────────────── */
@@ -6219,16 +6344,30 @@ button.ref-chip.clickable:hover {
   font-size: 13px;
   border-left: 2px solid var(--border);
   padding-left: 12px;
-  white-space: pre-wrap;
   word-break: break-word;
 }
 
-.think-block.live .think-body {
-  max-height: min(28vh, 320px);
-  overflow-y: auto;
-  /* 内层滚到头要把剩余滚量交给对话流，不能 none。 */
-  overscroll-behavior: auto;
+/* 段内单换行的断行交给 remarkSoftBreaks（见 Markdown.tsx）——
+   这里**不能**用 white-space: pre-line 顶替，理由写在那个插件的注释里。 */
+
+/* 思考是过程不是结论，整块靠小字淡色压着。markdown 的标题按 em 放大，
+   1.3em 的 h1 会把这块喊成全屏最响的东西 —— 收到和正文齐平，
+   层级靠字重区分。 */
+.think-body .md h1,
+.think-body .md h2,
+.think-body .md h3,
+.think-body .md h4 {
+  font-size: 1em;
+  margin: 0.9em 0 0.35em;
+  color: var(--text-dim);
 }
+
+/* 直播中的思考正文**不**限高、不给内层滚动条。
+   限高过的版本有两个毛病：一是落定那一刻 .live 消失、max-height 跟着
+   没了，块高从 320px 弹成全文，页面当场跳一下；二是内层滚动条和外层
+   对话流抢滚轮，读长思考时得先把内层滚到头才能继续翻页面。
+   现在展开就是全文，高度只在内容增长时单向变化 —— 倒排容器天然贴底，
+   这种增长不会把正在读的位置顶走。 */
 
 /* ── 过程折叠组 ─────────────────────────────── */
 
@@ -6877,13 +7016,6 @@ button.ref-chip.clickable:hover {
   border-bottom: 1px dashed var(--border);
 }
 
-/* 终端共享开关。亮起 = 模型正读得到这个终端的输出 —— 这个状态必须
-   一眼看得出来，用户不该需要点开 tooltip 才知道自己交出了什么。 */
-.term-share.on {
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-}
-
 /* ── 设置页 P2 批量修复 ───── */
 
 /* 「已保存 ✓」瞬时提示的定位锚点。 */
@@ -6969,15 +7101,41 @@ button.ref-chip.clickable:hover {
 }
 
 /* 「全部恢复继承」+ 点击回执排一行。 */
-.samp-reset {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 10px;
+/* 挨着「采样参数」标题放。字重收回常规：和标题一样粗的话，两个都在
+   抢这一行的重音，而它只是个善后按钮。 */
+.samp-reset,
+.prompt-save {
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 400;
+  border-radius: 6px;
 }
 
-.samp-reset .hint {
+/* 压过 .session-dialog-body .hint 的负边距：那是给说明段落留的，
+   这里是同一行里的一个回执。 */
+.dialog-section .samp-reset-done,
+.dialog-section .prompt-saved {
   margin: 0;
+  font-weight: 400;
+}
+
+/* 换预设顶掉旧正文后的后路。贴在输入框下面，像一条刚发生的事的回执 ——
+   它必须显眼到能被看见，又不能显眼到像报错。 */
+.prompt-undo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.prompt-undo .hint {
+  margin: 0;
+}
+
+.prompt-undo .ghost {
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 6px;
 }
 
 /* ── 对话卡片 P2 批量修复 ───── */
@@ -7102,11 +7260,29 @@ button.ref-chip.clickable:hover {
   );
 }
 
-/* 共享开着时按钮里多出"已共享"文字，宽度让给内容。 */
+/* 共享开着时按钮里多出"已共享"文字：26px 的方形图标位变成一颗药丸。
+   亮起 = 模型正读得到这个终端的输出，这个状态必须一眼看得出来，
+   用户不该需要点开 tooltip 才知道自己交出了什么。
+
+   必须改掉基类的 grid：`.term-tabs .icon` 是 `grid` + 单列，两个子元素
+   会上下堆成两行，把 26px 的高度撑破、和邻座的按钮错开一截。 */
 .term-tabs .icon.term-share.on {
   width: auto;
-  padding: 0 8px;
-  gap: 4px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  /* 左窄右宽：左边是图标，右边是文字，等 padding 会显得右侧发空。 */
+  padding: 0 9px 0 7px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+/* 基类的 `.icon:hover` 和这条同特异性，只靠源码顺序压制太脆。显式写
+   一条更具体的：不然鼠标一放上去 accent 就掉成普通灰，看着像共享
+   已经关掉了 —— 隐私状态不能因为悬停就说谎。 */
+.term-tabs .icon.term-share.on:hover:not(:disabled) {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
 }
 
 .term-share-mark {

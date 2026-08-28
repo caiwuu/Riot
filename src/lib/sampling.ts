@@ -1,4 +1,4 @@
-import type { Sampling } from "../bridge";
+import type { AppConfig, Sampling } from "../bridge";
 
 /**
  * 采样参数的范围和展示。三处 UI（会话覆盖、服务方默认、模型覆盖）共用，
@@ -105,29 +105,74 @@ export function ratioToValue(field: SamplingField, ratio: number): number {
   return snapSamplingValue(field, raw);
 }
 
-export function samplingDraft(s: Sampling): Record<string, string> {
+/**
+ * 一个字段的草稿值。三态和 {@link Sampling} 一一对应：
+ *
+ * - `""` = 继承（键不写进 Sampling）
+ * - `null` = 显式「模型默认」（写成 `null`）
+ * - 其它 = 编辑中的数字文本（"0."、"-" 这种中间态也留着，blur 时才收敛）
+ */
+export type SamplingDraft = Record<string, string | null>;
+
+export function samplingDraft(s: Sampling): SamplingDraft {
   return Object.fromEntries(
-    SAMPLING_FIELDS.map((f) => [f.key, s[f.key] != null ? String(s[f.key]) : ""]),
+    SAMPLING_FIELDS.map((f) => {
+      const v = s[f.key];
+      if (v === undefined) return [f.key, ""];
+      return [f.key, v === null ? null : String(v)];
+    }),
   );
 }
 
-/** 空/非法 = null（不设置 / 继承）。不夹范围：存量超范围值原样留下，夹紧只发生在拖滑块或改数字的那一刻。 */
-export function parseSampling(draft: Record<string, string>): Sampling {
-  const num = (key: SamplingKey, integer?: boolean) => {
-    const t = (draft[key] ?? "").trim();
-    if (!t) return null;
+/**
+ * 草稿 → Sampling。空/非法 = 继承，整个键不写；`null` 原样落成 `null`。
+ *
+ * `[约束]` 继承必须靠**键不在**表达，不能写 `{ temperature: null }` ——
+ * 那在宿主那边是"显式不发"，会把服务方设的值悄悄否掉。
+ *
+ * 不夹范围：存量超范围值原样留下，夹紧只发生在拖滑块或改数字的那一刻。
+ */
+export function parseSampling(draft: SamplingDraft): Sampling {
+  const out: Sampling = {};
+  for (const f of SAMPLING_FIELDS) {
+    const d = draft[f.key];
+    if (d === null) {
+      out[f.key] = null;
+      continue;
+    }
+    const t = (d ?? "").trim();
+    if (!t) continue;
     const v = Number(t);
-    if (!Number.isFinite(v)) return null;
-    return integer ? Math.round(v) : v;
-  };
-  return {
-    temperature: num("temperature"),
-    topP: num("topP"),
-    topK: num("topK", true),
-    maxOutputTokens: num("maxOutputTokens", true),
-  };
+    if (!Number.isFinite(v)) continue;
+    out[f.key] = f.integer ? Math.round(v) : v;
+  }
+  return out;
 }
 
+/** 字段级合并：`over` 表过态的字段赢，没表态的用 `base` 的。和宿主 `Sampling::or` 同序。 */
+export function mergeSampling(over: Sampling, base: Sampling): Sampling {
+  const out: Sampling = {};
+  for (const f of SAMPLING_FIELDS) {
+    const v = over[f.key] !== undefined ? over[f.key] : base[f.key];
+    if (v !== undefined) out[f.key] = v;
+  }
+  return out;
+}
+
+/**
+ * 会话覆盖之前，这一轮实际会用的采样值：当前模型叠在当前服务方之上。
+ *
+ * `[约束]` 顺序要和宿主 `AppConfig::resolve` 一致。反了或少一层，会话面板
+ * 上显示的"继承 x"就不是真会发出去的那个 x —— 那比不显示更糟。
+ */
+export function inheritedSampling(cfg: AppConfig): Sampling {
+  const p = cfg.providers.find((x) => x.id === cfg.activeProvider);
+  if (!p) return {};
+  const m = p.models.find((x) => x.id === cfg.activeModel);
+  return mergeSampling(m?.sampling ?? {}, p.sampling);
+}
+
+/** `===` 直接区分 undefined（继承）和 null（模型默认）—— 这里正需要它们不相等。 */
 export function sameSampling(a: Sampling, b: Sampling): boolean {
-  return SAMPLING_FIELDS.every((f) => (a[f.key] ?? null) === (b[f.key] ?? null));
+  return SAMPLING_FIELDS.every((f) => a[f.key] === b[f.key]);
 }
