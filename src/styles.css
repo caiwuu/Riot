@@ -3832,17 +3832,23 @@ button.ref-chip.clickable:hover {
   flex: 0 0 auto;
 }
 
+/* stack 行的控件竖排铺满 —— 它之所以 stack 就是因为一行装不下。
+   留着横排的话：多挂一个元素（测试结果、提示）会挤到控件旁边，而
+   key-row 这类没写 flex 的容器只按内容宽度站着，输入框缩成一小截。
+   `justify-content: stretch` 在 flex 里等同 flex-start，指望不上。 */
 .set-row.stack .set-row-ctl {
   min-width: 0;
-  justify-content: stretch;
+  flex-direction: column;
+  align-items: stretch;
 }
 
 /* 右列里的控件默认铺满这一列 —— 一列里的下拉、输入框宽度必须齐，
-   参差不齐正是"每个字段各写各的"留下的痕迹。 */
-.set-row-ctl > input,
-.set-row-ctl > .field-select,
-.set-row-ctl > textarea,
-.set-row-ctl > .input-with-btn {
+   参差不齐正是"每个字段各写各的"留下的痕迹。
+   只给横排的行：stack 是纵向的，flex:1 在那儿拉的是高度。 */
+.set-row:not(.stack) .set-row-ctl > input,
+.set-row:not(.stack) .set-row-ctl > .field-select,
+.set-row:not(.stack) .set-row-ctl > textarea,
+.set-row:not(.stack) .set-row-ctl > .input-with-btn {
   flex: 1;
   min-width: 0;
 }
