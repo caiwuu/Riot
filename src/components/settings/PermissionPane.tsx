@@ -16,7 +16,7 @@ import {
   MIN_COMPACT_THRESHOLD as MIN_COMPACT_AT,
 } from "../../lib/contextWindow";
 import { FieldNumber } from "../FieldNumber";
-import { HintTip } from "../HintTip";
+import { Card, CardBlock, Group, Row } from "./layout";
 import { type AskConfirm, FormError, blurOnEnter } from "./shared";
 
 /** 和宿主侧 config::normalize 的夹紧区间保持一致。 */
@@ -385,11 +385,10 @@ export function PermissionPane({
 
   return (
     <>
-      <section>
-        <h2>
-          新会话的默认模式
-          <HintTip>只影响之后创建的会话。当前会话在输入框左下角切换。</HintTip>
-        </h2>
+      <Group
+        title="新会话的默认权限"
+        desc="只影响之后创建的会话。当前会话的模式在输入框左下角切换。"
+      >
         <div className="mode-cards" role="radiogroup" aria-label="新会话的默认模式">
           {MODES.map((m) => (
             <button
@@ -407,15 +406,12 @@ export function PermissionPane({
             </button>
           ))}
         </div>
-      </section>
-      <section>
-        <h2>
-          命令隔离
-          <HintTip>
-            由操作系统限制命令能改什么。开着时，没有规则命中、也不是只读的命令可以直接放行 ——
-            边界由内核守着。macOS 开箱可用；Windows 需要装一次（下面会提示）。
-          </HintTip>
-        </h2>
+      </Group>
+
+      <Group
+        title="命令隔离"
+        desc="由操作系统限制命令能改什么。开着时，没有规则命中、也不是只读的命令可以直接放行 —— 边界由内核守着。macOS 开箱可用，Windows 需要装一次。"
+      >
         <div className="mode-cards" role="radiogroup" aria-label="命令隔离">
           {SANDBOX_MODES.map((m) => (
             <button
@@ -443,99 +439,108 @@ export function PermissionPane({
           onUninstall={runUninstall}
         />
         {IS_WINDOWS && sandbox !== "off" ? (
-          <label style={{ display: "block", marginTop: 10 }}>
-            <span className="hint" style={{ display: "block", margin: "0 0 4px" }}>
-              沙箱内额外可读的目录（一行一个绝对路径）。装在你用户目录下的工具（nvm、conda、pip
-              --user……）沙箱内默认打不开，需要哪个填哪个；目录越大，会话首次激活越慢。
-            </span>
-            <textarea
-              value={allowRead}
-              onChange={(e) => setAllowRead(e.target.value)}
-              onBlur={commitAllowRead}
-              placeholder={"如：\nC:\\Users\\你\\.cargo\nC:\\Users\\你\\.rustup"}
-              rows={3}
-              spellCheck={false}
-            />
-          </label>
+          <Card>
+            <Row
+              title="沙箱内额外可读的目录"
+              desc="一行一个绝对路径。装在你用户目录下的工具（nvm、conda、pip --user……）沙箱内默认打不开，需要哪个填哪个；目录越大，会话首次激活越慢。"
+              stack
+            >
+              <textarea
+                className="paths-input"
+                value={allowRead}
+                onChange={(e) => setAllowRead(e.target.value)}
+                onBlur={commitAllowRead}
+                placeholder={"如：\nC:\\Users\\你\\.cargo\nC:\\Users\\你\\.rustup"}
+                rows={3}
+                spellCheck={false}
+              />
+            </Row>
+          </Card>
         ) : null}
-      </section>
-      <section>
-        <h2>
-          等待授权的时间
-          <HintTip>
-            弹窗多久没人回应就放弃，超时按拒绝处理。范围 {MIN_TIMEOUT}–{MAX_TIMEOUT} 秒。
-          </HintTip>
-        </h2>
-        <label className="field-inline">
-          <FieldNumber
-            value={timeout}
-            onChange={(e) => setTimeout_(e.target.value)}
-            onBlur={commitTimeout}
-            onKeyDown={blurOnEnter}
-          />
-          <span className="field-unit">秒</span>
-          {clamp?.key === "timeout" ? (
-            <span className="clamp-note" role="status">
-              {clamp.text}
+      </Group>
+
+      <Group title="运行上限">
+        <Card>
+          <Row
+            title="等待授权的时间"
+            desc={`弹窗多久没人回应就放弃，超时按拒绝处理。范围 ${MIN_TIMEOUT}–${MAX_TIMEOUT} 秒。`}
+          >
+            <span className="field-inline">
+              <FieldNumber
+                value={timeout}
+                onChange={(e) => setTimeout_(e.target.value)}
+                onBlur={commitTimeout}
+                onKeyDown={blurOnEnter}
+                aria-label="等待授权的时间（秒）"
+              />
+              <span className="field-unit">秒</span>
             </span>
-          ) : null}
-        </label>
-      </section>
-      <section>
-        <h2>
-          单轮最大步数
-          <HintTip>
-            一句话之内模型最多自主往返多少步。到顶就停下等你再说，不是报错。浏览器自动化、渗透这类多步任务容易吃满，可以调高。范围{" "}
-            {MIN_TURNS}–{MAX_TURNS} 步。
-          </HintTip>
-        </h2>
-        <label className="field-inline">
-          <FieldNumber
-            value={turns}
-            onChange={(e) => setTurns(e.target.value)}
-            onBlur={commitTurns}
-            onKeyDown={blurOnEnter}
-          />
-          <span className="field-unit">步</span>
-          {clamp?.key === "turns" ? (
-            <span className="clamp-note" role="status">
-              {clamp.text}
+            {clamp?.key === "timeout" ? (
+              <span className="clamp-note" role="status">
+                {clamp.text}
+              </span>
+            ) : null}
+          </Row>
+          <Row
+            title="单轮最大步数"
+            desc={`一句话之内模型最多自主往返多少步。到顶就停下等你再说，不是报错。浏览器自动化、渗透这类多步任务容易吃满，可以调高。范围 ${MIN_TURNS}–${MAX_TURNS} 步。`}
+          >
+            <span className="field-inline">
+              <FieldNumber
+                value={turns}
+                onChange={(e) => setTurns(e.target.value)}
+                onBlur={commitTurns}
+                onKeyDown={blurOnEnter}
+                aria-label="单轮最大步数"
+              />
+              <span className="field-unit">步</span>
             </span>
-          ) : null}
-        </label>
-      </section>
-      <section>
-        <h2>
-          默认压缩阈值
-          <HintTip>
-            会话历史估算超过这个 token 数时自动摘要压缩。只对<b>没填上下文窗口</b>的模型生效 ——
-            填了窗口的按窗口算（在输入框的模型菜单里选，或在「服务方 → 模型」里填）。范围{" "}
-            {MIN_COMPACT_AT.toLocaleString()}–{MAX_COMPACT_AT.toLocaleString()}。
-          </HintTip>
-        </h2>
-        <label className="field-inline">
-          <FieldNumber
-            value={compactAt}
-            onChange={(e) => setCompactAt(e.target.value)}
-            onBlur={commitCompactAt}
-            onKeyDown={blurOnEnter}
-          />
-          <span className="field-unit">token</span>
-          {clamp?.key === "compactAt" ? (
-            <span className="clamp-note" role="status">
-              {clamp.text}
+            {clamp?.key === "turns" ? (
+              <span className="clamp-note" role="status">
+                {clamp.text}
+              </span>
+            ) : null}
+          </Row>
+          <Row
+            title="默认压缩阈值"
+            desc={
+              <>
+                会话历史估算超过这个 token 数时自动摘要压缩。只对<b>没填上下文窗口</b>
+                的模型生效 —— 填了窗口的按窗口算。范围 {MIN_COMPACT_AT.toLocaleString()}–
+                {MAX_COMPACT_AT.toLocaleString()}。
+              </>
+            }
+          >
+            <span className="field-inline">
+              <FieldNumber
+                value={compactAt}
+                onChange={(e) => setCompactAt(e.target.value)}
+                onBlur={commitCompactAt}
+                onKeyDown={blurOnEnter}
+                aria-label="默认压缩阈值（token）"
+              />
+              <span className="field-unit">token</span>
             </span>
-          ) : null}
-        </label>
-      </section>
-      <section>
-        <h2>
-          会话内规则
-          <HintTip>
-            点「总是允许」记住的规则（如 <code>Bash(npm run *)</code>）只在当前会话有效。
-          </HintTip>
-        </h2>
-      </section>
+            {clamp?.key === "compactAt" ? (
+              <span className="clamp-note" role="status">
+                {clamp.text}
+              </span>
+            ) : null}
+          </Row>
+        </Card>
+      </Group>
+
+      <Group title="会话内规则">
+        <Card>
+          <CardBlock>
+            <p className="hint" style={{ margin: 0 }}>
+              点「总是允许」记住的规则（如 <code>Bash(npm run *)</code>
+              ）只在当前会话有效，关掉会话就没了。
+            </p>
+          </CardBlock>
+        </Card>
+      </Group>
+
       {error ? <FormError text={error} /> : null}
     </>
   );

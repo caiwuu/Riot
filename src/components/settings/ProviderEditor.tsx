@@ -6,14 +6,14 @@ import {
   type ModelConfig,
   type Protocol,
   type ProviderConfig,
-  type Sampling,
   listModels,
   setApiKey,
   testConnection,
 } from "../../bridge";
-import { FieldNumber } from "../FieldNumber";
-import { HintTip } from "../HintTip";
+import { parseSampling, sameSampling, samplingDraft } from "../../lib/sampling";
+import { SamplingSliders } from "../FieldSlider";
 import { ModelDialog } from "../ModelDialog";
+import { Card, CardBlock, Group, Row } from "./layout";
 import { type AskConfirm, blurOnEnter } from "./shared";
 
 /** 路径留空时实际会用的默认值。两个协议各不同。 */
@@ -35,45 +35,6 @@ function joinUrl(base: string, path: string): string {
   return `${b}/${p}`;
 }
 
-const SAMPLING_FIELDS: {
-  key: keyof Sampling;
-  label: string;
-  hint: string;
-  step: string;
-  integer?: boolean;
-}[] = [
-  { key: "temperature", label: "temperature", hint: "0–2。越高越发散。", step: "0.1" },
-  { key: "topP", label: "top_p", hint: "0–1。一般不与 temperature 同调。", step: "0.05" },
-  { key: "topK", label: "top_k", hint: "仅 Anthropic 协议发送。", step: "1", integer: true },
-  { key: "maxOutputTokens", label: "max tokens", hint: "单次回复的输出上限。", step: "256", integer: true },
-];
-
-/** 采样值转回输入框草稿。初始化和"提交失败回滚"共用同一条真值来源。 */
-function samplingDraft(s: Sampling): Record<string, string> {
-  return {
-    temperature: s.temperature?.toString() ?? "",
-    topP: s.topP?.toString() ?? "",
-    topK: s.topK?.toString() ?? "",
-    maxOutputTokens: s.maxOutputTokens?.toString() ?? "",
-  };
-}
-
-/** 把输入框草稿解析成采样值：空/非法 = null（不设置）。 */
-function parseSampling(draft: Record<string, string>): Sampling {
-  const num = (s: string | undefined, integer?: boolean) => {
-    const t = (s ?? "").trim();
-    if (!t) return null;
-    const v = Number(t);
-    if (!Number.isFinite(v)) return null;
-    return integer ? Math.round(v) : v;
-  };
-  return {
-    temperature: num(draft.temperature),
-    topP: num(draft.topP),
-    topK: num(draft.topK, true),
-    maxOutputTokens: num(draft.maxOutputTokens, true),
-  };
-}
 
 /**
  * 单个 provider 的编辑表单。
@@ -143,9 +104,9 @@ export function ProviderEditor({
     });
   };
 
-  const commitSampling = () => {
-    const next = parseSampling(sampDraft);
-    if (JSON.stringify(next) === JSON.stringify(p.sampling)) return;
+  const commitSampling = (draft: Record<string, string>) => {
+    const next = parseSampling(draft);
+    if (sameSampling(next, p.sampling)) return;
     void onPatch({ sampling: next }).then((ok) => {
       if (!ok) setSampDraft(samplingDraft(p.sampling));
     });
@@ -243,101 +204,148 @@ export function ProviderEditor({
 
   return (
     <>
-      <section>
-        <div className="field-row">
-          <label>名称</label>
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            onBlur={blurCommit}
-            onKeyDown={blurOnEnter}
-            autoFocus={autoFocusName}
-            spellCheck={false}
-          />
-        </div>
-        <div className="field-row">
-          <label>协议</label>
-          <div className="radio-row" role="radiogroup" aria-label="协议">
-            {(["openai", "anthropic"] as Protocol[]).map((proto) => (
+      <Group title="连接">
+        <Card>
+          <Row title="名称" desc="只在界面上显示，随便起。">
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onBlur={blurCommit}
+              onKeyDown={blurOnEnter}
+              autoFocus={autoFocusName}
+              spellCheck={false}
+              aria-label="名称"
+            />
+          </Row>
+          <Row title="协议" desc="决定请求格式和认证头。选错了会被服务方拒绝。">
+            <div className="radio-row" role="radiogroup" aria-label="协议">
+              {(["openai", "anthropic"] as Protocol[]).map((proto) => (
+                <button
+                  key={proto}
+                  role="radio"
+                  aria-checked={p.protocol === proto}
+                  className={p.protocol === proto ? "radio-pill active" : "radio-pill"}
+                  onClick={() => void onPatch({ protocol: proto })}
+                >
+                  {proto === "openai" ? "OpenAI 兼容" : "Anthropic"}
+                </button>
+              ))}
+            </div>
+          </Row>
+          <Row title="API 主机">
+            <input
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              onBlur={blurCommit}
+              onKeyDown={blurOnEnter}
+              placeholder="https://api.example.com"
+              spellCheck={false}
+              aria-label="API 主机"
+            />
+          </Row>
+          <Row
+            title="API 路径"
+            desc={
+              <>
+                留空按主机猜。接口不在常规位置时（如智谱的{" "}
+                <code>/api/paas/v4/chat/completions</code>）在这里填。
+              </>
+            }
+          >
+            <input
+              value={apiPath}
+              onChange={(e) => setApiPath(e.target.value)}
+              onBlur={blurCommit}
+              onKeyDown={blurOnEnter}
+              placeholder={defaultPath(p.protocol)}
+              spellCheck={false}
+              aria-label="API 路径"
+            />
+          </Row>
+          {/* 把拼出来的完整地址摆出来。路径错一段的表现只是一个 404，
+              报错里没有任何线索指向它 —— 而在这里一眼就能看出来。 */}
+          <CardBlock className="url-preview-block">
+            <span className="set-row-title">实际请求地址</span>
+            <p className="url-preview">
+              {joinUrl(baseUrl, apiPath.trim() || defaultPath(p.protocol))}
+            </p>
+          </CardBlock>
+        </Card>
+      </Group>
+
+      <Group title="API Key">
+        <Card>
+          <Row
+            title="密钥"
+            desc={
+              savedFlash ? (
+                <span className="key-state ok">已保存。</span>
+              ) : keySource === "env" ? (
+                <span className="key-state ok">
+                  正在使用环境变量 <code>{p.apiKeyEnv}</code>。
+                </span>
+              ) : keySource === "saved" ? (
+                <span className="key-state ok">已保存。粘贴新的可以覆盖。</span>
+              ) : (
+                <span className="key-state warn">还没有配置，现在还不能发消息。</span>
+              )
+            }
+            stack
+          >
+            <div className="key-row">
+              <input
+                type="password"
+                value={keyDraft}
+                onChange={(e) => setKeyDraft(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && void saveKey()}
+                placeholder={`粘贴 ${p.name} 的 API key`}
+                autoComplete="off"
+                spellCheck={false}
+                aria-label="API key"
+              />
               <button
-                key={proto}
-                role="radio"
-                aria-checked={p.protocol === proto}
-                className={p.protocol === proto ? "radio-pill active" : "radio-pill"}
-                onClick={() => void onPatch({ protocol: proto })}
+                className="primary"
+                onClick={() => void saveKey()}
+                disabled={!keyDraft.trim()}
               >
-                {proto === "openai" ? "OpenAI 兼容" : "Anthropic"}
+                保存
               </button>
-            ))}
+            </div>
+          </Row>
+        </Card>
+      </Group>
+
+      <Group
+        title="模型"
+        action={
+          <div className="set-group-actions">
+            <button className="btn-compact" onClick={() => setAdding(true)}>
+              添加模型…
+            </button>
+            {/* disabled 按钮吞掉 title，先决条件挂在外层 span 上才看得见 */}
+            <span
+              className="tip-wrap"
+              title={!keySource ? "先在上面保存 API key，才能从接口获取模型列表" : undefined}
+            >
+              <button
+                className="btn-compact"
+                onClick={() => void doFetch()}
+                disabled={fetching || !keySource}
+              >
+                {fetching ? "获取中…" : "从 API 获取"}
+              </button>
+            </span>
           </div>
-        </div>
-        <div className="field-row">
-          <label>API 主机</label>
-          <input
-            value={baseUrl}
-            onChange={(e) => setBaseUrl(e.target.value)}
-            onBlur={blurCommit}
-            onKeyDown={blurOnEnter}
-            placeholder="https://api.example.com"
-            spellCheck={false}
-          />
-        </div>
-        <div className="field-row">
-          <label>
-            API 路径
-            <HintTip>
-              OpenAI 兼容：DeepSeek、Kimi、vLLM、Ollama 及各家中转。路径留空按主机猜；接口不在常规位置时（如智谱的{" "}
-              <code>/api/paas/v4/chat/completions</code>）在这里填。
-            </HintTip>
-          </label>
-          <input
-            value={apiPath}
-            onChange={(e) => setApiPath(e.target.value)}
-            onBlur={blurCommit}
-            onKeyDown={blurOnEnter}
-            placeholder={defaultPath(p.protocol)}
-            spellCheck={false}
-          />
-        </div>
-        {/* 把拼出来的完整地址摆出来。路径错一段的表现只是一个 404，
-            报错里没有任何线索指向它 —— 而在这里一眼就能看出来。 */}
-        <p className="url-preview">
-          {joinUrl(baseUrl, apiPath.trim() || defaultPath(p.protocol))}
-        </p>
-      </section>
-
-      <section>
-        <h2>API Key</h2>
-        {savedFlash ? (
-          <p className="key-state ok">已保存。</p>
-        ) : keySource === "env" ? (
-          <p className="key-state ok">
-            正在使用环境变量 <code>{p.apiKeyEnv}</code>。
-          </p>
-        ) : keySource === "saved" ? (
-          <p className="key-state ok">已保存。粘贴新的可以覆盖。</p>
-        ) : (
-          <p className="key-state warn">还没有配置。</p>
-        )}
-        <div className="key-row">
-          <input
-            type="password"
-            value={keyDraft}
-            onChange={(e) => setKeyDraft(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && void saveKey()}
-            placeholder={`粘贴 ${p.name} 的 API key`}
-            autoComplete="off"
-            spellCheck={false}
-          />
-          <button className="primary" onClick={() => void saveKey()} disabled={!keyDraft.trim()}>
-            保存
-          </button>
-        </div>
-      </section>
-
-      <section>
-        <h2>模型</h2>
-        {p.models.length === 0 ? <p className="hint">还没有模型。手动输入，或从 API 获取。</p> : null}
+        }
+      >
+        <Card>
+        {p.models.length === 0 ? (
+          <CardBlock>
+            <p className="hint" style={{ margin: 0 }}>
+              还没有模型。用右上角的「添加模型」手动填，或从 API 获取。
+            </p>
+          </CardBlock>
+        ) : null}
         <div className="model-list" role="radiogroup" aria-label="当前模型">
           {p.models.map((m) => {
             const active = isActive && cfg.activeModel === m.id;
@@ -372,39 +380,34 @@ export function ProviderEditor({
           })}
         </div>
 
-        <div className="key-row">
-          <button onClick={() => setAdding(true)}>添加模型…</button>
-          {/* disabled 按钮吞掉 title，先决条件挂在外层 span 上才看得见 */}
-          <span className="tip-wrap" title={!keySource ? "先在上面保存 API key，才能从接口获取模型列表" : undefined}>
-            <button onClick={() => void doFetch()} disabled={fetching || !keySource}>
-              {fetching ? "获取中…" : "从 API 获取"}
-            </button>
-          </span>
-        </div>
-
         {fetched ? (
-          fetched.length ? (
-            <div className="fetched-list">
-              {fetched.map((m) => {
-                const added = p.models.some((x) => x.id === m);
-                return (
-                  <button
-                    key={m}
-                    className={added ? "fetched-item added" : "fetched-item"}
-                    onClick={() => (added ? removeModel(m) : addModel(m))}
-                    title={added ? "点击移除" : "点击添加"}
-                  >
-                    {added ? "✓ " : "+ "}
-                    {m}
-                  </button>
-                );
-              })}
-            </div>
-          ) : (
-            <p className="hint">这个服务方没有返回任何模型。</p>
-          )
+          <CardBlock>
+            {fetched.length ? (
+              <div className="fetched-list">
+                {fetched.map((m) => {
+                  const added = p.models.some((x) => x.id === m);
+                  return (
+                    <button
+                      key={m}
+                      className={added ? "fetched-item added" : "fetched-item"}
+                      onClick={() => (added ? removeModel(m) : addModel(m))}
+                      title={added ? "点击移除" : "点击添加"}
+                    >
+                      {added ? "✓ " : "+ "}
+                      {m}
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="hint" style={{ margin: 0 }}>
+                这个服务方没有返回任何模型。
+              </p>
+            )}
+          </CardBlock>
         ) : null}
-      </section>
+        </Card>
+      </Group>
 
       {editing || adding ? (
         <ModelDialog
@@ -418,29 +421,21 @@ export function ProviderEditor({
         />
       ) : null}
 
-      <section>
-        <h2>
-          采样参数（这一家的默认值）
-          <HintTip>
-            模型没单独设的字段用这里的值。单个模型在它的编辑弹窗里改；对话里还能按会话临时覆盖。
-          </HintTip>
-        </h2>
-        {SAMPLING_FIELDS.map((f) => (
-          <div className="field-row" key={f.key}>
-            <label>
-              {f.label}
-              <HintTip>{f.hint}</HintTip>
-            </label>
-            <FieldNumber
-              value={sampDraft[f.key] ?? ""}
-              onChange={(e) => setSampDraft({ ...sampDraft, [f.key]: e.target.value })}
-              onBlur={commitSampling}
-              onKeyDown={blurOnEnter}
-              placeholder="默认"
+      <Group
+        title="采样参数"
+        desc="这一家的默认值。模型没单独设的字段用这里的值；单个模型在它的编辑弹窗里改，对话里还能按会话临时覆盖。"
+      >
+        <Card>
+          <CardBlock>
+            <SamplingSliders
+              draft={sampDraft}
+              hint
+              onChange={(key, value) => setSampDraft((s) => ({ ...s, [key]: value }))}
+              onCommit={commitSampling}
             />
-          </div>
-        ))}
-      </section>
+          </CardBlock>
+        </Card>
+      </Group>
 
       <div className="editor-foot">
         {testResult ? (

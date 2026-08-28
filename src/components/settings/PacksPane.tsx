@@ -13,7 +13,7 @@ import {
   startPackInstall,
   usePackInstalls,
 } from "../../hooks/usePackInstalls";
-import { HintTip } from "../HintTip";
+import { Card, CardBlock, Group } from "./layout";
 import type { AskConfirm } from "./shared";
 
 /** 字节数写成人话。包是几百 MB 量级，一位小数够用。 */
@@ -93,16 +93,10 @@ export function PacksPane({ askConfirm }: { askConfirm: AskConfirm }) {
   };
 
   return (
-    <section>
-      <h2>
-        能力包
-        <HintTip>
-          可选下载的运行时。装上之后模型自己会用 —— 相关技能和工具自动注册，
-          不需要你在别处再配一遍。包体较大，建议在网络稳定时装；装的过程中可以关掉
-          设置去干别的，回来还能看到进度。下载中断可以重来，已下好的部分会接着传。
-        </HintTip>
-      </h2>
-
+    <Group
+      title="可下载的包"
+      desc="装上之后模型自己会用 —— 相关技能和工具自动注册，不用在别处再配一遍。包体较大，建议在网络稳定时装；装的过程中可以关掉设置去干别的，回来还能看到进度。下载中断可以重来，已下好的部分会接着传。"
+    >
       {loadError ? (
         <div className="empty-state">
           <p className="form-error" style={{ margin: 0 }}>
@@ -111,9 +105,21 @@ export function PacksPane({ askConfirm }: { askConfirm: AskConfirm }) {
           <button onClick={() => void refresh()}>重试</button>
         </div>
       ) : packs === null ? (
-        <p className="hint">读取中…</p>
+        <Card>
+          <CardBlock>
+            <p className="hint" style={{ margin: 0 }}>
+              读取中…
+            </p>
+          </CardBlock>
+        </Card>
       ) : packs.length === 0 ? (
-        <p className="hint">当前没有可用的能力包。</p>
+        <Card>
+          <CardBlock>
+            <p className="hint" style={{ margin: 0 }}>
+              当前没有可用的能力包。
+            </p>
+          </CardBlock>
+        </Card>
       ) : (
         <ul className="pack-list">
           {packs.map((p) => {
@@ -192,6 +198,6 @@ export function PacksPane({ askConfirm }: { askConfirm: AskConfirm }) {
           })}
         </ul>
       )}
-    </section>
+    </Group>
   );
 }

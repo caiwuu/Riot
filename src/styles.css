@@ -328,6 +328,17 @@ textarea {
   -webkit-appearance: none;
 }
 
+/* range 不当文本框：全局 input 的描边/内边距/appearance 会把滑条毁了。 */
+input[type='range'] {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  color: inherit;
+}
+
 input:disabled,
 textarea:disabled {
   opacity: 0.45;
@@ -1401,16 +1412,12 @@ pre {
   display: grid;
   place-items: center;
   overflow: hidden;
-  background: #0d0d0f;
+  /* 和终端、主区同底（见 .term-panel 的注释）。这里曾经硬编码一个更深的
+     黑，结果抽屉打开时右半屏比左半屏暗一档，像贴了块补丁。 */
+  background: var(--bg);
   outline: none;
   /* 隐藏的输入法落点是绝对定位的，参照系在这里。 */
   position: relative;
-}
-
-/* 键盘焦点进了页面时描个边 —— 否则聚焦落在看不见的 IME 落点上，
-   用户按键"打给空气"却没有任何视觉表达。 */
-.browser-view.focused {
-  box-shadow: inset 0 0 0 2px var(--accent);
 }
 
 /* 输入法的落点。看不见，但必须真的存在、真的能聚焦。
@@ -3476,11 +3483,15 @@ button.ref-chip.clickable:hover {
   border-color: rgba(90, 141, 214, 0.55);
 }
 
-/* ── 设置 ───────────────────────────────────── */
+/* ── 设置整页 ───────────────────────────────── */
 
-.modal.settings {
-  width: min(780px, 100%);
-  height: min(600px, 88vh);
+.settings-page {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
 }
 
 .settings-head {
@@ -3489,29 +3500,32 @@ button.ref-chip.clickable:hover {
   align-items: center;
   gap: 12px;
   height: 44px;
-  padding: 0 8px 0 16px;
+  padding: 0 12px 0 10px;
   border-bottom: 1px solid var(--border);
-  background: var(--bg-card);
+  background: var(--bg);
 }
 
-.settings-head-title {
-  font-size: 13px;
-  font-weight: 600;
+.settings-head.pad-traffic {
+  padding-left: 84px;
 }
 
-.settings-close {
-  flex-shrink: 0;
-  margin-left: auto;
+.shell[data-fullscreen] .settings-head.pad-traffic {
+  padding-left: 10px;
+}
+
+.settings-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   border: none;
   background: transparent;
-  color: var(--text-faint);
+  color: var(--text-dim);
   font-size: 13px;
-  line-height: 1;
-  padding: 6px 8px;
+  padding: 6px 10px;
   border-radius: 8px;
 }
 
-.settings-close:hover {
+.settings-back:hover {
   background: var(--bg-hover);
   color: var(--text);
 }
@@ -3537,29 +3551,56 @@ button.ref-chip.clickable:hover {
 
 /* 设置左侧的分类列表也是菜单，跟侧栏同一档底色和 hover。 */
 .settings-nav {
-  width: 148px;
+  width: 208px;
   flex-shrink: 0;
   background: var(--bg-nav);
   --bg-hover: var(--bg-nav-hover);
   border-right: 1px solid var(--border);
-  padding: 10px 8px;
+  padding: 6px 10px 20px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
   overflow-y: auto;
+}
+
+.settings-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+/* 组标题。九项平铺时找一项要从头读一遍；分了组就先定位组再挑。 */
+.settings-nav-label {
+  padding: 0 10px;
+  margin: 16px 0 6px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.settings-nav-group:first-child .settings-nav-label {
+  margin-top: 8px;
 }
 
 .settings-tab {
   text-align: left;
   border: none;
   background: none;
-  padding: 7px 10px;
+  padding: 0 10px;
+  height: 30px;
   border-radius: 8px;
   color: var(--text-dim);
   font-size: 13px;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 9px;
+}
+
+.settings-tab-icon {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  color: var(--text-faint);
 }
 
 .settings-tab:hover:not(:disabled) {
@@ -3567,8 +3608,16 @@ button.ref-chip.clickable:hover {
   color: var(--text);
 }
 
+.settings-tab:hover:not(:disabled) .settings-tab-icon {
+  color: var(--text-dim);
+}
+
 .settings-tab.active {
   background: var(--bg-nav-active);
+  color: var(--text);
+}
+
+.settings-tab.active .settings-tab-icon {
   color: var(--text);
 }
 
@@ -3618,8 +3667,222 @@ button.ref-chip.clickable:hover {
 .settings-body {
   flex: 1;
   min-width: 0;
-  padding: 20px 22px;
+  padding: 12px 40px 72px;
   overflow-y: auto;
+}
+
+/* 正文限宽居中。铺满整屏的话，一个 1600px 宽的窗口会把「名称」和它的
+   输入框拉到两端，眼睛得横扫一整行才能把标签和控件对上。 */
+.settings-inner {
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+/* ── 设置版式件（layout.tsx） ───────────────── */
+
+.pane-head {
+  padding: 26px 0 4px;
+}
+
+.pane-head h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.pane-head p {
+  margin: 6px 0 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+
+.set-group {
+  margin-top: 28px;
+}
+
+.set-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.set-group-head h2 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.set-group-desc {
+  margin: -4px 0 10px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-faint);
+}
+
+/* 设置行装在卡片里。分隔线由行自己出（相邻兄弟），卡片只管外框和圆角。 */
+.set-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.set-card + .set-card {
+  margin-top: 10px;
+}
+
+.set-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: 52px;
+  padding: 12px 16px;
+}
+
+/* 卡片里相邻两块之间一道分隔线。写在直接子元素上而不是逐个类名列举 ——
+   卡片装得下设置行、说明块和各种清单，漏掉一种就是那一处没有线。 */
+.set-card > * + * {
+  border-top: 1px solid var(--border);
+}
+
+/* 控件占满一行的字段（长路径、多行文本）。挤进右列会被压成一条缝。 */
+.set-row.stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.set-row-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.set-row-title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.set-row-desc {
+  margin: 3px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+
+.set-group-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.set-group-actions .btn-compact {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.set-row-ctl {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 200px;
+}
+
+/* 文本输入要比下拉、开关占更多横向空间：一个 URL 挤在 200px 里只看得见开头。 */
+.set-row:not(.stack) .set-row-ctl:has(> input),
+.set-row:not(.stack) .set-row-ctl:has(> .input-with-btn) {
+  flex: 1 1 300px;
+}
+
+/* 说明列不能被输入框挤没。 */
+.set-row:not(.stack) .set-row-text {
+  flex: 1 1 40%;
+  min-width: 150px;
+}
+
+/* 一组 pill、一个按钮这类固有宽度的控件靠右站着，别被拉长。 */
+.set-row-ctl > .radio-row {
+  flex: 0 0 auto;
+}
+
+.set-row.stack .set-row-ctl {
+  min-width: 0;
+  justify-content: stretch;
+}
+
+/* 右列里的控件默认铺满这一列 —— 一列里的下拉、输入框宽度必须齐，
+   参差不齐正是"每个字段各写各的"留下的痕迹。 */
+.set-row-ctl > input,
+.set-row-ctl > .field-select,
+.set-row-ctl > textarea,
+.set-row-ctl > .input-with-btn {
+  flex: 1;
+  min-width: 0;
+}
+
+.set-row-ctl > .set-static {
+  font-size: 12px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 整行自定义内容（列表、进度、说明块）。 */
+.set-block {
+  padding: 14px 16px;
+}
+
+.set-block > :first-child {
+  margin-top: 0;
+}
+
+.set-block > :last-child {
+  margin-bottom: 0;
+}
+
+/* 拼出来的完整请求地址。等宽字 + 换行，长 URL 不撑破卡片。 */
+.url-preview-block .set-row-title {
+  color: var(--text-dim);
+}
+
+.url-preview-block .url-preview {
+  margin: 4px 0 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  word-break: break-all;
+}
+
+/* 卡片里的列表和空态自带外边距，装进 Group 时把它们收掉。 */
+.set-group > .skill-list,
+.set-group > .pack-list,
+.set-group > .mcp-list {
+  margin-top: 0;
+}
+
+.set-group > .editor-foot {
+  margin-top: 14px;
+  padding-top: 0;
+  border-top: none;
+}
+
+/* stack 行里的多行输入铺满，且和上面的说明拉开一点。 */
+.set-row.stack .paths-input,
+.set-row.stack .mcp-json-input {
+  margin: 0;
 }
 
 .field-row {
@@ -3712,8 +3975,11 @@ button.ref-chip.clickable:hover {
   color: var(--text-faint);
 }
 
-/* MCP 的 JSON 编辑视图：占满整栏的等宽编辑区，观感同表单输入框。 */
-.mcp-json-input {
+/* 占满整栏的等宽编辑区，观感同表单输入框。两处在用：MCP 的 JSON 编辑
+   视图、沙箱可读路径清单（一行一个路径）。裸 textarea 的默认宽度是
+   ~20 列，摆在弹窗里就是一小块，必须显式铺满。 */
+.mcp-json-input,
+.paths-input {
   display: block;
   width: 100%;
   box-sizing: border-box;
@@ -3729,6 +3995,10 @@ button.ref-chip.clickable:hover {
   outline: none;
   appearance: none;
   -webkit-appearance: none;
+}
+
+.paths-input::placeholder {
+  color: var(--text-faint);
 }
 
 .empty-actions {
@@ -4105,11 +4375,6 @@ button.ref-chip.clickable:hover {
   overflow-y: auto;
 }
 
-.mcp-head-actions {
-  display: flex;
-  gap: 6px;
-}
-
 /* 服务器列表：竖排行，名字截断，超高滚动。
    pill 铺排在几十个条目 + 长名字下会糊成一片（踩过）。 */
 .mcp-list {
@@ -4417,6 +4682,19 @@ button.ref-chip.clickable:hover {
   background: transparent;
 }
 
+/* Row 右列里的裸开关：按钮的内边距和 hover 底色都不要，只留轨道本身。 */
+.switch {
+  display: inline-flex;
+  padding: 0;
+  border: none;
+  background: none;
+  border-radius: 999px;
+}
+
+.switch:hover:not(:disabled) {
+  background: none;
+}
+
 .toggle-track {
   position: relative;
   flex-shrink: 0;
@@ -4464,7 +4742,6 @@ button.ref-chip.clickable:hover {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin-top: 10px;
 }
 
 .mode-card {
@@ -4537,11 +4814,17 @@ button.ref-chip.clickable:hover {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 10px;
 }
 
 .field-inline input {
   width: 90px;
+}
+
+/* 数字 + 单位在右列右对齐，数字右对齐 —— 三行叠在一起时个位要成一条线。 */
+.set-row-ctl .field-inline input {
+  width: 84px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .field-unit {
@@ -4575,13 +4858,6 @@ button.ref-chip.clickable:hover {
 
 .test-result.err {
   color: var(--danger);
-}
-
-.about-card {
-  padding: 14px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid var(--border);
 }
 
 .about-brand {
@@ -4665,23 +4941,6 @@ button.ref-chip.clickable:hover {
   color: var(--danger-soft);
 }
 
-.about-path {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.about-path code {
-  flex: 1;
-  min-width: 0;
-  padding: 8px 10px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  font-size: 12px;
-  color: var(--text-dim);
-  word-break: break-all;
-}
 
 .update-banner {
   flex-shrink: 0;
@@ -4709,19 +4968,6 @@ button.ref-chip.clickable:hover {
 .update-banner-dismiss:hover:not(:disabled) {
   opacity: 1;
   background: color-mix(in srgb, var(--warn) 12%, transparent);
-}
-
-.about-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.about-row code {
-  font-size: 12px;
-  color: var(--text-dim);
-  word-break: break-all;
-  flex: 1;
 }
 
 /* ── Provider 管理 ──────────────────────────── */
@@ -4788,30 +5034,37 @@ button.ref-chip.clickable:hover {
   background: var(--bg-active);
 }
 
+/* 模型行装在设置卡片里：外框和圆角归卡片，行自己只留一道分隔线。
+   行再描一圈边就是框中框，而卡片边和行边只差一个像素的位置。 */
 .model-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  margin-bottom: 10px;
 }
 
 .model-row {
   display: flex;
   align-items: center;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  overflow: hidden;
 }
 
+.model-row + .model-row {
+  border-top: 1px solid var(--border);
+}
+
+/* 选中态用底色 + 左缘一道色条。描边会和卡片边贴在一起分不开。 */
 .model-row.active {
-  border-color: var(--accent);
   background: var(--bg-active);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 /* 整行一起亮，别只亮左边那个名字按钮 —— 它是 button，会吃到全局
    button:hover 的底色，右边两个操作键还是透明，左右就劈开了。 */
 .model-row:hover {
   background: var(--bg-hover);
+}
+
+/* 选中行 hover 时别退回普通 hover 灰，否则"哪个在用"当场消失。 */
+.model-row.active:hover {
+  background: color-mix(in srgb, var(--bg-active) 70%, var(--bg-hover));
 }
 
 .model-row .model-name:hover,
@@ -4896,7 +5149,7 @@ button.ref-chip.clickable:hover {
 }
 
 .model-row .row-btn:last-child {
-  margin-right: 6px;
+  margin-right: 12px;
 }
 
 .model-row.active .row-btn {
@@ -4918,7 +5171,8 @@ button.ref-chip.clickable:hover {
   border: none;
   background: none;
   border-radius: 0;
-  padding: 7px 10px;
+  /* 左内边距和卡片里的设置行对齐，两种行摆在一起才是一条竖线。 */
+  padding: 10px 16px;
   text-align: left;
   font-family: var(--mono);
   font-size: 12px;
@@ -5004,29 +5258,159 @@ button.ref-chip.clickable:hover {
   min-height: 0;
 }
 
-/* 采样字段排两列、标签在输入框上方。
-   minmax(0, 1fr) 挡住溢出：纯 1fr 会被输入框的内容最小宽度撑破弹窗。 */
+/* 采样字段排两列。minmax(0, 1fr) 挡住溢出：纯 1fr 会被数字格撑破弹窗。 */
 .samp-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 12px 20px;
+  gap: 14px 20px;
 }
 
-.samp-grid .field-row {
-  margin-bottom: 0;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 5px;
-}
-
-.samp-grid .field-row label {
-  width: auto;
-}
-
-.samp-grid .field-row input[type='number'] {
-  flex: none;
-  width: 100%;
+.field-slider {
   min-width: 0;
+  --fill: var(--accent);
+}
+
+.field-slider.unset {
+  --fill: color-mix(in srgb, var(--text-faint) 55%, transparent);
+}
+
+.field-slider-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 5px;
+}
+
+.field-slider-head label {
+  min-width: 0;
+  flex: 1;
+  font-size: 12px;
+  color: var(--text-dim);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.field-slider-num {
+  width: 72px;
+  flex: none;
+  padding: 4px 6px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.field-slider.unset .field-slider-num {
+  color: var(--text-faint);
+}
+
+.field-slider-clear,
+.field-slider-clear-slot {
+  flex: none;
+  width: 22px;
+  height: 22px;
+}
+
+.field-slider-clear {
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.field-slider-clear:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.field-slider-track {
+  position: relative;
+  height: 18px;
+  display: flex;
+  align-items: center;
+}
+
+/* 轨道自己画：WebKit 的 range track 吃不到父级 CSS 变量，填充条会丢。 */
+.field-slider-rail {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 4px;
+  border-radius: 99px;
+  background: var(--border-strong);
+  pointer-events: none;
+}
+
+.field-slider-fill {
+  height: 100%;
+  border-radius: 99px;
+  background: var(--fill);
+}
+
+.field-slider-range {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 18px;
+  margin: 0;
+  cursor: pointer;
+}
+
+.field-slider-range:focus-visible {
+  outline: none;
+}
+
+.field-slider-range:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.field-slider-range::-webkit-slider-runnable-track {
+  height: 4px;
+  border: none;
+  background: transparent;
+}
+
+.field-slider-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border: 2px solid var(--bg-card);
+  border-radius: 50%;
+  background: var(--text);
+  box-shadow: 0 0 0 1px var(--border-strong);
+}
+
+.field-slider.unset .field-slider-range::-webkit-slider-thumb {
+  background: var(--text-dim);
+}
+
+.field-slider-range::-moz-range-track {
+  height: 4px;
+  border: none;
+  background: transparent;
+}
+
+.field-slider-range::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--bg-card);
+  border-radius: 50%;
+  background: var(--text);
+  box-shadow: 0 0 0 1px var(--border-strong);
+}
+
+.field-slider-bounds {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
 }
 
 /* 分组标题，和模型弹窗同一档：弹窗自己有标题栏，里面的层级要小一号。 */
@@ -5040,30 +5424,75 @@ button.ref-chip.clickable:hover {
   color: var(--text-dim);
 }
 
+.prompt-field {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
 .prompt-input {
+  display: block;
   width: 100%;
-  resize: vertical;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  resize: none;
+  min-height: 80px;
+  border: 1px solid var(--border-strong);
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
   padding: 8px 10px;
   font-size: 12px;
   line-height: 1.5;
   color: var(--text);
+  background: var(--bg);
 }
 
+/* 真能拖的高度条。CSS resize 在 WKWebView 里是死的，不能再靠角标骗人。 */
+.prompt-grip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 14px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 8px 8px;
+  background: var(--bg);
+  cursor: ns-resize;
+}
+
+.prompt-grip::after {
+  content: '';
+  width: 28px;
+  height: 3px;
+  border-radius: 99px;
+  background: var(--text-faint);
+}
+
+.prompt-grip:hover,
+.prompt-grip:focus-visible {
+  background: var(--bg-hover);
+}
+
+.prompt-grip:hover::after,
+.prompt-grip:focus-visible::after {
+  background: var(--text-dim);
+}
+
+/* 还没搬到 layout.tsx 那套版式件的分区，标题跟 .set-group-head 保持同款 ——
+   同一页里两种标题字号会让人以为自己点错了地方。 */
 .settings-body section {
-  margin-bottom: 26px;
+  margin-top: 28px;
 }
 
 .settings-body h2 {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
-  color: var(--text-faint);
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text);
   margin: 0 0 10px;
 }
 
@@ -6347,12 +6776,9 @@ button.ref-chip.clickable:hover {
 /* ── 设置页 P2 批量修复 ───── */
 
 /* 「已保存 ✓」瞬时提示的定位锚点。 */
-.modal.settings {
-  position: relative;
-}
 
 /* 保存回执：低调地在弹窗右下角出现又淡出，不打断任何操作。 */
-.settings .save-flash {
+.settings-page .save-flash {
   position: absolute;
   right: 14px;
   bottom: 12px;

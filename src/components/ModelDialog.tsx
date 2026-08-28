@@ -12,7 +12,9 @@ import {
   compactThresholdForWindow,
   fmtTokens,
 } from "../lib/contextWindow";
+import { parseSampling, samplingDraft } from "../lib/sampling";
 import { FieldNumber } from "./FieldNumber";
+import { SamplingSliders } from "./FieldSlider";
 import { HintTip } from "./HintTip";
 import { Modal } from "./Modal";
 
@@ -28,31 +30,6 @@ import { Modal } from "./Modal";
  * 采样参数也在这里，不在别处:它们和能力一样属于这个模型，分两个地方设的话，
  * 用户改完参数会去找"那我的 temperature 到底存哪了"。
  */
-const FIELDS: {
-  key: keyof Sampling;
-  label: string;
-  step: string;
-  integer?: boolean;
-  hint: string;
-}[] = [
-  { key: "temperature", label: "temperature", step: "0.1", hint: "越高越随机" },
-  { key: "topP", label: "top_p", step: "0.05", hint: "核采样" },
-  {
-    key: "topK",
-    label: "top_k",
-    step: "1",
-    integer: true,
-    hint: "仅 Anthropic 协议发送",
-  },
-  {
-    key: "maxOutputTokens",
-    label: "最大输出 token",
-    step: "256",
-    integer: true,
-    hint: "单次回复的上限",
-  },
-];
-
 export function ModelDialog({
   provider,
   model,
@@ -72,9 +49,7 @@ export function ModelDialog({
   // 数字字段走字符串草稿:输入过程中会经过 "0."、"-" 这种还不是合法数字的
   // 中间态，直接绑成 number 的话那些字符会被吃掉，表现是"打不出小数点"。
   const [samp, setSamp] = useState<Record<string, string>>(() =>
-    Object.fromEntries(
-      FIELDS.map((f) => [f.key, model?.sampling?.[f.key]?.toString() ?? ""]),
-    ),
+    samplingDraft(model?.sampling ?? {}),
   );
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
@@ -85,17 +60,7 @@ export function ModelDialog({
   // 而用户改的是第二个，表现为"设置没生效"。
   const duplicate = adding && provider.models.some((m) => m.id === trimmedId);
 
-  const sampling = (): Sampling => {
-    const out: Sampling = {};
-    for (const f of FIELDS) {
-      const raw = samp[f.key]?.trim() ?? "";
-      if (!raw) continue;
-      const n = Number(raw);
-      if (!Number.isFinite(n)) continue;
-      out[f.key] = f.integer ? Math.round(n) : n;
-    }
-    return out;
-  };
+  const sampling = (): Sampling => parseSampling(samp);
 
   /** 留空 = 不填这个字段，压缩阈值走设置里的全局值。 */
   const contextWindow = (): number | undefined => {
@@ -215,21 +180,14 @@ export function ModelDialog({
 
           <h3 className="model-dialog-section">
             采样参数
-            <HintTip>留空继承服务方的设置，占位符就是继承来的值。</HintTip>
+            <HintTip>数字是服务方的值（或常见默认）。改过的字段才写入覆盖。</HintTip>
           </h3>
-          {FIELDS.map((f) => (
-            <div className="field-row" key={f.key}>
-              <label>
-                {f.label}
-                <HintTip>{f.hint}</HintTip>
-              </label>
-              <FieldNumber
-                value={samp[f.key] ?? ""}
-                onChange={(e) => setSamp({ ...samp, [f.key]: e.target.value })}
-                placeholder={provider.sampling?.[f.key]?.toString() ?? "服务端默认"}
-              />
-            </div>
-          ))}
+          <SamplingSliders
+            draft={samp}
+            inherited={provider.sampling}
+            hint
+            onChange={(key, value) => setSamp((s) => ({ ...s, [key]: value }))}
+          />
         </div>
 
         <div className="editor-foot">

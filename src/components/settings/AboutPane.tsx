@@ -4,7 +4,7 @@ import {
   openInBrowser,
   revealInFinder,
 } from "../../bridge";
-import { HintTip } from "../HintTip";
+import { Card, CardBlock, Group, Row } from "./layout";
 
 function friendlyUpdateError(raw: string): string {
   if (/403|429|rate limit/i.test(raw)) return "GitHub 暂时限流，过一会再试。";
@@ -50,55 +50,56 @@ export function AboutPane({
 
   return (
     <>
-      <section>
-        <h2>关于</h2>
-        <div className="about-card">
-          <div className="about-brand">
-            <span className="about-mark" aria-hidden>
-              <AboutMark />
-            </span>
-            <div className="about-brand-text">
-              <div className="about-title-row">
-                <span className="about-name">Riot</span>
-                {version ? <span className="about-ver">v{version}</span> : null}
+      <Group title="版本">
+        <Card>
+          <CardBlock>
+            <div className="about-brand">
+              <span className="about-mark" aria-hidden>
+                <AboutMark />
+              </span>
+              <div className="about-brand-text">
+                <div className="about-title-row">
+                  <span className="about-name">Riot</span>
+                  {version ? <span className="about-ver">v{version}</span> : null}
+                </div>
+                <p className="about-tagline">一款轻量、强大的智能体工作台</p>
               </div>
-              <p className="about-tagline">一款轻量、强大的智能体工作台</p>
-            </div>
-            <div className="about-actions">
-              <button disabled={checking} onClick={onCheck}>
-                {checking ? "检查中…" : "检查更新"}
-              </button>
-              {update?.newer ? (
-                <button className="primary" onClick={() => void openInBrowser(update.url)}>
-                  去下载 {update.latest}
+              <div className="about-actions">
+                <button disabled={checking} onClick={onCheck}>
+                  {checking ? "检查中…" : "检查更新"}
                 </button>
-              ) : null}
+                {update?.newer ? (
+                  <button className="primary" onClick={() => void openInBrowser(update.url)}>
+                    去下载 {update.latest}
+                  </button>
+                ) : null}
+              </div>
             </div>
-          </div>
-          {statusText ? (
-            <p
-              className={`about-status ${statusKind ?? ""}`}
-              title={error ?? undefined}
-            >
-              {statusText}
-            </p>
-          ) : null}
-        </div>
-      </section>
-      <section>
-        <h2>
-          配置文件
-          <HintTip>
-            API key 单独存在同目录的 <code>auth.json</code>。
-          </HintTip>
-        </h2>
-        <div className="about-card">
-          <div className="about-path">
-            <code title={status.configPath}>{status.configPath}</code>
+            {statusText ? (
+              <p className={`about-status ${statusKind ?? ""}`} title={error ?? undefined}>
+                {statusText}
+              </p>
+            ) : null}
+          </CardBlock>
+        </Card>
+      </Group>
+
+      <Group title="配置文件">
+        <Card>
+          <Row
+            title="config.json"
+            desc={
+              <>
+                <code title={status.configPath}>{status.configPath}</code>
+                <br />
+                API key 不在这里，单独存在同目录的 <code>auth.json</code>。
+              </>
+            }
+          >
             <button onClick={() => void revealInFinder(configDir)}>在访达中显示</button>
-          </div>
-        </div>
-      </section>
+          </Row>
+        </Card>
+      </Group>
     </>
   );
 }

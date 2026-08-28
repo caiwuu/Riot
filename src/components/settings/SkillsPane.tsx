@@ -6,7 +6,7 @@ import {
   revealInFinder,
   skillsList,
 } from "../../bridge";
-import { HintTip } from "../HintTip";
+import { Card, CardBlock, Group, Row } from "./layout";
 
 /**
  * 技能清单（只读）。技能就是磁盘上的 SKILL.md，编辑器比表单好用 ——
@@ -35,37 +35,39 @@ export function SkillsPane({ status, activeRoot }: { status: ConfigStatus; activ
 
   return (
     <>
-      <section>
-        <h2>
-          Skills
-          <HintTip>
-            写成 <code>SKILL.md</code>，模型按需加载（清单进上下文，正文用到才读）。优先级{" "}
-            <strong>项目 &gt; 全局 &gt; 内置</strong>，同名即可盖掉内置。
-            名字和描述每轮都在上下文里，所以描述写「什么时候用」。只想自己敲{" "}
-            <code>/</code>、不想占上下文的，去「命令」页。
-            {activeRoot ? (
-              <>
-                {" "}
-                项目级放 <code>{activeRoot}/.riot/skills/</code>。
-              </>
-            ) : null}
-          </HintTip>
-        </h2>
-        <div className="about-row">
-          <code>{globalDir}/&lt;名字&gt;/SKILL.md</code>
-          <button className="ghost" onClick={() => void revealInFinder(globalDir)}>
-            打开目录
-          </button>
-        </div>
-      </section>
+      <Group
+        title="怎么写"
+        desc={
+          <>
+            写成 <code>SKILL.md</code>，模型按需加载：名字和描述每轮都在上下文里，正文用到才读，
+            所以描述要写「什么时候用」。优先级 <strong>项目 &gt; 全局 &gt; 内置</strong>
+            ，同名即可盖掉内置。只想自己敲 <code>/</code> 调用、不想占上下文的，去「命令」页。
+          </>
+        }
+      >
+        <Card>
+          <Row title="全局技能目录" desc={<code>{globalDir}/&lt;名字&gt;/SKILL.md</code>}>
+            <button onClick={() => void revealInFinder(globalDir)}>打开目录</button>
+          </Row>
+          {activeRoot ? (
+            <Row
+              title="项目技能目录"
+              desc={<code>{activeRoot}/.riot/skills/&lt;名字&gt;/SKILL.md</code>}
+            >
+              <button onClick={() => void revealInFinder(activeRoot)}>打开项目</button>
+            </Row>
+          ) : null}
+        </Card>
+      </Group>
 
-      <section>
-        <div className="skills-head">
-          <h2>已发现的技能</h2>
-          <button className="ghost" onClick={() => void refresh()}>
+      <Group
+        title="已发现的技能"
+        action={
+          <button className="btn-compact" onClick={() => void refresh()}>
             刷新
           </button>
-        </div>
+        }
+      >
         {loadError ? (
           <div className="empty-state">
             <p className="form-error" style={{ margin: 0 }}>
@@ -74,13 +76,17 @@ export function SkillsPane({ status, activeRoot }: { status: ConfigStatus; activ
             <button onClick={() => void refresh()}>重试</button>
           </div>
         ) : skills === null ? (
-          <p className="hint">读取中…</p>
+          <Card>
+            <CardBlock>
+              <p className="hint" style={{ margin: 0 }}>
+                读取中…
+              </p>
+            </CardBlock>
+          </Card>
         ) : skills.length === 0 ? (
           <div className="empty-state">
             <p className="empty-title">还没有技能</p>
-            <p className="hint">
-              示例格式：
-            </p>
+            <p className="hint">在上面的目录里建一个文件夹，放进这样一个 SKILL.md：</p>
             <pre className="skill-example">{`---
 name: 发布流程
 description: 发布新版本时用。跑测试、打 tag、更新 changelog。
@@ -114,7 +120,7 @@ description: 发布新版本时用。跑测试、打 tag、更新 changelog。
             ))}
           </ul>
         )}
-      </section>
+      </Group>
     </>
   );
 }

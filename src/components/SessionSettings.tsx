@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { type PointerEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import {
   type Sampling,
@@ -11,7 +11,8 @@ import {
   setSessionSystemPrompt,
   setSessionThinking,
 } from "../bridge";
-import { FieldNumber } from "./FieldNumber";
+import { SAMPLING_FIELDS, parseSampling, sameSampling } from "../lib/sampling";
+import { SamplingSliders } from "./FieldSlider";
 import { FieldSelect, type FieldOption } from "./FieldSelect";
 import { HintTip } from "./HintTip";
 import { Modal } from "./Modal";
@@ -25,39 +26,6 @@ import { basename } from "../pathDisplay";
  * 提交成功后通过 `onPatch` 回写 App 的会话列表 —— 不回写的话，关掉
  * 弹窗再打开，显示的还是启动时 listSessions 拉到的旧值。
  */
-const SAMPLING_FIELDS: {
-  key: keyof Sampling;
-  label: string;
-  step: string;
-  integer?: boolean;
-}[] = [
-  { key: "temperature", label: "temperature", step: "0.1" },
-  { key: "topP", label: "top_p", step: "0.05" },
-  { key: "topK", label: "top_k", step: "1", integer: true },
-  { key: "maxOutputTokens", label: "max tokens", step: "256", integer: true },
-];
-
-/** 把输入框草稿解析成采样值：空/非法 = null（继承）。 */
-function parseSampling(draft: Record<string, string>): Sampling {
-  const num = (s: string | undefined, integer?: boolean) => {
-    const t = (s ?? "").trim();
-    if (!t) return null;
-    const v = Number(t);
-    if (!Number.isFinite(v)) return null;
-    return integer ? Math.round(v) : v;
-  };
-  return {
-    temperature: num(draft.temperature),
-    topP: num(draft.topP),
-    topK: num(draft.topK, true),
-    maxOutputTokens: num(draft.maxOutputTokens, true),
-  };
-}
-
-/** 逐字段比较。宿主回来的空覆盖是 `{}`，解析结果是全 null —— 语义相同。 */
-function sameSampling(a: Sampling, b: Sampling): boolean {
-  return SAMPLING_FIELDS.every((f) => (a[f.key] ?? null) === (b[f.key] ?? null));
-}
 
 /** 思考策略的下拉项。固定档位摊平成一级选项 —— 六个选项不值得两级菜单。
  *  说明走 hint（第二行灰字）：塞进主标签会挤成两行大字，见谁选谁难受。 */
@@ -87,7 +55,7 @@ export function SessionSettings({
   onClose,
 }: {
   session: SessionInfo;
-  /** 继承来的采样默认值（当前激活 provider 的），显示成占位符。 */
+  /** 继承来的采样默认值（当前激活 provider 的），没覆盖时数字格就显示它。 */
   inherited: Sampling;
   /** 提交成功后回写 App 里的会话信息。 */
   onPatch: (patch: Partial<SessionInfo>) => void;
@@ -201,24 +169,14 @@ export function SessionSettings({
           <p className="session-path">{session.root}</p>
           <h3 className="dialog-section" style={{ marginTop: 0 }}>
             采样参数
-            <HintTip>留空继承服务方的设置，占位符是继承来的值。</HintTip>
+            <HintTip>数字是继承来的值（或常见默认）。拖过或改过的字段才写入覆盖。</HintTip>
           </h3>
-          <div className="samp-grid">
-            {SAMPLING_FIELDS.map((f) => (
-              <div className="field-row" key={f.key}>
-                <label>{f.label}</label>
-                <FieldNumber
-                  value={samp[f.key] ?? ""}
-                  onChange={(e) => setSamp({ ...samp, [f.key]: e.target.value })}
-                  onBlur={() => commitSampling(parseSampling(samp))}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                  }}
-                  placeholder={inherited[f.key]?.toString() ?? "默认"}
-                />
-              </div>
-            ))}
-          </div>
+          <SamplingSliders
+            draft={samp}
+            inherited={inherited}
+            onChange={(key, value) => setSamp((s) => ({ ...s, [key]: value }))}
+            onCommit={(next) => commitSampling(parseSampling(next))}
+          />
           {/* 按钮常驻：忽隐忽现的按钮像 bug，disabled 才说明"现在没有可恢复的"。 */}
           <div className="samp-reset">
             <button className="ghost" onClick={resetSampling} disabled={!overrides}>
@@ -296,18 +254,78 @@ export function SessionSettings({
             系统提示词
             <HintTip>追加在内置提示词之后，不替换它。留空只用内置提示词。</HintTip>
           </h3>
-          <textarea
-            className="prompt-input"
+          <PromptField
             value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            onBlur={(e) => commitPrompt(e.target.value)}
-            placeholder="给这个会话补充的指令"
-            rows={5}
-            spellCheck={false}
+            onChange={setPrompt}
+            onCommit={commitPrompt}
           />
 
           {error ? <p className="form-error">{error}</p> : null}
         </div>
     </Modal>
+  );
+}
+
+const PROMPT_H = { def: 120, min: 80, max: 480 };
+
+/**
+ * 系统提示词。不用 CSS `resize`：WKWebView 在 `appearance: none` 下
+ * 把系统拉伸角标吃掉，拖了等于没拖。底下那条杠才是真的拖高度。
+ */
+function PromptField({
+  value,
+  onChange,
+  onCommit,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  onCommit: (v: string) => void;
+}) {
+  const [h, setH] = useState(PROMPT_H.def);
+  const drag = useRef<{ y: number; h: number } | null>(null);
+
+  const onGripDown = (e: PointerEvent<HTMLButtonElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    drag.current = { y: e.clientY, h };
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      /* 合成事件没有活跃指针 */
+    }
+  };
+
+  const onGripMove = (e: PointerEvent<HTMLButtonElement>) => {
+    const d = drag.current;
+    if (!d) return;
+    setH(Math.min(PROMPT_H.max, Math.max(PROMPT_H.min, d.h + (e.clientY - d.y))));
+  };
+
+  const onGripUp = () => {
+    drag.current = null;
+  };
+
+  return (
+    <div className="prompt-field">
+      <textarea
+        className="prompt-input"
+        style={{ height: h }}
+        value={value}
+        onChange={(ev) => onChange(ev.target.value)}
+        onBlur={(ev) => onCommit(ev.target.value)}
+        placeholder="给这个会话补充的指令"
+        spellCheck={false}
+      />
+      <button
+        type="button"
+        className="prompt-grip"
+        aria-label="拖动调整高度"
+        title="拖动调整高度"
+        onPointerDown={onGripDown}
+        onPointerMove={onGripMove}
+        onPointerUp={onGripUp}
+        onPointerCancel={onGripUp}
+      />
+    </div>
   );
 }

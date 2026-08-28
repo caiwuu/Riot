@@ -45,3 +45,34 @@ export function Toggle({ on, onChange, label }: { on: boolean; onChange: (v: boo
     </button>
   );
 }
+
+/**
+ * 只有开关本体的版本，给 `Row` 的右列用 —— 名字已经在行的左边了，
+ * 再挂一遍标签就是同一句话说两次。读屏靠 `aria-label` 拿到它。
+ */
+export function Switch({
+  on,
+  onChange,
+  label,
+  disabled,
+}: {
+  on: boolean;
+  onChange: (v: boolean) => void;
+  label: string;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      className="switch"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      disabled={disabled}
+      onClick={() => onChange(!on)}
+    >
+      <span className={on ? "toggle-track on" : "toggle-track"}>
+        <span className="toggle-knob" />
+      </span>
+    </button>
+  );
+}

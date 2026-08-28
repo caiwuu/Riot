@@ -6,7 +6,7 @@ import {
   hooksList,
   revealInFinder,
 } from "../../bridge";
-import { HintTip } from "../HintTip";
+import { Card, CardBlock, Group, Row } from "./layout";
 
 const HOOK_EVENT_HINT: Record<string, string> = {
   PreToolUse: "工具执行前。exit 2 = 拦下这次调用",
@@ -35,45 +35,64 @@ export function HooksPane({ status, activeRoot }: { status: ConfigStatus; active
   }, [activeRoot]);
 
   return (
-    <section>
-      <div className="skills-head">
-        <h2>
-          Hooks
-          <HintTip>
-            固定检查点跑脚本：stdin 收一行事件 JSON，<b>exit 2 拦下</b>（stderr
-            给模型看），exit 0 的 stdout 作补充上下文。事件：PreToolUse / PostToolUse / Stop /
-            UserPromptSubmit。matcher 支持工具名、<code>A|B</code>、正则。
-            {activeRoot ? (
-              <>
-                {" "}
-                项目级 <code>{activeRoot}/.riot/hooks.json</code> 和全局叠加。
-              </>
-            ) : null}
-          </HintTip>
-        </h2>
-        <button className="ghost" onClick={() => void refresh()}>
-          刷新
-        </button>
-      </div>
-      <div className="about-row">
-        <code>{configDir}/hooks.json</code>
-        <button className="ghost" onClick={() => void revealInFinder(configDir)}>
-          打开目录
-        </button>
-      </div>
-      {loadError ? (
-        <div className="empty-state">
-          <p className="form-error" style={{ margin: 0 }}>
-            读取失败：{loadError}
-          </p>
-          <button onClick={() => void refresh()}>重试</button>
-        </div>
-      ) : hooks === null ? (
-        <p className="hint">读取中…</p>
-      ) : hooks.length === 0 ? (
-        <div className="empty-state">
-          <p className="empty-title">还没有 hooks</p>
-          <pre className="skill-example">{`{
+    <>
+      <Group
+        title="怎么写"
+        desc={
+          <>
+            脚本从 stdin 收一行事件 JSON：<b>exit 2 拦下</b>这次调用（stderr 给模型看），exit 0
+            的 stdout 作为补充上下文。事件有 PreToolUse / PostToolUse / Stop / UserPromptSubmit，
+            matcher 支持工具名、<code>A|B</code> 和正则。
+          </>
+        }
+      >
+        <Card>
+          <Row title="全局 hooks" desc={<code>{configDir}/hooks.json</code>}>
+            <button onClick={() => void revealInFinder(configDir)}>打开目录</button>
+          </Row>
+          {activeRoot ? (
+            <Row
+              title="项目 hooks"
+              desc={
+                <>
+                  <code>{activeRoot}/.riot/hooks.json</code>，和全局叠加。
+                </>
+              }
+            >
+              <button onClick={() => void revealInFinder(activeRoot)}>打开项目</button>
+            </Row>
+          ) : null}
+        </Card>
+      </Group>
+
+      <Group
+        title="已注册的 hooks"
+        action={
+          <button className="btn-compact" onClick={() => void refresh()}>
+            刷新
+          </button>
+        }
+      >
+        {loadError ? (
+          <div className="empty-state">
+            <p className="form-error" style={{ margin: 0 }}>
+              读取失败：{loadError}
+            </p>
+            <button onClick={() => void refresh()}>重试</button>
+          </div>
+        ) : hooks === null ? (
+          <Card>
+            <CardBlock>
+              <p className="hint" style={{ margin: 0 }}>
+                读取中…
+              </p>
+            </CardBlock>
+          </Card>
+        ) : hooks.length === 0 ? (
+          <div className="empty-state">
+            <p className="empty-title">还没有 hooks</p>
+            <p className="hint">在上面的 hooks.json 里这样写：</p>
+            <pre className="skill-example">{`{
   "PreToolUse": [
     { "matcher": "Bash",
       "hooks": [{ "type": "command", "command": "./scripts/check-cmd.sh" }] }
@@ -82,28 +101,32 @@ export function HooksPane({ status, activeRoot }: { status: ConfigStatus; active
     { "hooks": [{ "type": "command", "command": "cargo test -q" }] }
   ]
 }`}</pre>
-        </div>
-      ) : (
-        <ul className="skill-list">
-          {hooks.map((h, i) => (
-            <li key={`${h.event}-${h.command}-${i}`} className={h.error ? "skill-item bad" : "skill-item"}>
-              <div className="skill-item-head">
-                <span className="skill-name">{h.error ? "配置有问题" : h.event}</span>
-                {h.matcher ? <code className="hook-matcher">{h.matcher}</code> : null}
-                <span className="skill-source">{h.source === "project" ? "项目" : "全局"}</span>
-              </div>
-              <p className={h.error ? "form-error" : "hint"} style={{ margin: "2px 0 0" }}>
-                {h.error ? `${h.command}：${h.error}` : h.command}
-              </p>
-              {!h.error ? (
-                <p className="hint" style={{ margin: "2px 0 0" }}>
-                  {HOOK_EVENT_HINT[h.event] ?? ""}（超时 {h.timeoutSecs}s）
+          </div>
+        ) : (
+          <ul className="skill-list">
+            {hooks.map((h, i) => (
+              <li
+                key={`${h.event}-${h.command}-${i}`}
+                className={h.error ? "skill-item bad" : "skill-item"}
+              >
+                <div className="skill-item-head">
+                  <span className="skill-name">{h.error ? "配置有问题" : h.event}</span>
+                  {h.matcher ? <code className="hook-matcher">{h.matcher}</code> : null}
+                  <span className="skill-source">{h.source === "project" ? "项目" : "全局"}</span>
+                </div>
+                <p className={h.error ? "form-error" : "hint"} style={{ margin: "2px 0 0" }}>
+                  {h.error ? `${h.command}：${h.error}` : h.command}
                 </p>
-              ) : null}
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
+                {!h.error ? (
+                  <p className="hint" style={{ margin: "2px 0 0" }}>
+                    {HOOK_EVENT_HINT[h.event] ?? ""}（超时 {h.timeoutSecs}s）
+                  </p>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        )}
+      </Group>
+    </>
   );
 }

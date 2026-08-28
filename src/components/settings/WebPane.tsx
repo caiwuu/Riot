@@ -7,8 +7,8 @@ import {
   testSearchBackend,
 } from "../../bridge";
 import { FieldSelect } from "../FieldSelect";
-import { HintTip } from "../HintTip";
-import { FormError, Toggle, blurOnEnter } from "./shared";
+import { Card, CardBlock, Group, Row } from "./layout";
+import { FormError, Switch, blurOnEnter } from "./shared";
 
 /**
  * 抓取、搜索、蒸馏三块。
@@ -71,97 +71,101 @@ export function WebPane({
 
   return (
     <>
-      <section>
-        <h2>
-          网页抓取
-          <HintTip>首次访问每个域名会询问。内网地址一律拒绝。</HintTip>
-        </h2>
-        <Toggle
-          on={web.fetchEnabled}
-          onChange={(v) => void patch({ fetchEnabled: v })}
-          label="允许模型抓取网页（WebFetch）"
-        />
-      </section>
-
-      <section>
-        <h2>搜索</h2>
-        <Toggle
-          on={web.searchEnabled}
-          onChange={(v) => void patch({ searchEnabled: v })}
-          label="允许模型联网搜索（WebSearch）"
-        />
-        <div className="field-row">
-          <label>
-            自定义 SearXNG
-            <HintTip>
-              留空使用内置搜索。自建实例要求 <code>server.limiter: false</code>，且{" "}
-              <code>search.formats</code> 含 <code>json</code>。
-            </HintTip>
-          </label>
-          <div className="input-with-btn">
-            <input
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              onBlur={() => {
-                const v = url.trim();
-                if (v === web.searxngUrl) return;
-                void patch({ searxngUrl: v }).then((ok) => {
-                  // 保存被拒时退回真值，别让输入框展示一个没生效的地址
-                  if (!ok) setUrl(web.searxngUrl);
-                });
-              }}
-              onKeyDown={blurOnEnter}
-              placeholder="留空则使用内置搜索"
-              spellCheck={false}
-              disabled={!web.searchEnabled}
+      <Group title="网页访问">
+        <Card>
+          <Row
+            title="抓取网页"
+            desc="允许模型打开链接读正文（WebFetch）。首次访问每个域名会询问，内网地址一律拒绝。"
+          >
+            <Switch
+              on={web.fetchEnabled}
+              onChange={(v) => void patch({ fetchEnabled: v })}
+              label="抓取网页"
             />
-            <span
-              className="tip-wrap"
-              title={
-                !web.searchEnabled
-                  ? "先打开上面的搜索开关"
-                  : url.trim()
-                    ? "会真发一次查询"
-                    : "会测内置搜索"
-              }
-            >
-              <button
-                className="btn-compact"
-                onClick={() => void doTest()}
-                disabled={testing || !web.searchEnabled}
+          </Row>
+          <Row title="联网搜索" desc="允许模型自己发起搜索并读取结果（WebSearch）。">
+            <Switch
+              on={web.searchEnabled}
+              onChange={(v) => void patch({ searchEnabled: v })}
+              label="联网搜索"
+            />
+          </Row>
+          <Row
+            title="自定义 SearXNG"
+            desc={
+              <>
+                留空使用内置搜索。自建实例要求 <code>server.limiter: false</code>，且{" "}
+                <code>search.formats</code> 含 <code>json</code>。
+              </>
+            }
+            stack
+          >
+            <div className="input-with-btn">
+              <input
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                onBlur={() => {
+                  const v = url.trim();
+                  if (v === web.searxngUrl) return;
+                  void patch({ searxngUrl: v }).then((ok) => {
+                    // 保存被拒时退回真值，别让输入框展示一个没生效的地址
+                    if (!ok) setUrl(web.searxngUrl);
+                  });
+                }}
+                onKeyDown={blurOnEnter}
+                placeholder="留空则使用内置搜索"
+                spellCheck={false}
+                disabled={!web.searchEnabled}
+              />
+              <span
+                className="tip-wrap"
+                title={
+                  !web.searchEnabled
+                    ? "先打开上面的搜索开关"
+                    : url.trim()
+                      ? "会真发一次查询"
+                      : "会测内置搜索"
+                }
               >
-                {testing ? "测试中…" : "测试"}
-              </button>
-            </span>
-          </div>
-        </div>
-        {testResult ? (
-          <p className={testResult.ok ? "test-result ok" : "test-result err"}>{testResult.text}</p>
-        ) : null}
-      </section>
+                <button
+                  className="btn-compact"
+                  onClick={() => void doTest()}
+                  disabled={testing || !web.searchEnabled}
+                >
+                  {testing ? "测试中…" : "测试"}
+                </button>
+              </span>
+            </div>
+            {testResult ? (
+              <p className={testResult.ok ? "test-result ok" : "test-result err"}>
+                {testResult.text}
+              </p>
+            ) : null}
+          </Row>
+        </Card>
+      </Group>
 
-      <section>
-        <h2>
-          正文蒸馏
-          <HintTip>用便宜的模型把网页压成摘要，省上下文。留空则直接截断。</HintTip>
-        </h2>
-        <div className="field-row">
-          <label>辅助模型</label>
-          <FieldSelect
-            value={allModels.some((m) => m.value === web.distillModel) ? web.distillModel : ""}
-            onChange={(v) => void patch({ distillModel: v })}
-            options={[
-              { value: "", label: "不蒸馏（返回截断的正文）" },
-              ...allModels,
-            ]}
-          />
-        </div>
-        {web.distillModel && !allModels.some((m) => m.value === web.distillModel) ? (
-          <p className="key-state warn">
-            <code>{web.distillModel}</code> 已不存在，当前不会蒸馏。
-          </p>
-        ) : null}
-      </section>
+      <Group title="正文蒸馏">
+        <Card>
+          <Row
+            title="辅助模型"
+            desc="用便宜的模型把网页压成摘要，省上下文。不选则直接截断正文。"
+          >
+            <FieldSelect
+              value={allModels.some((m) => m.value === web.distillModel) ? web.distillModel : ""}
+              onChange={(v) => void patch({ distillModel: v })}
+              options={[{ value: "", label: "不蒸馏（返回截断的正文）" }, ...allModels]}
+            />
+          </Row>
+          {web.distillModel && !allModels.some((m) => m.value === web.distillModel) ? (
+            <CardBlock>
+              <p className="key-state warn" style={{ margin: 0 }}>
+                <code>{web.distillModel}</code> 已不存在，当前不会蒸馏。
+              </p>
+            </CardBlock>
+          ) : null}
+        </Card>
+      </Group>
 
       {error ? <FormError text={error} /> : null}
     </>

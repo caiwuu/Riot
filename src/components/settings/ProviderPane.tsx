@@ -7,7 +7,7 @@ import {
   setConfig,
 } from "../../bridge";
 import { FieldSelect } from "../FieldSelect";
-import { HintTip } from "../HintTip";
+import { Card, CardBlock, Group, Row } from "./layout";
 import { ProviderEditor } from "./ProviderEditor";
 import { type AskConfirm, FormError } from "./shared";
 
@@ -113,15 +113,15 @@ export function ProviderPane({
   // 少了它这里是一片空白，用户看不出是"还没配"还是"设置页坏了"。
   if (!sel) {
     return (
-      <section>
-        <h2>服务方</h2>
+      <Group title="服务方">
         <div className="empty-state">
           <p className="empty-title">还没有服务方</p>
+          <p className="hint">加一家服务方、填上 API key，就可以开始对话了。</p>
           <button className="primary" onClick={addProvider}>
             添加服务方
           </button>
         </div>
-      </section>
+      </Group>
     );
   }
 
@@ -129,11 +129,14 @@ export function ProviderPane({
     <>
       {/* 全局设置放在最上面，而且不在任何一个服务方的编辑器里面 ——
           放在下面的话它看着就像"当前这家的设置"，而它管的是所有模型。 */}
-      <VisionFallback cfg={cfg} onCommit={commit} />
-      <SubagentModel cfg={cfg} onCommit={commit} />
+      <Group title="全局模型分工">
+        <Card>
+          <VisionFallback cfg={cfg} onCommit={commit} />
+          <SubagentModel cfg={cfg} onCommit={commit} />
+        </Card>
+      </Group>
 
-      <section>
-        <h2>服务方</h2>
+      <Group title="服务方" desc="切换要编辑的服务方。带圆点的是当前对话在用的那家。">
         <div className="prov-tabs">
           {cfg.providers.map((p) => (
             <button
@@ -152,7 +155,7 @@ export function ProviderPane({
             +
           </button>
         </div>
-      </section>
+      </Group>
 
       <ProviderEditor
         key={sel.id}
@@ -203,38 +206,34 @@ function VisionFallback({
   const known = options.some((o) => o.value === cfg.visionModel);
 
   return (
-    <section>
-      <h2>
-        视觉兼容（全局）
-        <HintTip>
-          只对没勾「看图」的模型生效：先让这里配的模型看图、转成文字，再交给主模型。
-          主模型自己能收图时不走这条路，直接发原图。转述有损，精确像素判断不要依赖它。
-        </HintTip>
-      </h2>
-      <div className="field-row">
-        <label>兼容模型</label>
+    <>
+      <Row
+        title="视觉兼容"
+        desc="只对没勾「看图」的模型生效：先让这里配的模型看图、转成文字，再交给主模型。主模型自己能收图时直接发原图。转述有损，精确像素判断别依赖它。"
+      >
         <FieldSelect
           value={known ? cfg.visionModel : ""}
           onChange={(v) => void onCommit({ ...cfg, visionModel: v })}
           disabled={options.length === 0}
-          options={[
-            { value: "", label: "不转（截图工具会说用不了）" },
-            ...options,
-          ]}
+          options={[{ value: "", label: "不转（截图工具会说用不了）" }, ...options]}
         />
-      </div>
+      </Row>
       {options.length === 0 ? (
-        <p className="hint">
-          还没有标记为能看图的模型。先在上面的模型列表里给一个视觉模型点上「看图」。
-        </p>
+        <CardBlock>
+          <p className="hint" style={{ margin: 0 }}>
+            还没有标记为能看图的模型。先在下面的模型列表里给一个视觉模型点上「看图」。
+          </p>
+        </CardBlock>
       ) : null}
       {cfg.visionModel && !known ? (
-        <p className="key-state warn">
-          <code>{cfg.visionModel}</code> 已不可用（模型被删了，或者它的「看图」被
-          取消了），当前不会转述。
-        </p>
+        <CardBlock>
+          <p className="key-state warn" style={{ margin: 0 }}>
+            <code>{cfg.visionModel}</code>{" "}
+            已不可用（模型被删了，或者它的「看图」被取消了），当前不会转述。
+          </p>
+        </CardBlock>
       ) : null}
-    </section>
+    </>
   );
 }
 
@@ -263,16 +262,11 @@ function SubagentModel({
   const known = options.some((o) => o.value === cfg.subagentModel);
 
   return (
-    <section>
-      <h2>
-        子 agent 便宜档（全局）
-        <HintTip>
-          只读侦察的子 agent 走这一档。翻代码、写报告不改东西，但搜索结果全进上下文，往往更吃
-          token。会改代码的子 agent 始终用主模型。
-        </HintTip>
-      </h2>
-      <div className="field-row">
-        <label>侦察模型</label>
+    <>
+      <Row
+        title="子 agent 便宜档"
+        desc="只读侦察的子 agent 走这一档。翻代码、写报告不改东西，但搜索结果全进上下文，往往更吃 token。会改代码的子 agent 始终用主模型。"
+      >
         <FieldSelect
           value={known ? cfg.subagentModel : ""}
           onChange={(v) => void onCommit({ ...cfg, subagentModel: v })}
@@ -282,12 +276,14 @@ function SubagentModel({
             ...options.filter((o) => o.value !== activeValue),
           ]}
         />
-      </div>
+      </Row>
       {cfg.subagentModel && !known ? (
-        <p className="key-state warn">
-          <code>{cfg.subagentModel}</code> 已不可用（模型被删了），侦察当前走主模型。
-        </p>
+        <CardBlock>
+          <p className="key-state warn" style={{ margin: 0 }}>
+            <code>{cfg.subagentModel}</code> 已不可用（模型被删了），侦察当前走主模型。
+          </p>
+        </CardBlock>
       ) : null}
-    </section>
+    </>
   );
 }

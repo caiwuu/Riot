@@ -64,8 +64,6 @@ export function BrowserPanel({
   /** 导航失败给一行原因 —— 之前 go() 无 catch，慢站/打不开时画面停在原地，
    *  用户分不清"在加载/挂了/没点上"。 */
   const [navError, setNavError] = useState("");
-  /** IME 落点区是否聚焦。聚焦时给画面区描边，"键盘现在打进页面"才有视觉表达。 */
-  const [imeFocused, setImeFocused] = useState(false);
   const viewRef = useRef<HTMLDivElement>(null);
   const imeRef = useRef<HTMLTextAreaElement>(null);
   /** 上一次点击的位置。输入法的候选窗口贴着它弹。 */
@@ -598,7 +596,7 @@ export function BrowserPanel({
       {navError ? <div className="browser-nav-error">{navError}</div> : null}
 
       <div
-        className={imeFocused ? "browser-view focused" : "browser-view"}
+        className="browser-view"
         ref={viewRef}
         onMouseDown={(e) => {
           // `[约束]` 必须拦掉 mousedown 的默认行为。默认行为是"把焦点移给
@@ -688,8 +686,6 @@ export function BrowserPanel({
           ref={imeRef}
           aria-label="页面键盘输入"
           style={{ left: caret.x, top: caret.y }}
-          onFocus={() => setImeFocused(true)}
-          onBlur={() => setImeFocused(false)}
           // 输入法自己有候选和纠错，浏览器再插一手只会打架。
           spellCheck={false}
           autoCapitalize="off"

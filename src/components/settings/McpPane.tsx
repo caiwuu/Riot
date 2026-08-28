@@ -11,8 +11,8 @@ import {
   mcpStatus,
   setConfig,
 } from "../../bridge";
-import { HintTip } from "../HintTip";
-import { type AskConfirm, type LeaveGuard, FormError, Toggle, blurOnEnter } from "./shared";
+import { Card, CardBlock, Group, Row } from "./layout";
+import { type AskConfirm, type LeaveGuard, FormError, Switch, blurOnEnter } from "./shared";
 
 /**
  * MCP 服务器管理。
@@ -167,14 +167,15 @@ export function McpPane({
   // JSON 视图：显示并编辑标准格式（{"mcpServers": {...}}），整体替换。
   if (jsonDraft !== null) {
     return (
-      <section>
-        <h2>
-          MCP 服务器 · JSON
-          <HintTip>
+      <Group
+        title="JSON 配置"
+        desc={
+          <>
             标准格式，和 Claude Desktop / Cursor / Cline 通用。README 里的{" "}
             <code>mcpServers</code> 片段可以整段粘贴。保存会整体替换当前列表。
-          </HintTip>
-        </h2>
+          </>
+        }
+      >
         <textarea
           className="mcp-json-input"
           value={jsonDraft}
@@ -211,14 +212,13 @@ export function McpPane({
             </button>
           </div>
         </div>
-      </section>
+      </Group>
     );
   }
 
   if (!sel) {
     return (
-      <section>
-        <h2>MCP 服务器</h2>
+      <Group title="服务器">
         <div className="empty-state">
           <p className="empty-title">还没有 MCP 服务器</p>
           <p className="hint">
@@ -233,29 +233,35 @@ export function McpPane({
           </div>
           {error ? <p className="form-error">{error}</p> : null}
         </div>
-      </section>
+      </Group>
     );
   }
 
   return (
     <>
-      <section>
-        <div className="skills-head">
-          <h2>
-            MCP 服务器
-            <HintTip>
-              工具名是 <code>mcp__服务器id__…</code>，权限规则按它匹配。每个工具首次调用会像内置工具一样询问。
-            </HintTip>
-          </h2>
-          <div className="mcp-head-actions">
-            <button className="ghost" onClick={addServer}>
+      <Group
+        title="服务器"
+        desc={
+          <>
+            工具名是 <code>mcp__服务器id__…</code>
+            ，权限规则按它匹配。每个工具首次调用会像内置工具一样询问。
+          </>
+        }
+        action={
+          <div className="set-group-actions">
+            <button className="btn-compact" onClick={addServer}>
               添加
             </button>
-            <button className="ghost" onClick={() => void openJson()} title="以标准 JSON 格式查看和编辑">
+            <button
+              className="btn-compact"
+              onClick={() => void openJson()}
+              title="以标准 JSON 格式查看和编辑"
+            >
               JSON
             </button>
           </div>
-        </div>
+        }
+      >
         {/* 竖排列表而不是 pill 铺排：几十个服务器时 pill 会糊成一片，
             长名字还会把整行撑爆。行内名字省略号截断，超高滚动。 */}
         <ul className="mcp-list">
@@ -290,7 +296,7 @@ export function McpPane({
             );
           })}
         </ul>
-      </section>
+      </Group>
 
       <McpServerEditor
         key={sel.id}
@@ -392,86 +398,97 @@ function McpServerEditor({
   };
 
   return (
-    <section>
-      <div className={`mcp-status ${state}`}>
-        <span className={`mcp-dot ${state}`} />
-        <span className="mcp-status-text">{stateText[state]}</span>
-        {server.enabled !== false ? (
-          <button className="ghost" onClick={() => void doRestart()} disabled={restarting}>
-            {restarting ? "重连中…" : "重连"}
-          </button>
-        ) : null}
-      </div>
-      {state === "connected" && live && live.tools.length > 0 ? (
-        <ul className="mcp-tools">
-          {(toolsOpen ? live.tools : live.tools.slice(0, MCP_TOOLS_SHOWN)).map((t) => (
-            <li key={t}>
-              <span className="mcp-tool-chip" title={t}>
-                {mcpToolShortName(t)}
-              </span>
-            </li>
-          ))}
-          {live.tools.length > MCP_TOOLS_SHOWN ? (
-            <li>
-              <button type="button" className="mcp-tools-more" onClick={() => setToolsOpen(!toolsOpen)}>
-                {toolsOpen ? "收起" : `还有 ${live.tools.length - MCP_TOOLS_SHOWN} 个`}
+    <Group title={server.name || server.id}>
+      <Card>
+        <CardBlock>
+          <div className={`mcp-status ${state}`}>
+            <span className={`mcp-dot ${state}`} />
+            <span className="mcp-status-text">{stateText[state]}</span>
+            {server.enabled !== false ? (
+              <button className="ghost" onClick={() => void doRestart()} disabled={restarting}>
+                {restarting ? "重连中…" : "重连"}
               </button>
-            </li>
+            ) : null}
+          </div>
+          {state === "connected" && live && live.tools.length > 0 ? (
+            <ul className="mcp-tools">
+              {(toolsOpen ? live.tools : live.tools.slice(0, MCP_TOOLS_SHOWN)).map((t) => (
+                <li key={t}>
+                  <span className="mcp-tool-chip" title={t}>
+                    {mcpToolShortName(t)}
+                  </span>
+                </li>
+              ))}
+              {live.tools.length > MCP_TOOLS_SHOWN ? (
+                <li>
+                  <button
+                    type="button"
+                    className="mcp-tools-more"
+                    onClick={() => setToolsOpen(!toolsOpen)}
+                  >
+                    {toolsOpen ? "收起" : `还有 ${live.tools.length - MCP_TOOLS_SHOWN} 个`}
+                  </button>
+                </li>
+              ) : null}
+            </ul>
           ) : null}
-        </ul>
-      ) : null}
+        </CardBlock>
 
-      <Toggle
-        on={server.enabled !== false}
-        onChange={(v) => onPatch({ enabled: v })}
-        label="启用这个服务器"
-      />
-
-      <div className="field-row">
-        <label>名称</label>
-        <input
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onBlur={() => name.trim() !== (server.name ?? "") && onPatch({ name: name.trim() })}
-          onKeyDown={blurOnEnter}
-          autoFocus={autoFocusName}
-          placeholder={server.id}
-          spellCheck={false}
-        />
-      </div>
-      <div className="field-row">
-        <label>命令</label>
-        <input
-          value={command}
-          onChange={(e) => setCommand(e.target.value)}
-          onBlur={() => command.trim() !== server.command && onPatch({ command: command.trim() })}
-          onKeyDown={blurOnEnter}
-          placeholder="npx / uvx / 可执行文件路径"
-          spellCheck={false}
-        />
-      </div>
-      <div className="field-row">
-        <label>参数</label>
-        <textarea
-          value={args}
-          onChange={(e) => setArgs(e.target.value)}
-          onBlur={commitArgs}
-          placeholder={"一行一个，如：\n-y\n@modelcontextprotocol/server-filesystem\n/tmp"}
-          rows={4}
-          spellCheck={false}
-        />
-      </div>
-      <div className="field-row">
-        <label>环境变量</label>
-        <textarea
-          value={env}
-          onChange={(e) => setEnv(e.target.value)}
-          onBlur={commitEnv}
-          placeholder={"一行一个 KEY=VALUE，如：\nGITHUB_TOKEN=ghp_..."}
-          rows={2}
-          spellCheck={false}
-        />
-      </div>
+        <Row title="启用" desc="关掉后进程会停，它的工具在下一轮对话里消失。">
+          <Switch
+            on={server.enabled !== false}
+            onChange={(v) => onPatch({ enabled: v })}
+            label="启用这个服务器"
+          />
+        </Row>
+        <Row title="名称" desc="只在界面上显示。工具名用的是服务器 id。">
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onBlur={() => name.trim() !== (server.name ?? "") && onPatch({ name: name.trim() })}
+            onKeyDown={blurOnEnter}
+            autoFocus={autoFocusName}
+            placeholder={server.id}
+            spellCheck={false}
+            aria-label="名称"
+          />
+        </Row>
+        <Row title="启动命令">
+          <input
+            value={command}
+            onChange={(e) => setCommand(e.target.value)}
+            onBlur={() => command.trim() !== server.command && onPatch({ command: command.trim() })}
+            onKeyDown={blurOnEnter}
+            placeholder="npx / uvx / 可执行文件路径"
+            spellCheck={false}
+            aria-label="启动命令"
+          />
+        </Row>
+        <Row title="参数" desc="一行一个。" stack>
+          <textarea
+            className="paths-input"
+            value={args}
+            onChange={(e) => setArgs(e.target.value)}
+            onBlur={commitArgs}
+            placeholder={"如：\n-y\n@modelcontextprotocol/server-filesystem\n/tmp"}
+            rows={4}
+            spellCheck={false}
+            aria-label="参数"
+          />
+        </Row>
+        <Row title="环境变量" desc="一行一个 KEY=VALUE。" stack>
+          <textarea
+            className="paths-input"
+            value={env}
+            onChange={(e) => setEnv(e.target.value)}
+            onBlur={commitEnv}
+            placeholder={"如：\nGITHUB_TOKEN=ghp_..."}
+            rows={2}
+            spellCheck={false}
+            aria-label="环境变量"
+          />
+        </Row>
+      </Card>
       <div className="editor-foot">
         <span />
         <div className="editor-foot-actions">
@@ -480,6 +497,6 @@ function McpServerEditor({
           </button>
         </div>
       </div>
-    </section>
+    </Group>
   );
 }
