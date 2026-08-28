@@ -505,6 +505,12 @@ impl SessionManager {
             s.flush_log().await;
         }
         self.mcp.shutdown().await;
+        // 回收本进程写下的沙箱授权。会话级（沙箱 Drop）不再各自撤 —— Windows
+        // 上 holder 是内核 pid、多会话共享，会话级撤会连累并发会话（见
+        // riot_runtime 的 sandbox_win）。所以在这里、所有 turn 都停掉之后撤
+        // 一次，撤的是本内核名下全部；强杀路径由下次启动的 recover 兜底。
+        // 起 srt-win 子进程 + 遍历 ACL，放阻塞池，别堵住关闭用的 runtime。
+        let _ = tokio::task::spawn_blocking(riot_runtime::revoke_all_sandbox_grants).await;
     }
 }
 

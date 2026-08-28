@@ -676,6 +676,21 @@ pub fn recover_orphan_sandbox_state() {
     crate::sandbox_win::recover_orphans();
 }
 
+/// 内核退出前回收本进程写下的全部沙箱授权。**宿主 shutdown 调一次。**
+///
+/// 和 [`recover_orphan_sandbox_state`] 对称：那个在**启动**时收上一个（已死）
+/// 内核残留的孤儿，这个在**退出**时收自己的。
+///
+/// `[约束]` 会话级（`SandboxedRunner` 持有的 [`ActiveSandbox`] 的 Drop）
+/// **不再**各自撤授权：Windows 上 holder 是内核进程 pid，同一内核的多会话
+/// 共享它，会话级撤会连累并发会话（见 `sandbox_win::WinSandbox` 的 Drop）。
+/// 所以撤授权抬到进程级，在这里一次性做。非 Windows 空操作（seatbelt 不留
+/// 持久状态）。
+pub fn revoke_all_sandbox_grants() {
+    #[cfg(windows)]
+    crate::sandbox_win::revoke_all();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1581,7 +1596,11 @@ mod tests {
             .is_ok_and(|o| o.status.success());
         assert!(!leaked, "沙箱内的注册表写不该落到真实用户的 HKCU 上");
 
-        drop(runner); // 触发 Drop：回收 ACE + 删会话 temp
+        drop(runner); // 触发 Drop：删会话 temp（ACE 不在这里撤，见 WinSandbox::Drop）
+        // 会话级不再撤 ACE，改由内核退出的一次性回收做。测试进程就是 holder
+        // （grant/revoke 都用 `std::process::id()`），显式调它把本用例写下的
+        // ACE 收干净 —— 否则会留给同一 test 二进制里后跑的用例。
+        revoke_all_sandbox_grants();
         let _ = std::fs::remove_dir_all(&base);
     }
 }

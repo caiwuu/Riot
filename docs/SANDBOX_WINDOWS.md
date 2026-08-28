@@ -112,20 +112,31 @@ stderr 的东西都会污染那条通道。
 
 | 时机 | 动作 |
 |---|---|
-| 内核启动 | `acl recover`（回收上次崩溃残留的 ACE）|
+| 内核启动 | `acl recover`（回收上一个已死内核残留的孤儿 ACE）|
 | 会话激活 | `user status` 查装机 → 建会话 temp → `acl grant`（可写目录 + temp）→ `acl stamp`（逃逸面 DENY）→ 冒烟 |
 | 每条命令 | `srt-win exec --quiet --env … -- <命令>` |
-| 会话结束 | `acl revoke` + `acl restore` + 删会话 temp |
+| 会话结束 | 删会话 temp（**不撤 ACE**，见下）|
+| 内核退出 | `acl revoke` + `acl restore`（撤本进程名下全部；宿主 shutdown 调）|
 
 `grant` 和 `stamp` 是一对，回收也必须成对（`revoke` 撤 ALLOW，`restore` 撤
 DENY）。只撤一边会留下另一边，而留下 DENY 尤其糟：下次会话的 grant 压不过它，
 表现是沙箱内的 cargo 莫名其妙写不了 `.cargo\bin`。
 
-holder 是**内核进程的 pid**，不是 `srt-win acl` 那个短命进程的。srt-win 按
-路径引用计数，同机另一个会话正用着同一个工作区时，它的 ACE 不会被连坐撤掉。
+**撤授权在内核退出、不在会话结束。** holder 是**内核进程的 pid**，同一内核里
+所有会话共享它，而 `acl revoke` 按 holder 撤名下的**全部**授权、不按路径。曾经
+在会话结束（`WinSandbox::Drop`）撤，以为“srt-win 按路径引用计数”能护住并发
+会话 —— 那是错的：引用计数只在**不同 holder pid** 间生效，同一内核的多会话
+共享一个 holder，对同一路径是 UPSERT 成一行，一个会话结束就把它撤了，连累
+另一个还在跑命令的会话（工作区突然写不进，os error 5）。所以撤授权抬到进程级：
+内核只有一个，退出时撤一次，撤的正是自己名下全部（`revoke_all`）。强杀路径由
+下次启动的 `acl recover` 兜底（旧 pid 已死，崩溃恢复认出死 holder 回收）。
+
+代价：一个会话结束 / 换档后，它的授权留到内核退出才撤，这中间可写面是各会话
+之和。对单用户桌面有界、可接受；要即时收窄得引入进程级引用计数（未做）。
 
 `recover` 不带 `--force`：那个会无视 holder 存活情况横扫，同机双开会踩到另一
-个内核进程正在用的授权。
+个内核进程正在用的授权。而按 holder 存活判定的普通 `recover` 只回收**已死**
+内核的孤儿，正在跑的另一个内核（不同 pid）的授权不受影响。
 
 ### 3.5 会话 temp 为什么还在
 

@@ -31,6 +31,6 @@ pub use fs::{MemoryFileState, SystemFs};
 pub use proc::SystemProcessRunner;
 pub use sandbox::{
     ActiveSandbox, SandboxBlocker, SandboxPolicy, SandboxStatus, SandboxedRunner,
-    recover_orphan_sandbox_state,
+    recover_orphan_sandbox_state, revoke_all_sandbox_grants,
 };
 pub use web::SystemWebClient;

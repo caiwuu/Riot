@@ -54,14 +54,19 @@ use riot_protocol::tool::ProcessSpec;
 /// 已激活的 Windows 沙箱。
 ///
 /// 拿到它意味着:`srt-win` 装过了(账户 + 凭证在位),而且本会话的可写目录
-/// 已经拿到了沙箱账户的 ALLOW ACE。`Drop` 时按 holder pid 一次性回收。
+/// 已经拿到了沙箱账户的 ALLOW ACE。
+///
+/// `Drop` **只删会话 temp、不撤 ACE** —— holder 是内核 pid、多会话共享，
+/// 会话级撤会连累并发会话。撤授权在内核退出时统一做（[`revoke_all`]），
+/// 见 `Drop` 的说明。
 pub(crate) struct WinSandbox {
     /// 怎么调 `srt-win`。
     srt: SrtWin,
     /// 沙箱账户的 SID。`acl` 的每个子命令都要带,exec 不用。
     sid: String,
-    /// 本会话授权过的路径。只用于 `Drop` 的日志——真正的账在 srt-win 自己
-    /// 的状态库里,按 holder pid 记,`acl revoke` 一次清干净。
+    /// 本会话授权过的路径。给 [`WinSandbox::stamp_protected`] 现算敏感面用
+    /// （`stamp_targets`）——真正的账在 srt-win 自己的状态库里，按 holder pid
+    /// 记，内核退出时 `acl revoke` 一次清干净。
     granted: Vec<PathBuf>,
     /// 会话专属 temp 子目录。见 [`session_temp_env`]。
     session_temp: PathBuf,
@@ -134,48 +139,32 @@ impl WinSandbox {
 
 impl Drop for WinSandbox {
     fn drop(&mut self) {
-        let srt = self.srt.clone();
-        let sid = std::mem::take(&mut self.sid);
-        let n = self.granted.len();
+        // `[约束]` 会话级**不撤 ACE**。holder 是内核进程 pid
+        // （`std::process::id()`），同一内核里所有会话共享它，而
+        // `acl revoke` 按 holder 撤名下的**全部**授权、不按路径
+        // （见 srt-win 的 `release_aces`）。在这里撤，会连带撤掉别的**并发
+        // 会话**正在用的工作区 / 读授权 —— 表现是：开着 B 会话跑命令时关掉
+        // A 会话，B 的沙箱进程突然写不进工作区（os error 5），而工作区本该
+        // 可写，模型读不懂只会原地打转。
+        //
+        // 曾经以为“srt-win 按路径引用计数”能护住并发会话，那是错的：引用
+        // 计数只在**不同 holder pid** 间生效，同一内核的多会话共享一个
+        // holder，对同一路径是 UPSERT 成一行，照撤不误。
+        //
+        // 授权改在**内核退出**时一次性撤（[`revoke_all`]，宿主 shutdown 调），
+        // 强杀路径由下次启动的 [`recover_orphans`] 兜底（旧内核 pid 已死，
+        // srt-win 的崩溃恢复认出死 holder 回收）。代价是一个会话结束 / 换档
+        // 后，它的授权会留到内核退出 —— 对单用户桌面有界、可接受。
+        //
+        // 这里只删会话专属 temp（pid+nonce，本会话独有，删它不连累别人）。
+        // 它的 grant 行留在 srt-win 的状态库里，回收时路径已不存在，按
+        // Missing 清掉。
         let temp = std::mem::take(&mut self.session_temp);
+        // 删的可能是装了编译中间产物的树，走几秒；Drop 常在 tokio 工作线程
+        // 上，同步删会堵住 runtime。
         let cleanup = move || {
-            // 按 holder pid 回收本会话写下的 ACE。srt-win 内部按路径引用
-            // 计数,归零才真撤——同机另一个会话正用着同一个工作区时,它的
-            // ACE 不会被我们连坐撤掉。
-            //
-            // `[约束]` 两笔账要分开撤:grant 的 ALLOW 走 `revoke`,stamp 的
-            // DENY 走 `restore`。只撤一边会留下另一边,而留下 DENY 尤其糟 ——
-            // 下一次会话的 grant 压不过它(DENY 在 DACL 求值里优先),表现是
-            // 沙箱内的 cargo 莫名其妙写不了 `.cargo\bin`。
-            let pid = std::process::id().to_string();
-            for (what, sub) in [("授权", "revoke"), ("敏感面 DENY", "restore")] {
-                match run_srt(
-                    &srt,
-                    &[
-                        "acl",
-                        sub,
-                        "--holder-pid",
-                        &pid,
-                        "--sandbox-user-sid",
-                        &sid,
-                        "--json",
-                    ],
-                    None,
-                ) {
-                    Ok(_) => tracing::debug!(paths = n, kind = what, "沙箱 ACE 已回收"),
-                    // 撤不掉不 panic:srt-win 的状态库在下一次 acl 操作时会跑
-                    // 崩溃恢复(它的 state_db 模块头写明"crash-recovery runs
-                    // unconditionally at every acquire"),孤儿 ACE 由那条路兜底。
-                    Err(e) => {
-                        tracing::warn!(error = %e, kind = what, "回收沙箱 ACE 失败,留给下次崩溃恢复");
-                    }
-                }
-            }
             let _ = std::fs::remove_dir_all(&temp);
         };
-        // 回收要起子进程、还要遍历目录树改 ACL,`~/.cargo` 那种十万文件的树
-        // 能走上几秒。Drop 常发生在 tokio 工作线程上,同步做就是把 runtime
-        // 堵在那儿。
         match tokio::runtime::Handle::try_current() {
             Ok(rt) => drop(rt.spawn_blocking(cleanup)),
             Err(_) => cleanup(),
@@ -423,6 +412,55 @@ pub(crate) fn recover_orphans() {
     match run_srt(&srt, &["acl", "recover", "--json"], None) {
         Ok(out) => tracing::debug!(result = %out.trim(), "沙箱孤儿授权回收完毕"),
         Err(e) => tracing::info!(error = %e, "沙箱孤儿授权回收跳过"),
+    }
+}
+
+/// 内核退出前，一次性撤掉本进程写下的**全部**沙箱授权。**宿主 shutdown 调一次。**
+///
+/// 和 [`recover_orphans`] 对称：那个在**启动**时收上一个（已死）内核残留的
+/// 孤儿，这个在**退出**时收自己的。
+///
+/// 为什么把撤授权抬到进程级、而不放在 [`WinSandbox`] 的 `Drop`：holder 是
+/// 内核进程 pid，同一内核里所有会话共享它，会话级撤会连累并发会话（见那里
+/// 的说明）。内核只有一个，退出时撤一次，撤的正是自己名下的全部。
+///
+/// 两笔账分开撤：grant 的 ALLOW 走 `revoke`，stamp 的 DENY 走 `restore`
+/// （Windows 当前不 grant home 缓存，DENY 恒空，但仍照撤，语义对齐）。撤不掉
+/// 不 panic：holder 随进程退出即死，下次启动的 [`recover_orphans`] 会认出它
+/// 兜底回收。
+///
+/// 阻塞：起 srt-win 子进程 + 遍历 ACL，调用方（shutdown）要放阻塞上下文。
+pub(crate) fn revoke_all() {
+    let Some(srt) = SrtWin::locate() else { return };
+    let sid = match sandbox_user_sid(&srt) {
+        Ok(Some(s)) => s,
+        // 没装 / 查不出来：本来就没有我们写下的 ACE 可撤。
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(error = %e, "退出回收：查沙箱 SID 失败，跳过（下次启动 recover 兜底）");
+            return;
+        }
+    };
+    let pid = std::process::id().to_string();
+    for (what, sub) in [("授权", "revoke"), ("敏感面 DENY", "restore")] {
+        match run_srt(
+            &srt,
+            &[
+                "acl",
+                sub,
+                "--holder-pid",
+                &pid,
+                "--sandbox-user-sid",
+                &sid,
+                "--json",
+            ],
+            None,
+        ) {
+            Ok(_) => tracing::debug!(kind = what, "退出回收：沙箱 ACE 已撤"),
+            Err(e) => {
+                tracing::warn!(error = %e, kind = what, "退出回收失败，留给下次启动 recover");
+            }
+        }
     }
 }
 
@@ -1211,7 +1249,9 @@ mod tests {
         assert_eq!(w.cwd, PathBuf::from("/work"));
         // 别把自己也 exempt 了 —— 那样 SandboxedRunner 会直接透传,沙箱白套。
         assert!(!w.sandbox_exempt);
-        std::mem::forget(sb); // 别在测试里触发 Drop 去起真进程
+        // Drop 现在只删会话 temp（不再起 srt 进程撤 ACE），forget 只是省掉
+        // 对一个不存在路径 `/t` 的 remove_dir_all —— 留着无害。
+        std::mem::forget(sb);
     }
 
     /// 分发标记必须和上游常量一致。写死字面量是因为 mac 上取不到那个符号
