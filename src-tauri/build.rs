@@ -46,6 +46,7 @@ const COMMANDS: &[&str] = &[
     "browser_new_tab",
     "browser_close_tab",
     "browser_select_tab",
+    "browser_watch_tabs",
     "browser_resize",
     "browser_input",
     "browser_scope_list",

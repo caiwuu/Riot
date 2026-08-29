@@ -60,6 +60,7 @@
     "allow-browser-new-tab",
     "allow-browser-close-tab",
     "allow-browser-select-tab",
+    "allow-browser-watch-tabs",
     "allow-browser-resize",
     "allow-browser-input",
     "allow-browser-scope-list",

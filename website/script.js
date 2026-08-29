@@ -9,7 +9,8 @@
  */
 const RELEASES_PAGE = "https://github.com/caiwuu/Riot/releases/latest";
 const RELEASES_API = "https://api.github.com/repos/caiwuu/Riot/releases/latest";
-const RELEASE_CACHE = "riot.latest-release.v2";
+const RELEASE_CACHE = "riot.latest-release.v3"; // 换键即可作废所有旧格式缓存
+const RELEASE_TTL = 10 * 60 * 1000; // 缓存 10 分钟：长开的标签页里也能拿到新版本
 
 const DOWNLOADS = {
   mac: {
@@ -54,9 +55,13 @@ function formatSize (bytes) {
 async function loadLatestRelease () {
   try {
     const cached = sessionStorage.getItem(RELEASE_CACHE);
-    if (cached) return JSON.parse(cached);
+    if (cached) {
+      const { t, data } = JSON.parse(cached);
+      // 只信任 TTL 内的缓存；过期就重新请求，保证发新版后很快能看到
+      if (data && Date.now() - t < RELEASE_TTL) return data;
+    }
   } catch {
-    /* 隐私模式 / 禁用存储 */
+    /* 隐私模式 / 禁用存储 / 旧格式 */
   }
   const res = await fetch(RELEASES_API, {
     headers: { Accept: "application/vnd.github+json" },
@@ -69,7 +74,7 @@ async function loadLatestRelease () {
     win: assetInfo(data.assets, "_x64-setup.exe"),
   };
   try {
-    sessionStorage.setItem(RELEASE_CACHE, JSON.stringify(slim));
+    sessionStorage.setItem(RELEASE_CACHE, JSON.stringify({ t: Date.now(), data: slim }));
   } catch {
     /* ignore */
   }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-browser-watch-tabs"
+description = "Enables the browser_watch_tabs command without any pre-configured scope."
+commands.allow = ["browser_watch_tabs"]
+
+[[permission]]
+identifier = "deny-browser-watch-tabs"
+description = "Denies the browser_watch_tabs command without any pre-configured scope."
+commands.deny = ["browser_watch_tabs"]
