@@ -674,7 +674,8 @@ async fn browser_new_tab(
     b.open_tab().await.map_err(HostError::Browser)
 }
 
-/// 关一个标签页。关掉最后一个时会补一个新的空白页。
+/// 关一个标签页。关掉最后一个就是空清单，不补新页 —— 界面据此收掉
+/// 浏览器标签（见 access::close_tab 的说明）。
 #[tauri::command]
 async fn browser_close_tab(
     state: tauri::State<'_, AppState>,
@@ -695,6 +696,32 @@ async fn browser_select_tab(
 ) -> HostResult<browser::access::PanelState> {
     let b = state.panel_browser(&session_id).await?;
     b.select_tab(tab).await.map_err(HostError::Browser)
+}
+
+/// 订阅标签清单的变更:开页 / 关页 / 切页的瞬间 ping 一声（不带内容），
+/// 前端收到就立刻重查一次 `browser_state` —— 新标签这才和画面同时出现，
+/// 不用等下一拍轮询。轮询仍保留，管标题 / 地址这类没有事件的渐变。
+///
+/// 不设退订命令:订阅方只有工作台标签栏一个，重新订阅就替换旧通道，
+/// 而退订和新订阅在 IPC 上没有先后保证 —— 退订晚到会把新通道误清掉，
+/// 表现是"重开浏览器后新标签又开始迟到"。旧通道最多白收几声 ping。
+#[tauri::command]
+async fn browser_watch_tabs(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    on_change: Channel<bool>,
+) -> HostResult<()> {
+    let b = state.panel_browser(&session_id).await?;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    tokio::spawn(async move {
+        while rx.recv().await.is_some() {
+            if on_change.send(true).is_err() {
+                break; // 前端不听了
+            }
+        }
+    });
+    b.watch_tabs(tx).await;
+    Ok(())
 }
 
 /// 面板尺寸变了。视口跟着变 —— 比例对不上时画面周围会留出黑边。
@@ -1028,8 +1055,8 @@ pub fn run() {
     gui_env::inherit_login_env();
     askpass::install();
 
-    // dev 和安装版共用 identifier「dev.riot.app」，Windows 上 WebView2 的用户
-    // 数据目录因此都是 %LOCALAPPDATA%\dev.riot.app\EBWebView。这个目录被先
+    // dev 和安装版共用 identifier「dev.riot.desktop」，Windows 上 WebView2 的用户
+    // 数据目录因此都是 %LOCALAPPDATA%\dev.riot.desktop\EBWebView。这个目录被先
     // 启动的实例占住后，后启动的那个创建 webview 会报 0x8007139F
     // （ERROR_INVALID_STATE），窗口永远出不来 —— 装过正式版再跑
     // `pnpm tauri dev` 必踩。debug 构建改用自己的目录，两边即可并存。
@@ -1040,7 +1067,7 @@ pub fn run() {
         && let Some(base) = std::env::var_os("LOCALAPPDATA")
     {
         let dir = std::path::Path::new(&base)
-            .join("dev.riot.app")
+            .join("dev.riot.desktop")
             .join("EBWebView-dev");
         // 豁免理由：宿主启动路径，建的是自己的 webview profile 目录。
         #[allow(clippy::disallowed_methods)]
@@ -1107,6 +1134,7 @@ pub fn run() {
             browser_new_tab,
             browser_close_tab,
             browser_select_tab,
+            browser_watch_tabs,
             browser_resize,
             browser_input,
             browser_scope_list,

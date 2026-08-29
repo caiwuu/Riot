@@ -21,6 +21,7 @@ pub mod path;
 pub mod pentest;
 pub mod plan;
 pub mod precondition;
+pub mod preview;
 pub mod read;
 pub mod search;
 pub mod shrink;
@@ -80,6 +81,8 @@ pub fn builtin() -> Vec<Arc<dyn Tool>> {
     tools.push(Arc::new(diagnostics::Diagnostics));
     // 可见终端的清单（自己起的 + 用户共享的）。追加在末尾，不动前缀。
     tools.push(Arc::new(terminal::TerminalList));
+    // 把文件摆到用户眼前（右侧预览面板）。追加在末尾，不动前缀。
+    tools.push(Arc::new(preview::PreviewFile));
     tools
 }
 

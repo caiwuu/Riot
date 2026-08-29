@@ -19,11 +19,9 @@ export function GitChangesPanel({
   /** 变一次就重新拉一次。轮次结束时由外层递增 —— 抽屉是常驻的，
    *  不跟着刷新的话，模型改完文件这里还是上一轮的样子。 */
   refreshKey,
-  onClose,
 }: {
   sessionId: string;
   refreshKey: number;
-  onClose: () => void;
 }) {
   const [git, setGit] = useState<GitChanges | null>(null);
   const [error, setError] = useState("");
@@ -67,44 +65,52 @@ export function GitChangesPanel({
     (acc, c) => ({ added: acc.added + c.added, removed: acc.removed + c.removed }),
     { added: 0, removed: 0 },
   );
+  /**
+   * 已经问清楚了：这个目录不是 git 仓库。
+   *
+   * 这时整条头部行都不显示。分支下拉和统计本来就是空的，只剩一个
+   * "重新比对" —— 而这里没有任何可比对的东西，按多少次都是同一句话。
+   * 一个按不出结果的按钮配一道分割线，比干净的空面板更让人费解。
+   * `git init` 之后不用手动点：轮次结束会刷新，切走再切回来也会重问。
+   */
+  const notRepo = Boolean(git && !git.repo);
 
   return (
     <div className="changes-panel">
-      <div className="changes-head">
-        {git?.repo && git.refs?.length ? (
-          <FieldSelect
-            className="changes-branch"
-            title="对比基线。只换看哪条分支,不会 checkout。"
-            menuMinWidth={240}
-            value={base ?? git.base ?? git.refs[0] ?? ""}
-            options={git.refs.map((r) =>
-              r === git.branch
-                ? { value: r, label: r, hint: "当前分支" }
-                : { value: r, label: r },
-            )}
-            onChange={setBase}
+      {notRepo ? null : (
+        <div className="changes-head">
+          {git?.repo && git.refs?.length ? (
+            <FieldSelect
+              className="changes-branch"
+              title="对比基线。只换看哪条分支,不会 checkout。"
+              menuMinWidth={240}
+              value={base ?? git.base ?? git.refs[0] ?? ""}
+              options={git.refs.map((r) =>
+                r === git.branch
+                  ? { value: r, label: r, hint: "当前分支" }
+                  : { value: r, label: r },
+              )}
+              onChange={setBase}
+              disabled={loading}
+            />
+          ) : null}
+          {changes?.length && total ? (
+            <span className="changes-total">
+              {changes.length} 个文件 <span className="add">+{total.added}</span>{" "}
+              <span className="del">−{total.removed}</span>
+            </span>
+          ) : null}
+          <span className="changes-head-spacer" />
+          <button
+            className={loading ? "icon loading" : "icon"}
+            onClick={() => setManual((n) => n + 1)}
             disabled={loading}
-          />
-        ) : null}
-        {changes?.length && total ? (
-          <span className="changes-total">
-            {changes.length} 个文件 <span className="add">+{total.added}</span>{" "}
-            <span className="del">−{total.removed}</span>
-          </span>
-        ) : null}
-        <span className="changes-head-spacer" />
-        <button
-          className={loading ? "icon loading" : "icon"}
-          onClick={() => setManual((n) => n + 1)}
-          disabled={loading}
-          title="重新比对"
-        >
-          <RefreshIcon />
-        </button>
-        <button className="icon" onClick={onClose} title="收起面板">
-          <PanelIcon />
-        </button>
-      </div>
+            title="重新比对"
+          >
+            <RefreshIcon />
+          </button>
+        </div>
+      )}
 
       <div className="changes-body">
         {error ? (
@@ -160,12 +166,3 @@ function RefreshIcon() {
   );
 }
 
-/** 关闭面板。画的是"右边那一栏收起来"，和浏览器面板同一个手势。 */
-function PanelIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <rect x="1.5" y="2.5" width="13" height="11" rx="2" stroke="currentColor" strokeWidth="1.3" />
-      <path d="M10.5 2.5v11" stroke="currentColor" strokeWidth="1.3" />
-    </svg>
-  );
-}

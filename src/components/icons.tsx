@@ -46,6 +46,16 @@ export function PanelBottomIcon() {
   );
 }
 
+/** 右侧工作台开关：矩形 + 右侧一道竖线。 */
+export function PanelRightIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <rect x="1.5" y="2.5" width="13" height="11" rx="2" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M10.5 2.5v11" stroke="currentColor" strokeWidth="1.3" />
+    </svg>
+  );
+}
+
 /** 改动一览：上面一个加号、下面一道减号 —— diff 的通用符号（octicon 同款）。 */
 export function DiffIcon() {
   return (

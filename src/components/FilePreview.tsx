@@ -1,8 +1,8 @@
 //! 应用内文件预览：Office / PDF / 图片 / 文本 / 压缩包在右侧抽屉里直接看。
 //!
 //! 做成抽屉而不是弹窗（Codex 同款）：预览常常是拿着文档和对话对照着看
-//! 的。多文件用标签页 —— 模型交付一批文档时挨个点开，像浏览器一样切
-//! 着看，不用看一个关一个。
+//! 的。多文件各占一个工作台标签（标签栏在抽屉顶部，见 Workbench）——
+//! 模型交付一批文档时挨个点开，像浏览器一样切着看，不用看一个关一个。
 //!
 //! 渲染交给 @file-viewer —— 全部在 webview 本地解析（Worker / WASM 自托管），
 //! 文件不出机器。字节由宿主的 `read_file_bytes` 命令读进来：不开 Tauri 的
@@ -173,22 +173,25 @@ export function subscribeFilePreview(cb: (path: string) => void): () => void {
   };
 }
 
-/** 右侧抽屉里的预览面板：标签行 + 当前文件的操作行 + 渲染区。 */
+/**
+ * 右侧抽屉里的预览面板：当前文件的操作行 + 渲染区。
+ *
+ * 标签属于抽屉顶部的统一标签栏（见 Workbench）—— 每个文件是一个顶层
+ * 工作台标签，和浏览器 / Git 改动平级。这里不再自带标签行，但仍然
+ * 一次性挂着**全部**打开的文件（见下方保活注释），visible 只控 display：
+ * 切去别的标签（哪怕是浏览器）再切回来，渲染器和滚动位置都在原地。
+ */
 export function FilePreviewPanel({
   paths,
   active,
-  onSelect,
-  onCloseTab,
-  onClose,
+  visible,
 }: {
-  /** 打开着的所有文件（绝对路径），也是标签顺序。 */
+  /** 打开着的所有文件（绝对路径），即标签顺序。 */
   paths: string[];
-  /** 正在看的那个。一定在 paths 里。 */
+  /** 正在看（或上次看）的那个。一定在 paths 里。 */
   active: string;
-  onSelect: (path: string) => void;
-  onCloseTab: (path: string) => void;
-  /** 收起整个面板（标签保留，回来还在）。 */
-  onClose: () => void;
+  /** 激活的工作台标签是不是预览。不是的话整个面板 display:none 保活。 */
+  visible: boolean;
 }) {
   const [openErr, setOpenErr] = useState(false);
 
@@ -200,40 +203,7 @@ export function FilePreviewPanel({
   };
 
   return (
-    <div className="preview-panel">
-      <div className="preview-tabs">
-        {paths.map((p) => (
-          <button
-            type="button"
-            key={p}
-            className={p === active ? "preview-tab active" : "preview-tab"}
-            title={p}
-            onClick={() => onSelect(p)}
-          >
-            <span className="preview-tab-title">{basename(p)}</span>
-            <span
-              className="preview-tab-close"
-              role="button"
-              tabIndex={0}
-              aria-label={`关闭 ${basename(p)}`}
-              onClick={(e) => {
-                e.stopPropagation();
-                onCloseTab(p);
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  onCloseTab(p);
-                }
-              }}
-            >
-              <CloseIcon />
-            </span>
-          </button>
-        ))}
-      </div>
-
+    <div className="preview-panel" style={visible ? undefined : { display: "none" }}>
       <div className="preview-panel-head">
         <span className="preview-panel-path" title={active}>
           {tildify(active)}
@@ -259,9 +229,6 @@ export function FilePreviewPanel({
           title="在访达 / 资源管理器中显示"
         >
           <FolderMarkIcon />
-        </button>
-        <button type="button" className="icon" onClick={onClose} title="收起面板">
-          <PanelIcon />
         </button>
       </div>
 
@@ -414,19 +381,6 @@ function resolveDocLink(href: string, fromDoc: string): string | null {
   return sep === "/" ? `/${joined}` : joined;
 }
 
-function CloseIcon() {
-  return (
-    <svg width="10" height="10" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <path
-        d="M4 4l8 8M12 4l-8 8"
-        stroke="currentColor"
-        strokeWidth="1.6"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
 /** 系统应用打开：一个往外飞的箭头。 */
 function LaunchIcon() {
   return (
@@ -463,12 +417,3 @@ function FolderMarkIcon() {
   );
 }
 
-/** 关闭面板。画的是"右边那一栏收起来"，和浏览器 / 改动面板同一个手势。 */
-function PanelIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <rect x="1.5" y="2.5" width="13" height="11" rx="2" stroke="currentColor" strokeWidth="1.3" />
-      <path d="M10.5 2.5v11" stroke="currentColor" strokeWidth="1.3" />
-    </svg>
-  );
-}

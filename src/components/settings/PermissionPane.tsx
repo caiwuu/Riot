@@ -16,6 +16,7 @@ import {
   MIN_COMPACT_THRESHOLD as MIN_COMPACT_AT,
 } from "../../lib/contextWindow";
 import { FieldNumber } from "../FieldNumber";
+import { ResizableTextarea } from "../ResizableTextarea";
 import { Card, CardBlock, Group, Row } from "./layout";
 import { type AskConfirm, FormError, blurOnEnter } from "./shared";
 
@@ -444,7 +445,7 @@ export function PermissionPane({
               desc="一行一个绝对路径。装在你用户目录下的工具（nvm、conda、pip --user……）沙箱内默认打不开，需要哪个填哪个；目录越大，会话首次激活越慢。"
               stack
             >
-              <textarea
+              <ResizableTextarea
                 className="paths-input"
                 value={allowRead}
                 onChange={(e) => setAllowRead(e.target.value)}

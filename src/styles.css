@@ -469,21 +469,15 @@ pre {
   cursor: default;
 }
 
-.tb-btn.active {
-  background: var(--bg-hover);
+/* 开着的面板：底色比 hover 再亮一档，不画底边线。
+   `[约束]` 不能和 hover 同色。以前两者同色，靠底边一道线区分；线去掉
+   之后底色就是唯一的信号，同色等于没有选中态。
+   `[约束]` active:hover 要一起写。hover 那条规则的权重比 .active 高，
+   漏掉的话鼠标一悬上去，开着的按钮反而暗回 hover 色。 */
+.tb-btn.active,
+.tb-btn.active:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--bg-hover) 90%, var(--text));
   color: var(--text);
-}
-
-/* 开着的面板用底边一条线标出来 —— 只靠浅底的话，和 hover 分不清。 */
-.tb-btn.active::after {
-  content: '';
-  position: absolute;
-  left: 6px;
-  right: 6px;
-  bottom: 3px;
-  height: 1.5px;
-  border-radius: 1px;
-  background: currentColor;
 }
 
 /* 会话标题即菜单入口。宽度设上限，超长标题截断，别把右边的开关挤走。 */
@@ -524,6 +518,18 @@ pre {
 .tb-spacer {
   flex: 1;
   align-self: stretch;
+}
+
+/* 窗口级分栏开关（侧栏 / 终端 / 侧边面板）。抽屉收起时坐在顶栏右端，
+   开着时坐在抽屉标签栏右端 —— 两处都是窗口的右上角，所以样式共用。
+   左边多留一点：和会话设置（管的是单个会话）之间要有一道呼吸，
+   不然五个图标连成一排，看不出哪些管窗口、哪些管会话。 */
+.win-controls {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 6px;
 }
 
 /* ── 拖拽分隔线 ─────────────────────────────── */
@@ -1135,9 +1141,209 @@ pre {
   flex-shrink: 1;
   min-width: 240px;
   display: flex;
-  /* 竖排：浏览器面板占满，渗透 scope 面板贴在底部当一条状态带。 */
+  /* 竖排：顶部一条工作台标签栏，下面激活标签的面板占满，渗透 scope
+     面板贴在底部当一条状态带。 */
   flex-direction: column;
   min-height: 0;
+}
+
+/* ── 工作台标签栏（抽屉顶部）────────────────── */
+
+/* 一条统一标签栏管整个抽屉：浏览器 / Git 改动 / 每个预览文件各占一个
+   标签，点着切换（Codex 同款）。视觉抄终端标签：透明底、激活的浮出
+   一张卡。窄面板上允许横向滚动 —— 标签挤成看不出标题的小方块，比
+   需要滚一下更糟。 */
+.wb-tabs {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  /* 和顶栏同高。两条栏隔着一道分隔线并排，差几像素就是肉眼可见的错位
+     —— 而右端那组窗口开关正跨在这条缝上。 */
+  min-height: 44px;
+  /* `[约束]` 右内边距必须和顶栏（.topbar）的一致。那组窗口开关在抽屉
+     开合时会在这两条栏之间换座位，两边留白差一点，按钮就会在点下去的
+     瞬间横向跳一下 —— 看起来像点歪了。左边可以不同：那是标签的起点。 */
+  padding: 0 10px 0 8px;
+  border-left: 1px solid var(--border);
+  /* 不画下边线（Codex 同款）：顶栏那条横线到抽屉这一列就该停住。以前
+     画它是为了和浏览器面板自带的那排页面标签分界，而页面标签早已提到
+     这条栏上来了 —— 下面各面板自己的头部行都带边线，不缺这一条；标签
+     一个都没有时，它更是一根悬在空面板上、什么也没分隔的线。 */
+  background: var(--bg);
+}
+
+/* 只有标签这一层横滚：整条栏滚的话，右端的窗口开关会被一排标签推出
+   视野。窄面板上标签先压到最小宽度，再开始滚 —— 挤成看不出标题的
+   小方块，比需要滚一下更糟。 */
+.wb-tabs-list {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.wb-tabs-list::-webkit-scrollbar {
+  display: none;
+}
+
+.wb-tabs-spacer {
+  flex: 1;
+  /* 面板窄的时候先让它消失，把空间留给标签 */
+  min-width: 0;
+  align-self: stretch;
+}
+
+.wb-tabs .icon {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  color: var(--text-dim);
+}
+
+.wb-tabs .icon:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.wb-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 1 160px;
+  min-width: 92px;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.wb-tab:hover:not(.active) {
+  background: var(--bg-hover);
+  color: var(--text-dim);
+}
+
+.wb-tab.active {
+  background: var(--bg-card);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+/* 图标固定不缩，标题吃剩余空间再省略。 */
+.wb-tab-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+}
+
+.wb-tab-icon svg {
+  width: 13px;
+  height: 13px;
+}
+
+.wb-tab-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+/* 关闭键 hover / 激活才显形，命中区 ≥20px（同终端标签的取舍）。 */
+.wb-tab-close {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin: -2px -4px -2px 0;
+  border-radius: 5px;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.wb-tab:hover .wb-tab-close {
+  opacity: 0.6;
+}
+
+.wb-tab.active .wb-tab-close {
+  opacity: 0.85;
+}
+
+.wb-tab-close:hover {
+  opacity: 1;
+  background: var(--bg-hover);
+}
+
+/* 键盘 Tab 过去时也得显形 —— 只认 hover 的话键盘用户对着隐形按钮按回车。 */
+.wb-tab-close:focus-visible {
+  opacity: 1;
+}
+
+/* 抽屉的空状态：一列可添加的面板（Codex 同款）。空状态本身就是
+   "添加面板"的菜单，不是一句"这里空空如也"。 */
+.wb-empty {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  border-left: 1px solid var(--border);
+  background: var(--bg);
+  overflow-y: auto;
+}
+
+.wb-empty-item {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: var(--bg-card);
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.wb-empty-item:hover {
+  color: var(--text);
+  border-color: var(--border);
+  background: var(--bg-hover);
+}
+
+.wb-empty-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+}
+
+.wb-empty-label {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+
+/* 快捷键标注：右端、更淡。<kbd> 的默认等宽字体在这儿显得突兀。 */
+.wb-empty-kbd {
+  flex: none;
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--text-faint);
 }
 
 /* 渗透授权范围面板：抽屉底部一条可折行的芯片带。空时组件自己不渲染。 */
@@ -1217,107 +1423,6 @@ pre {
   flex-direction: column;
   border-left: 1px solid var(--border);
   background: var(--bg);
-}
-
-/* 标签栏。窄面板上标签会被压扁，所以给个最小宽度然后允许横向滚动 ——
-   挤成一排看不出标题的小方块，比需要滚一下更糟。 */
-.browser-tabs {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 6px 8px 0;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.browser-tabs::-webkit-scrollbar {
-  display: none;
-}
-
-.browser-tabs-spacer {
-  flex: 1;
-  /* 面板窄的时候先让它消失，把空间留给标签 */
-  min-width: 0;
-}
-
-.browser-tabs .icon {
-  flex: none;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  display: grid;
-  place-items: center;
-  background: transparent;
-  border: none;
-  border-radius: 7px;
-  color: var(--text-dim);
-}
-
-.browser-tabs .icon:hover:not(:disabled) {
-  background: var(--bg-hover);
-  color: var(--text);
-}
-
-.browser-tab {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 0 1 160px;
-  min-width: 92px;
-  padding: 5px 8px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-faint);
-  font-size: 12px;
-}
-
-.browser-tab:hover:not(.active) {
-  background: var(--bg-hover);
-  color: var(--text-dim);
-}
-
-.browser-tab.active {
-  background: var(--bg-card);
-  border-color: var(--border);
-  color: var(--text);
-}
-
-.browser-tab-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-align: left;
-}
-
-/* 关闭键平时半透明:一排标签上每个都挂一个实心 ✕ 会让标签栏看着很吵。 */
-.browser-tab-close {
-  display: grid;
-  place-items: center;
-  flex: none;
-  /* 命中区 ≥22px（Fitts）：16px 的关闭键点三次两次落空。图标不变，
-     只是可点的框变大。 */
-  width: 22px;
-  height: 22px;
-  margin: -3px -3px -3px 0;
-  border-radius: 5px;
-  opacity: 0;
-  cursor: pointer;
-}
-
-.browser-tab:hover .browser-tab-close {
-  opacity: 0.6;
-}
-
-.browser-tab.active .browser-tab-close {
-  opacity: 0.85;
-}
-
-.browser-tab-close:hover {
-  opacity: 1;
-  background: var(--bg-hover);
 }
 
 .browser-bar {
@@ -1652,7 +1757,6 @@ pre {
 
 /* hover 才出现的关闭键，键盘 Tab 过去时也得显形 —— 只认 hover 的话
    键盘用户对着一个隐形按钮按回车。 */
-.browser-tab-close:focus-visible,
 .term-tab-close:focus-visible {
   opacity: 1;
 }
@@ -3214,85 +3318,6 @@ pre {
   background: var(--bg);
 }
 
-/* 标签行。视觉抄终端标签：透明底、激活的浮出一张卡。 */
-.preview-tabs {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 6px 8px 0;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.preview-tabs::-webkit-scrollbar {
-  display: none;
-}
-
-.preview-tab {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 0 1 160px;
-  min-width: 92px;
-  padding: 4px 8px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-faint);
-  font-size: 12px;
-}
-
-.preview-tab:hover:not(.active) {
-  background: var(--bg-hover);
-  color: var(--text-dim);
-}
-
-.preview-tab.active {
-  background: var(--bg-card);
-  border-color: var(--border);
-  color: var(--text);
-}
-
-.preview-tab-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-align: left;
-}
-
-/* 关闭键 hover / 激活才显形，命中区 ≥20px（同终端标签的取舍）。 */
-.preview-tab-close {
-  display: grid;
-  place-items: center;
-  flex: none;
-  width: 20px;
-  height: 20px;
-  margin: -2px -4px -2px 0;
-  border-radius: 5px;
-  opacity: 0;
-  cursor: pointer;
-}
-
-.preview-tab:hover .preview-tab-close {
-  opacity: 0.6;
-}
-
-.preview-tab.active .preview-tab-close {
-  opacity: 0.85;
-}
-
-.preview-tab-close:hover {
-  opacity: 1;
-  background: var(--bg-hover);
-}
-
-.preview-tab-close:focus-visible {
-  opacity: 1;
-}
-
 .preview-panel-head {
   flex-shrink: 0;
   display: flex;
@@ -3931,7 +3956,8 @@ button.ref-chip.clickable:hover {
 
 /* stack 行里的多行输入铺满，且和上面的说明拉开一点。 */
 .set-row.stack .paths-input,
-.set-row.stack .mcp-json-input {
+.set-row.stack .mcp-json-input,
+.set-row.stack .ta-resize {
   margin: 0;
 }
 
@@ -4011,10 +4037,10 @@ button.ref-chip.clickable:hover {
   font-size: 12px;
   line-height: 1.6;
   background: var(--bg);
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--border);
   border-radius: 8px;
   color: var(--text);
-  padding: 8px 12px;
+  padding: 10px 12px;
   outline: none;
   box-shadow: none;
   appearance: none;
@@ -4051,8 +4077,8 @@ button.ref-chip.clickable:hover {
   color: var(--text-faint);
 }
 
-/* 提示词正文。同 .paths-input 的框，但走正文字体和更松的行距 ——
-   这里躺的是给模型读的一段中文，等宽字体会让它看起来像配置片段。 */
+/* 提示词正文（会话设置、提示词库）。同 .paths-input 的框，但走正文字体
+   和更松的行距 —— 给模型读的中文指令，等宽字体会让它看起来像配置片段。 */
 .preset-body-input {
   display: block;
   width: 100%;
@@ -4073,6 +4099,61 @@ button.ref-chip.clickable:hover {
 
 .preset-body-input::placeholder {
   color: var(--text-faint);
+}
+
+/* 自制拉伸角：外观跟系统右下角标同一位置，但拖动是真的。
+   系统那套在 WKWebView + appearance:none 下是死的。 */
+.ta-resize {
+  position: relative;
+  display: block;
+  width: 100%;
+  min-width: 0;
+}
+
+.ta-resize > textarea {
+  resize: none;
+}
+
+.ta-resize-grip {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 0 0 8px 0;
+  background: transparent;
+  cursor: ns-resize;
+  touch-action: none;
+  color: var(--text-faint);
+}
+
+.ta-resize-grip::before,
+.ta-resize-grip::after {
+  content: '';
+  position: absolute;
+  right: 4px;
+  height: 1px;
+  background: currentColor;
+  transform-origin: right center;
+  transform: rotate(-45deg);
+}
+
+.ta-resize-grip::before {
+  bottom: 7px;
+  width: 8px;
+}
+
+.ta-resize-grip::after {
+  bottom: 4px;
+  width: 4px;
+}
+
+button.ta-resize-grip:hover:not(:disabled),
+.ta-resize-grip:focus-visible {
+  color: var(--text-dim);
+  background: transparent;
 }
 
 .empty-actions {
@@ -5016,8 +5097,17 @@ button.ref-chip.clickable:hover {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
+  align-items: center;
   gap: 8px;
   flex-shrink: 0;
+}
+
+.about-actions button {
+  height: 30px;
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
 }
 
 .about-status {
@@ -5550,60 +5640,6 @@ button.field-slider-state:hover {
   font-size: 12px;
   font-weight: 600;
   color: var(--text-dim);
-}
-
-.prompt-field {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.prompt-input {
-  display: block;
-  width: 100%;
-  resize: none;
-  min-height: 80px;
-  border: 1px solid var(--border-strong);
-  border-bottom: none;
-  border-radius: 8px 8px 0 0;
-  padding: 8px 10px;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--text);
-  background: var(--bg);
-}
-
-/* 真能拖的高度条。CSS resize 在 WKWebView 里是死的，不能再靠角标骗人。 */
-.prompt-grip {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  height: 14px;
-  padding: 0;
-  border: 1px solid var(--border-strong);
-  border-top: 1px solid var(--border);
-  border-radius: 0 0 8px 8px;
-  background: var(--bg);
-  cursor: ns-resize;
-}
-
-.prompt-grip::after {
-  content: '';
-  width: 28px;
-  height: 3px;
-  border-radius: 99px;
-  background: var(--text-faint);
-}
-
-.prompt-grip:hover,
-.prompt-grip:focus-visible {
-  background: var(--bg-hover);
-}
-
-.prompt-grip:hover::after,
-.prompt-grip:focus-visible::after {
-  background: var(--text-dim);
 }
 
 /* 还没搬到 layout.tsx 那套版式件的分区，标题跟 .set-group-head 保持同款 ——

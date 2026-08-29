@@ -956,7 +956,8 @@ export function browserNewTab(sessionId: string): Promise<PanelState> {
   return invoke<PanelState>("browser_new_tab", { sessionId });
 }
 
-/** 关一个标签页。关掉最后一个时宿主会补一个新的空白页。 */
+/** 关一个标签页。关掉最后一个就是空清单，不补新页 —— 界面据此收掉
+ *  浏览器标签。 */
 export function browserCloseTab(sessionId: string, tab: number): Promise<PanelState> {
   return invoke<PanelState>("browser_close_tab", { sessionId, tab });
 }
@@ -964,6 +965,27 @@ export function browserCloseTab(sessionId: string, tab: number): Promise<PanelSt
 /** 切到某个标签页。画面、工具栏和模型的浏览器工具都跟着它。 */
 export function browserSelectTab(sessionId: string, tab: number): Promise<PanelState> {
   return invoke<PanelState>("browser_select_tab", { sessionId, tab });
+}
+
+/**
+ * 订阅标签清单的变更（开 / 关 / 切页）。通知不带内容 —— 收到就该立刻
+ * 重查一次 {@link browserState}，新标签才能和画面同时出现，不用等下
+ * 一拍轮询。返回退订函数（只停本地分发；宿主的通道在下次订阅时替换，
+ * 取舍见宿主 browser_watch_tabs 的说明）。
+ */
+export function watchBrowserTabs(sessionId: string, onChange: () => void): () => void {
+  let live = true;
+  const channel = new Channel<boolean>();
+  channel.onmessage = () => {
+    if (live) onChange();
+  };
+  invoke("browser_watch_tabs", { sessionId, onChange: channel }).catch((e: unknown) => {
+    // 会话没了、浏览器起不来 —— 标签栏退化成纯轮询，不值得打扰用户。
+    console.warn("订阅浏览器标签变更失败", e);
+  });
+  return () => {
+    live = false;
+  };
 }
 
 /**

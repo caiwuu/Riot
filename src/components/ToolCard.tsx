@@ -171,6 +171,7 @@ export function summarize(t: Tool): string {
     case "Read":
     case "Write":
     case "Edit":
+    case "PreviewFile":
       return short(str("path") || str("file_path"));
     case "Grep":
       return `${str("pattern")}${str("path") ? ` 在 ${short(str("path"))}` : ""}`;

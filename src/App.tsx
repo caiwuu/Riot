@@ -9,6 +9,9 @@ import {
 
 import {
   addProject,
+  browserCloseTab,
+  browserNewTab,
+  browserSelectTab,
   type ConfigStatus,
   createSession,
   deleteSession,
@@ -19,6 +22,7 @@ import {
   type PermissionMode,
   openInBrowser,
   pickDirectory,
+  pickFiles,
   probeDirs,
   removeProject,
   renameSession,
@@ -37,6 +41,7 @@ import { ConfirmDialog, type ConfirmRequest } from "./components/ConfirmDialog";
 import {
   FilePreviewPanel,
   ImageLightboxHost,
+  openFilePreview,
   subscribeFilePreview,
 } from "./components/FilePreview";
 import { MissingProjectDialog } from "./components/MissingProjectDialog";
@@ -53,10 +58,25 @@ import {
   waitStartedAt,
 } from "./hooks/useSession";
 import { useAppUpdate } from "./hooks/useAppUpdate";
+import { useBrowserPanel } from "./hooks/useBrowserPanel";
 import { newPresetId } from "./lib/prompts";
 import { inheritedSampling } from "./lib/sampling";
 import { Transcript, transcriptView } from "./components/Transcript";
-import { ContextMenu, type MenuState, Resizer, TopBar } from "./components/chrome";
+import {
+  ContextMenu,
+  type MenuState,
+  Resizer,
+  TopBar,
+  WindowControls,
+} from "./components/chrome";
+import {
+  EMPTY_WORKBENCH,
+  tabId,
+  WorkbenchEmpty,
+  WorkbenchTabs,
+  type WorkbenchState,
+  type WorkbenchTab,
+} from "./components/Workbench";
 import { Sidebar } from "./components/Sidebar";
 import { Welcome } from "./components/Welcome";
 import { Composer, forgetComposerSession } from "./components/Composer";
@@ -64,12 +84,14 @@ import {
   FolderIcon,
   RiotMark,
 } from "./components/icons";
-import { basename } from "./pathDisplay";
+import { basename, looksAbsPath } from "./pathDisplay";
 
 /**
  * 布局照着 Codex 桌面端：左侧按项目分组的会话列表（可拖宽、可收起），
- * 主区顶部一条工具栏，中间是对话流，右侧一个抽屉（放浏览器），底部一条
- * 终端面板。三块附属面板的尺寸都能拖，且记住上次的位置。
+ * 主区顶部一条工具栏，中间是对话流，右侧一个多标签工作台（浏览器 /
+ * Git 改动 / 每个预览文件各占一个标签，共存不互斥，点着切换；以后的
+ * 新面板就是新的一种标签），底部一条终端面板。附属面板的尺寸都能拖，
+ * 且记住上次的位置。
  *
  * 没有"当前工作区"这个全局概念 —— 每个会话在创建时绑定自己的项目
  * 目录，之后永不改变。多项目并行时谁也不影响谁；"换了目录代码还写进
@@ -131,26 +153,23 @@ export function App() {
   /** 探测过、确认不存在的项目根。用来在侧栏和欢迎页标「已失效」。 */
   const [missing, setMissing] = useState<Set<string>>(() => new Set());
   const [renaming, setRenaming] = useState<string | null>(null);
-  /** 右侧抽屉此刻装着谁。三个都是整列，只能开一个。 */
-  const [drawer, setDrawer] = useState<"browser" | "changes" | "preview" | null>(null);
-  /** 预览面板打开着的文件（绝对路径），即标签页顺序。当前会话的那份。 */
-  const [previewTabs, setPreviewTabs] = useState<string[]>([]);
-  /** 正在看的那个标签。 */
-  const [previewActive, setPreviewActive] = useState<string | null>(null);
-  /** 每个会话自己的预览标签组（浏览器面板同款语义：工具窗跟会话走）。
-   *  切会话时把当前组存回来、换上目标会话的组；会话删除时由
-   *  dropSessionWorkbench 清掉。 */
-  const previewBySession = useRef(
-    new Map<string, { tabs: string[]; active: string | null }>(),
-  );
-  /** 预览打开前抽屉里是谁。关掉预览回到它 —— 从改动列表点开预览、
-   *  关掉回列表接着点下一个，这条路必须顺。 */
-  const previewReturn = useRef<"browser" | "changes" | null>(null);
+  /** 右侧工作台：标签组 + 激活项 + 抽屉开合。标签共存不互斥（Codex
+   *  同款），浏览器 / Git 改动 / 每个预览文件各占一个，点着切换。 */
+  const [wb, setWb] = useState<WorkbenchState>(EMPTY_WORKBENCH);
+  /** 每个会话自己的工作台（工具窗跟会话走：浏览器内容、预览标签本来
+   *  就是会话的）。切会话整存整取；会话删除时由 dropSessionWorkbench
+   *  清掉。 */
+  const workbenchBySession = useRef(new Map<string, WorkbenchState>());
+  /** 最近真正看过的预览文件。激活标签不是预览时，保活着的预览面板仍
+   *  需要一个"当前文件"定住各 body 的 display —— 用它，免得隐藏的
+   *  面板里乱切一通（渲染器会白做适配）。 */
+  const lastPreview = useRef<string | null>(null);
   /**
-   * 用户主动关过浏览器抽屉的会话。模型在这些会话里再用浏览器工具，
-   * 抽屉不再自动弹出 —— 用户已经表过态，每次工具调用都弹回去等于
-   * 反复跟他抢屏幕。手动重开视为又想看了，从集合里移除、恢复自动弹出。
-   * 存会话 id 而不是一个布尔：别的会话的浏览器活动不该被这个会话连坐。
+   * 用户主动关过 / 切走过浏览器标签的会话。模型在这些会话里再用浏览器
+   * 工具，标签不再自动抢到前台 —— 用户已经表过态，每次工具调用都夺回
+   * 焦点等于反复跟他抢屏幕。主动回到浏览器标签视为又想看了，从集合里
+   * 移除、恢复自动弹出。存会话 id 而不是一个布尔：别的会话的浏览器
+   * 活动不该被这个会话连坐。
    */
   const browserDismissed = useRef(new Set<string>());
   const [showTerm, setShowTerm] = useState(false);
@@ -207,49 +226,180 @@ export function App() {
   const update = useAppUpdate(!booting && !bootError);
   const updateNotice = update.banner;
 
-  // 预览请求来自聊天引用、改动列表、Markdown 链接的模块级入口。
-  // 已开过的文件只激活标签不重复开。跟着 drawer 重订阅：回调要在
-  // 切换前记住"预览打开前抽屉里是谁"。
-  useEffect(() => {
-    return subscribeFilePreview((p) => {
-      setPreviewTabs((tabs) => (tabs.includes(p) ? tabs : [...tabs, p]));
-      setPreviewActive(p);
-      if (drawer !== "preview") previewReturn.current = drawer;
-      setDrawer("preview");
-    });
-  }, [drawer]);
+  /** 激活的工作台标签。抽屉的渲染分支和顶栏开关的亮灭都从它派生。 */
+  const activeTab = wb.tabs.find((t) => tabId(t) === wb.active) ?? null;
+  /** 正显示着的标签种类。抽屉收起时是 null —— 开关状态别亮着。 */
+  const activeKind = wb.open ? (activeTab?.kind ?? null) : null;
+  /** 打开着的预览文件（kind=preview 的标签），即预览面板的保活集合。 */
+  const previewPaths = useMemo(
+    () => wb.tabs.flatMap((t) => (t.kind === "preview" ? [t.path] : [])),
+    [wb.tabs],
+  );
+  /** 浏览器标签开着没有（不管在不在前台）。页面状态的轮询跟着它走 ——
+   *  页面标签展开在统一标签栏上，浏览器在后台时标签也得是活的。 */
+  const hasBrowserTab = wb.tabs.some((t) => t.kind === "browser");
+  const {
+    panel: browserPages,
+    apply: applyBrowserPanel,
+    patchTab: patchBrowserTab,
+  } = useBrowserPanel(activeSession?.id ?? null, hasBrowserTab);
 
-  // 切会话：预览标签组随会话切换（每个会话一份，浏览器面板同款）。
-  // 把当前组存回 Map、换上目标会话的组；目标会话没有标签而抽屉正开着
-  // 预览时收起 —— 空面板没意义。
+  // 记住最近真正看过的预览文件。effect 不带依赖数组没问题 —— 每次
+  // 渲染就一次 ref 赋值，比精确依赖便宜也不会错。
+  useEffect(() => {
+    if (activeTab?.kind === "preview") lastPreview.current = activeTab.path;
+  });
+  /** 预览面板这个会话里显示过没有。面板的保活是"显示过之后切走不卸"，
+   *  而不是"一恢复会话就在 display:none 里首挂" —— 文档渲染器的首屏
+   *  适配必须发生在看得见的容器里（见 FilePreviewPanel 的保活注释）。 */
+  const [previewWarm, setPreviewWarm] = useState(false);
+  useEffect(() => {
+    if (activeKind === "preview") setPreviewWarm(true);
+  }, [activeKind]);
+  /** 预览面板此刻该显示的文件：激活标签是预览就是它；不是（面板在后台
+   *  保活）就停在最近看过的那个，别的标签切来切去不动它。 */
+  const activePreviewPath =
+    activeTab?.kind === "preview"
+      ? activeTab.path
+      : lastPreview.current && previewPaths.includes(lastPreview.current)
+        ? lastPreview.current
+        : (previewPaths[previewPaths.length - 1] ?? null);
+
+  /** 打开（或激活）一个标签，抽屉随之展开。不碰 browserDismissed ——
+   *  这是"程序把标签带上来"的中性入口；带表态的用户操作走 activateTab。 */
+  const openTab = useCallback((tab: WorkbenchTab) => {
+    setWb((prev) => {
+      const id = tabId(tab);
+      const exists = prev.tabs.some((t) => tabId(t) === id);
+      return {
+        tabs: exists ? prev.tabs : [...prev.tabs, tab],
+        active: id,
+        open: true,
+      };
+    });
+  }, []);
+
+  /**
+   * 用户主动把某个标签带到前台（点标签、空状态、快捷键、"+"菜单）。
+   *
+   * 从正看着的浏览器切走是"现在不看浏览器"的表态 —— 记进
+   * browserDismissed，模型的浏览器活动此后不再抢回焦点；主动回到
+   * 浏览器则恢复自动弹出。
+   */
+  const activateTab = useCallback(
+    (tab: WorkbenchTab) => {
+      if (activeSession) {
+        if (activeKind === "browser" && tab.kind !== "browser") {
+          browserDismissed.current.add(activeSession.id);
+        }
+        if (tab.kind === "browser") {
+          browserDismissed.current.delete(activeSession.id);
+        }
+      }
+      openTab(tab);
+    },
+    [activeSession, activeKind, openTab],
+  );
+
+  /** 关一个标签。关的是激活的就让右邻顶上（没有则左邻，浏览器同款）；
+   *  一个不剩就留在空状态（那里本身是"添加面板"的菜单，Codex 同款）。
+   *  关浏览器标签同样是表态，此后不自动弹。 */
+  const closeTab = useCallback(
+    (id: string) => {
+      if (id === "browser" && activeSession) {
+        browserDismissed.current.add(activeSession.id);
+      }
+      const idx = wb.tabs.findIndex((t) => tabId(t) === id);
+      if (idx < 0) return;
+      const tabs = wb.tabs.filter((t) => tabId(t) !== id);
+      let active = wb.active;
+      if (active === id) {
+        const neighbor = tabs[Math.min(idx, tabs.length - 1)];
+        active = neighbor ? tabId(neighbor) : null;
+      }
+      setWb({ tabs, active, open: wb.open });
+    },
+    [wb, activeSession],
+  );
+
+  /** 收起抽屉（标签保留，激活项记着，再展开回到原处）。正看着浏览器
+   *  时收起也是"不看了"的表态。 */
+  const collapseDrawer = useCallback(() => {
+    if (activeKind === "browser" && activeSession) {
+      browserDismissed.current.add(activeSession.id);
+    }
+    setWb((prev) => ({ ...prev, open: false }));
+  }, [activeKind, activeSession]);
+
+  /** 展开抽屉。标签组原样回来；一个标签都没有就是空状态（添加面板的菜单）。 */
+  const openDrawer = useCallback(() => {
+    setWb((prev) => ({ ...prev, open: true }));
+  }, []);
+
+  /** 系统文件选择框 → 预览标签。空状态行、"+"菜单和 ⌘P 共用这一条。
+   *  openFilePreview 自带分流：可预览的开成标签，图片开大图，其余访达定位。 */
+  const pickAndPreview = useCallback(() => {
+    void pickFiles().then((paths) => {
+      for (const p of paths) openFilePreview(p);
+    });
+  }, []);
+
+  /** 点了标签栏上的某个浏览器页面：把浏览器带到前台并切到那一页。 */
+  const selectBrowserPage = (pageId: number) => {
+    activateTab({ kind: "browser" });
+    if (activeSession) {
+      void browserSelectTab(activeSession.id, pageId)
+        .then(applyBrowserPanel)
+        .catch(() => {});
+    }
+  };
+
+  /** 关一个浏览器页面。最后一页关掉 = 收掉整个浏览器标签（和浏览器里
+   *  关最后一个标签页等于关窗口一个道理）。宿主的进程和授权都留着，
+   *  模型下次用到会现开一页。 */
+  const closeBrowserPage = useCallback(
+    (pageId: number) => {
+      if (!activeSession) return;
+      void browserCloseTab(activeSession.id, pageId)
+        .then((s) => {
+          applyBrowserPanel(s);
+          if (s.tabs.length === 0) closeTab("browser");
+        })
+        .catch(() => {});
+    },
+    [activeSession, applyBrowserPanel, closeTab],
+  );
+
+  // 预览请求来自聊天引用、改动列表、Markdown 链接的模块级入口。
+  // 已开过的文件只激活标签不重复开。标签共存，不再有"顶掉谁、回到谁"。
+  useEffect(
+    () => subscribeFilePreview((p) => openTab({ kind: "preview", path: p })),
+    [openTab],
+  );
+
+  // 切会话：工作台整组随会话切换（每个会话一份）。把当前组存回 Map、
+  // 换上目标会话的组；目标会话没存过就是全收起 —— 新会话不该继承上
+  // 一个会话临走前开着的面板。
   const prevSessionId = useRef<string | null>(null);
   useEffect(() => {
     const prev = prevSessionId.current;
     const next = activeSession?.id ?? null;
     if (prev === next) return;
-    if (prev) {
-      previewBySession.current.set(prev, { tabs: previewTabs, active: previewActive });
-    }
+    if (prev) workbenchBySession.current.set(prev, wb);
     prevSessionId.current = next;
-    const saved = next ? previewBySession.current.get(next) : undefined;
-    setPreviewTabs(saved?.tabs ?? []);
-    setPreviewActive(saved?.active ?? null);
-    previewReturn.current = null;
-    if (!saved?.tabs.length) {
-      setDrawer((d) => (d === "preview" ? null : d));
-    }
-    // previewTabs/previewActive 是被保存的对象而不是触发条件 ——
-    // 只在会话切换那一刻读它们当时的值。
+    setWb((next ? workbenchBySession.current.get(next) : undefined) ?? EMPTY_WORKBENCH);
+    lastPreview.current = null;
+    setPreviewWarm(false);
+    // wb 是被保存的对象而不是触发条件 —— 只在会话切换那一刻读它当时的值。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSession?.id]);
 
-  // 欢迎页没有工作台：浏览器、终端、预览都跟着会话走，最后一个会话
-  // 删掉后它们全部收起。残留的 drawer 值也一并清 —— 否则新建会话时
-  // 上一个会话临走前开着的面板会突兀地弹出来。
+  // 欢迎页没有工作台：终端跟着会话走，最后一个会话删掉后收起。右侧
+  // 抽屉不用管 —— 它按会话整存整取，没有会话就不渲染，上面的切换
+  // effect 也已经把状态清成空。
   useEffect(() => {
     if (activeSession) return;
     setShowTerm(false);
-    setDrawer(null);
   }, [activeSession]);
 
   // `[约束]` 链接点击的全局兜底，堵"整窗被导航走"的逃逸口。
@@ -282,21 +432,6 @@ export function App() {
     window.addEventListener("click", onClick);
     return () => window.removeEventListener("click", onClick);
   }, []);
-
-  /** 关一个预览标签。关的是正在看的就激活右邻（没有则左邻，浏览器
-   *  同款）；关到一个不剩，面板让位给预览前开着的东西。 */
-  const closePreviewTab = (p: string) => {
-    const idx = previewTabs.indexOf(p);
-    const next = previewTabs.filter((t) => t !== p);
-    setPreviewTabs(next);
-    if (next.length === 0) {
-      setPreviewActive(null);
-      setDrawer(previewReturn.current);
-      previewReturn.current = null;
-    } else if (previewActive === p) {
-      setPreviewActive(next[Math.min(idx, next.length - 1)] ?? null);
-    }
-  };
 
   // 项目列表不会因为用户在访达里删了文件夹而自己更新。启动和窗口
   // 回到前台时探一次，侧栏才能把失效项标出来，而不必等点「新会话」才知道。
@@ -494,16 +629,40 @@ export function App() {
           // 终端组跟着会话走，欢迎页上没有归属可言 —— 不开。
           if (activeSession) setShowTerm((v) => !v);
           return;
-        case "w":
-          // 永远拦下，绝不让它冒泡去关窗口。收起一个面板：抽屉优先，
-          // 其次终端；都没开就静默吃掉（绝不关窗）。
+        case "t":
+          // ⌘T 浏览器（空状态菜单里标着同一个键）。已在前台就收起。
+          if (e.shiftKey) return;
           e.preventDefault();
-          if (drawer) {
-            // 用键盘收掉浏览器抽屉也是主动关闭，之后不再自动弹。
-            if (drawer === "browser" && activeSession) {
-              browserDismissed.current.add(activeSession.id);
-            }
-            setDrawer(null);
+          if (!activeSession) return;
+          if (activeKind === "browser") collapseDrawer();
+          else activateTab({ kind: "browser" });
+          return;
+        case "g":
+          // ⌘⇧G Git 改动。不带 shift 的 ⌘G 留给"查找下一个"这类惯例。
+          if (!e.shiftKey) return;
+          e.preventDefault();
+          if (!activeSession) return;
+          if (activeKind === "changes") collapseDrawer();
+          else activateTab({ kind: "changes" });
+          return;
+        case "p":
+          // ⌘P 打开文件进预览。必须拦下 —— webview 的默认行为是打印。
+          if (e.shiftKey) return;
+          e.preventDefault();
+          if (activeSession) pickAndPreview();
+          return;
+        case "w":
+          // 永远拦下，绝不让它冒泡去关窗口。浏览器在前台时关的是当前
+          // 页面（Chrome 肌肉记忆），最后一页连带收掉浏览器标签；其余
+          // 情况关激活的工作台标签；空状态收抽屉；没抽屉就收终端；
+          // 都没有就静默吃掉（绝不关窗）。
+          e.preventDefault();
+          if (wb.open && wb.active === "browser" && browserPages.tabs.length > 0) {
+            closeBrowserPage(browserPages.active);
+          } else if (wb.open && wb.active) {
+            closeTab(wb.active);
+          } else if (wb.open) {
+            collapseDrawer();
           } else {
             setShowTerm((v) => (v ? false : v));
           }
@@ -514,7 +673,20 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [activeSession, projects, newSession, toggleSidebar, drawer]);
+  }, [
+    activeSession,
+    projects,
+    newSession,
+    toggleSidebar,
+    wb,
+    activeKind,
+    activateTab,
+    collapseDrawer,
+    pickAndPreview,
+    closeTab,
+    browserPages,
+    closeBrowserPage,
+  ]);
 
   /* ── 会话 / 项目操作 ──────────────────────── */
 
@@ -531,7 +703,7 @@ export function App() {
     transcriptView.delete(id);
     forgetComposerSession(id);
     closeSessionTerminals(id);
-    previewBySession.current.delete(id);
+    workbenchBySession.current.delete(id);
   };
 
   const doDeleteSession = async (id: string) => {
@@ -690,6 +862,34 @@ export function App() {
     });
   };
 
+  /** 工作台标签栏的"+"菜单：往抽屉里添一个标签。已开着的项只是激活。
+   *  以后的新面板在这里加一行，再到抽屉里加一个渲染分支。 */
+  const workbenchAddMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setMenu({
+      x: e.clientX,
+      y: e.clientY,
+      entries: [
+        {
+          label: "浏览器",
+          action: () => {
+            // 已经开着就再开一页（浏览器"+"的直觉）；还没开就先开起来，
+            // 第一页宿主自己建。
+            const had = wb.tabs.some((t) => t.kind === "browser");
+            activateTab({ kind: "browser" });
+            if (had && browserPages.tabs.length > 0 && activeSession) {
+              void browserNewTab(activeSession.id)
+                .then(applyBrowserPanel)
+                .catch(() => {});
+            }
+          },
+        },
+        { label: "Git 改动", action: () => activateTab({ kind: "changes" }) },
+        { label: "打开文件…", action: pickAndPreview },
+      ],
+    });
+  };
+
   if (bootError) {
     return (
       <div className="boot-fail">
@@ -711,6 +911,26 @@ export function App() {
       </div>
     );
   }
+
+  /** 抽屉此刻在不在画面上。它决定窗口的右上角归谁 —— 见下面 controls。 */
+  const drawerVisible = activeSession !== null && wb.open;
+  /**
+   * 窗口级分栏开关。同一份节点挂在两处之一：抽屉开着时挂在抽屉的标签栏
+   * 上，收起时挂在顶栏右端 —— 两种情况下它都正好落在**窗口**的右上角。
+   */
+  const windowControls = (
+    <WindowControls
+      terminalOpen={showTerm}
+      terminalEnabled={activeSession !== null}
+      onToggleTerminal={() => setShowTerm((v) => !v)}
+      drawerOpen={wb.open}
+      drawerEnabled={activeSession !== null}
+      onToggleDrawer={() => {
+        if (wb.open) collapseDrawer();
+        else openDrawer();
+      }}
+    />
+  );
 
   return (
     <ProjectRootContext.Provider value={activeSession?.root ?? ""}>
@@ -759,48 +979,12 @@ export function App() {
           onToggleSidebar={toggleSidebar}
           session={activeSession}
           onSessionMenu={sessionMenu}
-          browserOpen={drawer === "browser"}
-          browserEnabled={activeSession !== null}
-          onToggleBrowser={() => {
-            if (drawer === "browser") {
-              if (activeSession) browserDismissed.current.add(activeSession.id);
-              setDrawer(null);
-            } else {
-              if (activeSession) browserDismissed.current.delete(activeSession.id);
-              setDrawer("browser");
-            }
-          }}
-          terminalOpen={showTerm}
-          terminalEnabled={activeSession !== null}
-          onToggleTerminal={() => setShowTerm((v) => !v)}
           sessionCfgOpen={showSessionCfg}
           sessionCfgEnabled={activeSession !== null}
           onToggleSessionCfg={() => setShowSessionCfg((v) => !v)}
-          changesOpen={drawer === "changes"}
-          changesEnabled={activeSession !== null}
-          onToggleChanges={() => {
-            // 切到改动面板会把浏览器顶掉 —— 这也是"用户不想看浏览器"的
-            // 表态，不记下来的话，模型下一次导航又把改动面板抢回去。
-            if (drawer === "browser" && activeSession) {
-              browserDismissed.current.add(activeSession.id);
-            }
-            setDrawer((d) => (d === "changes" ? null : "changes"));
-          }}
-          previewOpen={drawer === "preview"}
-          previewEnabled={previewTabs.length > 0}
-          onTogglePreview={() => {
-            if (drawer === "preview") {
-              // 顶栏开关是显式的"收起"，不回退到之前的面板。
-              setDrawer(null);
-              previewReturn.current = null;
-              return;
-            }
-            if (drawer === "browser" && activeSession) {
-              browserDismissed.current.add(activeSession.id);
-            }
-            previewReturn.current = drawer;
-            setDrawer("preview");
-          }}
+          onOpenBrowser={() => activateTab({ kind: "browser" })}
+          // 抽屉开着时窗口的右上角是抽屉的，那三个键挂到它的标签栏上去。
+          controls={drawerVisible ? null : windowControls}
         />
 
         {updateNotice ? (
@@ -848,7 +1032,18 @@ export function App() {
                       onAgentBrowser={() => {
                         if (!visible) return;
                         if (browserDismissed.current.has(s.id)) return;
-                        setDrawer("browser");
+                        openTab({ kind: "browser" });
+                      }}
+                      onAgentPreview={(p) => {
+                        // 后台会话不抢前台的预览面板 —— 切回来时不补开，
+                        // 和浏览器同一个取舍。
+                        if (!visible) return;
+                        // 模型可能传相对路径（内核按会话目录解析成功了），
+                        // 前端拿到的是原文，同样按会话根目录拼绝对路径。
+                        const abs = looksAbsPath(p)
+                          ? p
+                          : `${s.root.replace(/[\\/]+$/, "")}/${p}`;
+                        openFilePreview(abs);
                       }}
                       onTurnEnd={() => setChangesRev((n) => n + 1)}
                       onBusy={(b) => patchSession(s.id, { busy: b })}
@@ -909,9 +1104,11 @@ export function App() {
           下面。抽屉和对话共享同一个会话 —— 这正是它存在的意义：你和模型
           看同一个页面。
 
-          浏览器和改动共用这一个槽位，互斥：两个都是"右边整列"，同时开
-          会把对话挤成一条缝。宽度共享，拖过一次两个都记住。 */}
-      {activeSession && drawer ? (
+          里面是多标签工作台：顶部一条统一标签栏，浏览器 / Git 改动 /
+          每个预览文件各占一个标签，共存不互斥。整列同一时刻仍只显示
+          一个标签的内容 —— 并排铺开会把对话挤成一条缝。宽度所有标签
+          共享，拖过一次全都记住。 */}
+      {drawerVisible && activeSession ? (
         <>
           <Resizer
             axis="x"
@@ -937,41 +1134,70 @@ export function App() {
             }}
           />
           <div className="drawer" style={{ width: drawerW }}>
-            {drawer === "browser" ? (
+            {/* 标签栏常在（哪怕一个标签都没有）：它同时是窗口右上角那三个
+                分栏开关的座位，抽屉开着的时候不能没有它。 */}
+            <WorkbenchTabs
+              tabs={wb.tabs}
+              active={wb.active}
+              pages={browserPages}
+              onSelect={(id) => {
+                const t = wb.tabs.find((x) => tabId(x) === id);
+                if (t) activateTab(t);
+              }}
+              onClose={closeTab}
+              onSelectPage={selectBrowserPage}
+              onClosePage={closeBrowserPage}
+              onAdd={workbenchAddMenu}
+              trailing={windowControls}
+            />
+            {/* 空状态即"添加面板"菜单（Codex 同款）。只列侧边标签；
+                终端停靠在底部，入口在窗口开关那一组里。 */}
+            {wb.tabs.length === 0 ? (
+              <WorkbenchEmpty
+                onChanges={() => activateTab({ kind: "changes" })}
+                onBrowser={() => activateTab({ kind: "browser" })}
+                onOpenFile={pickAndPreview}
+              />
+            ) : null}
+            {/* 浏览器和改动只在前台时挂载：浏览器切走要停帧流（宿主
+                不再白编码 JPEG），改动列表便宜、回来重比对一次就行。 */}
+            {/* `[约束]` 这几块的 key 必须带各自的前缀，不能都用会话 id。
+                它们是抽屉里的同层兄弟，React 在同层按 key 配对 —— 撞了 key
+                的那两个，切换时旧的漏删、新的照建，每切一次就在面板里多叠
+                一份（真出过：从预览切到 Git 改动，改动面板越攒越多）。
+                会话 id 留在 key 里是为了跨会话整块重挂，各标签组互不串。 */}
+            {activeKind === "browser" ? (
               <>
                 <BrowserPanel
-                  key={activeSession.id}
+                  key={`browser:${activeSession.id}`}
                   sessionId={activeSession.id}
-                  onClose={() => {
-                    browserDismissed.current.add(activeSession.id);
-                    setDrawer(null);
-                  }}
+                  panel={browserPages}
+                  onPanel={applyBrowserPanel}
+                  onPatchTab={patchBrowserTab}
                 />
                 <ScopePanel sessionId={activeSession.id} />
               </>
-            ) : drawer === "preview" && previewActive ? (
-              <FilePreviewPanel
-                // 跨会话重挂：每个会话的标签组独立，渲染器不跨会话保活
-                //（会话内的 tab 切换仍是零成本的 display 切换）。
-                key={activeSession.id}
-                paths={previewTabs}
-                active={previewActive}
-                onSelect={setPreviewActive}
-                onCloseTab={closePreviewTab}
-                // 收起面板不清标签 —— 顶栏图标或点开文件随时回来。
-                onClose={() => {
-                  setDrawer(previewReturn.current);
-                  previewReturn.current = null;
-                }}
-              />
-            ) : (
+            ) : null}
+            {activeKind === "changes" ? (
               <GitChangesPanel
-                key={activeSession.id}
+                key={`changes:${activeSession.id}`}
                 sessionId={activeSession.id}
                 refreshKey={changesRev}
-                onClose={() => setDrawer(null)}
               />
-            )}
+            ) : null}
+            {/* 预览面板显示过之后就常驻挂载（切走 display:none）：
+                渲染器、滚动位置、表格列宽都留在原地，切回即所见。
+                首挂必须在激活时（activeKind 那个分支先成立，previewWarm
+                随后才置位）—— 渲染器不能在 display:none 里做首屏适配。
+                跨会话仍整个重挂 —— 标签组每会话独立。 */}
+            {(activeKind === "preview" || previewWarm) && activePreviewPath ? (
+              <FilePreviewPanel
+                key={`preview:${activeSession.id}`}
+                paths={previewPaths}
+                active={activePreviewPath}
+                visible={activeKind === "preview"}
+              />
+            ) : null}
           </div>
         </>
       ) : null}
@@ -1042,6 +1268,7 @@ function Chat({
   onFirstMessage,
   onSessionEmptied,
   onAgentBrowser,
+  onAgentPreview,
   onTurnEnd,
   onBusy,
   insertText,
@@ -1065,6 +1292,9 @@ function Chat({
   onSessionEmptied?: (sessionId: string) => void;
   /** 模型调用浏览器工具时打开右侧抽屉，让用户看见同一页。 */
   onAgentBrowser?: () => void;
+  /** 模型的 PreviewFile 工具成功后，把文件在预览面板展示给用户。
+   *  路径是模型传的原文，可能是相对路径 —— 由外层按会话根目录解析。 */
+  onAgentPreview?: (path: string) => void;
   /** 一轮跑完。改动面板据此重新比对 —— 抽屉是常驻的，模型改完文件
    *  不刷新的话，那里还停在上一轮的样子。 */
   onTurnEnd?: () => void;
@@ -1076,7 +1306,12 @@ function Chat({
 }) {
   const session = useSession(
     sessionId,
-    onAgentBrowser ? { onBrowserOpen: onAgentBrowser } : undefined,
+    onAgentBrowser || onAgentPreview
+      ? {
+          ...(onAgentBrowser ? { onBrowserOpen: onAgentBrowser } : {}),
+          ...(onAgentPreview ? { onPreviewFile: onAgentPreview } : {}),
+        }
+      : undefined,
   );
 
   const busy = session.busy;

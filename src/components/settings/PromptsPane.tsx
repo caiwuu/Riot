@@ -7,6 +7,7 @@ import {
   setConfig,
 } from "../../bridge";
 import { newPresetId, presetLabel, presetSummary } from "../../lib/prompts";
+import { ResizableTextarea } from "../ResizableTextarea";
 import { Card, Group, Row } from "./layout";
 import { type AskConfirm, FormError, blurOnEnter } from "./shared";
 
@@ -199,7 +200,7 @@ function PresetEditor({
           desc="原样追加在内置提示词之后。适合放长期有效的指令（做什么、什么口吻、输出成什么样）；一次性的要求直接在对话里说更省事。"
           stack
         >
-          <textarea
+          <ResizableTextarea
             className="preset-body-input"
             value={body}
             onChange={(e) => setBody(e.target.value)}

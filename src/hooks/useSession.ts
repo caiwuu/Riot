@@ -266,6 +266,12 @@ export function useSession(
      * 历史回放不会走这条 —— 只在实时 `tool_use` 上触发。
      */
     onBrowserOpen?: () => void;
+    /**
+     * 模型的 PreviewFile 工具**成功**后，把这个文件在预览面板里展示给
+     * 用户。路径是模型传的原文（可能是相对路径），由调用方解析。
+     * 同 onBrowserOpen：历史回放不走，只在实时事件上触发。
+     */
+    onPreviewFile?: (path: string) => void;
   },
 ) {
   const [state, setStateRaw] = useState<SessionState>(() => touchSession(sessionId) ?? EMPTY_STATE);
@@ -303,6 +309,12 @@ export function useSession(
   const rafId = useRef(0);
   const onBrowserOpenRef = useRef(opts?.onBrowserOpen);
   onBrowserOpenRef.current = opts?.onBrowserOpen;
+  const onPreviewFileRef = useRef(opts?.onPreviewFile);
+  onPreviewFileRef.current = opts?.onPreviewFile;
+  /** 等结果的 PreviewFile 调用：tool_use id → 路径。成功的结果一到才开
+   *  预览 —— 在调用时就开的话，同一批里"先 Write 再 Preview"会抢在文件
+   *  落盘之前打开一个报错的标签；失败的调用（文件不存在）则根本不该开。 */
+  const pendingPreviews = useRef(new Map<string, string>());
 
   // 排队面板的权威镜像放 ref 而不是只放 state：事件回调（注入匹配、
   // Done 后接力）跑在 React 渲染周期之外，读 state 拿到的是一拍之前的
@@ -488,11 +500,31 @@ export function useSession(
         case "message": {
           flush();
           if (event.role === "assistant") {
+            let browserSeen = false;
             for (const c of event.content) {
-              if (c.type === "tool_use" && c.name.startsWith("Browser")) {
-                onBrowserOpenRef.current?.();
-                break;
+              if (c.type !== "tool_use") continue;
+              if (c.name.startsWith("Browser")) {
+                if (!browserSeen) {
+                  browserSeen = true;
+                  onBrowserOpenRef.current?.();
+                }
+              } else if (c.name === "PreviewFile") {
+                const p = (c.input as { path?: unknown } | null)?.path;
+                if (typeof p === "string" && p.trim()) {
+                  pendingPreviews.current.set(c.id, p);
+                }
               }
+            }
+          }
+          // PreviewFile 的成功结果到了 —— 这时文件已经被内核确认存在，
+          // 开出来的标签不会是一页报错。
+          if (event.role === "user") {
+            for (const c of event.content) {
+              if (c.type !== "tool_result") continue;
+              const p = pendingPreviews.current.get(c.tool_use_id);
+              if (p === undefined) continue;
+              pendingPreviews.current.delete(c.tool_use_id);
+              if (!c.is_error) onPreviewFileRef.current?.(p);
             }
           }
           // 排队的插话被内核注入了 —— 面板条目转成对话气泡。先按 id 配

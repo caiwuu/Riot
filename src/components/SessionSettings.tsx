@@ -1,4 +1,4 @@
-import { type PointerEvent, useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   type PromptPreset,
@@ -24,6 +24,7 @@ import { SamplingSliders } from "./FieldSlider";
 import { FieldSelect, type FieldOption } from "./FieldSelect";
 import { HintTip } from "./HintTip";
 import { Modal } from "./Modal";
+import { ResizableTextarea } from "./ResizableTextarea";
 import { basename } from "../pathDisplay";
 
 /**
@@ -351,14 +352,18 @@ export function SessionSettings({
               />
             </div>
           ) : null}
-          <PromptField
+          <ResizableTextarea
+            className="preset-body-input"
             value={prompt}
-            onChange={(v) => {
-              setPrompt(v);
+            onChange={(ev) => {
+              setPrompt(ev.target.value);
               // 一旦动手改，"撤销回替换前"就不再是用户想要的那个状态了。
               setReplaced(null);
             }}
-            onCommit={commitPrompt}
+            onBlur={(ev) => commitPrompt(ev.target.value)}
+            placeholder="给这个会话补充的指令"
+            rows={6}
+            spellCheck={false}
           />
           {replaced !== null ? (
             <div className="prompt-undo" role="status">
@@ -372,69 +377,5 @@ export function SessionSettings({
           {error ? <p className="form-error">{error}</p> : null}
         </div>
     </Modal>
-  );
-}
-
-const PROMPT_H = { def: 120, min: 80, max: 480 };
-
-/**
- * 系统提示词。不用 CSS `resize`：WKWebView 在 `appearance: none` 下
- * 把系统拉伸角标吃掉，拖了等于没拖。底下那条杠才是真的拖高度。
- */
-function PromptField({
-  value,
-  onChange,
-  onCommit,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  onCommit: (v: string) => void;
-}) {
-  const [h, setH] = useState(PROMPT_H.def);
-  const drag = useRef<{ y: number; h: number } | null>(null);
-
-  const onGripDown = (e: PointerEvent<HTMLButtonElement>) => {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    drag.current = { y: e.clientY, h };
-    try {
-      e.currentTarget.setPointerCapture(e.pointerId);
-    } catch {
-      /* 合成事件没有活跃指针 */
-    }
-  };
-
-  const onGripMove = (e: PointerEvent<HTMLButtonElement>) => {
-    const d = drag.current;
-    if (!d) return;
-    setH(Math.min(PROMPT_H.max, Math.max(PROMPT_H.min, d.h + (e.clientY - d.y))));
-  };
-
-  const onGripUp = () => {
-    drag.current = null;
-  };
-
-  return (
-    <div className="prompt-field">
-      <textarea
-        className="prompt-input"
-        style={{ height: h }}
-        value={value}
-        onChange={(ev) => onChange(ev.target.value)}
-        onBlur={(ev) => onCommit(ev.target.value)}
-        placeholder="给这个会话补充的指令"
-        spellCheck={false}
-      />
-      <button
-        type="button"
-        className="prompt-grip"
-        aria-label="拖动调整高度"
-        title="拖动调整高度"
-        onPointerDown={onGripDown}
-        onPointerMove={onGripMove}
-        onPointerUp={onGripUp}
-        onPointerCancel={onGripUp}
-      />
-    </div>
   );
 }

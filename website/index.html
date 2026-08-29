@@ -18,11 +18,18 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800;900&family=Geist+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@600&display=swap"
       rel="stylesheet"
     />
     <!-- 带版本参数防缓存：改样式/脚本后浏览器立刻拿到新文件，调整 v 值即可 -->
-    <link rel="stylesheet" href="style.css?v=2" />
+    <link rel="stylesheet" href="style.css?v=6" />
+    <noscript>
+      <style>
+        .hl-fallback {
+          display: flex !important;
+        }
+      </style>
+    </noscript>
   </head>
   <body id="top">
     <!-- 全站背景质感层 -->
@@ -34,9 +41,7 @@
     <header class="nav" id="nav">
       <div class="container nav-inner">
         <a class="brand" href="#top" aria-label="Riot 首页">
-          <span class="brand-mark" aria-hidden="true">
-            <img src="assets/riot-logo.png" alt="" />
-          </span>
+          <span class="brand-badge" aria-hidden="true">R</span>
           <span class="brand-name">RIOT</span>
         </a>
 
@@ -78,47 +83,64 @@
     </header>
 
     <main>
-      <!-- Hero -->
+      <!-- Hero：全屏黑域 —— 点阵字标 / 地平光线 / 波形丘陵 / 透视地面 -->
       <section class="hero" id="hero">
-        <div class="hero-sky" aria-hidden="true">
-          <canvas id="hero-canvas" class="hero-canvas"></canvas>
-          <div class="hero-veil"></div>
-          <canvas class="hl-canvas" id="logo-canvas"></canvas>
-        </div>
-
-        <div class="container hero-inner">
-          <div class="hero-logo" aria-hidden="true">
-            <span class="hl-glow"></span>
-            <img class="hl-fallback" src="assets/riot-logo.png" alt="" />
-          </div>
-
-          <!-- <h1 class="hero-wordmark" id="hero-title" aria-label="Riot">RIOT</h1> -->
-
-          <p class="hero-sub" data-reveal data-reveal-delay="2">
-            一个真正在你电脑上干活的 AI 助手——读代码、改文件、跑命令、出文档
+        <div class="hero-scene" aria-hidden="true">
+          <canvas id="scene-canvas" class="scene-canvas"></canvas>
+          <canvas id="logo-canvas" class="logo-canvas"></canvas>
+          <div class="hero-vignette"></div>
+          <p class="hero-sidenote hero-sidenote-left">
+            <span>load context</span>
+            <span>indexing files</span>
+            <span>parsing terminal</span>
+            <span class="is-ok">ready</span>
           </p>
-
-          <div class="hero-actions" data-reveal data-reveal-delay="3">
-            <a
-              class="btn btn-primary btn-lg js-primary-download"
-              href="#download"
-              id="hero-download"
-            >
-              <span class="btn-os-icon" id="hero-os-icon" aria-hidden="true"></span>
-              <span id="hero-download-label">前往下载</span>
-            </a>
-            <a class="btn btn-ghost btn-lg" href="#download">全部下载选项</a>
-          </div>
-
-          <p class="hero-meta" data-reveal data-reveal-delay="4">
-            <span id="hero-download-meta">macOS 与 Windows 双平台</span
-            ><span class="js-ver" hidden> · <span class="js-version"></span></span> · 免费且 MIT
-            开源
+          <p class="hero-sidenote hero-sidenote-right">
+            <span>model online</span>
+            <span>local-first</span>
           </p>
         </div>
 
-        <!-- 产品主视觉截图 -->
-        <div class="container hero-shot-wrap" data-reveal data-reveal-delay="5">
+        <h1 class="sr-only">RIOT — 跑在本机的 AI Agent</h1>
+
+        <div class="hero-wordmark-box" aria-hidden="true">
+          <span class="hl-fallback">RIOT</span>
+        </div>
+
+        <div class="hero-horizon" aria-hidden="true"></div>
+
+        <p class="hero-sub">一个真正在你电脑上干活的 AI 助手——读代码、改文件、跑命令、出文档</p>
+
+        <div class="hero-actions">
+          <a
+            class="btn btn-primary btn-lg js-primary-download"
+            href="#download"
+            id="hero-download"
+          >
+            <span class="btn-os-icon" id="hero-os-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="currentColor">
+                <path
+                  d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09l.01-.01zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z"
+                />
+              </svg>
+            </span>
+            <span id="hero-download-label">下载 macOS 版</span>
+          </a>
+          <a class="btn btn-ghost btn-lg" href="#download">
+            全部下载选项 <span class="btn-arrow" aria-hidden="true">→</span>
+          </a>
+        </div>
+
+        <p class="hero-meta">
+          <span id="hero-download-meta">.dmg · 仅 Apple Silicon</span
+          ><span class="js-ver" hidden> · <span class="js-version"></span></span> · 免费且 MIT
+          开源
+        </p>
+      </section>
+
+      <!-- 产品主视觉截图 -->
+      <section class="showcase">
+        <div class="container hero-shot-wrap" data-reveal>
           <p class="hero-facts" aria-hidden="true">
             <span>MIT 开源</span><i></i><span>终端 · 浏览器内置</span><i></i
             ><span>Word · Excel · PPT · PDF</span><i></i><span>macOS · Windows</span>
@@ -509,9 +531,7 @@
       <div class="container footer-inner">
         <div class="footer-brand">
           <a class="brand" href="#top" aria-label="回到顶部">
-            <span class="brand-mark" aria-hidden="true">
-              <img src="assets/riot-logo.png" alt="" />
-            </span>
+            <span class="brand-badge" aria-hidden="true">R</span>
             <span class="brand-name">RIOT</span>
           </a>
           <p>跑在本机的 AI Agent。<br />你的模型，你的机器，你的 Agent。</p>
@@ -553,6 +573,6 @@
       <div class="footer-watermark" aria-hidden="true">RIOT</div>
     </footer>
 
-    <script src="script.js?v=2"></script>
+    <script src="script.js?v=6"></script>
   </body>
 </html>

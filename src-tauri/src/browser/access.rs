@@ -280,6 +280,14 @@ pub struct HostBrowser {
     /// 几十个的时候，那几十个请求会同时到 —— 各自数一遍都看到"还没到上限"，
     /// 于是上限一条也没拦住。持锁串起来之后，第 25 个数到的是真实的 24。
     popping: Mutex<()>,
+    /// 标签清单的变更通知出口。前端的工作台标签栏开着浏览器组时装上。
+    ///
+    /// `[约束]` 开页 / 关页 / 切页的**瞬间**要 ping 一声。页面标签渲染在
+    /// 前端的统一标签栏上，只靠一秒一次的轮询对齐的话，点开新页要等下一拍
+    /// 才在标签栏上冒出来 —— 而画面（帧流）是即时的，肉眼看得出谁先谁后。
+    /// ping 不带内容:前端收到就重查一次 [`Self::state`]，这边不再算一份
+    /// 状态塞进通知里，免得和轮询的回包互相乱序。
+    tabs_watch: Mutex<Option<mpsc::UnboundedSender<()>>>,
 }
 
 /// 一条请求拦截规则:URL 含 `needle` 就执行 `action`。
@@ -317,7 +325,25 @@ impl HostBrowser {
             taps: Arc::default(),
             intercept: Arc::default(),
             popping: Mutex::default(),
+            tabs_watch: Mutex::default(),
         })
+    }
+
+    /// 装上标签清单的变更通知出口。已有的直接替换 —— 订阅方只会有一个
+    /// （工作台标签栏），旧通道属于它的上一次挂载。
+    pub async fn watch_tabs(&self, tx: mpsc::UnboundedSender<()>) {
+        *self.tabs_watch.lock().await = Some(tx);
+    }
+
+    /// 标签清单变了（开 / 关 / 切页）。发不出去说明前端那头已经没了，
+    /// 顺手摘掉，别在每次变更时都对着空处扔。
+    async fn ping_tabs(&self) {
+        let mut slot = self.tabs_watch.lock().await;
+        if let Some(tx) = slot.as_ref()
+            && tx.send(()).is_err()
+        {
+            *slot = None;
+        }
     }
 
     /// 当前活动的标签页；一个都没有就开一个。
@@ -431,6 +457,7 @@ impl HostBrowser {
         } else {
             self.stream(&b, left).await;
         }
+        self.ping_tabs().await;
         true
     }
 
@@ -469,6 +496,7 @@ impl HostBrowser {
         self.taps.lock().await.clear();
         self.intercept.lock().await.clear();
         *self.snap_refs.lock().await = None;
+        self.ping_tabs().await;
     }
 
     /// 页面自己要求开一页（`target="_blank"`、`window.open()`）。
@@ -526,6 +554,9 @@ impl HostBrowser {
             tabs.active = tab;
         }
         self.stream(&b, tab).await;
+        // 模型切页时（Nav::SelectTab）前端不知情 —— ping 让标签栏的高亮
+        // 立刻跟上。面板自己切页走的也是这条，重查一次无妨。
+        self.ping_tabs().await;
         self.state().await
     }
 
@@ -649,6 +680,7 @@ impl HostBrowser {
         if show {
             self.stream(b, id).await;
         }
+        self.ping_tabs().await;
         Ok(id)
     }
 

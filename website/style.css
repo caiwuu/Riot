@@ -4,7 +4,7 @@
    ============================================================ */
 
 :root {
-  --bg: #040404;
+  --bg: #030306;
   --surface: rgba(255, 255, 255, 0.024);
   --surface-2: rgba(255, 255, 255, 0.045);
   --line: rgba(255, 255, 255, 0.08);
@@ -78,6 +78,18 @@ code {
   margin-inline: auto;
 }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 main,
 .footer {
   position: relative;
@@ -123,7 +135,7 @@ main,
 }
 
 .nav.scrolled {
-  background: rgba(4, 4, 4, 0.78);
+  background: rgba(3, 3, 6, 0.78);
   border-bottom-color: var(--line);
   backdrop-filter: blur(16px) saturate(130%);
   -webkit-backdrop-filter: blur(16px) saturate(130%);
@@ -147,14 +159,22 @@ main,
   color: inherit;
 }
 
-.brand-mark {
+/* 「R」徽标：圆角方块内一枚字母，按新 UI 图 */
+.brand-badge {
   width: 26px;
   height: 26px;
-  display: inline-flex;
-}
-.brand-mark img {
-  width: 100%;
-  height: 100%;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.02));
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0;
+  color: #eef1f7;
+  box-shadow:
+    0 0 12px rgba(150, 180, 255, 0.14),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
 .nav-links {
@@ -187,7 +207,7 @@ main,
   justify-content: center;
   width: 32px;
   height: 32px;
-  border-radius: var(--radius-sm);
+  border-radius: 50%;
   color: var(--muted);
   border: 1px solid var(--line);
   background: transparent;
@@ -242,7 +262,7 @@ main,
   gap: 4px;
   padding: 12px 24px 24px;
   color: var(--fg);
-  background: rgba(4, 4, 4, 0.94);
+  background: rgba(3, 3, 6, 0.94);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border-bottom: 1px solid var(--line);
@@ -312,31 +332,39 @@ main,
 }
 
 .btn-primary {
-  background: var(--fg);
-  color: #060606;
-  border-color: var(--fg);
+  background: #fff;
+  color: #05060a;
+  border-color: #fff;
   box-shadow:
     0 1px 0 rgba(255, 255, 255, 0.4) inset,
-    0 18px 40px -18px rgba(244, 243, 238, 0.32);
+    0 18px 44px -18px rgba(214, 226, 255, 0.35);
 }
 .btn-primary:hover {
   background: #fff;
   border-color: #fff;
   transform: translateY(-1px);
-  box-shadow: 0 22px 48px -20px rgba(244, 243, 238, 0.4);
+  box-shadow: 0 22px 52px -20px rgba(214, 226, 255, 0.45);
 }
 .btn-primary:active {
   transform: translateY(0);
 }
 
 .btn-ghost {
-  background: transparent;
-  border-color: var(--line-strong);
-  color: var(--fg);
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.17);
+  color: #e9ecf4;
 }
 .btn-ghost:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(255, 255, 255, 0.06);
   border-color: rgba(255, 255, 255, 0.3);
+}
+
+.btn-arrow {
+  display: inline-block;
+  transition: transform 0.2s;
+}
+.btn:hover .btn-arrow {
+  transform: translateX(3px);
 }
 
 .btn-sm {
@@ -344,8 +372,9 @@ main,
   font-size: 13px;
 }
 .btn-lg {
-  padding: 13px 28px;
+  padding: 15px 30px;
   font-size: 15px;
+  border-radius: 11px;
 }
 .btn-block {
   width: 100%;
@@ -368,169 +397,305 @@ main,
 }
 
 /* ------------------------------------------------------------
-   Hero
+   Hero —— 新 UI：全屏黑域
+   点阵字标 / 地平光线 / 波形丘陵 / 透视地面 / 终端侧注
    ------------------------------------------------------------ */
 .hero {
   position: relative;
   isolation: isolate;
+  height: 100svh;
+  min-height: 640px;
   overflow: hidden;
-  padding-top: calc(var(--nav-h) + 12px);
-  padding-bottom: 8px;
   text-align: center;
 }
 
-.hero-sky {
+.hero-scene {
   position: absolute;
-  inset: 0 0 auto;
+  inset: 0;
+  pointer-events: none;
+}
+
+.scene-canvas,
+.logo-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
+}
+.scene-canvas {
   z-index: 0;
-  height: 100vh;
-  height: 100svh;
-  overflow: hidden;
+}
+.logo-canvas {
+  z-index: 2;
+}
+
+/* 暗角：把注意力收向画面中心 */
+.hero-vignette {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  background: radial-gradient(120% 92% at 50% 44%, transparent 58%, rgba(0, 0, 0, 0.5) 100%);
+}
+
+/* 场景收底：贴着下一屏渐入纯黑 */
+.hero::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 9%;
+  z-index: 4;
+  pointer-events: none;
+  background: linear-gradient(180deg, transparent, var(--bg));
+}
+
+/* 终端侧注 */
+.hero-sidenote {
+  position: absolute;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.05em;
+  line-height: 1.75;
+  text-align: left;
+}
+.hero-sidenote span {
+  opacity: 0;
+  animation: hero-fade 0.7s ease forwards;
+  transition: color 0.45s ease;
+}
+
+/* 左侧终端行：循环高亮「正在执行」的一行 */
+.hero-sidenote-left span.is-active {
+  color: rgba(170, 233, 195, 0.85);
+}
+.hero-sidenote-left {
+  left: 7.2%;
+  top: 26.2%;
+  color: rgba(148, 202, 168, 0.36);
+}
+.hero-sidenote-left .is-ok {
+  color: rgba(146, 226, 178, 0.62);
+}
+.hero-sidenote-right {
+  left: 79.6%;
+  top: 35.4%;
+  color: rgba(158, 176, 232, 0.4);
+}
+.hero-sidenote-left span:nth-child(1) {
+  animation-delay: 1.05s;
+}
+.hero-sidenote-left span:nth-child(2) {
+  animation-delay: 1.25s;
+}
+.hero-sidenote-left span:nth-child(3) {
+  animation-delay: 1.45s;
+}
+.hero-sidenote-left span:nth-child(4) {
+  animation-delay: 1.65s;
+}
+.hero-sidenote-right span:nth-child(1) {
+  animation-delay: 1.35s;
+}
+.hero-sidenote-right span:nth-child(2) {
+  animation-delay: 1.55s;
+}
+
+/* 点阵字标的定位锚：canvas 铺满首屏，字形在此矩形内成形 */
+.hero-wordmark-box {
+  position: absolute;
+  z-index: 1;
+  left: 50%;
+  top: 38.5%;
+  transform: translate(-50%, -50%);
+  width: clamp(300px, 33vw, 600px);
+  aspect-ratio: 3.9;
   pointer-events: none;
 }
 
-.hero-canvas {
+/* 字标后方的淡蓝辉光（缓慢呼吸） */
+.hero-wordmark-box::before {
+  content: '';
   position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  display: block;
-  mix-blend-mode: screen;
-}
-
-.hero-veil {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    180deg,
-    rgba(4, 4, 4, 0) 0%,
-    rgba(4, 4, 4, 0.06) 55%,
-    rgba(4, 4, 4, 0.62) 84%,
-    var(--bg) 100%
-  );
-}
-
-.hero-inner {
-  position: relative;
-  z-index: 6;
-}
-
-/* 动画 Logo 的定位锚：粒子云在此容器内成形（画布本体挂在 .hero-sky，铺满首屏）。
-   容器只留极少余量（粒子占 88%），避免上下吃掉首屏空间 */
-.hero-logo {
-  position: relative;
-  width: clamp(288px, 30.4vw, 384px);
-  aspect-ratio: 1;
-  margin: 0 auto;
-}
-
-/* 流星画布铺满整个首屏：流星从屏幕边缘飞入横穿全屏，星云只在 logo 区域成形 */
-.hl-canvas {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  display: block;
-  pointer-events: none;
-}
-
-/* 禁用动效 / 无 canvas 时的静态兜底 */
-.hl-fallback {
-  display: none;
-  position: absolute;
-  inset: 24%;
-  width: 52%;
-  height: 52%;
-  filter: drop-shadow(0 0 26px rgba(var(--glow-a), 0.38));
-}
-
-.hl-glow {
-  position: absolute;
-  inset: -14%;
-  border-radius: 50%;
+  inset: -60% -20%;
   background: radial-gradient(
-    circle,
-    rgba(var(--glow-a), 0.16),
-    rgba(var(--glow-b), 0.06) 46%,
-    transparent 68%
+    ellipse 50% 50% at 50% 50%,
+    rgba(146, 178, 255, 0.12),
+    rgba(120, 130, 240, 0.045) 55%,
+    transparent 75%
   );
-  animation: hl-breathe 6.5s ease-in-out infinite;
+  animation: glow-breathe 6s ease-in-out infinite;
 }
 
-@keyframes hl-breathe {
+@keyframes glow-breathe {
   0%,
   100% {
-    opacity: 0.65;
+    opacity: 0.78;
     transform: scale(1);
   }
   50% {
     opacity: 1;
-    transform: scale(1.08);
+    transform: scale(1.05);
   }
 }
 
-/* 轨道已移除：动效全部由 canvas 粒子系统承担（黑洞 + 陨石穿越） */
-
-/* RIOT 字标 */
-.hero-wordmark {
-  margin-top: -12px;
-  font-size: clamp(32px, 4.2vw, 54px);
-  font-weight: 700;
+/* 禁用 canvas 时的静态兜底字标 */
+.hl-fallback {
+  display: none;
+  position: absolute;
+  inset: 0;
+  align-items: center;
+  justify-content: center;
+  font-weight: 900;
+  font-size: clamp(56px, 7.6vw, 118px);
+  letter-spacing: 0.18em;
+  text-indent: 0.18em;
   line-height: 1;
-  letter-spacing: 0.22em;
-  text-indent: 0.22em;
-  color: var(--fg);
-  text-shadow: 0 0 60px rgba(var(--glow-a), 0.3);
+  color: #eef2fb;
+  text-shadow: 0 0 42px rgba(150, 182, 255, 0.55);
+}
+.hero-wordmark-box.no-canvas .hl-fallback {
+  display: flex;
 }
 
-/* 字标字符入场（由 JS 拆分） */
-.ht-ch {
-  display: inline-block;
+/* 地平光线 */
+.hero-horizon {
+  position: absolute;
+  z-index: 1;
+  left: 50%;
+  top: 52%;
+  width: min(62vw, 800px);
+  height: 1px;
+  transform: translateX(-50%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(168, 194, 255, 0.38) 16%,
+    rgba(224, 234, 255, 0.9) 40%,
+    #fff 50%,
+    rgba(224, 234, 255, 0.9) 60%,
+    rgba(168, 194, 255, 0.38) 84%,
+    transparent
+  );
+  box-shadow:
+    0 0 18px rgba(186, 206, 255, 0.65),
+    0 0 3px rgba(255, 255, 255, 0.9);
   opacity: 0;
-  transform: translateY(0.42em);
-  filter: blur(7px);
-  transition:
-    opacity 0.62s cubic-bezier(0.2, 0.6, 0.2, 1),
-    transform 0.62s cubic-bezier(0.2, 0.6, 0.2, 1),
-    filter 0.62s cubic-bezier(0.2, 0.6, 0.2, 1);
-  transition-delay: var(--ch-delay, 0ms);
+  animation:
+    hero-fade 1.4s ease 0.5s forwards,
+    horizon-pulse 4.5s ease-in-out 2.2s infinite;
 }
-.hero-wordmark.played .ht-ch {
-  opacity: 1;
-  transform: translateY(0);
-  filter: blur(0);
+
+/* 地平光线呼吸脉动 */
+@keyframes horizon-pulse {
+  0%,
+  100% {
+    filter: brightness(1);
+  }
+  50% {
+    filter: brightness(1.42);
+  }
+}
+.hero-horizon::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 44%;
+  height: 30px;
+  background: radial-gradient(
+    ellipse 50% 50% at 50% 50%,
+    rgba(214, 228, 255, 0.42),
+    rgba(160, 186, 255, 0.14) 48%,
+    transparent 72%
+  );
+  filter: blur(5px);
+}
+.hero-horizon::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 135%;
+  height: 190px;
+  background: radial-gradient(
+    ellipse 50% 50% at 50% 50%,
+    rgba(140, 168, 255, 0.13),
+    transparent 62%
+  );
 }
 
 .hero-sub {
-  margin: 14px auto 0;
-  max-width: 560px;
-  font-size: clamp(15px, 1.8vw, 16.5px);
+  position: absolute;
+  z-index: 6;
+  left: 50%;
+  top: 63%;
+  transform: translate(-50%, -50%);
+  margin: 0;
+  width: max-content;
+  max-width: min(92vw, 720px);
+  font-size: clamp(14px, 1.7vw, 17.5px);
   line-height: 1.9;
-  color: var(--muted);
+  letter-spacing: 0.02em;
+  color: rgba(226, 231, 241, 0.86);
+  opacity: 0;
+  animation: hero-fade 1s ease 0.7s forwards;
 }
 
 .hero-actions {
-  margin-top: 22px;
+  position: absolute;
+  z-index: 6;
+  left: 50%;
+  top: 73%;
+  transform: translate(-50%, -50%);
   display: flex;
   justify-content: center;
   align-items: center;
-  gap: 14px;
-  flex-wrap: wrap;
+  gap: 22px;
+  opacity: 0;
+  animation: hero-fade 1s ease 0.85s forwards;
 }
 
 .hero-meta {
-  margin-top: 12px;
+  position: absolute;
+  z-index: 6;
+  left: 50%;
+  top: 81%;
+  transform: translate(-50%, -50%);
+  margin: 0;
+  white-space: nowrap;
   font-family: var(--font-mono);
   font-size: 12px;
-  letter-spacing: 0.02em;
-  color: var(--muted-2);
+  letter-spacing: 0.05em;
+  color: rgba(170, 177, 194, 0.55);
+  opacity: 0;
+  animation: hero-fade 1s ease 1s forwards;
 }
 
-/* Hero 截图 */
+@keyframes hero-fade {
+  to {
+    opacity: 1;
+  }
+}
+
+/* 首屏下方的产品截图 */
+.showcase {
+  position: relative;
+  padding-top: 90px;
+}
+
 .hero-shot-wrap {
   position: relative;
   z-index: 6;
-  margin-top: 64px;
 }
 
 .hero-facts {
@@ -1583,19 +1748,13 @@ main,
   .t-line {
     opacity: 1;
   }
-  .hero-canvas {
-    display: none;
-  }
-  .hl-canvas {
-    display: none;
-  }
-  .hl-fallback {
-    display: block;
-  }
-  .ht-ch {
+  .hero-sidenote span,
+  .hero-horizon,
+  .hero-sub,
+  .hero-actions,
+  .hero-meta {
     opacity: 1;
-    transform: none;
-    filter: none;
+    animation: none;
   }
 }
 
@@ -1670,14 +1829,50 @@ main,
     grid-column: 1 / -1;
   }
 
+  /* 小屏改为常规文档流：装饰画布仍铺满背景 */
   .hero {
-    padding-top: calc(var(--nav-h) + 10px);
+    height: auto;
+    min-height: 100svh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: calc(var(--nav-h) + 34px) 0 56px;
   }
-  .hero-logo {
-    width: min(70vw, 272px);
+  .hero-wordmark-box,
+  .hero-horizon,
+  .hero-sub,
+  .hero-actions,
+  .hero-meta {
+    position: static;
+    transform: none;
   }
-  .hero-shot-wrap {
-    margin-top: 60px;
+  .hero-wordmark-box {
+    width: min(80vw, 430px);
+  }
+  .hero-horizon {
+    width: 86vw;
+    margin-top: 42px;
+  }
+  .hero-sub {
+    margin-top: 46px;
+    width: auto;
+    padding: 0 26px;
+  }
+  .hero-actions {
+    margin-top: 30px;
+    flex-wrap: wrap;
+  }
+  .hero-meta {
+    margin-top: 24px;
+    white-space: normal;
+    padding: 0 20px;
+  }
+  .hero-sidenote {
+    display: none;
+  }
+  .showcase {
+    padding-top: 64px;
   }
   .ticker {
     margin-top: 64px;

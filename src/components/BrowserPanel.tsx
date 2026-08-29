@@ -5,15 +5,11 @@ import {
   type BrowserInput,
   type PanelState,
   type TabInfo,
-  browserCloseTab,
   browserHistory,
   browserInput,
   browserNavigate,
-  browserNewTab,
   browserReload,
   browserResize,
-  browserSelectTab,
-  browserState,
   closeBrowser,
   openBrowser,
 } from "../bridge";
@@ -25,6 +21,11 @@ import {
  * 实际是另一个进程在渲染 —— 那个进程跑的是 CEF，而它必须活在自己的
  * `.app` 里（见 crates/riot-browser）。
  *
+ * 页面标签不在这里：它们展开在抽屉顶部的工作台标签栏上（见 Workbench），
+ * 页面状态由 App 级的 useBrowserPanel 持有、经 props 传进来 —— 面板只在
+ * 激活时挂载，状态跟着面板走的话，切去别的标签页面标签就消失了。
+ * 这里剩下的是画面、地址栏和输入转发。
+ *
  * # 为什么不用 iframe
  *
  * iframe 只能显示，读不到跨域页面的 DOM、截不了图、也拿不到 console。
@@ -33,10 +34,17 @@ import {
  */
 export function BrowserPanel({
   sessionId,
-  onClose,
+  panel,
+  onPanel,
+  onPatchTab,
 }: {
   sessionId: string;
-  onClose: () => void;
+  /** 页面状态（App 持有）。地址栏、前进后退的可用性都从它派生。 */
+  panel: PanelState;
+  /** 整个状态的回写（openBrowser 的首推走这里）。 */
+  onPanel: (s: PanelState) => void;
+  /** 单页信息的回写（前进后退的回值，作用在激活页上）。 */
+  onPatchTab: (info: TabInfo) => void;
 }) {
   /**
    * 收到过画面没有。只在第一帧翻一次 —— 帧本身不进 React 状态。
@@ -58,7 +66,6 @@ export function BrowserPanel({
    * 最终画面永远是最新的。
    */
   const nextFrame = useRef<BrowserFrame | null>(null);
-  const [panel, setPanel] = useState<PanelState>(EMPTY_PANEL);
   const [address, setAddress] = useState("");
   const [busy, setBusy] = useState(false);
   /** 导航失败给一行原因 —— 之前 go() 无 catch，慢站/打不开时画面停在原地，
@@ -94,7 +101,7 @@ export function BrowserPanel({
   };
 
   /**
-   * 把新的导航状态铺到界面上。
+   * 地址栏跟着激活页走（panel 是 App 持有的 props，轮询也在那边）。
    *
    * `[约束]` 地址栏有焦点的时候一个字都不能动 —— 那时候它属于用户。
    *
@@ -103,11 +110,10 @@ export function BrowserPanel({
    * 握着焦点 —— 于是用户接着打的每一个字都被一秒一次的同步冲掉，地址栏
    * 像有人在抢着输入，而且怎么都打不完一个地址。
    */
-  const apply = useCallback((s: PanelState) => {
-    setPanel(s);
-    const url = s.tabs.find((t) => t.id === s.active)?.url ?? "";
+  useEffect(() => {
+    const url = panel.tabs.find((t) => t.id === panel.active)?.url ?? "";
     if (document.activeElement !== addressRef.current) setAddress(url);
-  }, []);
+  }, [panel]);
 
   /**
    * 把一帧画到 canvas 上。
@@ -160,9 +166,9 @@ export function BrowserPanel({
   );
 
   useEffect(() => {
-    // 第三个参数让标签栏在浏览器就绪的那一刻就填上，不用等下一次定时同步 ——
+    // 第三个参数让标签组在浏览器就绪的那一刻就填上，不用等下一次定时同步 ——
     // 浏览器起来本身就要一秒，再叠一个轮询间隔就是两秒的空白。
-    const sub = openBrowser(sessionId, onFrame, apply);
+    const sub = openBrowser(sessionId, onFrame, onPanel);
     return () => {
       sub.unsubscribe();
       // 只停宿主的 JPEG 编码 —— 没人看的时候继续推是白烧 CPU。
@@ -170,51 +176,7 @@ export function BrowserPanel({
       // 改动再切回来，页面还是原样。
       void closeBrowser(sessionId);
     };
-  }, [sessionId, apply, onFrame]);
-
-  /**
-   * 只换一页的信息。前进后退回来的就是这一条 —— 它作用在活动页上。
-   *
-   * 用函数式更新而不是读一份快照:定时同步随时可能在中间落地，读快照会
-   * 把它的结果覆盖掉。
-   */
-  const patch = useCallback((info: TabInfo) => {
-    setPanel((prev) => ({
-      ...prev,
-      tabs: prev.tabs.map((t) => (t.id === info.id ? info : t)),
-    }));
-    if (document.activeElement !== addressRef.current) setAddress(info.url);
-  }, []);
-
-  /**
-   * 地址栏跟着页面走。
-   *
-   * `[取舍]` 定期问，而不是订阅页面的导航事件。
-   *
-   * 地址会在四种情况下变：地址栏跳转、前进后退、点页面里的链接、SPA 自己
-   * 改 history。前两种是我们发的命令，回值里就带着新状态；后两种只有页面
-   * 知道，要拿到就得订阅 `Page.frameNavigated` 再给面板铺一条推送通道。
-   * 而这个面板每秒本来就在收十几帧 JPEG，一次几十字节的往返在那个背景噪音
-   * 里量都量不出来。等真的需要"地址变化的精确时刻"再改。
-   */
-  useEffect(() => {
-    let alive = true;
-    const poll = () => {
-      // 失败就保持上一次的显示。页面换文档的瞬间这条问不到，
-      // 把地址栏清空会让它每次跳转都闪一下。
-      browserState(sessionId)
-        .then((s) => {
-          if (alive) apply(s);
-        })
-        .catch(() => {});
-    };
-    poll();
-    const timer = window.setInterval(poll, NAV_POLL_MS);
-    return () => {
-      alive = false;
-      window.clearInterval(timer);
-    };
-  }, [sessionId, apply]);
+  }, [sessionId, onPanel, onFrame]);
 
   /**
    * 让页面的视口和画面区一样大、一样清晰。
@@ -405,94 +367,17 @@ export function BrowserPanel({
   };
 
   const step = (delta: number) =>
-    void browserHistory(sessionId, delta).then(patch).catch(() => {});
-
-  /**
-   * 关完一页之后。
-   *
-   * 一页都不剩就把面板收起来 —— 和浏览器里关掉最后一个标签页等于关窗口
-   * 一个道理。宿主那边此时也没有活动页了，模型下次用到浏览器会现开一个。
-   */
-  const closed = (s: PanelState) => {
-    if (s.tabs.length === 0) {
-      onClose();
-      return;
-    }
-    apply(s);
-  };
+    void browserHistory(sessionId, delta).then(onPatchTab).catch(() => {});
 
   const active = panel.tabs.find((t) => t.id === panel.active);
   /** 画面该不该露出来。没画面、或停在空白页（且不在导航中）时给空状态。 */
   const showFrame = hasFrame && (Boolean(active?.url) || busy);
-  /**
-   * 浏览器还在起。
-   *
-   * `[约束]` 这段时间标签栏不能是空的。CEF 起来要一秒左右（六个进程），
-   * 空着的话面板会先显示一条只有"+"的光秃秃的栏，一秒后才"长出"一个标签，
-   * 看起来像刚才那下没点上。摆一个占位标签，界面的形状从第一帧就是对的。
-   */
+  /** 浏览器还在起（CEF 六个进程要一秒左右）。地址栏禁用并给出提示；
+   *  工作台标签栏那边同一时刻显示占位标签（见 Workbench）。 */
   const starting = panel.tabs.length === 0;
 
   return (
     <div className="browser-panel">
-      <div className="browser-tabs">
-        {starting ? (
-          <span className="browser-tab active">
-            <GlobeIcon />
-            <span className="browser-tab-title">{TAB_PLACEHOLDER}</span>
-          </span>
-        ) : null}
-        {panel.tabs.map((t) => (
-          <button
-            key={t.id}
-            className={t.id === panel.active ? "browser-tab active" : "browser-tab"}
-            onClick={() => void browserSelectTab(sessionId, t.id).then(apply).catch(() => {})}
-            title={t.url || TAB_PLACEHOLDER}
-          >
-            <GlobeIcon />
-            <span className="browser-tab-title">{t.title || TAB_PLACEHOLDER}</span>
-            {/*
-             * 关闭做成 span 而不是嵌套 button：button 套 button 是非法的
-             * HTML，React 会照渲染，但浏览器会把内层拆出去，点击行为随之
-             * 不可预料。
-             */}
-            <span
-              className="browser-tab-close"
-              role="button"
-              tabIndex={0}
-              aria-label="关闭标签页"
-              onClick={(e) => {
-                // 不冒泡给外层的"切到这一页" —— 否则关掉的同时又切了过去。
-                e.stopPropagation();
-                void browserCloseTab(sessionId, t.id).then(closed).catch(() => {});
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  void browserCloseTab(sessionId, t.id).then(closed).catch(() => {});
-                }
-              }}
-            >
-              <CloseIcon />
-            </span>
-          </button>
-        ))}
-        <button
-          className="icon"
-          onClick={() => void browserNewTab(sessionId).then(apply).catch(() => {})}
-          disabled={starting}
-          title="新标签页"
-        >
-          <PlusIcon />
-        </button>
-        <span className="browser-tabs-spacer" />
-        {/* 收起 ≠ 关闭：浏览器进程和标签页都留着，再点开还是原样 */}
-        <button className="icon" onClick={onClose} title="收起面板（页面保留）">
-          <PanelIcon />
-        </button>
-      </div>
-
       <div className="browser-bar">
         <button
           className="icon"
@@ -766,20 +651,6 @@ export function BrowserPanel({
   );
 }
 
-/** 面板刚挂上、宿主还没回状态时的样子。 */
-const EMPTY_PANEL: PanelState = { tabs: [], active: 0 };
-
-/** 还没加载过东西的标签页显示成这个。 */
-const TAB_PLACEHOLDER = "新标签页";
-
-/**
- * 多久问一次页面地址。
- *
- * 一秒是"点了链接之后瞥一眼地址栏，它已经变了"的量级。再快没有意义 ——
- * 用户的视线从页面移到地址栏本来就要这么久。
- */
-const NAV_POLL_MS = 1000;
-
 /** 小于这个尺寸不同步 —— 那种尺寸下的页面没法看，而且 0 会让 CEF 停止出帧。 */
 const MIN_VIEWPORT = 80;
 
@@ -854,7 +725,7 @@ function normalize(raw: string): string | null {
 
 /* ── 图标 ───────────────────────────────────── */
 
-/** 标签页和空状态用的地球。空状态那处要大一号，所以尺寸可传。 */
+/** 空状态用的地球（页面标签的同款画在 Workbench 里）。 */
 function GlobeIcon({ size = 12 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden>
@@ -864,37 +735,6 @@ function GlobeIcon({ size = 12 }: { size?: number }) {
         stroke="currentColor"
         strokeWidth="1.3"
       />
-    </svg>
-  );
-}
-
-function PlusIcon() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function CloseIcon() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <path
-        d="M4 4l8 8M12 4l-8 8"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
-/** 关闭面板。画的是"右边那一栏收起来"。 */
-function PanelIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <rect x="2" y="3" width="12" height="10" rx="2" stroke="currentColor" strokeWidth="1.3" />
-      <path d="M10 3v10" stroke="currentColor" strokeWidth="1.3" />
     </svg>
   );
 }

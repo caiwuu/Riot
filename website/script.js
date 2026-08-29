@@ -124,7 +124,7 @@ function applyOS () {
   document.querySelectorAll(".js-dl-mac").forEach((a) => (a.href = DOWNLOADS.mac.url));
   document.querySelectorAll(".js-dl-win").forEach((a) => (a.href = DOWNLOADS.win.url));
 
-  if (!os) return; // 未识别的系统：主按钮保持锚向下载区
+  if (!os) return; // 未识别的系统：主按钮保持锚向下载区（默认展示 macOS 文案）
 
   const dl = DOWNLOADS[os];
 
@@ -212,77 +212,342 @@ function initReveal () {
   items.forEach((el) => observer.observe(el));
 }
 
-/** Hero 大标题：逐字符浮现（保留 <em> 等内联标签） */
-function initHeroTitle () {
-  const title = document.getElementById("hero-title");
-  if (!title) return;
+/* ============================================================
+   Hero 场景（新 UI 图 1:1）
+   scene-canvas：星点 / 波形丘陵 / 透视地面 / 十字 / 半调网点
+   logo-canvas：点阵 LED 字标「RIOT」+ 外围暗点网格 + 溶解浮尘
+   ============================================================ */
 
-  if (reduceMotion) {
-    title.classList.add("played");
-    return;
-  }
-
-  let index = 0;
-  const STEP_MS = 26;
-
-  const splitNode = (node) => {
-    if (node.nodeType === Node.TEXT_NODE) {
-      const frag = document.createDocumentFragment();
-      for (const ch of node.textContent) {
-        if (ch.trim() === "") {
-          frag.appendChild(document.createTextNode(ch));
-          continue;
-        }
-        const span = document.createElement("span");
-        span.className = "ht-ch";
-        span.style.setProperty("--ch-delay", `${index * STEP_MS}ms`);
-        span.textContent = ch;
-        frag.appendChild(span);
-        index += 1;
-      }
-      node.replaceWith(frag);
-      return;
-    }
-    // <em> 用 background-clip: text 做渐变字，拆开会丢背景——整体作为一个动画单元
-    if (node.nodeType === Node.ELEMENT_NODE && node.tagName === "EM") {
-      node.classList.add("ht-ch");
-      node.style.setProperty("--ch-delay", `${index * STEP_MS}ms`);
-      index += Math.max(1, node.textContent.length);
-      return;
-    }
-    // 其他元素节点：递归处理子节点（快照，避免遍历中变更）
-    [...node.childNodes].forEach(splitNode);
-  };
-
-  [...title.childNodes].forEach(splitNode);
-
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => title.classList.add("played"));
-  });
+/** 预渲染辉光光点 sprite */
+function makeGlowSprite (r, g, b) {
+  const s = document.createElement("canvas");
+  const SIZE = 64;
+  s.width = SIZE;
+  s.height = SIZE;
+  const c = s.getContext("2d");
+  const grad = c.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grad.addColorStop(0, `rgba(${r},${g},${b},1)`);
+  grad.addColorStop(0.25, `rgba(${r},${g},${b},0.85)`);
+  grad.addColorStop(0.5, `rgba(${r},${g},${b},0.18)`);
+  grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+  c.fillStyle = grad;
+  c.fillRect(0, 0, SIZE, SIZE);
+  return s;
 }
 
 /**
- * 动画 Logo：「星云中的 RIOT」。
- * 离屏画布上写出字标「RIOT」，细密的炽白光点拼出字形；云朵是由
- * 「到文字的距离场」生成的胶囊状星云雾，贴字最浓，颜色随距离由青蓝过渡
- * 到深紫，向外密度/亮度连续衰减、位置弥散，天然没有轮廓线。
- * 宇宙中的星尘被引力捕获，绕着字标同向公转、一圈圈螺旋靠近：
- * 白色星尘真正落到笔画上时闪亮一下汇入字形；云朵色的星尘则落到
- * 云带的不同深度，融进对应色带的雾里。汇入后从远处的星空重生，川流不息。
- * 流星拖着尾迹横穿星空，轨迹被字标的引力弯折，击穿处的光点被撞飞，
- * 随后在引力作用下缓缓归位。鼠标靠近同样会推开光点。
- * 画布挂在 .hero-sky 内铺满整个首屏：流星横穿全屏，星云锚定在 .hero-logo 容器处成形。
+ * 背景场景：铺满首屏的一张 2D 画布。
+ * 静态装饰（十字 / 半调网点 / 汇聚线 / 角落等高线）只在 resize 时
+ * 预渲染进离屏层；每帧重画会动的部分——漂移闪烁的星点、流动的波形
+ * 丘陵、向观察者滚动的透视地面，30fps 足够。
+ * （流星在字标画布里，与字标微粒做撞击交互。）
+ */
+function initHeroScene () {
+  const canvas = document.getElementById("scene-canvas");
+  const hero = document.getElementById("hero");
+  if (!canvas || !hero) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const SP_STAR = makeGlowSprite(216, 228, 255);
+  const WAVE_FILL = "rgb(170, 196, 255)";
+  const GRID_RGB = "150, 172, 240";
+  const rand = (a, b) => a + Math.random() * (b - a);
+
+  let W = 0;
+  let H = 0;
+  let stars = [];
+  let staticLayer = null;
+  let running = false;
+  let lastDraw = 0;
+  const FRAME_MS = 33; // 氛围背景 30fps 足够
+
+  /** 静态装饰层：只在尺寸变化时重绘一次 */
+  const buildStaticLayer = () => {
+    staticLayer = document.createElement("canvas");
+    staticLayer.width = Math.round(W * dpr);
+    staticLayer.height = Math.round(H * dpr);
+    const c = staticLayer.getContext("2d");
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    // 定位十字（与 UI 图同位：上部两侧 + 中下两侧）
+    c.strokeStyle = "rgba(255, 255, 255, 0.25)";
+    c.lineWidth = 1;
+    const crosses = [
+      [0.072, 0.228],
+      [0.918, 0.228],
+      [0.034, 0.672],
+      [0.963, 0.672],
+    ];
+    for (const [fx, fy] of crosses) {
+      const x = Math.round(fx * W) + 0.5;
+      const y = Math.round(fy * H) + 0.5;
+      c.beginPath();
+      c.moveTo(x - 5, y);
+      c.lineTo(x + 5, y);
+      c.moveTo(x, y - 5);
+      c.lineTo(x, y + 5);
+      c.stroke();
+    }
+
+    // 半调网点方块（四角点缀）
+    const pitch = Math.max(6, Math.round(W * 0.0078));
+    const clusters = [
+      { x: 0.052, y: 0.8, cols: 9, rows: 9, a: 0.32 },
+      { x: 0.874, y: 0.8, cols: 9, rows: 9, a: 0.32 },
+      { x: 0.933, y: 0.66, cols: 7, rows: 8, a: 0.28 },
+      { x: 0.778, y: 0.1, cols: 7, rows: 6, a: 0.2 },
+      { x: 0.226, y: 0.095, cols: 6, rows: 5, a: 0.17 },
+    ];
+    for (const cl of clusters) {
+      for (let iy = 0; iy < cl.rows; iy++) {
+        for (let ix = 0; ix < cl.cols; ix++) {
+          if (Math.random() < 0.2) continue;
+          c.fillStyle = `rgba(198, 210, 255, ${(cl.a * rand(0.25, 1)).toFixed(3)})`;
+          c.fillRect(
+            Math.round(cl.x * W + ix * pitch),
+            Math.round(cl.y * H + iy * pitch),
+            1.4,
+            1.4
+          );
+        }
+      }
+    }
+
+    // 地平线以下的极淡汇聚线（点阵地面改为每帧动态滚动绘制）
+    const vpx = W / 2;
+    const vpy = H * 0.52;
+    for (let k = -8; k <= 8; k++) {
+      const endX = vpx + k * W * 0.115;
+      const grad = c.createLinearGradient(vpx, vpy + 6, endX, H);
+      grad.addColorStop(0, `rgba(${GRID_RGB}, 0)`);
+      grad.addColorStop(1, `rgba(${GRID_RGB}, 0.055)`);
+      c.strokeStyle = grad;
+      c.beginPath();
+      c.moveTo(vpx, vpy + 6);
+      c.lineTo(endX, H);
+      c.stroke();
+    }
+
+    // 底部两角的等高线
+    const contour = (cx0, cy0) => {
+      for (let i = 0; i < 4; i++) {
+        const r = W * (0.05 + i * 0.034);
+        c.strokeStyle = `rgba(${GRID_RGB}, ${(0.05 + i * 0.007).toFixed(3)})`;
+        c.beginPath();
+        c.ellipse(cx0, cy0, r, r * 0.6, 0, Math.PI, Math.PI * 2);
+        c.stroke();
+      }
+    };
+    contour(W * 0.06, H * 1.04);
+    contour(W * 0.94, H * 1.04);
+  };
+
+  const build = () => {
+    const rect = canvas.getBoundingClientRect();
+    W = Math.max(1, rect.width);
+    H = Math.max(1, rect.height);
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    // 星点：细碎的底 + 几颗带辉光的亮星（整体极缓慢向右漂移）
+    stars = [];
+    const n = Math.round((W * H) / 4200);
+    for (let i = 0; i < n; i++) {
+      stars.push({
+        x: Math.random() * W,
+        y: Math.random() * H,
+        r: 0.4 + Math.pow(Math.random(), 2.2) * 1.3,
+        a: rand(0.05, 0.38),
+        tw: Math.random() < 0.35,
+        glow: false,
+        phase: Math.random() * Math.PI * 2,
+        spd: rand(0.4, 1.6),
+        drift: rand(0.8, 3.2),
+      });
+    }
+    for (let i = 0; i < 6; i++) {
+      stars.push({
+        x: Math.random() * W,
+        y: Math.random() * H * 0.62,
+        r: rand(1.5, 2.1),
+        a: rand(0.5, 0.85),
+        tw: true,
+        glow: true,
+        phase: Math.random() * Math.PI * 2,
+        spd: rand(0.3, 0.8),
+        drift: rand(0.5, 1.4),
+      });
+    }
+
+    buildStaticLayer();
+  };
+
+  /** 透视点阵地面：一排排网点从地平线深处缓缓滚向观察者 */
+  const drawFloor = (time) => {
+    const vpx = W / 2;
+    const vpy = H * 0.52;
+    const ROWS = 9;
+    const frac = (time * 0.1) % 1; // 约 10 秒推进一格
+    ctx.fillStyle = `rgb(${GRID_RGB})`;
+    for (let j = 0; j <= ROWS; j++) {
+      const u = (j + frac) / ROWS;
+      if (u > 1.02) continue;
+      const p = Math.pow(u, 1.8);
+      const y = vpy + 12 + (H - vpy - 12) * p;
+      const sx = (14 + 120 * p) * (W / 1024);
+      const size = 0.8 + p * 1.1;
+      const n = Math.ceil(W / 2 / sx);
+      const fadeIn = Math.min(1, u / 0.12); // 远处新行淡入
+      for (let k = -n; k <= n; k++) {
+        ctx.globalAlpha = (0.035 + 0.085 * p) * (1 - (Math.abs(k) / (n + 2)) * 0.35) * fadeIn;
+        ctx.fillRect(vpx + k * sx, y, size, size);
+      }
+    }
+    ctx.globalAlpha = 1;
+  };
+
+  /** 波形丘陵：左右两片流动的点阵浪，向屏幕边缘隆起，向中心地平线收束 */
+  const drawWaves = (time) => {
+    const span = W * 0.4;
+    const step = 4.5;
+    const LINES = 10;
+    ctx.fillStyle = WAVE_FILL;
+    for (let side = 0; side < 2; side++) {
+      const seed = side === 0 ? 0 : 2.6;
+      const cols = Math.floor(span / step);
+      for (let l = 0; l < LINES; l++) {
+        const lw = 1 - Math.abs(l - (LINES - 1) / 2) / ((LINES - 1) / 2);
+        for (let i = 0; i <= cols; i++) {
+          const u = 1 - (i * step) / span; // 1 = 屏幕边缘，0 = 靠近中心
+          if (u <= 0.02) continue;
+          const x = side === 0 ? i * step : W - i * step;
+          const base = H * (0.548 - 0.088 * u);
+          const amp = H * (0.006 + 0.064 * Math.pow(u, 1.5));
+          const spread = (2 + 34 * u) * (l / (LINES - 1) - 0.5);
+          const e =
+            Math.sin(x * 0.016 + l * 0.9 + time * 0.55 + seed) * 0.62 +
+            Math.sin(x * 0.037 - time * 0.38 + l * 1.7) * 0.38;
+          const y = base + spread + e * amp;
+          let a = (0.045 + 0.34 * Math.pow(u, 0.9)) * (0.35 + 0.65 * lw);
+          a *= Math.min(1, u / 0.18); // 靠近中心渐隐，和地平光线融为一体
+          let size = 1.1;
+          if (e > 0.68) {
+            a *= 1.7; // 浪尖提亮
+            size = 1.6;
+          }
+          ctx.globalAlpha = Math.min(0.5, a);
+          ctx.fillRect(x, y, size, size);
+        }
+      }
+    }
+    ctx.globalAlpha = 1;
+  };
+
+  const paint = (time) => {
+    ctx.clearRect(0, 0, W, H);
+    if (staticLayer) ctx.drawImage(staticLayer, 0, 0, W, H);
+
+    drawFloor(time);
+
+    ctx.fillStyle = "#dfe6ff";
+    for (let i = 0; i < stars.length; i++) {
+      const st = stars[i];
+      let a = st.a;
+      if (st.tw) a *= 0.55 + 0.45 * Math.sin(time * st.spd + st.phase);
+      ctx.globalAlpha = Math.max(0, a);
+      const x = (st.x + time * st.drift) % W;
+      if (st.glow) {
+        const D = st.r * 9;
+        ctx.drawImage(SP_STAR, x - D / 2, st.y - D / 2, D, D);
+      } else {
+        ctx.fillRect(x, st.y, st.r, st.r);
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    drawWaves(time);
+  };
+
+  // 页面转入后台时 rAF 自动挂起、回前台自动续播，无需手动管 visibility
+  const render = (t) => {
+    if (!running) return;
+    if (t - lastDraw >= FRAME_MS) {
+      lastDraw = t;
+      paint(t * 0.001);
+    }
+    requestAnimationFrame(render);
+  };
+
+  const start = () => {
+    if (running) return;
+    running = true;
+    requestAnimationFrame(render);
+  };
+  const stop = () => {
+    running = false;
+  };
+
+  build();
+  paint(0);
+
+  let resizeTimer = 0;
+  window.addEventListener(
+    "resize",
+    () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        build();
+        paint(reduceMotion ? 0 : performance.now() * 0.001);
+      }, 200);
+    },
+    { passive: true }
+  );
+
+  if (reduceMotion) return; // 静态一帧即可，不跑动画
+
+  if ("IntersectionObserver" in window) {
+    const observer = new IntersectionObserver(
+      (entries) =>
+        entries.forEach((en) => {
+          if (en.isIntersecting) {
+            start();
+            return;
+          }
+          // 停帧前复核：确认真的滚出视野，防止环境误报把循环停死
+          const r = canvas.getBoundingClientRect();
+          if (r.bottom < 0 || r.top > window.innerHeight) stop();
+          else start();
+        }),
+      { threshold: 0.01 }
+    );
+    observer.observe(canvas);
+  }
+
+  start();
+}
+
+/**
+ * 粒子字标「RIOT」（对照设计稿：特粗字形 + 砂砾状密集粒子填充）：
+ * 离屏以特粗字重画出字标，然后两套采样——
+ * 1) 字形内部：细网格 + 随机抖动的密集微粒（大小/亮度重随机、少量蓝色调、
+ *    偶发亮斑与内部暗斑），边缘蚕食并向外溢出浮尘，呈砂砾质感的实心块面；
+ * 2) 字形外围：独立的稀疏规则网格暗点，覆盖整块字标区域、向外缘轻微衰减。
+ * 入场时微粒从四散位置左→右扫掠归位；鼠标靠近轻轻推开微粒。
+ * 流星也画在这层：六成流星瞄向字标飞来，命中时把微粒撞飞（弹簧短暂
+ * 失效再缓缓归位）、头部炸出闪光与火花，穿出后继续划向远方。
  */
 function initParticleLogo () {
   const canvas = document.getElementById("logo-canvas");
   const hero = document.getElementById("hero");
-  const logoBox = document.querySelector(".hero-logo");
-  if (!canvas || !hero || !logoBox || reduceMotion) return;
+  const anchor = document.querySelector(".hero-wordmark-box");
+  if (!canvas || !hero || !anchor) return;
 
   const showFallback = () => {
     canvas.style.display = "none";
-    const fallback = logoBox.querySelector(".hl-fallback");
-    if (fallback) fallback.style.display = "block";
+    anchor.classList.add("no-canvas");
   };
 
   const ctx = canvas.getContext("2d");
@@ -292,61 +557,37 @@ function initParticleLogo () {
   }
 
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const REPEL_RADIUS = 60;
-  const REPEL_FORCE = 4.6;
-  const METEOR_HIT_RADIUS = 22; // 流星冲击半径
-  const METEOR_FORCE = 5.5; // 冲击柔和一些，击穿时字形不至于整个散架
-  const METEOR_TAIL = 96; // 尾迹长度（px）
-  const METEOR_G = 2600000; // 引力常数：流星轨迹被 R 的中心弯折
-  const METEOR_MAX_AGE = 18; // 秒，被引力俘获绕圈的流星最终回收，避免反复切割字形
-  const WORD = "RIOT"; // 粒子字标内容
+  const WORD = "RIOT";
+  const TRACK = 0.16; // 字距（em）
+  const FILL_COLS = 128; // 字形填充微粒的细网格列数
+  const HALO_COLS = 48; // 外围暗点网格列数
+  const REPEL_R = 48;
+  const REPEL_F = 2.1;
+  const METEOR_HIT_R = 25; // 流星冲击半径
+  const METEOR_FORCE = 3; // 冲击力度（60fps 连续受力，不宜过大）
 
-  /** 预渲染辉光光点：加大实心亮核占比、收紧光晕衰减——光点更「实」，成形的 logo 更清晰 */
-  const makeSprite = (r, g, b) => {
-    const s = document.createElement("canvas");
-    const SIZE = 64;
-    s.width = SIZE;
-    s.height = SIZE;
-    const c = s.getContext("2d");
-    const grad = c.createRadialGradient(SIZE / 2, SIZE / 2, 0, SIZE / 2, SIZE / 2, SIZE / 2);
-    grad.addColorStop(0, `rgba(${r},${g},${b},1)`);
-    grad.addColorStop(0.22, `rgba(${r},${g},${b},0.98)`);
-    grad.addColorStop(0.35, `rgba(${r},${g},${b},0.22)`);
-    grad.addColorStop(0.55, `rgba(${r},${g},${b},0.04)`);
-    grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
-    c.fillStyle = grad;
-    c.fillRect(0, 0, SIZE, SIZE);
-    return s;
-  };
-
-  /* 能量色带：0 炽白核心 → 1 青蓝 → 2 紫 → 3 外缘深紫 */
-  const SPRITES = [
-    makeSprite(244, 248, 255),
-    makeSprite(168, 200, 255),
-    makeSprite(156, 146, 244),
-    makeSprite(110, 102, 198),
-  ];
+  const SP_WHITE = makeGlowSprite(242, 247, 255);
+  const SP_BLUE = makeGlowSprite(152, 186, 255);
+  const SP_DEEP = makeGlowSprite(116, 138, 235);
 
   let W = 0;
   let H = 0;
-  let holeX = 0; // 字标引力中心（画布坐标）：锚定在 .hero-logo 容器中心
-  let holeY = 0;
-  let particles = [];
-  let dust = []; // 星尘：绕字标公转、螺旋内落，白色汇入笔画，云朵色融进云带
-  let nebulaR = 100;
-  let cloudBandPx = 90; // 云带宽度（px）：给云朵色星尘挑落点深度
-  let capField = null; // 「到字形的距离」场：星尘判断是否触到笔画 / 云层
-  let capSize = 0;
-  let capOffX = 0;
-  let capOffY = 0;
-  let meteors = [];
-  let nextMeteorAt = 0;
-  let lastFrame = 0;
-  let running = false;
+  let dots = []; // 字形 LED 点
+  let halo = []; // 字标外围的暗点网格
+  let debris = []; // 边缘溶解出去的浮尘
+  let textCX = 0;
+  let textCY = 0;
+  let textW = 0;
   let built = false;
-  let revealStart = 0;
+  let running = false;
+  let startAt = 0;
+  let lastFrameAt = 0; // 最近一次真实渲染帧的时刻（看门狗用）
   let mouseX = -9999;
   let mouseY = -9999;
+  let meteors = []; // 流星（与微粒撞击交互）
+  let sparks = []; // 撞击火花
+  let nextMeteorAt = 0;
+  let prevT = 0;
 
   const resize = () => {
     const rect = canvas.getBoundingClientRect();
@@ -357,775 +598,568 @@ function initParticleLogo () {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   };
 
-  /** 星尘重生：回到远处星空，重新开始被引力捕获的螺旋内落 */
-  const respawnDust = (d) => {
-    d.r = nebulaR * (1.15 + Math.random() * 1.45);
-    d.a = Math.random() * Math.PI * 2;
-    d.w = 0.05 + Math.random() * 0.09; // 全部同向公转（rad/s），旋转趋势肉眼可辨
-    d.rate = 4 + Math.random() * 6; // 内落速度（px/s）：一点一点靠近
-    d.fade = 1;
-    /* capture 的语义是「到字形的距离阈值」，配合距离场判断落点 */
-    if (d.kind === 0) {
-      /* 白色星尘 → 一路落到笔画边上，汇入字形 */
-      d.capture = 3 + Math.random() * 5;
-      d.sprite = 0;
-      d.alpha = 0.3 + Math.random() * 0.25;
-      d.draw = 2.2 + Math.random() * 2.6;
-    } else {
-      /* 云朵色星尘 → 落到云带的随机深度融入；落点深浅不一，不会积出一圈隐形边界。
-         颜色跟落点处的云朵色带一致：落得越深越偏青蓝，浅处是深紫 */
-      d.capture = cloudBandPx * (0.12 + Math.random() * 0.68);
-      d.sprite = d.capture < cloudBandPx * 0.33 ? 1 : d.capture < cloudBandPx * 0.62 ? 2 : 3;
-      d.alpha = 0.22 + Math.random() * 0.2;
-      d.draw = 2 + Math.random() * 2.4;
-    }
-  };
-
-  /** 把字标「RIOT」画进离屏画布并采样，生成粒子锚点（位置/尺寸跟随 .hero-logo 容器） */
   const build = () => {
     resize();
-    particles = [];
+    dots = [];
+    halo = [];
+    debris = [];
+    built = false;
 
-    const box = logoBox.getBoundingClientRect();
-    const canvasBox = canvas.getBoundingClientRect();
-    // 离屏画布放大到容器的 1.95 倍：横排字标要铺开，四周还得给宽云带 + 长溶解尾留空间
-    const logoSize = Math.max(40, Math.round(Math.min(box.width, box.height) * 1.95));
+    const box = anchor.getBoundingClientRect();
+    const cbox = canvas.getBoundingClientRect();
+    const bw = box.width;
+    const bh = box.height;
+    if (bw < 60 || bh < 16) return;
+
+    // 离屏 2x 画出字标，供点阵网格采样
+    const scale = 2;
+    const ow = Math.ceil(bw * scale);
+    const oh = Math.ceil(bh * scale);
     const off = document.createElement("canvas");
-    off.width = logoSize;
-    off.height = logoSize;
+    off.width = ow;
+    off.height = oh;
     const octx = off.getContext("2d", { willReadFrequently: true });
-
-    // 黑底白字居中写出字标；画布放大后拟合比例同步下调，字的绝对大小保持不变
-    octx.fillStyle = "#000";
-    octx.fillRect(0, 0, logoSize, logoSize);
-    octx.fillStyle = "#fff";
-    octx.textAlign = "center";
-    octx.textBaseline = "middle";
     const family = '"Geist", "Helvetica Neue", Arial, sans-serif';
-    const setFont = (px) => {
-      octx.font = `700 ${px}px ${family}`;
-      octx.letterSpacing = `${(px * 0.08).toFixed(1)}px`;
-    };
-    let fontPx = Math.round(logoSize * 0.24);
-    setFont(fontPx);
-    const measured = octx.measureText(WORD).width || 1;
-    fontPx = Math.max(10, Math.round((fontPx * logoSize * 0.467) / measured));
-    setFont(fontPx);
-    octx.fillText(WORD, logoSize / 2, logoSize / 2);
 
-    let data;
+    // 手动排字：兼容不支持 canvas letterSpacing 的浏览器
+    const layout = (px) => {
+      octx.font = `900 ${px}px ${family}`;
+      const widths = [...WORD].map((ch) => octx.measureText(ch).width);
+      const track = px * TRACK;
+      return {
+        widths,
+        track,
+        total: widths.reduce((s, w) => s + w, 0) + track * (WORD.length - 1),
+      };
+    };
+    const draw = (px) => {
+      const mm = layout(px);
+      octx.clearRect(0, 0, ow, oh);
+      octx.fillStyle = "#fff";
+      octx.strokeStyle = "#fff";
+      octx.lineWidth = px * 0.055; // 描边增肥：贴近设计稿的特粗笔画
+      octx.lineJoin = "round";
+      octx.textAlign = "left";
+      octx.textBaseline = "alphabetic";
+      const baseY = oh / 2 + px * 0.36; // 大写字母光学居中
+      let penX = (ow - mm.total) / 2;
+      for (let i = 0; i < WORD.length; i++) {
+        octx.fillText(WORD[i], penX, baseY);
+        octx.strokeText(WORD[i], penX, baseY);
+        penX += mm.widths[i] + mm.track;
+      }
+    };
+    /** 实测墨迹包围盒：不同字体的度量差异一律以实际着墨为准 */
+    const inkBox = (data) => {
+      let minX = ow;
+      let minY = oh;
+      let maxX = 0;
+      let maxY = 0;
+      for (let y = 0; y < oh; y += 2) {
+        for (let x = 0; x < ow; x += 2) {
+          if (data[(y * ow + x) * 4 + 3] > 140) {
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+          }
+        }
+      }
+      return { minX, minY, maxX, maxY, w: Math.max(1, maxX - minX), h: Math.max(1, maxY - minY) };
+    };
+
+    let fontPx = oh * 1.36; // 大写高约 0.72em：先按高度顶满
+    const m0 = layout(fontPx);
+    if (m0.total > ow * 0.985) fontPx = Math.floor((fontPx * ow * 0.985) / m0.total);
+    draw(fontPx);
+
+    let img;
+    let ink;
     try {
-      data = octx.getImageData(0, 0, logoSize, logoSize).data;
+      img = octx.getImageData(0, 0, ow, oh).data;
+      // 按实测墨迹重拟合一次，让字形同时贴满锚框的宽与高
+      ink = inkBox(img);
+      const fit = Math.min((ow * 0.985) / ink.w, (oh * 0.97) / ink.h);
+      if (Math.abs(fit - 1) > 0.02) {
+        fontPx = Math.floor(fontPx * fit);
+        draw(fontPx);
+        img = octx.getImageData(0, 0, ow, oh).data;
+        ink = inkBox(img);
+      }
     } catch {
-      return; // 极端环境下放弃粒子，兜底静态图
+      showFallback();
+      return;
     }
+    // 居中校正：以墨迹几何中心对齐锚框中心（度量偏侧的字体也能真正居中）
+    const shiftX = (ow / 2 - (ink.minX + ink.maxX) / 2) / scale;
+    const shiftY = (oh / 2 - (ink.minY + ink.maxY) / 2) / scale;
 
-    // 字母掩码：黑底白字，取亮像素即字形
-    const letterMask = new Uint8Array(logoSize * logoSize);
-    for (let i = 0; i < letterMask.length; i++) {
-      if (data[i * 4] >= 150) letterMask[i] = 1;
-    }
+    const offX = box.left - cbox.left;
+    const offY = box.top - cbox.top;
+    textCX = offX + bw / 2;
+    textCY = offY + bh / 2;
+    textW = bw;
 
-    /** 多源 BFS 距离场（4 邻域，单位：像素） */
-    const distField = (isSource, walkable) => {
-      const dist = new Int32Array(logoSize * logoSize).fill(-1);
-      const queue = new Uint32Array(logoSize * logoSize);
-      let head = 0;
-      let tail = 0;
-      for (let i = 0; i < dist.length; i++) {
-        if (isSource(i)) {
-          dist[i] = 0;
-          queue[tail++] = i;
-        }
-      }
-      while (head < tail) {
-        const j = queue[head++];
-        const jx = j % logoSize;
-        const d = dist[j] + 1;
-        if (jx > 0 && dist[j - 1] === -1 && walkable(j - 1)) {
-          dist[j - 1] = d;
-          queue[tail++] = j - 1;
-        }
-        if (jx < logoSize - 1 && dist[j + 1] === -1 && walkable(j + 1)) {
-          dist[j + 1] = d;
-          queue[tail++] = j + 1;
-        }
-        if (j >= logoSize && dist[j - logoSize] === -1 && walkable(j - logoSize)) {
-          dist[j - logoSize] = d;
-          queue[tail++] = j - logoSize;
-        }
-        if (j < dist.length - logoSize && dist[j + logoSize] === -1 && walkable(j + logoSize)) {
-          dist[j + logoSize] = d;
-          queue[tail++] = j + logoSize;
-        }
-      }
-      return dist;
+    /** 以锚框内 CSS 坐标查询墨迹 */
+    const inkAt = (xCss, yCss) => {
+      const px = Math.round(xCss * scale);
+      const py = Math.round(yCss * scale);
+      if (px < 0 || py < 0 || px >= ow || py >= oh) return false;
+      return img[(py * ow + px) * 4 + 3] > 140;
     };
 
-    // dLet：每个像素到字形的距离。云朵形状、颜色分带、星尘落点全由这一个距离场驱动
-    const dLet = distField(
-      (i) => letterMask[i] === 1,
-      () => true
-    );
-
-    /* 云朵 = 距文字 cloudBand 以内的雾带：贴字是浓核，向外连续衰减，天然无轮廓 */
-    const cloudBand = Math.max(24, logoSize * 0.24);
-    const coreBand = cloudBand * 0.15; // 浓核收小：云带的八成五都是溶解尾
-    const nearBand = logoSize * 0.055; // 离字形这么近 → 青蓝
-    const midBand = logoSize * 0.105; // 再远 → 紫，其余深紫
-
-    // logo 在画布坐标系中的落点：两个矩形同帧测量，与滚动位置无关
-    const offX = box.left - canvasBox.left + (box.width - logoSize) / 2;
-    const offY = box.top - canvasBox.top + (box.height - logoSize) / 2;
-    const logoR = logoSize / 2;
-    holeX = offX + logoR;
-    holeY = offY + logoR;
-
-    /* —— 字标 RIOT：独立的细网格采样，光点小而密，字形「像素」更高 —— */
-    const stepL = Math.max(2, Math.round(logoSize / 170));
-    for (let y = 0; y < logoSize; y += stepL) {
-      for (let x = 0; x < logoSize; x += stepL) {
-        if (!letterMask[y * logoSize + x]) continue;
-
-        /* 每个采样点三颗：两颗炽白核心错位补缝，一颗贴着笔画的青蓝辉光 */
-        for (let c = 0; c < 3; c++) {
-          const isGlow = c === 2;
-          /* 景深：z 越大越近 → 更大更亮 */
-          const z = 0.55 + Math.random() * 0.9;
-          const size = isGlow ? 0.9 + Math.random() * 0.5 : 0.85 + Math.random() * 0.55;
-          const alpha = isGlow ? 0.13 + Math.random() * 0.11 : 0.88 + Math.random() * 0.12;
-          const a0 = alpha * (0.58 + 0.42 * ((z - 0.55) / 0.9));
-
-          // 抖动幅度跟着细网格收小，笔画边缘不发毛
-          const spread = c === 1 ? 2 : 1;
-          const hx = offX + x + (Math.random() - 0.5) * spread;
-          const hy = offY + y + (Math.random() - 0.5) * spread;
-          const angle = Math.random() * Math.PI * 2;
-          const dist = 70 + Math.random() * 180;
-
-          particles.push({
-            hx,
-            hy,
-            x: hx + Math.cos(angle) * dist,
-            y: hy + Math.sin(angle) * dist,
-            vx: 0,
-            vy: 0,
-            draw: size * (isGlow ? 6.4 : 4.1) * z, // 辉光颗更大更淡，贴着笔画晕开
-            sprite: isGlow ? 1 : 0,
-            alpha: a0,
-            orbit: null,
-            spring: 0.02 + Math.random() * 0.025,
-            springScale: 1, // 被流星击中后骤降，随时间缓慢恢复 → 「引力慢慢拉回」
-            phase: Math.random() * Math.PI * 2,
-            speed: 0.1 + Math.random() * 0.18,
-            drift: 1.1,
-            twinkle: !isGlow && Math.random() < 0.4,
+    /* —— 字形内部：细网格 + 随机抖动的密集微粒填充 —— */
+    const fs = bw / FILL_COLS;
+    const fRows = Math.max(1, Math.round(bh / fs));
+    /** 生成一颗填充微粒（jitterScale 控制离格心的散布程度） */
+    const spawnFill = (cx, cy, edge, jitterScale) => {
+      const bright = Math.random() < 0.06;
+      const jAmp = fs * jitterScale;
+      const x = offX + shiftX + cx + (Math.random() - 0.5) * 2 * jAmp;
+      const y = offY + shiftY + cy + (Math.random() - 0.5) * 2 * jAmp;
+      const sweep = (cx / bw) * 620; // 左→右入场扫掠
+      const ang = Math.random() * Math.PI * 2;
+      const dist = 36 + Math.random() * 130;
+      dots.push({
+        x,
+        y,
+        sx: x + Math.cos(ang) * dist, // 入场散点
+        sy: y + Math.sin(ang) * dist,
+        ox: 0,
+        oy: 0,
+        vx: 0,
+        vy: 0,
+        size: fs * (bright ? 2 : 0.9 + Math.random() * 0.8),
+        alpha: bright ? 1 : 0.45 + Math.pow(Math.random(), 1.3) * 0.55,
+        blue: Math.random() < 0.28,
+        edge,
+        shock: 0, // 被流星撞击后弹簧短暂失效，缓缓归位
+        delay: sweep + Math.random() * 240,
+        phase: Math.random() * Math.PI * 2,
+        spd: 0.5 + Math.random() * 1.2,
+        tw: edge ? 0.45 : Math.random() < 0.3 ? 0.18 : 0,
+      });
+    };
+    for (let gy = 0; gy < fRows; gy++) {
+      for (let gx = 0; gx < FILL_COLS; gx++) {
+        const cx = (gx + 0.5) * fs;
+        const cy = (gy + 0.5) * fs;
+        if (!inkAt(cx, cy)) continue;
+        const edge =
+          !inkAt(cx - fs, cy) ||
+          !inkAt(cx + fs, cy) ||
+          !inkAt(cx, cy - fs) ||
+          !inkAt(cx, cy + fs);
+        // 边缘蚕食出毛边，内部偶发暗斑形成砂砾质感
+        if (edge ? Math.random() < 0.3 : Math.random() < 0.03) continue;
+        spawnFill(cx, cy, edge, edge ? 0.7 : 0.42);
+        // 内部次级微粒：加密填充，让块面更实
+        if (!edge && Math.random() < 0.35) spawnFill(cx, cy, false, 0.6);
+        if (edge && Math.random() < 0.16) {
+          debris.push({
+            x: offX + shiftX + cx,
+            y: offY + shiftY + cy,
+            ang: Math.random() * Math.PI * 2,
+            base: 4 + Math.random() * 8,
+            reach: 22 + Math.random() * 46,
+            dur: 5 + Math.random() * 7,
+            t0: Math.random() * 12,
+            size: fs * (0.8 + Math.random() * 0.6),
+            alpha: 0.09 + Math.random() * 0.18,
           });
         }
       }
     }
 
-    const step = Math.max(2, Math.round(logoSize / 74));
-    for (let y = 0; y < logoSize; y += step) {
-      for (let x = 0; x < logoSize; x += step) {
-        const i = y * logoSize + x;
-        if (letterMask[i]) continue;
-        const d2r = dLet[i];
-        if (d2r > cloudBand) continue; // 云带之外是纯星空
-
-        /* —— 云朵本体：安静的星云雾 ——
-           边缘溶解三件套：密度随溶解度递减到零、亮度随之压暗、位置向外弥散，
-           所以云朵没有可辨认的轮廓线，只是渐渐消失在黑底里 */
-        const f0 = Math.min(1, (cloudBand - d2r) / (cloudBand - coreBand));
-        const fade = f0 * f0 * (3 - 2 * f0); // smoothstep：溶解过渡更顺滑
-        if (Math.random() > fade) continue;
-        let sprite;
-        let alpha;
-        if (d2r <= nearBand) {
-          sprite = 1;
-          alpha = 0.42 + Math.random() * 0.18;
-        } else if (d2r <= midBand) {
-          sprite = 2;
-          alpha = 0.33 + Math.random() * 0.15;
-        } else {
-          sprite = 3;
-          alpha = 0.25 + Math.random() * 0.12;
-        }
-
-        const z = 0.55 + Math.random() * 0.9;
-        const size = 0.95 + Math.random() * 0.75;
-        // 亮度直接乘溶解度：外缘渐近于零，和密度一起构成长尾，云没有可感知的「结束线」
-        const a0 = alpha * fade * (0.7 + 0.3 * ((z - 0.55) / 0.9));
-
-        // 越靠边缘散得越开：最外圈弥散超过一个云带宽，把等值线彻底揉碎进星空
-        const scatter = 1.5 + (1 - fade) * cloudBand * 1.25;
-        const hx = offX + x + (Math.random() - 0.5) * scatter;
-        const hy = offY + y + (Math.random() - 0.5) * scatter;
-        const angle = Math.random() * Math.PI * 2;
-        const dist = 70 + Math.random() * 180;
-
-        /* 边缘的雾沿切向缓慢往复环流：幅度有限（渲染时正弦摆动），
-           横排字形的胶囊云不会被持续公转搅散，只看到云边在流动 */
-        const w = (0.02 + Math.random() * 0.03) * (1 - fade);
-        const orbit =
-          w > 0.001
-            ? {
-              r: Math.hypot(hx - holeX, hy - holeY),
-              a: Math.atan2(hy - holeY, hx - holeX),
-              w,
-            }
-            : null;
-
-        particles.push({
-          hx,
-          hy,
-          x: hx + Math.cos(angle) * dist,
-          y: hy + Math.sin(angle) * dist,
-          vx: 0,
-          vy: 0,
-          draw: size * (5.2 + (1 - fade) * 3.2) * z, // 边缘颗更大更淡，像雾一样晕开
-          sprite,
-          alpha: a0,
-          orbit,
-          spring: 0.02 + Math.random() * 0.025,
-          springScale: 1,
+    /* —— 字形外围：独立的稀疏规则网格暗点，覆盖整块字标区域 —— */
+    const hs = bw / HALO_COLS;
+    const hRows = Math.max(1, Math.round(bh / hs));
+    const PADX = 9; // 外扩格数
+    const PADY = 7;
+    for (let gy = -PADY; gy < hRows + PADY; gy++) {
+      for (let gx = -PADX; gx < HALO_COLS + PADX; gx++) {
+        const cx = (gx + 0.5) * hs;
+        const cy = (gy + 0.5) * hs;
+        if (inkAt(cx, cy)) continue;
+        if (Math.random() < 0.18) continue;
+        const dx = gx < 0 ? -gx : gx >= HALO_COLS ? gx - HALO_COLS + 1 : 0;
+        const dy = gy < 0 ? -gy : gy >= hRows ? gy - hRows + 1 : 0;
+        const fall = Math.pow(1 - Math.max(dx / PADX, dy / PADY), 1.6);
+        const a = (0.06 + Math.random() * 0.11) * (0.4 + 0.6 * fall);
+        if (a < 0.028) continue;
+        const hx = offX + shiftX + cx;
+        const hy = offY + shiftY + cy;
+        halo.push({
+          x: hx,
+          y: hy,
+          dc: Math.hypot(hx - textCX, hy - textCY), // 到字标中心的距离（涟漪用）
+          size: hs * 0.34,
+          alpha: a,
+          delay: (cx / bw) * 620 + 260 + Math.random() * 300,
           phase: Math.random() * Math.PI * 2,
-          speed: 0.12 + Math.random() * 0.2,
-          drift: 0.8 + (1 - fade) * 2.8,
-          twinkle: Math.random() < 0.06,
+          tw: Math.random() < 0.18 ? 0.3 : 0,
         });
       }
     }
 
-    /* 星尘两队：白色落到笔画上汇入 RIOT，云朵色落进云带的随机深度。
-       初始就散布在螺旋内落途中的不同半径，画面一开始就是进行中的汇入流 */
-    nebulaR = logoR;
-    cloudBandPx = cloudBand;
-    capField = dLet;
-    capSize = logoSize;
-    capOffX = offX;
-    capOffY = offY;
-    dust = [];
-    for (let i = 0; i < 150; i++) {
-      const d = { kind: i < 60 ? 0 : 1 };
-      respawnDust(d);
-      d.r = nebulaR * (0.55 + Math.random() * 2.05);
-      dust.push(d);
-    }
-
-    built = particles.length > 0;
-    revealStart = 0; // 重建后重新走一遍淡入与聚合增强
+    built = dots.length > 0;
+    if (!built) showFallback();
   };
 
-  /**
-   * 生成一颗流星：从画布外随机方向射入，路径随机——
-   * 不一定穿过字形，但轨迹会被 R 的引力弯折，擦得足够近才会击穿粒子团。
-   */
-  const spawnMeteor = () => {
-    const ang = Math.random() * Math.PI * 2;
-    const rOut = Math.hypot(W, H) / 2 + 80;
-    const sx = W / 2 + Math.cos(ang) * rOut;
-    const sy = H / 2 + Math.sin(ang) * rOut;
-    // 目标点在画布内随机：大多数流星只是路过星空
-    const tx = W * (0.12 + Math.random() * 0.76);
-    const ty = H * (0.12 + Math.random() * 0.76);
-    const d = Math.hypot(tx - sx, ty - sy) || 1;
-    const speed = 80 + Math.random() * 50; // px/s，宇宙尺度的慢
-
-    meteors.push({
-      x: sx,
-      y: sy,
-      vx: ((tx - sx) / d) * speed,
-      vy: ((ty - sy) / d) * speed,
-      age: 0,
-    });
-  };
-
-  const render = (t) => {
-    if (!running || document.hidden) return;
-
-    const time = t * 0.001;
-    if (!revealStart) revealStart = t;
-    const reveal = Math.min(1, (t - revealStart) / 2400);
-
-    const dt = Math.min(0.05, lastFrame ? (t - lastFrame) / 1000 : 0.016);
-    lastFrame = t;
-
-    // 流星调度：入场汇聚完成后开始，之后每 1.75–4 秒一颗
-    if (!nextMeteorAt) nextMeteorAt = revealStart + 3000;
-    if (t >= nextMeteorAt) {
-      spawnMeteor();
-      nextMeteorAt = t + 1750 + Math.random() * 2250;
-    }
-
-    // 更新流星：受 R 中心的引力弯折轨迹；出界或过久（被俘获绕圈）回收
-    const gcx = holeX;
-    const gcy = holeY;
-    const margin = 140;
-    for (let i = meteors.length - 1; i >= 0; i--) {
-      const m = meteors[i];
-      const gdx = gcx - m.x;
-      const gdy = gcy - m.y;
-      const gd2 = Math.max(gdx * gdx + gdy * gdy, 4900); // 最小 70px，避免引力发散
-      const gd = Math.sqrt(gd2);
-      const ga = (METEOR_G / gd2) * dt;
-      m.vx += (gdx / gd) * ga;
-      m.vy += (gdy / gd) * ga;
-      m.x += m.vx * dt;
-      m.y += m.vy * dt;
-      m.age += dt;
-      if (
-        m.age > METEOR_MAX_AGE ||
-        m.x < -margin ||
-        m.x > W + margin ||
-        m.y < -margin ||
-        m.y > H + margin
-      ) {
-        meteors.splice(i, 1);
-      }
-    }
-
+  const paint = (elapsed, time) => {
     ctx.clearRect(0, 0, W, H);
-    ctx.globalCompositeOperation = "lighter"; // 加色混合：光点重叠即增亮
+    ctx.globalCompositeOperation = "lighter";
 
-    /* 整个字形极缓慢地摇摆与呼吸（绕 R 自身中心，而非画布中心） */
-    const cx = holeX;
-    const cy = holeY;
-    const sway = Math.sin(time * 0.05) * 0.04;
-    const breath = 1 + Math.sin(time * 0.08) * 0.014;
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.rotate(sway);
-    ctx.scale(breath, breath);
-    ctx.translate(-cx, -cy);
+    // 字标后方的一团淡蓝辉光（缓慢呼吸）
+    const breathe = Math.sin(time * 0.5);
+    const g = textW * (1.55 + 0.05 * breathe);
+    ctx.globalAlpha = 0.11 * (0.85 + 0.15 * breathe);
+    ctx.drawImage(SP_DEEP, textCX - g / 2, textCY - g / 2, g, g);
 
-    /* 星尘：绕 R 同向公转 + 螺旋内落；白色触到 R 外接圆、云朵色落到各自深度时，
-       放大增亮闪一下汇入目标，再从远处重生 */
-    for (let i = 0; i < dust.length; i++) {
-      const d = dust[i];
-      d.a += d.w * dt;
-      if (d.fade < 1) {
-        d.fade -= dt / 0.7;
-        if (d.fade <= 0) {
-          respawnDust(d);
-          continue;
-        }
-      } else {
-        d.r -= d.rate * dt;
-        // 查距离场：真正落到笔画（白尘）或云层深度（云尘）才开始「汇入」
-        const px = Math.round(cx + Math.cos(d.a) * d.r - capOffX);
-        const py = Math.round(cy + Math.sin(d.a) * d.r - capOffY);
-        let near = Infinity;
-        if (capField && px >= 0 && py >= 0 && px < capSize && py < capSize) {
-          near = capField[py * capSize + px];
-        }
-        if (near <= d.capture || d.r <= 6) d.fade = 0.999;
+    // 扫光带：入场完成后，一道柔和亮波周期性从左掠到右
+    const sweepX =
+      elapsed > 1600
+        ? textCX + textW * ((((time % 5.2) / 5.2) * 1.7 - 0.85))
+        : -1e9;
+    const sweepW = textW * 0.1;
+
+    // —— 流星：生成与推进（绘制放在最后，叠于字标之上） ——
+    const dt = Math.min(0.6, Math.max(0, prevT ? time - prevT : 0.016));
+    prevT = time;
+    if (elapsed > 2400) {
+      if (!nextMeteorAt) nextMeteorAt = time + 1.6;
+      if (time >= nextMeteorAt && meteors.length < 3) {
+        // 六成流星瞄向字标区域，确保能看到撞击
+        const aimed = Math.random() < 0.6;
+        const tx = aimed
+          ? textCX + (Math.random() - 0.5) * textW * 0.8
+          : W * (0.15 + Math.random() * 0.7);
+        const fromTopEdge = Math.random() < 0.55;
+        const sx0 = fromTopEdge ? Math.random() * W : Math.random() < 0.5 ? -50 : W + 50;
+        const sy0 = fromTopEdge ? -40 : Math.random() * H * 0.3;
+        const ty = Math.max(
+          aimed ? textCY + (Math.random() - 0.5) * textW * 0.18 : H * (0.12 + Math.random() * 0.28),
+          sy0 + 70
+        );
+        const dd = Math.hypot(tx - sx0, ty - sy0) || 1;
+        const spd = 250 + Math.random() * 150;
+        meteors.push({
+          x: sx0,
+          y: sy0,
+          vx: ((tx - sx0) / dd) * spd,
+          vy: ((ty - sy0) / dd) * spd,
+          age: 0,
+          flash: 0,
+          hit: false,
+        });
+        nextMeteorAt = time + 2.4 + Math.random() * 3.6;
       }
-      const dx = cx + Math.cos(d.a) * d.r;
-      const dy = cy + Math.sin(d.a) * d.r;
-      const merging = d.fade < 1;
-      const ds = merging ? d.draw * (1 + (1 - d.fade) * 0.9) : d.draw;
-      // 汇入 R 的白点闪得亮，融进云朵的低调些
-      const glow = d.kind === 0 ? 2.2 : 1.6;
-      ctx.globalAlpha = (merging ? Math.min(0.9, d.alpha * glow) * d.fade : d.alpha) * reveal;
-      ctx.drawImage(SPRITES[d.sprite], dx - ds / 2, dy - ds / 2, ds, ds);
+      for (let i = meteors.length - 1; i >= 0; i--) {
+        const m = meteors[i];
+        m.x += m.vx * dt;
+        m.y += m.vy * dt;
+        m.age += dt;
+        if (m.age > 8 || m.x < -110 || m.x > W + 110 || m.y < -110 || m.y > H * 0.85) {
+          meteors.splice(i, 1);
+        }
+      }
     }
 
-    for (let i = 0; i < particles.length; i++) {
-      const p = particles[i];
-
-      // 云朵边缘的雾沿切向缓慢往复环流（内部粒子 orbit 为 null，静止；
-      // 幅度有限的摆动让横排字形的胶囊云不会被搅散）
-      let bx = p.hx;
-      let by = p.hy;
-      if (p.orbit) {
-        const oa = p.orbit.a + Math.sin(time * p.orbit.w * 5 + p.phase) * 0.09;
-        bx = cx + Math.cos(oa) * p.orbit.r;
-        by = cy + Math.sin(oa) * p.orbit.r;
-      }
-
-      // 呼吸漂移的锚点
-      const ix = bx + Math.sin(time * p.speed + p.phase) * p.drift;
-      const iy = by + Math.cos(time * p.speed * 0.9 + p.phase * 1.7) * p.drift;
-
-      // 引力归位（被击中后 springScale 骤降，恢复期内引力变弱 → 慢慢拉回）
-      // 入场汇聚期引力临时增强，聚拢成形后回到宇宙尺度的慢引力
-      const settleBoost = reveal < 1 ? 3.5 - 2.5 * reveal : 1;
-      const k = p.spring * p.springScale * settleBoost;
-      p.vx += (ix - p.x) * k;
-      p.vy += (iy - p.y) * k;
-      if (p.springScale < 1) {
-        p.springScale = Math.min(1, p.springScale + 0.0032);
-      }
-
-      // 鼠标排斥
-      const dx = p.x - mouseX;
-      const dy = p.y - mouseY;
-      const d2 = dx * dx + dy * dy;
-      if (d2 < REPEL_RADIUS * REPEL_RADIUS) {
-        const d = Math.sqrt(d2) || 1;
-        const f = (1 - d / REPEL_RADIUS) * REPEL_FORCE;
-        p.vx += (dx / d) * f;
-        p.vy += (dy / d) * f;
-      }
-
-      // 流星冲击：沿径向撞飞 + 少量顺着流星方向拖拽
-      for (let j = 0; j < meteors.length; j++) {
-        const m = meteors[j];
-        const mdx = p.x - m.x;
-        const mdy = p.y - m.y;
-        const md2 = mdx * mdx + mdy * mdy;
-        if (md2 < METEOR_HIT_RADIUS * METEOR_HIT_RADIUS) {
-          const md = Math.sqrt(md2) || 1;
-          const f = (1 - md / METEOR_HIT_RADIUS) * METEOR_FORCE;
-          const mv = Math.hypot(m.vx, m.vy) || 1;
-          p.vx += (mdx / md) * f + (m.vx / mv) * f * 0.45;
-          p.vy += (mdy / md) * f + (m.vy / mv) * f * 0.45;
-          p.springScale = Math.min(p.springScale, 0.16);
-        }
-      }
-
-      p.vx *= 0.9;
-      p.vy *= 0.9;
-      p.x += p.vx;
-      p.y += p.vy;
-
-      let a = p.alpha * reveal;
-      let ds = p.draw;
-      if (p.twinkle) {
-        const tw = 0.55 + 0.45 * Math.sin(time * 0.6 + p.phase * 3.1);
-        a *= tw;
-        ds *= 0.85 + 0.3 * tw;
-      }
-
-      ctx.globalAlpha = a;
-      ctx.drawImage(SPRITES[p.sprite], p.x - ds / 2, p.y - ds / 2, ds, ds);
+    // 外围暗点网格（自字标中心向外的明暗涟漪）
+    for (let i = 0; i < halo.length; i++) {
+      const d = halo[i];
+      const k = Math.min(1, Math.max(0, (elapsed - d.delay) / 900));
+      if (k <= 0) continue;
+      let a = d.alpha * k;
+      if (d.tw) a *= 1 - d.tw * (0.5 + 0.5 * Math.sin(time * 0.8 + d.phase));
+      a *= 0.8 + 0.2 * Math.sin(d.dc * 0.05 - time * 1.4);
+      ctx.globalAlpha = Math.max(0, a);
+      const D = d.size * 2.1;
+      ctx.drawImage(SP_BLUE, d.x - D / 2, d.y - D / 2, D, D);
     }
 
-    ctx.restore();
+    // 字形微粒：第一遍铺蓝色辉光垫底（顺带算物理），第二遍点亮核
+    for (let pass = 0; pass < 2; pass++) {
+      for (let i = 0; i < dots.length; i++) {
+        const p = dots[i];
+        const k = Math.min(1, Math.max(0, (elapsed - p.delay) / 700));
+        if (k <= 0) continue;
+        const e = 1 - Math.pow(1 - k, 3);
+        let px;
+        let py;
+        if (k < 1) {
+          px = p.sx + (p.x - p.sx) * e;
+          py = p.sy + (p.y - p.sy) * e;
+        } else {
+          if (pass === 0) {
+            const mdx = p.x + p.ox - mouseX;
+            const mdy = p.y + p.oy - mouseY;
+            const md2 = mdx * mdx + mdy * mdy;
+            if (md2 < REPEL_R * REPEL_R) {
+              const md = Math.sqrt(md2) || 1;
+              const f = (1 - md / REPEL_R) * REPEL_F;
+              p.vx += (mdx / md) * f;
+              p.vy += (mdy / md) * f;
+            }
+            // 流星冲击：沿径向撞飞 + 顺着流星方向拖拽
+            for (let mi = 0; mi < meteors.length; mi++) {
+              const m = meteors[mi];
+              const hdx = p.x + p.ox - m.x;
+              const hdy = p.y + p.oy - m.y;
+              const hd2 = hdx * hdx + hdy * hdy;
+              if (hd2 < METEOR_HIT_R * METEOR_HIT_R) {
+                const hd = Math.sqrt(hd2) || 1;
+                const f = (1 - hd / METEOR_HIT_R) * METEOR_FORCE;
+                const mv = Math.hypot(m.vx, m.vy) || 1;
+                p.vx += (hdx / hd) * f + (m.vx / mv) * f * 0.45;
+                p.vy += (hdy / hd) * f + (m.vy / mv) * f * 0.45;
+                p.shock = 1;
+                m.hit = true;
+              }
+            }
+            // 被撞过的微粒弹簧短暂失效 → 先炸开，再被引力缓缓拉回
+            const spring = 0.09 * (1 - 0.85 * p.shock);
+            p.vx = (p.vx - p.ox * spring) * 0.86;
+            p.vy = (p.vy - p.oy * spring) * 0.86;
+            if (p.shock > 0.02) p.shock *= 0.982;
+            else p.shock = 0;
+            p.ox += p.vx;
+            p.oy += p.vy;
+          }
+          px = p.x + p.ox;
+          py = p.y + p.oy;
+          // 微粒呼吸漂移：整个字标像活的星尘，边缘幅度更大
+          const drift = p.edge ? 0.85 : 0.45;
+          px += Math.sin(time * 0.8 + p.phase) * drift;
+          py += Math.cos(time * 0.66 + p.phase * 1.7) * drift;
+        }
+        let a = p.alpha * e;
+        if (p.tw && k >= 1) a *= 1 - p.tw * (0.5 + 0.5 * Math.sin(time * p.spd + p.phase));
+        // 扫光提亮
+        if (k >= 1) {
+          const bd = Math.abs(px - sweepX);
+          if (bd < sweepW) {
+            const boost = 1 - bd / sweepW;
+            a = Math.min(1, a * (1 + boost * boost * 1.1));
+          }
+        }
+        if (pass === 0) {
+          // 辉光垫底隔粒画即可，物理每粒都算（在上方）
+          if ((i & 1) === 0) {
+            ctx.globalAlpha = a * 0.18;
+            const D = p.size * 2.8;
+            ctx.drawImage(SP_BLUE, px - D / 2, py - D / 2, D, D);
+          }
+        } else {
+          ctx.globalAlpha = a;
+          const sp = p.blue ? SP_BLUE : SP_WHITE;
+          ctx.drawImage(sp, px - p.size / 2, py - p.size / 2, p.size, p.size);
+        }
+      }
+    }
 
-    // 绘制流星（亮头 + 渐隐尾迹，不随字形摇摆）
+    // 边缘溶解出去的浮尘：飘远渐隐，循环重生
+    const dIn = Math.min(1, elapsed / 1100);
+    for (let i = 0; i < debris.length; i++) {
+      const d = debris[i];
+      const cyc = ((time + d.t0) % d.dur) / d.dur;
+      const r = d.base + d.reach * cyc;
+      ctx.globalAlpha = d.alpha * (1 - cyc) * dIn;
+      const D = d.size * 1.6;
+      ctx.drawImage(
+        SP_WHITE,
+        d.x + Math.cos(d.ang) * r - D / 2,
+        d.y + Math.sin(d.ang) * r - D / 2,
+        D,
+        D
+      );
+    }
+
+    // 撞击火花：命中帧从流星头部迸出，四散渐熄
+    for (let i = 0; i < meteors.length; i++) {
+      const m = meteors[i];
+      if (!m.hit) continue;
+      m.flash = 1;
+      m.hit = false;
+      if (sparks.length < 60) {
+        const nb = 2 + Math.floor(Math.random() * 3);
+        for (let s = 0; s < nb; s++) {
+          const a = Math.random() * Math.PI * 2;
+          const sp = 50 + Math.random() * 130;
+          sparks.push({
+            x: m.x,
+            y: m.y,
+            vx: Math.cos(a) * sp + m.vx * 0.12,
+            vy: Math.sin(a) * sp + m.vy * 0.12,
+            life: 0,
+            maxLife: 0.3 + Math.random() * 0.45,
+            size: 3 + Math.random() * 3,
+          });
+        }
+      }
+    }
+    for (let i = sparks.length - 1; i >= 0; i--) {
+      const s = sparks[i];
+      s.life += dt;
+      if (s.life >= s.maxLife) {
+        sparks.splice(i, 1);
+        continue;
+      }
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      s.vx *= 0.96;
+      s.vy *= 0.96;
+      const fade = 1 - s.life / s.maxLife;
+      ctx.globalAlpha = 0.9 * fade;
+      const D = s.size * (0.6 + 0.4 * fade) * 2;
+      ctx.drawImage(SP_WHITE, s.x - D / 2, s.y - D / 2, D, D);
+    }
+
+    // 流星本体：亮头 + 渐隐拖尾，叠在字标上方，真正「穿过」字面
     for (let i = 0; i < meteors.length; i++) {
       const m = meteors[i];
       const mv = Math.hypot(m.vx, m.vy) || 1;
-      const tailX = m.x - (m.vx / mv) * METEOR_TAIL;
-      const tailY = m.y - (m.vy / mv) * METEOR_TAIL;
-
-      const grad = ctx.createLinearGradient(m.x, m.y, tailX, tailY);
-      grad.addColorStop(0, "rgba(255,255,255,0.9)");
-      grad.addColorStop(0.4, "rgba(190,205,255,0.35)");
-      grad.addColorStop(1, "rgba(190,205,255,0)");
-      ctx.globalAlpha = 1;
+      const TAIL = 84;
+      const tlx = m.x - (m.vx / mv) * TAIL;
+      const tly = m.y - (m.vy / mv) * TAIL;
+      const grad = ctx.createLinearGradient(m.x, m.y, tlx, tly);
+      grad.addColorStop(0, `rgba(228, 236, 255, ${(0.72 + m.flash * 0.28).toFixed(3)})`);
+      grad.addColorStop(1, "rgba(228, 236, 255, 0)");
       ctx.strokeStyle = grad;
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth = 1.3;
       ctx.lineCap = "round";
       ctx.beginPath();
       ctx.moveTo(m.x, m.y);
-      ctx.lineTo(tailX, tailY);
+      ctx.lineTo(tlx, tly);
       ctx.stroke();
-
-      const headGlow = 14;
-      ctx.drawImage(SPRITES[0], m.x - headGlow / 2, m.y - headGlow / 2, headGlow, headGlow);
+      // 命中瞬间头部炸亮，随后回落
+      const D = 13 + m.flash * 22;
+      ctx.globalAlpha = 1;
+      ctx.drawImage(SP_WHITE, m.x - D / 2, m.y - D / 2, D, D);
+      if (m.flash > 0.02) m.flash *= 0.86;
+      else m.flash = 0;
     }
 
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = "source-over";
+  };
+
+  // 页面转入后台时 rAF 自动挂起、回前台自动续播，无需手动管 visibility
+  const render = (t) => {
+    if (!running) return;
+    if (!startAt) startAt = t;
+    lastFrameAt = performance.now();
+    paint(t - startAt, t * 0.001);
     requestAnimationFrame(render);
+  };
+
+  /** 同步重绘当前状态：rAF 之外（重建 / 看门狗）也能立刻出画面 */
+  const repaintNow = () => {
+    const now = performance.now();
+    paint(startAt ? now - startAt : 1e6, now * 0.001);
   };
 
   const start = () => {
     if (running || !built) return;
     running = true;
-    lastFrame = 0;
     requestAnimationFrame(render);
   };
-
   const stop = () => {
     running = false;
   };
 
-  const onPointer = (event) => {
-    const rect = canvas.getBoundingClientRect();
-    mouseX = event.clientX - rect.left;
-    mouseY = event.clientY - rect.top;
-  };
-
   build();
-  if (!built) {
-    showFallback();
-    return;
-  }
-  start();
-
-  // Web 字体就绪后重采样一次，字标用上正式字体（字体已就绪时立即 resolve，几乎无感）
-  if (document.fonts && document.fonts.ready) {
-    document.fonts.ready.then(() => {
-      if (built) build();
+  if (!built && !anchor.classList.contains("no-canvas")) {
+    // 首帧布局未就绪时兜底重试一次
+    requestAnimationFrame(() => {
+      build();
+      if (built && !reduceMotion) start();
+      if (built) repaintNow();
     });
   }
 
-  hero.addEventListener("pointermove", onPointer, { passive: true });
-  hero.addEventListener("pointerleave", () => {
-    mouseX = -9999;
-    mouseY = -9999;
-  });
+  // Web 字体就绪后重采样，字标用上正式字体（已就绪时几乎无感）。
+  // build 会清空画布，随即同步重绘，避免 rAF 未跑时留下空白
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(() => {
+      build();
+      repaintNow();
+    });
+  }
 
   let resizeTimer = 0;
   window.addEventListener(
     "resize",
     () => {
       clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(build, 200);
+      resizeTimer = setTimeout(() => {
+        build(); // startAt 不重置：重建后直接呈现当前状态，不重播入场
+        repaintNow();
+      }, 200);
     },
     { passive: true }
   );
 
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) start();
+  if (reduceMotion) {
+    paint(1e6, 0); // 静态一帧
+    return;
+  }
+
+  // 先同步画一帧成形态：rAF 不可用的离屏 / 预渲染环境也能看到完整字标。
+  // 正常浏览器里首个 rAF 在首次合成前就会触发，直接从入场动画开始，无闪烁。
+  repaintNow();
+  start();
+  // 看门狗：rAF 停摆超过 400ms 时补画当前状态，恢复后循环自动接管
+  setInterval(() => {
+    if (built && performance.now() - lastFrameAt > 400) repaintNow();
+  }, 500);
+
+  hero.addEventListener(
+    "pointermove",
+    (event) => {
+      const rect = canvas.getBoundingClientRect();
+      mouseX = event.clientX - rect.left;
+      mouseY = event.clientY - rect.top;
+    },
+    { passive: true }
+  );
+  hero.addEventListener("pointerleave", () => {
+    mouseX = -9999;
+    mouseY = -9999;
   });
 
   if ("IntersectionObserver" in window) {
     const observer = new IntersectionObserver(
-      (entries) => {
-        entries.forEach((entry) => {
-          if (entry.isIntersecting) start();
-          else stop();
-        });
-      },
+      (entries) =>
+        entries.forEach((en) => {
+          if (en.isIntersecting) {
+            start();
+            return;
+          }
+          // 停帧前复核：确认真的滚出视野，防止环境误报把循环停死
+          const r = canvas.getBoundingClientRect();
+          if (r.bottom < 0 || r.top > window.innerHeight) stop();
+          else start();
+        }),
       { threshold: 0.01 }
     );
     observer.observe(canvas);
   }
 }
 
-/**
- * Hero 背景：极光光丝 shader（vanilla WebGL，无依赖）。
- * 三条 fbm 扰动的冷色光带缓慢流动，指针带轻微视差；
- * canvas 用 mix-blend-mode: screen 叠在纯黑底上。
- */
-function initAuroraShader () {
+/** 左侧终端侧注：循环高亮「正在执行」的一行，像后台真的在跑 */
+function initSidenoteTicker () {
   if (reduceMotion) return;
-
-  const hero = document.getElementById("hero");
-  const canvas = document.getElementById("hero-canvas");
-  if (!hero || !canvas) return;
-
-  const gl = canvas.getContext("webgl", {
-    alpha: false,
-    antialias: false,
-    depth: false,
-    stencil: false,
-    powerPreference: "low-power",
-  });
-  if (!gl) return;
-
-  const vert = `
-    attribute vec2 position;
-    varying vec2 vUv;
-    void main() {
-      vUv = position * 0.5 + 0.5;
-      gl_Position = vec4(position, 0.0, 1.0);
-    }
-  `;
-
-  const frag = `
-    precision highp float;
-
-    uniform float iTime;
-    uniform vec2 iResolution;
-    uniform vec2 uPointer;
-    varying vec2 vUv;
-
-    float hash(vec2 p) {
-      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
-    }
-
-    float noise(vec2 p) {
-      vec2 i = floor(p);
-      vec2 f = fract(p);
-      vec2 u = f * f * (3.0 - 2.0 * f);
-      return mix(
-        mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
-        mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x),
-        u.y
-      );
-    }
-
-    float fbm(vec2 p) {
-      float v = 0.0;
-      float a = 0.5;
-      for (int i = 0; i < 5; i++) {
-        v += a * noise(p);
-        p = p * 2.04 + vec2(13.7, 7.1);
-        a *= 0.55;
-      }
-      return v;
-    }
-
-    /* 一条被 fbm 揉皱的水平光丝 */
-    float ribbon(vec2 p, float center, float amp, float sharp, float drift, float seed) {
-      float w = fbm(vec2(p.x * 1.1 + seed * 11.0 + drift, seed * 5.0 + drift * 0.55));
-      float y = p.y - center - (w - 0.5) * amp;
-      return exp(-abs(y) * sharp);
-    }
-
-    void main() {
-      float aspect = iResolution.x / max(iResolution.y, 1.0);
-      vec2 p = vUv - 0.5;
-      p.x *= aspect;
-
-      /* 指针视差：非常轻，只是让画面「活着」 */
-      p += (uPointer - 0.5) * vec2(0.05, 0.028);
-
-      float t = iTime * 0.05;
-
-      vec3 cCyan   = vec3(0.42, 0.62, 1.00);
-      vec3 cViolet = vec3(0.64, 0.54, 1.00);
-      vec3 cWhite  = vec3(0.86, 0.92, 1.00);
-
-      float r1 = ribbon(p, 0.21, 0.30, 16.0, t,             1.0);
-      float r2 = ribbon(p, 0.08, 0.38, 11.0, t * 1.25 + 3.0, 2.0);
-      float r3 = ribbon(p, 0.30, 0.22, 22.0, t * 0.8 + 7.0,  3.0);
-
-      vec3 col = vec3(0.0);
-      col += cCyan   * r1 * 0.30;
-      col += cViolet * r2 * 0.20;
-      col += cWhite  * r3 * 0.22;
-
-      /* 一层极淡的大尺度雾，垫住三条光丝 */
-      float haze = fbm(p * 1.7 + vec2(t * 0.6, 0.0));
-      col += mix(cViolet, cCyan, haze) * haze * haze * 0.05;
-
-      /* 光集中在画面上部：向下与向顶部两侧渐隐 */
-      col *= smoothstep(-0.30, 0.14, p.y);
-      col *= 1.0 - smoothstep(0.36, 0.52, p.y);
-      /* 左右两端轻微收口 */
-      col *= smoothstep(1.35, 0.5, abs(p.x));
-
-      /* 抖动防色带 */
-      col += (hash(vUv * iResolution) - 0.5) * 0.012;
-
-      gl_FragColor = vec4(max(col, 0.0), 1.0);
-    }
-  `;
-
-  const compileShader = (type, source) => {
-    const shader = gl.createShader(type);
-    gl.shaderSource(shader, source);
-    gl.compileShader(shader);
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-      throw new Error(gl.getShaderInfoLog(shader) || "Shader compile failed");
-    }
-    return shader;
-  };
-
-  let program;
-  try {
-    const vertexShader = compileShader(gl.VERTEX_SHADER, vert);
-    const fragmentShader = compileShader(gl.FRAGMENT_SHADER, frag);
-    program = gl.createProgram();
-    gl.attachShader(program, vertexShader);
-    gl.attachShader(program, fragmentShader);
-    gl.linkProgram(program);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-      throw new Error(gl.getProgramInfoLog(program) || "Shader link failed");
-    }
-  } catch (error) {
-    console.warn("Aurora shader skipped:", error);
-    return;
-  }
-
-  const buffer = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
-
-  const position = gl.getAttribLocation(program, "position");
-  gl.enableVertexAttribArray(position);
-  gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
-
-  const uniforms = {
-    iTime: gl.getUniformLocation(program, "iTime"),
-    iResolution: gl.getUniformLocation(program, "iResolution"),
-    uPointer: gl.getUniformLocation(program, "uPointer"),
-  };
-
-  let pointerX = 0.5;
-  let pointerY = 0.5;
-  let targetX = 0.5;
-  let targetY = 0.5;
-  let lastDrawTime = 0;
-  let running = false;
-  const FRAME_MS = 33; // 约 30fps：氛围背景不需要 60fps
-
-  const resize = () => {
-    const rect = canvas.getBoundingClientRect();
-    // 氛围光没有锐利细节，DPR 限 1.25 就足够，省大量像素填充
-    const dpr = Math.min(window.devicePixelRatio || 1, 1.25);
-    canvas.width = Math.max(1, Math.round(rect.width * dpr));
-    canvas.height = Math.max(1, Math.round(rect.height * dpr));
-    gl.viewport(0, 0, canvas.width, canvas.height);
-  };
-
-  const onPointer = (event) => {
-    const rect = hero.getBoundingClientRect();
-    targetX = (event.clientX - rect.left) / rect.width;
-    targetY = 1 - (event.clientY - rect.top) / rect.height;
-  };
-
-  const render = (time) => {
-    if (!running || document.hidden) return;
-
-    if (time - lastDrawTime < FRAME_MS) {
-      requestAnimationFrame(render);
-      return;
-    }
-    lastDrawTime = time;
-
-    pointerX += (targetX - pointerX) * 0.05;
-    pointerY += (targetY - pointerY) * 0.05;
-
-    gl.useProgram(program);
-    gl.uniform1f(uniforms.iTime, time * 0.001);
-    gl.uniform2f(uniforms.iResolution, canvas.width, canvas.height);
-    gl.uniform2f(uniforms.uPointer, pointerX, pointerY);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-
-    requestAnimationFrame(render);
-  };
-
-  const start = () => {
-    if (running) return;
-    running = true;
-    requestAnimationFrame(render);
-  };
-
-  const stop = () => {
-    running = false;
-  };
-
-  window.addEventListener("resize", resize, { passive: true });
-  hero.addEventListener("pointermove", onPointer, { passive: true });
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) start();
-  });
-
-  resize();
-
-  // hero 滚出视口就停止渲染，回来再重启，离屏零开销
-  if ("IntersectionObserver" in window) {
-    const observer = new IntersectionObserver(
-      (entries) => {
-        entries.forEach((entry) => {
-          if (entry.isIntersecting) start();
-          else stop();
-        });
-      },
-      { threshold: 0.01 }
-    );
-    observer.observe(hero);
-  } else {
-    start();
-  }
+  const lines = document.querySelectorAll(".hero-sidenote-left span");
+  if (!lines.length) return;
+  let idx = 0;
+  // 等入场淡入结束后再开始循环
+  setTimeout(() => {
+    setInterval(() => {
+      lines.forEach((el, i) => el.classList.toggle("is-active", i === idx));
+      idx = (idx + 1) % lines.length;
+    }, 1700);
+  }, 2600);
 }
 
 /** 卡片与按钮的指针跟随高光 */
@@ -1186,8 +1220,8 @@ initDownloads();
 initNav();
 initMobileMenu();
 initReveal();
-initHeroTitle();
+initHeroScene();
 initParticleLogo();
-initAuroraShader();
+initSidenoteTicker();
 initInteractiveHover();
 initYear();

@@ -70,7 +70,7 @@ export function AboutPane({
                 </button>
                 {update?.newer ? (
                   <button className="primary" onClick={() => void openInBrowser(update.url)}>
-                    去下载 {update.latest}
+                    去下载
                   </button>
                 ) : null}
               </div>

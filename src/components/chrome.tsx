@@ -13,11 +13,9 @@ import { useEscLayer } from "./Modal";
  * 控件在右侧，左边不用让位。 */
 export const IS_MAC = navigator.userAgent.includes("Mac");
 import {
-  BrowserIcon,
-  DiffIcon,
-  FileDocIcon,
   GearIcon,
   PanelBottomIcon,
+  PanelRightIcon,
   SidebarToggleIcon,
 } from "./icons";
 
@@ -32,52 +30,35 @@ export interface MenuState {
 
 /**
  * 主区顶部的工具栏（照 Codex）：左边收放侧栏，中间是当前会话的标题
- * （点开就是会话菜单），右边是面板开关和会话设置。整条都是窗口拖拽区。
+ * （点开就是会话菜单），右边是会话设置。整条都是窗口拖拽区。
+ *
+ * 侧栏开关留在左边 —— 它就贴着自己管的那一栏，指哪开哪。终端和侧边
+ * 面板的开关不在这里：那两块在窗口的下边和右边，归 [`WindowControls`]。
  */
 export function TopBar({
   sidebarOpen,
   onToggleSidebar,
   session,
   onSessionMenu,
-  browserOpen,
-  browserEnabled,
-  onToggleBrowser,
-  terminalOpen,
-  terminalEnabled,
-  onToggleTerminal,
   sessionCfgOpen,
   sessionCfgEnabled,
   onToggleSessionCfg,
-  changesOpen,
-  changesEnabled,
-  onToggleChanges,
-  previewOpen,
-  previewEnabled,
-  onTogglePreview,
+  onOpenBrowser,
+  controls,
 }: {
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
   session: SessionInfo | null;
   onSessionMenu: (e: React.MouseEvent, s: SessionInfo) => void;
-  browserOpen: boolean;
-  /** 浏览器抽屉跟着会话走，没有会话时开关置灰。 */
-  browserEnabled: boolean;
-  onToggleBrowser: () => void;
-  terminalOpen: boolean;
-  /** 终端组跟着会话走（每个会话一份），没有会话时置灰。 */
-  terminalEnabled: boolean;
-  onToggleTerminal: () => void;
   sessionCfgOpen: boolean;
   /** 会话设置管的是单个会话的参数，没有会话时置灰。 */
   sessionCfgEnabled: boolean;
   onToggleSessionCfg: () => void;
-  changesOpen: boolean;
-  changesEnabled: boolean;
-  onToggleChanges: () => void;
-  previewOpen: boolean;
-  /** 预览抽屉里得先有标签（点过文件）才有东西可看，空着时置灰。 */
-  previewEnabled: boolean;
-  onTogglePreview: () => void;
+  /** 渗透授权角标要能直达浏览器标签 —— 撤销入口（ScopePanel）在那里。 */
+  onOpenBrowser: () => void;
+  /** 窗口级分栏开关。抽屉收起时这条栏的右端就是窗口右上角，由它承载；
+   *  抽屉开着时交给抽屉的标签栏（见 WindowControls 的说明）。 */
+  controls?: React.ReactNode;
 }) {
   // 侧栏收起后 macOS 的红绿灯悬在主区左上角，工具栏给它们让位。
   // 全屏没有红绿灯（见 shell[data-fullscreen]），Windows/Linux 的窗口
@@ -88,7 +69,7 @@ export function TopBar({
       <button
         className={sidebarOpen ? "tb-btn active" : "tb-btn"}
         onClick={onToggleSidebar}
-        title={sidebarOpen ? "收起侧边栏" : "展开侧边栏"}
+        title={sidebarOpen ? "收起侧边栏（⌘B）" : "展开侧边栏（⌘B）"}
         aria-label={sidebarOpen ? "收起侧边栏" : "展开侧边栏"}
       >
         <SidebarToggleIcon />
@@ -107,47 +88,11 @@ export function TopBar({
 
       <div className="tb-spacer" data-tauri-drag-region />
 
-      {/* 渗透授权常驻角标：授权列表原本只在浏览器抽屉里可见，抽屉一关，
+      {/* 渗透授权常驻角标：授权列表原本只在浏览器标签里可见，标签一关，
           "允许对哪些站做侵入性操作"就从界面上彻底消失 —— 授权还生效着，
           它的可见性不能跟着面板走。 */}
-      {session ? <ScopeBadge sessionId={session.id} onOpen={onToggleBrowser} browserOpen={browserOpen} /> : null}
+      {session ? <ScopeBadge sessionId={session.id} onOpen={onOpenBrowser} /> : null}
 
-      <button
-        className={previewOpen ? "tb-btn active" : "tb-btn"}
-        onClick={onTogglePreview}
-        disabled={!previewEnabled}
-        title={previewEnabled ? "文件预览" : "点击一个文件后这里可以回到预览"}
-        aria-label="文件预览"
-      >
-        <FileDocIcon />
-      </button>
-      <button
-        className={changesOpen ? "tb-btn active" : "tb-btn"}
-        onClick={onToggleChanges}
-        disabled={!changesEnabled}
-        title={changesEnabled ? "Git 改动（未提交的工作区差异）" : "先打开一个会话"}
-        aria-label="Git 改动"
-      >
-        <DiffIcon />
-      </button>
-      <button
-        className={browserOpen ? "tb-btn active" : "tb-btn"}
-        onClick={onToggleBrowser}
-        disabled={!browserEnabled}
-        title={browserEnabled ? "浏览器抽屉" : "先打开一个会话再用浏览器"}
-        aria-label="浏览器抽屉"
-      >
-        <BrowserIcon />
-      </button>
-      <button
-        className={terminalOpen ? "tb-btn active" : "tb-btn"}
-        onClick={onToggleTerminal}
-        disabled={!terminalEnabled}
-        title={terminalEnabled ? "终端面板" : "先打开一个会话再用终端"}
-        aria-label="终端面板"
-      >
-        <PanelBottomIcon />
-      </button>
       <button
         className={sessionCfgOpen ? "tb-btn active" : "tb-btn"}
         onClick={onToggleSessionCfg}
@@ -157,22 +102,76 @@ export function TopBar({
       >
         <GearIcon />
       </button>
+      {controls}
     </header>
   );
 }
 
 /**
+ * 窗口级的分栏开关：底部终端、右侧面板。
+ *
+ * `[约束]` 它们停的是**窗口**的右上角，不是某一栏的右上角。这两个键改的
+ * 是整个窗口怎么分块，跟着对话列走的话，抽屉一开它们就落到窗口中间去了
+ * （图标指着"最右边那一栏"，人却在中间点它）。所以抽屉收起时由顶栏渲染，
+ * 抽屉开着时由抽屉的标签栏渲染 —— 那时窗口的右上角属于抽屉。
+ *
+ * 侧栏开关不在这里：它在顶栏左端，紧贴自己管的那一栏。会话设置也不在，
+ * 它管的是单个会话的参数，留在消息栏。
+ */
+export function WindowControls({
+  terminalOpen,
+  terminalEnabled,
+  onToggleTerminal,
+  drawerOpen,
+  drawerEnabled,
+  onToggleDrawer,
+}: {
+  terminalOpen: boolean;
+  /** 终端组跟着会话走（每个会话一份），没有会话时置灰。 */
+  terminalEnabled: boolean;
+  onToggleTerminal: () => void;
+  /** 右侧工作台抽屉。里面装什么由抽屉自己的标签栏 / 空状态管，
+   *  这里只有总开关（Codex 同款）。 */
+  drawerOpen: boolean;
+  drawerEnabled: boolean;
+  onToggleDrawer: () => void;
+}) {
+  return (
+    // 按钮之间的缝也归窗口拖拽 —— 顶栏其余空白处都是这么用的，
+    // 到了这一组突然拖不动会显得这块是"别的东西"。
+    <div className="win-controls" data-tauri-drag-region>
+      <button
+        className={terminalOpen ? "tb-btn active" : "tb-btn"}
+        onClick={onToggleTerminal}
+        disabled={!terminalEnabled}
+        title={terminalEnabled ? "终端面板（⌘J）" : "先打开一个会话再用终端"}
+        aria-label="终端面板"
+      >
+        <PanelBottomIcon />
+      </button>
+      <button
+        className={drawerOpen ? "tb-btn active" : "tb-btn"}
+        onClick={onToggleDrawer}
+        disabled={!drawerEnabled}
+        title={drawerEnabled ? "侧边面板" : "先打开一个会话"}
+        aria-label="侧边面板"
+      >
+        <PanelRightIcon />
+      </button>
+    </div>
+  );
+}
+
+/**
  * 顶栏的渗透授权角标。有生效的 scope 授权时亮起（盾牌 + 数量），
- * 点击打开浏览器抽屉 —— 撤销入口（ScopePanel）在那里。
+ * 点击激活浏览器标签 —— 撤销入口（ScopePanel）在那里。
  * 没有授权时整个不渲染，颗粒无声。
  */
 function ScopeBadge({
   sessionId,
-  browserOpen,
   onOpen,
 }: {
   sessionId: string;
-  browserOpen: boolean;
   onOpen: () => void;
 }) {
   const [count, setCount] = useState(0);
@@ -200,9 +199,7 @@ function ScopeBadge({
   return (
     <button
       className="tb-btn scope-badge"
-      onClick={() => {
-        if (!browserOpen) onOpen();
-      }}
+      onClick={onOpen}
       title={`${count} 个站点授权了侵入性渗透操作 —— 点击查看和撤销`}
       aria-label={`渗透授权 ${count} 个站点`}
     >

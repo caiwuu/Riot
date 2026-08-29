@@ -11,6 +11,7 @@ import {
   mcpStatus,
   setConfig,
 } from "../../bridge";
+import { ResizableTextarea } from "../ResizableTextarea";
 import { Card, CardBlock, Group, Row } from "./layout";
 import { type AskConfirm, type LeaveGuard, FormError, Switch, blurOnEnter } from "./shared";
 
@@ -176,7 +177,7 @@ export function McpPane({
           </>
         }
       >
-        <textarea
+        <ResizableTextarea
           className="mcp-json-input"
           value={jsonDraft}
           onChange={(e) => setJsonDraft(e.target.value)}
@@ -398,8 +399,24 @@ function McpServerEditor({
   };
 
   return (
-    <Group title={server.name || server.id}>
+    <Group
+      title={server.name || server.id}
+      action={
+        <div className="set-group-actions">
+          <button className="btn-compact ghost-danger" onClick={onRemove}>
+            删除服务器
+          </button>
+        </div>
+      }
+    >
       <Card>
+        <Row title="启用" desc="关掉后进程会停，它的工具在下一轮对话里消失。">
+          <Switch
+            on={server.enabled !== false}
+            onChange={(v) => onPatch({ enabled: v })}
+            label="启用这个服务器"
+          />
+        </Row>
         <CardBlock>
           <div className={`mcp-status ${state}`}>
             <span className={`mcp-dot ${state}`} />
@@ -433,14 +450,6 @@ function McpServerEditor({
             </ul>
           ) : null}
         </CardBlock>
-
-        <Row title="启用" desc="关掉后进程会停，它的工具在下一轮对话里消失。">
-          <Switch
-            on={server.enabled !== false}
-            onChange={(v) => onPatch({ enabled: v })}
-            label="启用这个服务器"
-          />
-        </Row>
         <Row title="名称" desc="只在界面上显示。工具名用的是服务器 id。">
           <input
             value={name}
@@ -465,7 +474,7 @@ function McpServerEditor({
           />
         </Row>
         <Row title="参数" desc="一行一个。" stack>
-          <textarea
+          <ResizableTextarea
             className="paths-input"
             value={args}
             onChange={(e) => setArgs(e.target.value)}
@@ -477,7 +486,7 @@ function McpServerEditor({
           />
         </Row>
         <Row title="环境变量" desc="一行一个 KEY=VALUE。" stack>
-          <textarea
+          <ResizableTextarea
             className="paths-input"
             value={env}
             onChange={(e) => setEnv(e.target.value)}
@@ -489,14 +498,6 @@ function McpServerEditor({
           />
         </Row>
       </Card>
-      <div className="editor-foot">
-        <span />
-        <div className="editor-foot-actions">
-          <button className="btn-danger ghost-danger" onClick={onRemove}>
-            删除服务器
-          </button>
-        </div>
-      </div>
     </Group>
   );
 }

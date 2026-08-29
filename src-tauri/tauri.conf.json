@@ -3,7 +3,7 @@
   "productName": "Riot",
   "mainBinaryName": "Riot",
   "version": "0.1.1",
-  "identifier": "dev.riot.app",
+  "identifier": "dev.riot.desktop",
 
   "build": {
     "beforeDevCommand": "node scripts/stage-kernel.mjs debug && pnpm dev",
