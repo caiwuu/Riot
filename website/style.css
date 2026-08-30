@@ -527,8 +527,8 @@ main,
   inset: -60% -20%;
   background: radial-gradient(
     ellipse 50% 50% at 50% 50%,
-    rgba(146, 178, 255, 0.12),
-    rgba(120, 130, 240, 0.045) 55%,
+    rgba(146, 178, 255, 0.07),
+    rgba(120, 130, 240, 0.028) 55%,
     transparent 75%
   );
   animation: glow-breathe 6s ease-in-out infinite;
@@ -565,33 +565,36 @@ main,
   display: flex;
 }
 
-/* 地平光线 */
+/* 地平光线：不是一根通到边的硬线，是中间亮、往两端慢慢溶掉的光带 */
 .hero-horizon {
   position: absolute;
   z-index: 1;
   left: 50%;
   top: 52%;
-  width: min(62vw, 800px);
+  width: min(74vw, 980px);
   height: 1px;
   transform: translateX(-50%);
   background: linear-gradient(
     90deg,
     transparent,
-    rgba(168, 194, 255, 0.38) 16%,
-    rgba(224, 234, 255, 0.9) 40%,
+    rgba(150, 178, 250, 0.1) 10%,
+    rgba(190, 210, 255, 0.34) 26%,
+    rgba(232, 240, 255, 0.85) 42%,
     #fff 50%,
-    rgba(224, 234, 255, 0.9) 60%,
-    rgba(168, 194, 255, 0.38) 84%,
+    rgba(232, 240, 255, 0.85) 58%,
+    rgba(190, 210, 255, 0.34) 74%,
+    rgba(150, 178, 250, 0.1) 90%,
     transparent
   );
   box-shadow:
-    0 0 18px rgba(186, 206, 255, 0.65),
-    0 0 3px rgba(255, 255, 255, 0.9);
+    0 0 18px rgba(186, 206, 255, 0.5),
+    0 0 3px rgba(255, 255, 255, 0.7);
   opacity: 0;
   animation:
     hero-fade 1.4s ease 0.5s forwards,
     horizon-pulse 4.5s ease-in-out 2.2s infinite;
 }
+
 
 /* 地平光线呼吸脉动 */
 @keyframes horizon-pulse {
@@ -603,34 +606,36 @@ main,
     filter: brightness(1.42);
   }
 }
+/* 中心横向光芒：宽而扁，像镜头光斑顺着线摊开 */
 .hero-horizon::before {
   content: '';
   position: absolute;
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
-  width: 44%;
+  width: 78%;
   height: 30px;
   background: radial-gradient(
     ellipse 50% 50% at 50% 50%,
-    rgba(214, 228, 255, 0.42),
-    rgba(160, 186, 255, 0.14) 48%,
-    transparent 72%
+    rgba(228, 238, 255, 0.6),
+    rgba(170, 195, 255, 0.16) 52%,
+    transparent 76%
   );
-  filter: blur(5px);
+  filter: blur(6px);
 }
+/* 大范围的氛围光罩：上下都亮一点，托住整条地平线 */
 .hero-horizon::after {
   content: '';
   position: absolute;
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
-  width: 135%;
-  height: 190px;
+  width: 150%;
+  height: 240px;
   background: radial-gradient(
     ellipse 50% 50% at 50% 50%,
-    rgba(140, 168, 255, 0.13),
-    transparent 62%
+    rgba(146, 174, 255, 0.16),
+    transparent 64%
   );
 }
 

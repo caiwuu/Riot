@@ -223,18 +223,25 @@ function initReveal () {
    logo-canvas：点阵 LED 字标「RIOT」+ 外围暗点网格 + 溶解浮尘
    ============================================================ */
 
-/** 预渲染辉光光点 sprite */
-function makeGlowSprite (r, g, b) {
+/** 预渲染辉光光点 sprite。`tight` 收紧衰减，给字标核点用，避免糊边。 */
+function makeGlowSprite (r, g, b, tight) {
   const s = document.createElement("canvas");
   const SIZE = 64;
   s.width = SIZE;
   s.height = SIZE;
   const c = s.getContext("2d");
   const grad = c.createRadialGradient(32, 32, 0, 32, 32, 32);
-  grad.addColorStop(0, `rgba(${r},${g},${b},1)`);
-  grad.addColorStop(0.25, `rgba(${r},${g},${b},0.85)`);
-  grad.addColorStop(0.5, `rgba(${r},${g},${b},0.18)`);
-  grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+  if (tight) {
+    grad.addColorStop(0, `rgba(${r},${g},${b},1)`);
+    grad.addColorStop(0.2, `rgba(${r},${g},${b},0.92)`);
+    grad.addColorStop(0.4, `rgba(${r},${g},${b},0.14)`);
+    grad.addColorStop(0.62, `rgba(${r},${g},${b},0)`);
+  } else {
+    grad.addColorStop(0, `rgba(${r},${g},${b},1)`);
+    grad.addColorStop(0.25, `rgba(${r},${g},${b},0.85)`);
+    grad.addColorStop(0.5, `rgba(${r},${g},${b},0.18)`);
+    grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+  }
   c.fillStyle = grad;
   c.fillRect(0, 0, SIZE, SIZE);
   return s;
@@ -260,12 +267,43 @@ function initHeroScene () {
   const GRID_RGB = "150, 172, 240";
   const rand = (a, b) => a + Math.random() * (b - a);
 
+  /**
+   * 丁达尔光束的手工排布（deg：0 = 垂直向下，负左正右）。
+   * 180° 内散布，长短 / 粗细 / 亮度全随机、与角度无关 ——
+   * 不聚中、不对称，才不像圆规画的。spd/ph 控制各自的呼吸节奏。
+   */
+  const BEAM_DEFS = [
+    { deg: -88, len: 0.9, w: 1.6, a: 0.75, spd: 0.42, ph: 1.3 },
+    { deg: -76, len: 0.55, w: 0.7, a: 0.9, spd: 0.61, ph: 4.1 },
+    { deg: -63, len: 1.0, w: 2.2, a: 0.55, spd: 0.35, ph: 2.2 },
+    { deg: -55, len: 0.68, w: 1.0, a: 0.8, spd: 0.72, ph: 5.6 },
+    { deg: -41, len: 0.85, w: 0.55, a: 1.0, spd: 0.4, ph: 0.7 },
+    { deg: -33, len: 0.6, w: 1.8, a: 0.5, spd: 0.55, ph: 3.4 },
+    { deg: -21, len: 0.95, w: 1.2, a: 0.7, spd: 0.33, ph: 1.9 },
+    { deg: -9, len: 0.7, w: 0.8, a: 0.85, spd: 0.5, ph: 5.0 },
+    { deg: 4, len: 0.88, w: 2.4, a: 0.5, spd: 0.38, ph: 2.8 },
+    { deg: 13, len: 0.6, w: 0.6, a: 0.95, spd: 0.66, ph: 0.4 },
+    { deg: 27, len: 1.0, w: 1.5, a: 0.65, spd: 0.45, ph: 4.7 },
+    { deg: 38, len: 0.75, w: 0.95, a: 0.9, spd: 0.58, ph: 1.5 },
+    { deg: 49, len: 0.92, w: 2.0, a: 0.55, spd: 0.36, ph: 3.9 },
+    { deg: 61, len: 0.65, w: 0.75, a: 0.85, spd: 0.63, ph: 2.5 },
+    { deg: 72, len: 0.98, w: 1.35, a: 0.7, spd: 0.44, ph: 5.9 },
+    { deg: 85, len: 0.8, w: 1.0, a: 0.8, spd: 0.52, ph: 0.9 },
+  ];
+  /** 每道光束的三层羽化：[宽度系数, 透明度系数] */
+  const BEAM_LAYERS = [
+    [1.9, 0.3],
+    [1.05, 0.55],
+    [0.42, 0.95],
+  ];
+
   let W = 0;
   let H = 0;
   let stars = [];
   let staticLayer = null;
   let running = false;
   let lastDraw = 0;
+  let horizonY = 0; // 白光线在画布内的实际 y：射线和地面都从它出发
   const FRAME_MS = 33; // 氛围背景 30fps 足够
 
   /** 静态装饰层：只在尺寸变化时重绘一次 */
@@ -320,21 +358,6 @@ function initHeroScene () {
       }
     }
 
-    // 地平线以下的极淡汇聚线（点阵地面改为每帧动态滚动绘制）
-    const vpx = W / 2;
-    const vpy = H * 0.52;
-    for (let k = -8; k <= 8; k++) {
-      const endX = vpx + k * W * 0.115;
-      const grad = c.createLinearGradient(vpx, vpy + 6, endX, H);
-      grad.addColorStop(0, `rgba(${GRID_RGB}, 0)`);
-      grad.addColorStop(1, `rgba(${GRID_RGB}, 0.055)`);
-      c.strokeStyle = grad;
-      c.beginPath();
-      c.moveTo(vpx, vpy + 6);
-      c.lineTo(endX, H);
-      c.stroke();
-    }
-
     // 底部两角的等高线
     const contour = (cx0, cy0) => {
       for (let i = 0; i < 4; i++) {
@@ -356,6 +379,16 @@ function initHeroScene () {
     canvas.width = Math.round(W * dpr);
     canvas.height = Math.round(H * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    // 实测白光线位置：小屏是常规文档流，它不在画布 52% 处，
+    // 不跟着量的话射线锥会和线脱节，悬在半空
+    horizonY = H * 0.52;
+    const horEl = document.querySelector(".hero-horizon");
+    if (horEl) {
+      const hr = horEl.getBoundingClientRect();
+      const y = hr.top + hr.height / 2 - rect.top;
+      if (hr.width > 0 && y > H * 0.2 && y < H * 0.9) horizonY = y;
+    }
 
     // 星点：细碎的底 + 几颗带辉光的亮星（整体极缓慢向右漂移）
     stars = [];
@@ -390,25 +423,132 @@ function initHeroScene () {
     buildStaticLayer();
   };
 
-  /** 透视点阵地面：一排排网点从地平线深处缓缓滚向观察者 */
+  /**
+   * 地平光的光晕都在线下方 —— 光从线心洒向地面：
+   * 丁达尔光柱（柔光楔，微微呼吸）向下放射，落在光洼和尘点上；
+   * 线上方只留 CSS 的光斑与氛围光，不另外补。
+   */
+  const drawHorizonBloom = (time) => {
+    const vpx = W / 2;
+    const vpy = (horizonY || H * 0.52) + 1;
+    const pulse = 0.85 + 0.15 * Math.sin(time * 0.55);
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    // 全部画在线以下
+    ctx.beginPath();
+    ctx.rect(0, vpy, W, H - vpy);
+    ctx.clip();
+
+    // —— 丁达尔光束：180° 铺满线下半圆，但**不等距、不等宽、不等亮** ——
+    // 真实的体积光乱中有序：几道主束醒目，其余若隐若现；
+    // 每道叠三层同轴楔形模拟横向羽化，边缘融进黑里，不是硬边扇骨。
+    const maxL = Math.max(140, Math.min((H - vpy) * 1.0, H * 0.36));
+    for (let i = 0; i < BEAM_DEFS.length; i++) {
+      const b = BEAM_DEFS[i];
+      const th = (b.deg * Math.PI) / 180; // 0 = 垂直向下
+      const dx = Math.sin(th);
+      const dy = Math.cos(th);
+      const shimmer = 0.66 + 0.34 * Math.sin(time * b.spd + b.ph);
+      const L = maxL * b.len * (0.92 + 0.08 * Math.sin(time * 0.37 + b.ph * 2.1));
+      // 根部不从一个数学点出发：沿光斑略微错开，消掉"圆规画的"感觉
+      const rx0 = vpx + dx * 6 + Math.sin(b.ph * 7.3) * 10;
+      const ry0 = vpy;
+      const ex = rx0 + dx * L;
+      const ey = ry0 + dy * L;
+      const pxn = Math.cos(th);
+      const pyn = -Math.sin(th);
+      const wEnd = (6 + L * 0.1) * b.w;
+      const a0 = 0.085 * b.a * pulse * shimmer;
+      const grad = ctx.createLinearGradient(rx0, ry0, ex, ey);
+      grad.addColorStop(0, `rgba(222, 234, 255, ${a0.toFixed(3)})`);
+      grad.addColorStop(0.55, `rgba(200, 218, 255, ${(a0 * 0.4).toFixed(3)})`);
+      grad.addColorStop(1, "rgba(190, 210, 255, 0)");
+      ctx.fillStyle = grad;
+      // 三层同轴楔形：外圈宽而虚、内芯窄而实，近似横向高斯羽化
+      for (const [wf, af] of BEAM_LAYERS) {
+        ctx.globalAlpha = af;
+        const wl = wEnd * wf;
+        ctx.beginPath();
+        ctx.moveTo(rx0 - pxn * 2.4, ry0 - pyn * 2.4);
+        ctx.lineTo(rx0 + pxn * 2.4, ry0 + pyn * 2.4);
+        ctx.lineTo(ex + pxn * wl, ey + pyn * wl);
+        ctx.lineTo(ex - pxn * wl, ey - pyn * wl);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // —— 地面光洼 ——
+    const ry1 = Math.max(26, (H - vpy) * 0.26);
+    const rx1 = W * 0.24;
+    ctx.save();
+    ctx.translate(vpx, vpy);
+    ctx.scale(rx1 / ry1, 1);
+    const core = ctx.createRadialGradient(0, 0, 0, 0, 0, ry1);
+    core.addColorStop(0, `rgba(228, 238, 255, ${(0.16 * pulse).toFixed(3)})`);
+    core.addColorStop(0.4, `rgba(196, 214, 255, ${(0.07 * pulse).toFixed(3)})`);
+    core.addColorStop(1, "rgba(170, 196, 255, 0)");
+    ctx.fillStyle = core;
+    ctx.fillRect(-ry1, 0, ry1 * 2, ry1);
+    ctx.restore();
+
+    const ry2 = Math.max(40, (H - vpy) * 0.48);
+    const rx2 = W * 0.5;
+    ctx.save();
+    ctx.translate(vpx, vpy);
+    ctx.scale(rx2 / ry2, 1);
+    const spill = ctx.createRadialGradient(0, 0, 0, 0, 0, ry2);
+    spill.addColorStop(0, `rgba(190, 210, 255, ${(0.05 * pulse).toFixed(3)})`);
+    spill.addColorStop(0.5, `rgba(160, 188, 255, ${(0.02 * pulse).toFixed(3)})`);
+    spill.addColorStop(1, "rgba(140, 168, 255, 0)");
+    ctx.fillStyle = spill;
+    ctx.fillRect(-ry2, 0, ry2 * 2, ry2);
+    ctx.restore();
+
+    ctx.restore();
+  };
+
+  /**
+   * 透视点阵地面：发光尘点铺满整个地面，贴着地平线最亮、越往近处越暗，
+   * 行向灭点收拢 + 每粒一点确定性抖动，读起来是星尘不是格子。
+   */
   const drawFloor = (time) => {
     const vpx = W / 2;
-    const vpy = H * 0.52;
-    const ROWS = 9;
-    const frac = (time * 0.1) % 1; // 约 10 秒推进一格
-    ctx.fillStyle = `rgb(${GRID_RGB})`;
+    const vpy = horizonY || H * 0.52;
+    const ROWS = 19;
+    const s = time * 0.05; // 极缓慢滚向观察者
+    const frac = s % 1;
+    // 比背景网点亮一档的蓝白 —— 这是被光照着的尘，不是暗纹
+    ctx.fillStyle = "rgb(206, 220, 252)";
     for (let j = 0; j <= ROWS; j++) {
       const u = (j + frac) / ROWS;
       if (u > 1.02) continue;
-      const p = Math.pow(u, 1.8);
-      const y = vpy + 12 + (H - vpy - 12) * p;
-      const sx = (14 + 120 * p) * (W / 1024);
-      const size = 0.8 + p * 1.1;
+      const p = Math.pow(u, 1.75);
+      const y = vpy + 3 + (H - vpy - 3) * p;
+      const sx = (8 + 92 * p) * (W / 1024);
+      const size = 1 + p * 1.4;
       const n = Math.ceil(W / 2 / sx);
-      const fadeIn = Math.min(1, u / 0.12); // 远处新行淡入
+      const fadeIn = Math.min(1, u / 0.1); // 远处新行淡入
+      const wid = j - Math.floor(s); // 行的持续身份：滚动换编号时抖动不跳
       for (let k = -n; k <= n; k++) {
-        ctx.globalAlpha = (0.035 + 0.085 * p) * (1 - (Math.abs(k) / (n + 2)) * 0.35) * fadeIn;
-        ctx.fillRect(vpx + k * sx, y, size, size);
+        // 确定性抖动：同一粒尘每帧同位，格感被打散
+        const h = Math.sin(wid * 127.1 + k * 311.7) * 43758.5453;
+        const hf = h - Math.floor(h);
+        const jit = hf - 0.5;
+        const px = vpx + (k + jit * 0.9) * sx;
+        const side = 1 - (Math.abs(k) / (n + 2)) * 0.5;
+        // 贴线亮、往下暗 —— 光是从地平线洒下来的
+        const nearLine = 1 - p;
+        const lit = Math.max(
+          0,
+          1 - Math.hypot((px - vpx) / (W * 0.42), (y - vpy) / ((H - vpy) * 0.62))
+        );
+        const base = (0.05 + 0.24 * Math.pow(nearLine, 1.5)) * side * fadeIn;
+        // 少数尘粒亮一档，像撒了碎钻
+        const sparkle = hf > 0.93 ? 1.8 : 1;
+        ctx.globalAlpha = Math.min(0.8, (base + 0.34 * lit * lit) * sparkle);
+        ctx.fillRect(px, y, size, size);
       }
     }
     ctx.globalAlpha = 1;
@@ -455,6 +595,7 @@ function initHeroScene () {
     ctx.clearRect(0, 0, W, H);
     if (staticLayer) ctx.drawImage(staticLayer, 0, 0, W, H);
 
+    drawHorizonBloom(time);
     drawFloor(time);
 
     ctx.fillStyle = "#dfe6ff";
@@ -537,9 +678,9 @@ function initHeroScene () {
 /**
  * 粒子字标「RIOT」（对照设计稿：特粗字形 + 砂砾状密集粒子填充）：
  * 离屏以特粗字重画出字标，然后两套采样——
- * 1) 字形内部：细网格 + 随机抖动的密集微粒（大小/亮度重随机、少量蓝色调、
- *    偶发亮斑与内部暗斑），边缘蚕食并向外溢出浮尘，呈砂砾质感的实心块面；
- * 2) 字形外围：独立的稀疏规则网格暗点，覆盖整块字标区域、向外缘轻微衰减。
+ * 1) 字形内部：细网格 + 受约束的微抖。粒子必须落在墨迹内，边缘不外溢、
+ *    不蚕食，轮廓才锐利；核点用实心方点而不是大辉光，避免糊边。
+ * 2) 字形外围：独立的稀疏规则网格暗点，与字形至少隔一格，不糊轮廓。
  * 入场时微粒从四散位置左→右扫掠归位；鼠标靠近轻轻推开微粒。
  * 流星也画在这层：六成流星瞄向字标飞来，命中时把微粒撞飞（弹簧短暂
  * 失效再缓缓归位）、头部炸出闪光与火花，穿出后继续划向远方。
@@ -571,9 +712,10 @@ function initParticleLogo () {
   const METEOR_HIT_R = 25; // 流星冲击半径
   const METEOR_FORCE = 3; // 冲击力度（60fps 连续受力，不宜过大）
 
-  const SP_WHITE = makeGlowSprite(242, 247, 255);
-  const SP_BLUE = makeGlowSprite(152, 186, 255);
+  const SP_WHITE = makeGlowSprite(242, 247, 255, true);
+  const SP_BLUE = makeGlowSprite(152, 186, 255, true);
   const SP_DEEP = makeGlowSprite(116, 138, 235);
+  const INK = 200; // 丢掉抗锯齿毛边，轮廓才锐
 
   let W = 0;
   let H = 0;
@@ -593,6 +735,9 @@ function initParticleLogo () {
   let sparks = []; // 撞击火花
   let nextMeteorAt = 0;
   let prevT = 0;
+  let glyph = null; // 墨迹蒙版：把归位微粒裁进字形，轮廓才锐
+  let letterLayer = null;
+  let letterCtx = null;
 
   const resize = () => {
     const rect = canvas.getBoundingClientRect();
@@ -601,6 +746,11 @@ function initParticleLogo () {
     canvas.width = Math.round(W * dpr);
     canvas.height = Math.round(H * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    letterLayer = document.createElement("canvas");
+    letterLayer.width = canvas.width;
+    letterLayer.height = canvas.height;
+    letterCtx = letterLayer.getContext("2d");
+    letterCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   };
 
   const build = () => {
@@ -642,8 +792,9 @@ function initParticleLogo () {
       octx.clearRect(0, 0, ow, oh);
       octx.fillStyle = "#fff";
       octx.strokeStyle = "#fff";
-      octx.lineWidth = px * 0.055; // 描边增肥：贴近设计稿的特粗笔画
-      octx.lineJoin = "round";
+      octx.lineWidth = px * 0.038; // 略描边增肥，miter 保住转角
+      octx.lineJoin = "miter";
+      octx.miterLimit = 2.2;
       octx.textAlign = "left";
       octx.textBaseline = "alphabetic";
       const baseY = oh / 2 + px * 0.36; // 大写字母光学居中
@@ -662,7 +813,7 @@ function initParticleLogo () {
       let maxY = 0;
       for (let y = 0; y < oh; y += 2) {
         for (let x = 0; x < ow; x += 2) {
-          if (data[(y * ow + x) * 4 + 3] > 140) {
+          if (data[(y * ow + x) * 4 + 3] > INK) {
             if (x < minX) minX = x;
             if (x > maxX) maxX = x;
             if (y < minY) minY = y;
@@ -710,7 +861,7 @@ function initParticleLogo () {
       const px = Math.round(xCss * scale);
       const py = Math.round(yCss * scale);
       if (px < 0 || py < 0 || px >= ow || py >= oh) return false;
-      return img[(py * ow + px) * 4 + 3] > 140;
+      return img[(py * ow + px) * 4 + 3] > INK;
     };
 
     /* —— 字形内部：细网格 + 随机抖动的密集微粒填充 —— */
@@ -718,10 +869,26 @@ function initParticleLogo () {
     const fRows = Math.max(1, Math.round(bh / fs));
     /** 生成一颗填充微粒（jitterScale 控制离格心的散布程度） */
     const spawnFill = (cx, cy, edge, jitterScale) => {
-      const bright = Math.random() < 0.06;
+      const bright = Math.random() < 0.05;
       const jAmp = fs * jitterScale;
-      const x = offX + shiftX + cx + (Math.random() - 0.5) * 2 * jAmp;
-      const y = offY + shiftY + cy + (Math.random() - 0.5) * 2 * jAmp;
+      let xCss = cx;
+      let yCss = cy;
+      let inside = inkAt(cx, cy);
+      if (jAmp > 0) {
+        for (let t = 0; t < 5; t++) {
+          const jx = cx + (Math.random() - 0.5) * 2 * jAmp;
+          const jy = cy + (Math.random() - 0.5) * 2 * jAmp;
+          if (inkAt(jx, jy)) {
+            xCss = jx;
+            yCss = jy;
+            inside = true;
+            break;
+          }
+        }
+      }
+      if (!inside) return;
+      const x = offX + shiftX + xCss;
+      const y = offY + shiftY + yCss;
       const sweep = (cx / bw) * 620; // 左→右入场扫掠
       const ang = Math.random() * Math.PI * 2;
       const dist = 36 + Math.random() * 130;
@@ -734,15 +901,15 @@ function initParticleLogo () {
         oy: 0,
         vx: 0,
         vy: 0,
-        size: fs * (bright ? 2 : 0.9 + Math.random() * 0.8),
-        alpha: bright ? 1 : 0.45 + Math.pow(Math.random(), 1.3) * 0.55,
-        blue: Math.random() < 0.28,
+        size: fs * (bright ? 1.6 : 0.78 + Math.random() * 0.5),
+        alpha: bright ? 1 : 0.55 + Math.pow(Math.random(), 1.3) * 0.4,
+        blue: Math.random() < 0.22,
         edge,
         shock: 0, // 被流星撞击后弹簧短暂失效，缓缓归位
         delay: sweep + Math.random() * 240,
         phase: Math.random() * Math.PI * 2,
         spd: 0.5 + Math.random() * 1.2,
-        tw: edge ? 0.45 : Math.random() < 0.3 ? 0.18 : 0,
+        tw: edge ? 0.18 : Math.random() < 0.22 ? 0.12 : 0,
       });
     };
     for (let gy = 0; gy < fRows; gy++) {
@@ -755,22 +922,21 @@ function initParticleLogo () {
           !inkAt(cx + fs, cy) ||
           !inkAt(cx, cy - fs) ||
           !inkAt(cx, cy + fs);
-        // 边缘蚕食出毛边，内部偶发暗斑形成砂砾质感
-        if (edge ? Math.random() < 0.3 : Math.random() < 0.03) continue;
-        spawnFill(cx, cy, edge, edge ? 0.7 : 0.42);
-        // 内部次级微粒：加密填充，让块面更实
-        if (!edge && Math.random() < 0.35) spawnFill(cx, cy, false, 0.6);
-        if (edge && Math.random() < 0.16) {
+        // 边缘几乎不抽点，轮廓才连得住；内部多留暗隙，保住点阵质感
+        if (edge ? Math.random() < 0.04 : Math.random() < 0.07) continue;
+        spawnFill(cx, cy, edge, edge ? 0.14 : 0.26);
+        if (!edge && Math.random() < 0.15) spawnFill(cx, cy, false, 0.34);
+        if (edge && Math.random() < 0.045) {
           debris.push({
             x: offX + shiftX + cx,
             y: offY + shiftY + cy,
             ang: Math.random() * Math.PI * 2,
-            base: 4 + Math.random() * 8,
-            reach: 22 + Math.random() * 46,
+            base: 2 + Math.random() * 4,
+            reach: 8 + Math.random() * 16,
             dur: 5 + Math.random() * 7,
             t0: Math.random() * 12,
-            size: fs * (0.8 + Math.random() * 0.6),
-            alpha: 0.09 + Math.random() * 0.18,
+            size: fs * (0.6 + Math.random() * 0.4),
+            alpha: 0.05 + Math.random() * 0.08,
           });
         }
       }
@@ -786,6 +952,15 @@ function initParticleLogo () {
         const cx = (gx + 0.5) * hs;
         const cy = (gy + 0.5) * hs;
         if (inkAt(cx, cy)) continue;
+        // 与字形隔开一格，暗点不要糊到轮廓上
+        if (
+          inkAt(cx - hs, cy) ||
+          inkAt(cx + hs, cy) ||
+          inkAt(cx, cy - hs) ||
+          inkAt(cx, cy + hs)
+        ) {
+          continue;
+        }
         if (Math.random() < 0.18) continue;
         const dx = gx < 0 ? -gx : gx >= HALO_COLS ? gx - HALO_COLS + 1 : 0;
         const dy = gy < 0 ? -gy : gy >= hRows ? gy - hRows + 1 : 0;
@@ -807,8 +982,19 @@ function initParticleLogo () {
       }
     }
 
+    glyph = {
+      canvas: off,
+      x: offX + shiftX,
+      y: offY + shiftY,
+      w: bw,
+      h: bh,
+    };
+
     built = dots.length > 0;
-    if (!built) showFallback();
+    if (!built) {
+      glyph = null;
+      showFallback();
+    }
   };
 
   const paint = (elapsed, time) => {
@@ -818,7 +1004,7 @@ function initParticleLogo () {
     // 字标后方的一团淡蓝辉光（缓慢呼吸）
     const breathe = Math.sin(time * 0.5);
     const g = textW * (1.55 + 0.05 * breathe);
-    ctx.globalAlpha = 0.11 * (0.85 + 0.15 * breathe);
+    ctx.globalAlpha = 0.07 * (0.85 + 0.15 * breathe);
     ctx.drawImage(SP_DEEP, textCX - g / 2, textCY - g / 2, g, g);
 
     // 扫光带：入场完成后，一道柔和亮波周期性从左掠到右
@@ -883,7 +1069,27 @@ function initParticleLogo () {
       ctx.drawImage(SP_BLUE, d.x - D / 2, d.y - D / 2, D, D);
     }
 
-    // 字形微粒：第一遍铺蓝色辉光垫底（顺带算物理），第二遍点亮核
+    // 字形微粒：归位的画进蒙版层（轮廓被墨迹裁齐），飞入/撞飞的画在主画布。
+    // 只有粒子、没有实心底 —— 锐利靠蒙版裁边，质感靠粒子间的暗隙。
+    if (letterCtx) {
+      letterCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      letterCtx.clearRect(0, 0, W, H);
+      letterCtx.globalCompositeOperation = "lighter";
+    }
+    const drawDot = (target, pass, i, p, px, py, a) => {
+      if (pass === 0) {
+        if ((i & 1) === 0) {
+          target.globalAlpha = a * 0.08;
+          const D = p.size * 1.7;
+          target.drawImage(SP_BLUE, px - D / 2, py - D / 2, D, D);
+        }
+        return;
+      }
+      target.globalAlpha = a;
+      const core = Math.max(0.8, p.size * 0.6);
+      target.fillStyle = p.blue ? "#c8d6ff" : "#f5f7ff";
+      target.fillRect(px - core / 2, py - core / 2, core, core);
+    };
     for (let pass = 0; pass < 2; pass++) {
       for (let i = 0; i < dots.length; i++) {
         const p = dots[i];
@@ -906,7 +1112,6 @@ function initParticleLogo () {
               p.vx += (mdx / md) * f;
               p.vy += (mdy / md) * f;
             }
-            // 流星冲击：沿径向撞飞 + 顺着流星方向拖拽
             for (let mi = 0; mi < meteors.length; mi++) {
               const m = meteors[mi];
               const hdx = p.x + p.ox - m.x;
@@ -922,7 +1127,6 @@ function initParticleLogo () {
                 m.hit = true;
               }
             }
-            // 被撞过的微粒弹簧短暂失效 → 先炸开，再被引力缓缓拉回
             const spring = 0.09 * (1 - 0.85 * p.shock);
             p.vx = (p.vx - p.ox * spring) * 0.86;
             p.vy = (p.vy - p.oy * spring) * 0.86;
@@ -933,14 +1137,12 @@ function initParticleLogo () {
           }
           px = p.x + p.ox;
           py = p.y + p.oy;
-          // 微粒呼吸漂移：整个字标像活的星尘，边缘幅度更大
-          const drift = p.edge ? 0.85 : 0.45;
+          const drift = p.edge ? 0.2 : 0.12;
           px += Math.sin(time * 0.8 + p.phase) * drift;
           py += Math.cos(time * 0.66 + p.phase * 1.7) * drift;
         }
         let a = p.alpha * e;
         if (p.tw && k >= 1) a *= 1 - p.tw * (0.5 + 0.5 * Math.sin(time * p.spd + p.phase));
-        // 扫光提亮
         if (k >= 1) {
           const bd = Math.abs(px - sweepX);
           if (bd < sweepW) {
@@ -948,19 +1150,18 @@ function initParticleLogo () {
             a = Math.min(1, a * (1 + boost * boost * 1.1));
           }
         }
-        if (pass === 0) {
-          // 辉光垫底隔粒画即可，物理每粒都算（在上方）
-          if ((i & 1) === 0) {
-            ctx.globalAlpha = a * 0.18;
-            const D = p.size * 2.8;
-            ctx.drawImage(SP_BLUE, px - D / 2, py - D / 2, D, D);
-          }
-        } else {
-          ctx.globalAlpha = a;
-          const sp = p.blue ? SP_BLUE : SP_WHITE;
-          ctx.drawImage(sp, px - p.size / 2, py - p.size / 2, p.size, p.size);
-        }
+        const loose = k < 1 || p.shock > 0.05 || Math.hypot(p.ox, p.oy) > 2.4;
+        const target = !loose && letterCtx ? letterCtx : ctx;
+        drawDot(target, pass, i, p, px, py, a);
       }
+    }
+    if (letterCtx && letterLayer && glyph) {
+      letterCtx.globalCompositeOperation = "destination-in";
+      letterCtx.globalAlpha = 1;
+      letterCtx.drawImage(glyph.canvas, glyph.x, glyph.y, glyph.w, glyph.h);
+      letterCtx.globalCompositeOperation = "source-over";
+      ctx.globalAlpha = 1;
+      ctx.drawImage(letterLayer, 0, 0, W, H);
     }
 
     // 边缘溶解出去的浮尘：飘远渐隐，循环重生
