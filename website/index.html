@@ -109,7 +109,9 @@
 
         <div class="hero-horizon" aria-hidden="true"></div>
 
-        <p class="hero-sub">一个真正在你电脑上干活的 AI 助手——读代码、改文件、跑命令、出文档</p>
+        <p class="hero-sub">
+          一个真正在你电脑上干活的 AI 助手——读代码、改文件、跑命令、控浏览器、出文档
+        </p>
 
         <div class="hero-actions">
           <a
@@ -142,8 +144,8 @@
       <section class="showcase">
         <div class="container hero-shot-wrap" data-reveal>
           <p class="hero-facts" aria-hidden="true">
-            <span>MIT 开源</span><i></i><span>终端 · 浏览器内置</span><i></i
-            ><span>Word · Excel · PPT · PDF</span><i></i><span>macOS · Windows</span>
+            <span>比 Codex 快 10×</span><i></i><span>内置浏览器 · 抓包逆向</span><i></i
+            ><span>Word · Excel · PPT · PDF</span><i></i><span>定时任务 · MIT 开源</span>
           </p>
           <div class="hero-shot">
             <div class="window">
@@ -229,6 +231,73 @@
           </div>
 
           <div class="bento">
+            <!-- 速度 -->
+            <article class="bento-card span-2 card-speed" data-reveal>
+              <div class="bento-icon" aria-hidden="true">
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.4"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path d="M13 2 4 14h7l-1 8 9-12h-7z" />
+                </svg>
+              </div>
+              <h3>比 Codex 快 10 倍</h3>
+              <p>Rust 独立内核，工具并行调用、结果流式回吐。多个只读操作一起跑，不用一个个排队等。</p>
+              <div class="speed-bars" aria-hidden="true">
+                <div class="speed-row">
+                  <span class="speed-name">Riot</span>
+                  <span class="speed-track"><i class="speed-fill" style="--w: 100%"></i></span>
+                  <span class="speed-val">10×</span>
+                </div>
+                <div class="speed-row is-slow">
+                  <span class="speed-name">Codex</span>
+                  <span class="speed-track"><i class="speed-fill" style="--w: 12%"></i></span>
+                  <span class="speed-val">1×</span>
+                </div>
+              </div>
+            </article>
+
+            <!-- 内置浏览器 -->
+            <article class="bento-card span-4 card-browser" data-reveal data-reveal-delay="1">
+              <div class="bento-icon" aria-hidden="true">
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.4"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <circle cx="12" cy="12" r="9" />
+                  <path d="M3 12h18" />
+                  <path d="M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" />
+                </svg>
+              </div>
+              <h3>浏览器，就长在窗口里</h3>
+              <p>
+                内嵌 Chromium，不用另开 Chrome。导航、点击、填表、截图、跑
+                JS——它和你看的是同一个页面，做过什么一目了然。
+              </p>
+              <div class="mini-browser" aria-hidden="true">
+                <div class="mb-bar">
+                  <span class="mb-dots"><i></i><i></i><i></i></span>
+                  <span class="mb-url">app.your-site.com/dashboard</span>
+                  <span class="mb-pick">✛</span>
+                </div>
+                <div class="mb-view">
+                  <span class="mb-tag">navigate</span>
+                  <span class="mb-tag">click [12]</span>
+                  <span class="mb-tag">填表单</span>
+                  <span class="mb-tag">screenshot</span>
+                  <span class="mb-tag mb-tag-run">evaluate()</span>
+                </div>
+              </div>
+            </article>
+
             <!-- 文档能力 -->
             <article class="bento-card span-4" data-reveal>
               <div class="bento-icon" aria-hidden="true">
@@ -247,8 +316,8 @@
               </div>
               <h3>Word、Excel、PPT、PDF，直接交付</h3>
               <p>
-                不止会写代码——报告、表格、幻灯片它都能直接产出：公式真实可算，版式自己逐页检查过才交给你。无需安装
-                Office，开箱即用。
+                不止会写代码——报告、表格、幻灯片它都能直接产出：公式真实可算，版式自己逐页渲染检查过才交给你。装上文档能力包即可，不用装
+                Office。
               </p>
               <div class="file-badges" aria-hidden="true">
                 <span class="fb">DOCX</span>
@@ -258,8 +327,8 @@
               </div>
             </article>
 
-            <!-- 规划模式 -->
-            <article class="bento-card span-2" data-reveal data-reveal-delay="1">
+            <!-- 定时任务 -->
+            <article class="bento-card span-2 card-sched" data-reveal data-reveal-delay="1">
               <div class="bento-icon" aria-hidden="true">
                 <svg
                   viewBox="0 0 24 24"
@@ -269,91 +338,30 @@
                   stroke-linecap="round"
                   stroke-linejoin="round"
                 >
-                  <circle cx="12" cy="12" r="10" />
-                  <path d="m15.5 8.5-2 5-5 2 2-5z" />
+                  <circle cx="12" cy="12" r="9" />
+                  <path d="M12 7v5l3.5 2" />
                 </svg>
               </div>
-              <h3>先给方案，再动手</h3>
-              <p>复杂任务先出一份计划，你点头之后，它才会碰你的文件。</p>
-              <ol class="plan-steps" aria-hidden="true">
-                <li>只读侦察</li>
-                <li>写出计划</li>
-                <li>批准执行</li>
-              </ol>
-            </article>
-
-            <!-- 权限档位 -->
-            <article class="bento-card span-2" data-reveal>
-              <div class="bento-icon" aria-hidden="true">
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.4"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                >
-                  <path d="M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z" />
-                </svg>
-              </div>
-              <h3>六档权限，收放自如</h3>
-              <p>从「每一步都问我」到「放手去干」，一键切换，随时反悔。</p>
-              <div class="perm-pills" aria-hidden="true">
-                <span>每次询问</span><span>自动接受编辑</span><span>规划</span><span>自动判危</span
-                ><span>全部放行</span><span>无人值守</span>
-              </div>
-            </article>
-
-            <!-- 终端与浏览器 -->
-            <article class="bento-card span-4" data-reveal data-reveal-delay="1">
-              <div class="bento-icon" aria-hidden="true">
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.4"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                >
-                  <rect x="2" y="4" width="20" height="16" rx="2" />
-                  <path d="m6 9 3 3-3 3M12 15h6" />
-                </svg>
-              </div>
-              <h3>它做的每一步，你都看得见</h3>
-              <p>
-                跑命令、打开网页、截图比对，全都发生在你眼前的终端和浏览器里——没有黑箱，改了什么随时可查。
-              </p>
-              <div class="terminal" aria-hidden="true">
-                <div class="terminal-bar">
-                  <span class="dot"></span><span class="dot"></span><span class="dot"></span
-                  ><span class="terminal-title">riot — 会话终端</span>
+              <h3>到点，自己开工</h3>
+              <p>每天出份晨报、每周清一次日志——说好时间和频率，它按时自己跑。</p>
+              <div class="sched-list" aria-hidden="true">
+                <div class="sched-item">
+                  <span class="sched-dot on"></span><span class="sched-t">每天 09:00</span
+                  ><span class="sched-name">晨报汇总</span>
                 </div>
-                <div class="terminal-body">
-                  <p class="t-line" style="--i: 0">
-                    <span class="t-prompt">›</span> 把 CHANGELOG 整理成发布公告，配一份 PPT
-                  </p>
-                  <p class="t-line t-dim" style="--i: 1">
-                    <span class="t-mark t-run">●</span> 读取 CHANGELOG.md · 3.2 KB
-                  </p>
-                  <p class="t-line t-dim" style="--i: 2">
-                    <span class="t-mark t-run">●</span> 生成 announcement.docx · 渲染页面预览
-                  </p>
-                  <p class="t-line" style="--i: 3">
-                    <span class="t-mark t-ask">✋</span> 写入 release.pptx —— 需要你的允许
-                    <span class="t-btn">允许</span><span class="t-btn t-btn-ghost">拒绝</span>
-                  </p>
-                  <p class="t-line t-dim" style="--i: 4">
-                    <span class="t-mark t-run">●</span> 逐页检查 12 张幻灯片…
-                  </p>
-                  <p class="t-line" style="--i: 5">
-                    <span class="t-mark t-ok">✓</span> 已交付 announcement.docx · release.pptx
-                  </p>
+                <div class="sched-item">
+                  <span class="sched-dot on"></span><span class="sched-t">周一 10:00</span
+                  ><span class="sched-name">清理日志</span>
+                </div>
+                <div class="sched-item is-off">
+                  <span class="sched-dot"></span><span class="sched-t">30 分钟后</span
+                  ><span class="sched-name">跑一遍测试</span>
                 </div>
               </div>
             </article>
 
-            <!-- 自带模型 -->
-            <article class="bento-card span-3" data-reveal>
+            <!-- DOM 拾取 -->
+            <article class="bento-card span-2 card-pick" data-reveal>
               <div class="bento-icon" aria-hidden="true">
                 <svg
                   viewBox="0 0 24 24"
@@ -363,18 +371,23 @@
                   stroke-linecap="round"
                   stroke-linejoin="round"
                 >
-                  <rect x="4" y="4" width="16" height="16" rx="3" />
-                  <path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3" />
+                  <path d="M12 2v4M12 18v4M2 12h4M18 12h4" />
+                  <circle cx="12" cy="12" r="4" />
                 </svg>
               </div>
-              <h3>你的模型，你的 API</h3>
-              <p>
-                DeepSeek、Kimi、Qwen、OpenRouter、Ollama……接上你已有的模型服务就能开工。密钥加密存在本机，不经过任何中间服务器。
-              </p>
+              <h3>指哪，改哪</h3>
+              <p>在浏览器里点一下页面元素，选择器和上下文直接进输入框，省掉描述「那个按钮」的功夫。</p>
+              <div class="pick-demo" aria-hidden="true">
+                <div class="pick-box">
+                  <span class="pick-el">&lt;button class="btn-primary"&gt;</span>
+                  <span class="pick-cross">✛</span>
+                </div>
+                <div class="pick-sel"><code>button.btn-primary</code></div>
+              </div>
             </article>
 
-            <!-- 可扩展 -->
-            <article class="bento-card span-3" data-reveal data-reveal-delay="1">
+            <!-- 破甲逆向 -->
+            <article class="bento-card span-4 card-net" data-reveal data-reveal-delay="1">
               <div class="bento-icon" aria-hidden="true">
                 <svg
                   viewBox="0 0 24 24"
@@ -384,20 +397,7 @@
                   stroke-linecap="round"
                   stroke-linejoin="round"
                 >
-                  <path d="M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
-                </svg>
-              </div>
-              <h3>越用越懂你</h3>
-              <p>
-                自定义命令、技能包、项目记忆，让它记住你的项目和习惯；支持
-                MCP，接上你在用的工具生态。
-              </p>
-              <div class="code-chips" aria-hidden="true">
-                <code>/git:pr</code><code>@src/App.tsx</code><code>$ARGUMENTS</code
-                ><code>SKILL.md</code>
-              </div>
-            </article>
-          </div>
+                  <path d="M22 12h-4l-3 9L
         </div>
       </section>
 

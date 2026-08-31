@@ -150,9 +150,24 @@ const DRAWER_MIN = 320;
 const TERM = { def: 260, min: 110 };
 /** 定时任务详情（占用系统右侧栏的位置，宽度独立于工作台抽屉）。 */
 const SCHED_DETAIL = { def: 612, min: 500, max: 1008 };
+/** 主区挤到底还要留的宽度。跟 .main 的 min-width 是同一个数。 */
+const MAIN_MIN = 280;
 
 /** 抽屉的默认宽度跟着窗口走 —— 固定像素在小窗口上会把对话挤没。 */
 const drawerDefault = () => Math.round(window.innerWidth * 0.42);
+
+/**
+ * 右侧面板（工作台抽屉 / 任务详情）能拖到多宽。
+ *
+ * `[约束]` 上限必须按剩余空间算，不能只取窗口的一个比例。面板壳是
+ * flex-shrink:0（开合动画得靠固定尺寸撑着），拖过头它不会被挤扁，而是把
+ * 右缘顶出窗口、再被 .shell 的 overflow:hidden 裁掉 —— 表现就是面板跑到
+ * 屏幕外面去了。所以得减掉左边两列真正占住的位置：侧栏（收起时为 0）
+ * 加主区的下限。窗口窄到连 min 都塞不下时以 min 为准，让位给可用性。
+ */
+function rightPanelMax(sidebar: number, min: number): number {
+  return Math.max(min, window.innerWidth - sidebar - MAIN_MIN);
+}
 
 function loadPx(key: string, fallback: number): number {
   const v = Number(localStorage.getItem(key));
@@ -281,6 +296,22 @@ export function App() {
   const dragLive = useRef(0);
 
   useEffect(() => subscribeFullscreen(setFullscreen), []);
+
+  // 拖宽侧栏、把窗口拉窄，都会吃掉右侧面板站的地方，而面板壳是
+  // flex-shrink:0 不会自己让 —— 不主动收就是右缘顶出窗口被裁掉。
+  // 只改内存里的值：盘上存的宽度留着，窗口回大时下次启动还能回来。
+  useEffect(() => {
+    const fit = () => {
+      const side = sidebarOpen ? sidebarW : 0;
+      setDrawerW((w) => Math.min(w, rightPanelMax(side, DRAWER_MIN)));
+      setSchedDetailW((w) =>
+        Math.min(w, SCHED_DETAIL.max, rightPanelMax(side, SCHED_DETAIL.min)),
+      );
+    };
+    fit();
+    window.addEventListener("resize", fit);
+    return () => window.removeEventListener("resize", fit);
+  }, [sidebarOpen, sidebarW]);
 
   const toggleSidebar = useCallback(() => {
     setSidebarOpen((v) => {
@@ -1429,7 +1460,10 @@ export function App() {
             const w = clamp(
               dragFrom.current - d,
               SCHED_DETAIL.min,
-              Math.min(SCHED_DETAIL.max, Math.round(window.innerWidth * 0.7)),
+              Math.min(
+                SCHED_DETAIL.max,
+                rightPanelMax(sidebarOpen ? sidebarW : 0, SCHED_DETAIL.min),
+              ),
             );
             dragLive.current = w;
             setSchedDetailW(w);
@@ -1473,7 +1507,7 @@ export function App() {
             const w = clamp(
               dragFrom.current - d,
               DRAWER_MIN,
-              Math.round(window.innerWidth * 0.7),
+              rightPanelMax(sidebarOpen ? sidebarW : 0, DRAWER_MIN),
             );
             dragLive.current = w;
             setDrawerW(w);

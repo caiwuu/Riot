@@ -144,23 +144,25 @@ export function Sidebar(props: SidebarProps) {
         打开目录…
       </button>
 
-      <button
-        className={props.schedulesActive ? "side-item side-nav active" : "side-item side-nav"}
-        onClick={onSchedules}
-      >
-        <ClockIcon />
-        <span className="side-label">定时任务</span>
-        {props.missedSchedules > 0 ? (
-          <span
-            className="side-badge"
-            title={`有 ${props.missedSchedules} 个任务在 App 关着时错过了`}
-          >
-            {props.missedSchedules}
-          </span>
-        ) : null}
-      </button>
-
+      {/* 菜单项在滚动区里跟着列表一起走 —— 项目多的时候它占着顶部不动，
+          等于白吃一行可视高度。 */}
       <nav className="threads">
+        <button
+          className={props.schedulesActive ? "side-item side-nav active" : "side-item side-nav"}
+          onClick={onSchedules}
+        >
+          <ClockIcon />
+          <span className="side-label">定时任务</span>
+          {props.missedSchedules > 0 ? (
+            <span
+              className="side-badge"
+              title={`有 ${props.missedSchedules} 个任务在 App 关着时错过了`}
+            >
+              {props.missedSchedules}
+            </span>
+          ) : null}
+        </button>
+
         {roots.length ? (
           <div className="section-head">
             <button

@@ -799,7 +799,8 @@ pre {
      落到上一行的 auto。macOS 不写 ::-webkit-scrollbar 几何，走系统
      overlay：滚才出现。 */
   overflow-y: overlay;
-  /* 和上方菜单项到「打开目录」的间距同一个数 —— 三段等距才不别扭。 */
+  /* 「打开目录」到滚动区头一项的间距。菜单项和项目分组都在这里面滚，
+     彼此之间由下面的 gap 拉开。 */
   margin-top: 10px;
   /* 滚出侧栏的右内边距，滑块贴着分隔线；padding 把会话行推回原位。 */
   margin-right: -10px;
@@ -828,6 +829,12 @@ pre {
   display: grid;
   grid-template-rows: 0fr;
   min-height: 0;
+  /* `[约束]` 上面的 min-height:0 是过渡要的（flex/grid 的自动最小尺寸会
+     顶住 0fr，收不拢），代价是这个盒子丢了 flex item 的内容保底 —— 放进
+     一个限高的 flex 列里就会被 flex-shrink 压扁，1fr 行跟着缩到压扁后的
+     高度，clip 再把露出来的部分裁干净。外层滚动容器于是量不到任何溢出
+     （scrollHeight === clientHeight），滚动条不出现、滚轮也没反应。 */
+  flex: none;
   /* clip 只裁切，不是滚动容器。hidden 会截住滚轮（再叠
      overscroll-behavior:none 就交不到外层对话流）。 */
   overflow: clip;
@@ -7674,14 +7681,9 @@ button.field-slider-state:hover {
   text-align: center;
 }
 
-/* 侧栏主体里的一级菜单项（定时任务）。基础样式来自 .side-item，
-   这里只管间距和"页面在前台"的高亮。
-   节奏：「打开目录」→ 10px → 菜单项 → 10px（.threads 的 margin-top）
-   → 「项目」，上下均衡；再往下分组之间由 .threads 的 gap 拉开。 */
-.side-nav {
-  margin: 10px 0 0;
-}
-
+/* 侧栏主体里的一级菜单项（定时任务）。基础样式来自 .side-item，这里只管
+   "页面在前台"的高亮 —— 它是 .threads 的头一个子项，上间距由容器的
+   margin-top 给、到「项目」的那段走容器的 gap，自己不写 margin。 */
 .side-nav .side-label {
   flex: 1;
 }
