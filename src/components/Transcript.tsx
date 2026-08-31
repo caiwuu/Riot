@@ -14,10 +14,10 @@
  */
 
 import {
+  Fragment,
   memo,
   type ReactNode,
   useCallback,
-  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -27,11 +27,24 @@ import {
 
 import type { PermissionAsk, PermissionResponse } from "../bridge";
 import type { Item, TextItem } from "../hooks/useSession";
-import { SLASH_HEAD_RE, extractMentionSpans, mentionCovers } from "../lib/promptText";
-import { basename, joinRoot, looksAbsPath } from "../pathDisplay";
+import {
+  caretToEnd,
+  handleChipKey,
+  normalizePads,
+  readEditor,
+  writeEditor,
+} from "../lib/chipEditor";
+import {
+  SLASH_HEAD_RE,
+  extractElemSpans,
+  extractMentionSpans,
+  mentionCovers,
+  promptToSegs,
+  segsToPrompt,
+} from "../lib/promptText";
+import { Chip, FileChip } from "./Chip";
 import { ConfirmDialog, type ConfirmRequest } from "./ConfirmDialog";
-import { openFilePreview } from "./FilePreview";
-import { LazyMarkdown, Markdown, ProjectRootContext } from "./Markdown";
+import { LazyMarkdown, Markdown } from "./Markdown";
 import { AskChoiceCard, PlanApprovalCard, PlanDraft } from "./PermissionDialog";
 import { groupBlocks, ProcessGroup, ThinkingBlock } from "./ProcessFold";
 import { ShotViewer, ToolCard } from "./ToolCard";
@@ -771,6 +784,7 @@ const Row = memo(function Row({
           <div className="msg user editing">
             <MsgEditor
               initial={item.text}
+              parseChips
               onCancel={() => setEditing(false)}
               onSave={async (text) => {
                 const ok = await onEditEntry(item, text);
@@ -972,35 +986,51 @@ function MsgTime({ at }: { at: number }) {
  *
  * ⌘/Ctrl+Enter 保存、Esc 取消，和输入框同一套肌肉记忆。保存失败
  * （忙、消息已被压缩、内核拒绝）时编辑框留着 —— 草稿不能丢。
+ *
+ * 用户消息（`parseChips`）用和输入框同一套 contenteditable 块机械：
+ * 文件引用、页面元素在编辑时也是色块，和气泡里看到的一致，而不是一串
+ * 裸标记。助手消息保持纯文本 —— 回复里长得像 `@路径` 的字符串是内容，
+ * 解析成块再序列化会改写它。
  */
 function MsgEditor({
   initial,
+  parseChips = false,
   onSave,
   onCancel,
 }: {
   initial: string;
+  parseChips?: boolean;
   onSave: (text: string) => Promise<boolean>;
   onCancel: () => void;
 }) {
-  const [text, setText] = useState(initial);
   const [saving, setSaving] = useState(false);
-  const ref = useRef<HTMLTextAreaElement>(null);
+  const [hasText, setHasText] = useState(!!initial.trim());
+  const ref = useRef<HTMLDivElement>(null);
+  // 中文 IME：组字中不能动 DOM（normalize 合并文本节点会打断组字）。
+  const imeRef = useRef(false);
 
-  // 高度贴内容长（封顶四成屏），别让用户在一个两行的小框里改长文。
-  const fit = (el: HTMLTextAreaElement) => {
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight + 2, Math.round(window.innerHeight * 0.4))}px`;
+  const read = () => (ref.current ? segsToPrompt(readEditor(ref.current)) : "");
+
+  const refresh = () => {
+    const el = ref.current;
+    if (!el) return;
+    if (!imeRef.current) normalizePads(el);
+    setHasText(read().trim().length > 0);
   };
+
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
+    writeEditor(el, parseChips ? promptToSegs(initial) : [{ kind: "text", value: initial }]);
     el.focus();
-    el.setSelectionRange(el.value.length, el.value.length);
-    fit(el);
+    caretToEnd(el);
+    // 只在挂载时灌一次：编辑区是非受控的，内容住在 DOM 里。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const save = async () => {
-    if (saving || !text.trim()) return;
+    const text = read().trim();
+    if (saving || !text) return;
     setSaving(true);
     try {
       await onSave(text);
@@ -1011,19 +1041,43 @@ function MsgEditor({
 
   return (
     <div className="msg-editor">
-      <textarea
+      <div
         ref={ref}
-        value={text}
-        disabled={saving}
-        onChange={(e) => {
-          setText(e.target.value);
-          fit(e.currentTarget);
+        className="msg-editbox"
+        contentEditable={!saving}
+        suppressContentEditableWarning
+        role="textbox"
+        aria-multiline="true"
+        onInput={refresh}
+        onCompositionStart={() => {
+          imeRef.current = true;
+        }}
+        onCompositionEnd={() => {
+          setTimeout(() => {
+            imeRef.current = false;
+          }, 0);
+          refresh();
+        }}
+        // 和输入框一致：富文本粘贴一律降级成纯文本。
+        onPaste={(e) => {
+          e.preventDefault();
+          document.execCommand("insertText", false, e.clipboardData.getData("text/plain"));
         }}
         onKeyDown={(e) => {
+          if (
+            ref.current &&
+            !e.nativeEvent.isComposing &&
+            !imeRef.current &&
+            handleChipKey(e, ref.current)
+          ) {
+            e.preventDefault();
+            refresh();
+            return;
+          }
           if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
             e.preventDefault();
             void save();
-          } else if (e.key === "Escape") {
+          } else if (e.key === "Escape" && !e.nativeEvent.isComposing) {
             e.preventDefault();
             e.stopPropagation();
             onCancel();
@@ -1039,7 +1093,7 @@ function MsgEditor({
           type="button"
           className="msg-editor-save"
           onClick={() => void save()}
-          disabled={saving || !text.trim()}
+          disabled={saving || !hasText}
         >
           {saving ? "保存中…" : "保存"}
         </button>
@@ -1237,14 +1291,37 @@ function UserText({ text, files = [] }: { text: string; files?: string[] }) {
     );
   };
 
+  // 先把"页面元素"标记切出来画成绿色色块（和输入框里一致），标记之间的
+  // 普通文本再交给 fileNodes 处理 `@文件` 引用。两层不会互相吞：元素标记
+  // 用【】+反引号，文件用 `@`。
+  const bodyNodes = (src: string): ReactNode => {
+    const marks = extractElemSpans(src);
+    if (marks.length === 0) return fileNodes(src);
+    const out: React.ReactNode[] = [];
+    let last = 0;
+    marks.forEach((e, i) => {
+      if (e.index > last) {
+        out.push(<Fragment key={`t-${i}`}>{fileNodes(src.slice(last, e.index))}</Fragment>);
+      }
+      out.push(
+        <Chip key={`el-${i}`} seg={{ kind: "elem", value: e.selector, label: e.label }} />,
+      );
+      last = e.index + e.length;
+    });
+    if (last < src.length) {
+      out.push(<Fragment key="t-end">{fileNodes(src.slice(last))}</Fragment>);
+    }
+    return <>{out}</>;
+  };
+
   if (!cmdName) {
-    return <>{fileNodes(body)}</>;
+    return <>{bodyNodes(body)}</>;
   }
 
   return (
     <>
-      <CmdChip name={cmdName} />
-      {body || files.length > 0 ? <> {fileNodes(body)}</> : null}
+      <Chip seg={{ kind: "cmd", value: cmdName }} />
+      {body || files.length > 0 ? <> {bodyNodes(body)}</> : null}
     </>
   );
 }
@@ -1264,57 +1341,5 @@ function UserImage({ src }: { src: string }) {
       </button>
       {viewer ? <ShotViewer src={src} alt="消息附图" onClose={() => setViewer(false)} /> : null}
     </>
-  );
-}
-
-/**
- * 文件引用块。`preview` 置真时渲染成按钮、点击打开应用内预览 ——
- * 消息气泡里用；Composer 的 `@` 候选列表里它套在候选按钮内部，
- * 保持纯展示（button 嵌 button 不合法，点击语义也归外层）。
- */
-export function FileChip({ path, preview = false }: { path: string; preview?: boolean }) {
-  // 引用块记的是项目内相对路径，预览要拼成绝对的。
-  const root = useContext(ProjectRootContext);
-  if (!preview) {
-    return (
-      <span className="ref-chip static" title={path}>
-        <FileIcon />
-        {basename(path)}
-      </span>
-    );
-  }
-  const full = looksAbsPath(path) ? path : joinRoot(root, path);
-  return (
-    <button
-      type="button"
-      className="ref-chip static clickable"
-      title={`预览 ${path}`}
-      onClick={() => openFilePreview(full)}
-    >
-      <FileIcon />
-      {basename(path)}
-    </button>
-  );
-}
-
-export function CmdChip({ name }: { name: string }) {
-  return (
-    <span className="cmd-chip static" title={`/${name}`}>
-      /{name}
-    </span>
-  );
-}
-
-function FileIcon() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <path
-        d="M9 1.8H4.5a1 1 0 0 0-1 1v10.4a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1V5.3L9 1.8z"
-        stroke="currentColor"
-        strokeWidth="1.3"
-        strokeLinejoin="round"
-      />
-      <path d="M8.9 2v3.4h3.4" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
-    </svg>
   );
 }

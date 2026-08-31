@@ -177,6 +177,164 @@ fn fmt_headers(headers: &Value) -> String {
     lines.join("\n")
 }
 
+/// 把累积的 `Network.*` 事件导成 HAR 1.2（JSON 文本）。
+///
+/// `[取舍]` 不含响应体。响应体要逐条 `Network.getResponseBody` 现取，几十条
+/// 请求就是几十次往返，而 HAR 的主要用途（时序、头、状态、大小分析）不依赖
+/// 它。需要某条的响应体时用 `network` 的 detail 单看。
+///
+/// 时间戳来自 `requestWillBeSent` 的 `wallTime`（epoch 秒）。`timings` 一律给
+/// -1（HAR 允许的"未知"），`time` 尽量用响应的 `receiveHeadersEnd`。
+pub fn har(events: &[Value]) -> String {
+    #[derive(Default)]
+    struct E {
+        method: String,
+        url: String,
+        req_headers: Value,
+        wall_time: Option<f64>,
+        status: Option<i64>,
+        status_text: String,
+        resp_headers: Value,
+        mime: String,
+        size: Option<f64>,
+        time_ms: Option<f64>,
+    }
+
+    let mut map: HashMap<String, E> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    for e in events {
+        let id = e["params"]["requestId"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        if id.is_empty() {
+            continue;
+        }
+        let entry = map.entry(id.clone()).or_insert_with(|| {
+            order.push(id.clone());
+            E::default()
+        });
+        match e["method"].as_str().unwrap_or_default() {
+            "Network.requestWillBeSent" => {
+                let req = &e["params"]["request"];
+                if entry.url.is_empty() {
+                    entry.url = req["url"].as_str().unwrap_or_default().to_owned();
+                }
+                if entry.method.is_empty() {
+                    entry.method = req["method"].as_str().unwrap_or("GET").to_owned();
+                }
+                if entry.req_headers.is_null() {
+                    entry.req_headers = req["headers"].clone();
+                }
+                if entry.wall_time.is_none() {
+                    entry.wall_time = e["params"]["wallTime"].as_f64();
+                }
+            }
+            "Network.responseReceived" => {
+                let resp = &e["params"]["response"];
+                entry.status = resp["status"].as_i64();
+                entry.status_text = resp["statusText"].as_str().unwrap_or_default().to_owned();
+                entry.resp_headers = resp["headers"].clone();
+                entry.mime = resp["mimeType"].as_str().unwrap_or_default().to_owned();
+                if entry.url.is_empty() {
+                    entry.url = resp["url"].as_str().unwrap_or_default().to_owned();
+                }
+                if let Some(t) = resp["timing"]["receiveHeadersEnd"].as_f64() {
+                    entry.time_ms = Some(t);
+                }
+            }
+            "Network.loadingFinished" => {
+                entry.size = e["params"]["encodedDataLength"].as_f64();
+            }
+            _ => {}
+        }
+    }
+
+    let entries: Vec<Value> = order
+        .iter()
+        .filter_map(|id| map.get(id))
+        .map(|e| {
+            serde_json::json!({
+                "startedDateTime": e.wall_time.map_or_else(
+                    || "1970-01-01T00:00:00.000Z".to_owned(),
+                    iso8601_utc,
+                ),
+                "time": e.time_ms.unwrap_or(-1.0),
+                "request": {
+                    "method": e.method,
+                    "url": e.url,
+                    "httpVersion": "HTTP/1.1",
+                    "headers": har_headers(&e.req_headers),
+                    "queryString": [],
+                    "cookies": [],
+                    "headersSize": -1,
+                    "bodySize": -1,
+                },
+                "response": {
+                    "status": e.status.unwrap_or(0),
+                    "statusText": e.status_text,
+                    "httpVersion": "HTTP/1.1",
+                    "headers": har_headers(&e.resp_headers),
+                    "cookies": [],
+                    "content": { "size": e.size.unwrap_or(0.0), "mimeType": e.mime },
+                    "redirectURL": "",
+                    "headersSize": -1,
+                    "bodySize": e.size.unwrap_or(-1.0),
+                },
+                "cache": {},
+                "timings": { "send": -1, "wait": -1, "receive": -1 },
+            })
+        })
+        .collect();
+
+    let doc = serde_json::json!({
+        "log": {
+            "version": "1.2",
+            "creator": { "name": "Riot", "version": env!("CARGO_PKG_VERSION") },
+            "entries": entries,
+        }
+    });
+    serde_json::to_string_pretty(&doc).unwrap_or_else(|_| "{}".to_owned())
+}
+
+/// CDP 的 `{name: value}` 头对象 → HAR 的 `[{name, value}]` 数组。
+fn har_headers(headers: &Value) -> Vec<Value> {
+    headers
+        .as_object()
+        .map(|o| {
+            o.iter()
+                .map(|(k, v)| serde_json::json!({ "name": k, "value": v.as_str().unwrap_or_default() }))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// epoch 秒（UTC）→ ISO8601（`YYYY-MM-DDTHH:MM:SS.mmmZ`）。
+///
+/// 自己算而不是拉个日期库:整个 host 没有 chrono/jiff，为一个时间戳引一个
+/// 依赖不值当。用的是 Howard Hinnant 的 civil-from-days（对格里高利历精确）。
+fn iso8601_utc(epoch_secs: f64) -> String {
+    let total = epoch_secs.floor() as i64;
+    let millis = ((epoch_secs - total as f64) * 1000.0).round().clamp(0.0, 999.0) as i64;
+    let days = total.div_euclid(86400);
+    let rem = total.rem_euclid(86400);
+    let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+
+    // days 从 1970-01-01 起算，换算成年月日。
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let month = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = if month <= 2 { y + 1 } else { y };
+
+    format!("{year:04}-{month:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}.{millis:03}Z")
+}
+
 /// 安全审计:找主文档的响应头，检查该有而没有的安全头、以及明显的弱配置。
 ///
 /// `page_url` 用来认出哪条是主文档（导航到的那个地址）。
@@ -346,6 +504,49 @@ mod tests {
             out.contains("CORS 高危"),
             "带凭证的通配 CORS 要标高危：{out}"
         );
+    }
+
+    fn finished(id: &str, bytes: i64) -> Value {
+        json!({ "method": "Network.loadingFinished", "params": { "requestId": id, "encodedDataLength": bytes } })
+    }
+
+    #[test]
+    fn har_导出成合法的_har_结构() {
+        let events = vec![
+            sent("1", "GET", "https://x.test/"),
+            recv(
+                "1",
+                200,
+                "text/html",
+                "https://x.test/",
+                json!({ "Server": "nginx" }),
+            ),
+            finished("1", 1234),
+        ];
+        let out = har(&events);
+        let v: Value = serde_json::from_str(&out).expect("HAR 必须是合法 JSON");
+        assert_eq!(v["log"]["version"], "1.2");
+        let entries = v["log"]["entries"].as_array().expect("有 entries");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["request"]["method"], "GET");
+        assert_eq!(entries[0]["request"]["url"], "https://x.test/");
+        assert_eq!(entries[0]["response"]["status"], 200);
+        assert_eq!(entries[0]["response"]["content"]["size"], 1234.0);
+        // CDP 的 {name:value} 头对象要转成 HAR 的 [{name,value}]。
+        let rh = entries[0]["response"]["headers"].as_array().expect("头是数组");
+        assert!(
+            rh.iter()
+                .any(|h| h["name"] == "Server" && h["value"] == "nginx"),
+            "响应头要带过来：{rh:?}"
+        );
+    }
+
+    #[test]
+    fn iso8601_按已知时间点换算() {
+        // 2021-01-01T00:00:00Z 的 epoch 是 1609459200。算错年月日这里会红。
+        assert_eq!(iso8601_utc(1_609_459_200.0), "2021-01-01T00:00:00.000Z");
+        // 带毫秒。
+        assert_eq!(iso8601_utc(1_609_459_200.5), "2021-01-01T00:00:00.500Z");
     }
 
     #[test]

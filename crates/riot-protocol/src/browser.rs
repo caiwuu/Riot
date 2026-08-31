@@ -53,7 +53,11 @@ pub trait BrowserAccess: Send + Sync {
     /// 不解码成字节是刻意的:CDP 给的就是 base64，而工具要塞进内容块的
     /// 也是 base64。中间解一次再编一次纯属白做，对一张几百 KB 的图还要
     /// 多两次全量拷贝。
-    async fn screenshot(&self) -> Result<String, BrowserUnavailable>;
+    ///
+    /// `deterministic` 为真时，截图前把 CSS 动画/过渡按 0 时长收尾、隐藏
+    /// 文本光标，截完复原 —— 用于两次截图做像素 diff 的场景（回归、验收），
+    /// 否则转圈动画、闪烁光标会让每一帧都不一样。默认为假（如实拍当前一刻）。
+    async fn screenshot(&self, deterministic: bool) -> Result<String, BrowserUnavailable>;
 
     /// 页面的可访问性快照，已经整形成文本。
     ///
@@ -119,6 +123,21 @@ pub trait BrowserAccess: Send + Sync {
     /// 自动化的瑞士军刀:读 DOM/localStorage、算个值、调页面自己的函数。
     /// 支持 `await`。脚本抛异常时返回带异常信息的 `Target` 错误。
     async fn evaluate(&self, expr: &str) -> Result<String, InteractError>;
+
+    /// 把一个页面元素映射回它的源码位置（文件:行）和组件名。
+    ///
+    /// 依赖**开发构建**里保留的调试信息:React 的 `_debugSource`、Vue 组件的
+    /// `__file`。生产构建里这些被抹掉了，只能尽量给到组件名或明确说没有。
+    /// 这是"点这个、改那个"工作流的关键一环 —— 把用户在面板里指的可见元素
+    /// 直接落到代码位置。
+    async fn source_of(&self, target: Target) -> Result<String, InteractError>;
+
+    /// 读某个**非活动**标签页的结构快照，不切走用户当前看的那一页。
+    ///
+    /// 给"并行研究/对比多个页面"用:模型想看另一个标签页的内容，又不该把
+    /// 用户的画面抢走（面板是"你和模型看同一页"的约定）。返回纯文本、
+    /// **不**产生可交互编号 —— 交互仍只作用于活动页（见 [`Self::click`]）。
+    async fn snapshot_tab(&self, tab: TabId) -> Result<String, InteractError>;
 
     /// 给一个文件输入框（`<input type=file>`）设置要上传的本地文件。
     ///
@@ -190,6 +209,10 @@ pub enum NetQuery {
     /// 安全审计:检查主文档响应头（CSP/HSTS/X-Frame-Options/CORS 等）的
     /// 缺失与弱配置。
     Audit,
+    /// 把累积到的请求导成 HAR 1.2（JSON）。含每条请求的方法/URL/头/状态/
+    /// 大小/时间;不含响应体（那要逐条现取，代价大）。给"存下来用 DevTools
+    /// 或 HAR 查看器分析"用。
+    Har,
 }
 
 /// 元素级动作。定位统一走 [`Target`]。
@@ -309,7 +332,7 @@ impl BrowserAccess for NoBrowser {
     async fn navigate(&self, _url: &str) -> Result<(), BrowserUnavailable> {
         Err(unavailable())
     }
-    async fn screenshot(&self) -> Result<String, BrowserUnavailable> {
+    async fn screenshot(&self, _deterministic: bool) -> Result<String, BrowserUnavailable> {
         Err(unavailable())
     }
     async fn snapshot(&self) -> Result<String, BrowserUnavailable> {
@@ -355,6 +378,12 @@ impl BrowserAccess for NoBrowser {
         Err(unavailable().into())
     }
     async fn evaluate(&self, _expr: &str) -> Result<String, InteractError> {
+        Err(unavailable().into())
+    }
+    async fn source_of(&self, _target: Target) -> Result<String, InteractError> {
+        Err(unavailable().into())
+    }
+    async fn snapshot_tab(&self, _tab: TabId) -> Result<String, InteractError> {
         Err(unavailable().into())
     }
     async fn upload(&self, _target: Target, _paths: Vec<String>) -> Result<String, InteractError> {

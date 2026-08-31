@@ -19,7 +19,7 @@ use tokio::sync::{Mutex, oneshot};
 
 use riot_protocol::browser::{
     Action, BrowserAccess, BrowserUnavailable, InteractError, InterceptOp, MarkedView, Nav,
-    NetQuery, Target, WaitCondition,
+    NetQuery, TabId, Target, WaitCondition,
 };
 use riot_protocol::env::{EnvProbe, EnvSnapshot};
 use riot_protocol::hostcall::{BrowserCall, HostCallErrorKind, HostRequest, HostResponse};
@@ -230,8 +230,8 @@ impl BrowserAccess for RemoteBrowser {
         }
     }
 
-    async fn screenshot(&self) -> Result<String, BrowserUnavailable> {
-        match self.simple(BrowserCall::Screenshot).await? {
+    async fn screenshot(&self, deterministic: bool) -> Result<String, BrowserUnavailable> {
+        match self.simple(BrowserCall::Screenshot { deterministic }).await? {
             HostResponse::Text { text } => Ok(text),
             other => Err(BrowserUnavailable(format!("宿主回了意外形状:{other:?}"))),
         }
@@ -322,6 +322,14 @@ impl BrowserAccess for RemoteBrowser {
             expr: expr.to_owned(),
         })
         .await
+    }
+
+    async fn source_of(&self, target: Target) -> Result<String, InteractError> {
+        self.text(BrowserCall::SourceOf { target }).await
+    }
+
+    async fn snapshot_tab(&self, tab: TabId) -> Result<String, InteractError> {
+        self.text(BrowserCall::SnapshotTab { tab }).await
     }
 
     async fn upload(&self, target: Target, paths: Vec<String>) -> Result<String, InteractError> {

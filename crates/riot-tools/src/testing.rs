@@ -553,7 +553,10 @@ impl riot_protocol::browser::BrowserAccess for FakeBrowser {
             "替身不导航".into(),
         ))
     }
-    async fn screenshot(&self) -> Result<String, riot_protocol::browser::BrowserUnavailable> {
+    async fn screenshot(
+        &self,
+        _deterministic: bool,
+    ) -> Result<String, riot_protocol::browser::BrowserUnavailable> {
         Ok(self.shot.clone())
     }
     async fn snapshot(&self) -> Result<String, riot_protocol::browser::BrowserUnavailable> {
@@ -627,6 +630,18 @@ impl riot_protocol::browser::BrowserAccess for FakeBrowser {
     }
     async fn evaluate(&self, expr: &str) -> Result<String, riot_protocol::browser::InteractError> {
         self.interaction(format!("eval {expr}"))
+    }
+    async fn source_of(
+        &self,
+        target: riot_protocol::browser::Target,
+    ) -> Result<String, riot_protocol::browser::InteractError> {
+        self.interaction(format!("source_of {}", fake_target(&target)))
+    }
+    async fn snapshot_tab(
+        &self,
+        tab: riot_protocol::browser::TabId,
+    ) -> Result<String, riot_protocol::browser::InteractError> {
+        self.interaction(format!("snapshot_tab {tab}"))
     }
     async fn upload(
         &self,

@@ -18,7 +18,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::browser::{Action, InterceptOp, Nav, NetQuery, Target, WaitCondition};
+use crate::browser::{Action, InterceptOp, Nav, NetQuery, TabId, Target, WaitCondition};
 use crate::id::SessionId;
 use crate::terminal::TerminalInfo;
 
@@ -73,7 +73,9 @@ pub enum BrowserCall {
     Navigate {
         url: String,
     },
-    Screenshot,
+    Screenshot {
+        deterministic: bool,
+    },
     Snapshot,
     SnapshotMarked,
     Console,
@@ -104,6 +106,12 @@ pub enum BrowserCall {
     },
     Evaluate {
         expr: String,
+    },
+    SourceOf {
+        target: Target,
+    },
+    SnapshotTab {
+        tab: TabId,
     },
     Upload {
         target: Target,

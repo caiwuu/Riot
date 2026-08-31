@@ -103,7 +103,67 @@ const MAX_SHOT_HEIGHT: f64 = 8000.0;
 /// `[取舍]` JPEG 而不是 PNG。整页 PNG 动辄两三 MB，一张图就撞上限、
 /// 或者吃掉小半个上下文窗口。q80 在 1× 下文字仍然清楚，而模型要判断的是
 /// 布局、间距、颜色有没有错位，不是发丝级的锐度。
-pub async fn screenshot(tab: Tab<'_>) -> Result<String, BrowserError> {
+///
+/// `deterministic` 为真时，截图前把视觉动态量冻住（见 [`freeze_visuals`]），
+/// 截完复原 —— 让两次截图能做像素 diff。默认按原样拍当前一刻。
+pub async fn screenshot(tab: Tab<'_>, deterministic: bool) -> Result<String, BrowserError> {
+    if !deterministic {
+        return screenshot_inner(tab).await;
+    }
+    // `[约束]` 冻结样式注在页面 DOM 里，截完**必须**移除 —— 不移除的话，
+    // 用户面板里的页面从此没有动画、光标不闪，而且没有任何线索指向截图。
+    // 长页面路径中途会 Resize 渲染表面，但那不重载文档，注入的样式照旧生效。
+    freeze_visuals(tab).await;
+    let shot = screenshot_inner(tab).await;
+    unfreeze_visuals(tab).await;
+    shot
+}
+
+/// 冻结页面里会让每帧都不同的东西:CSS 动画/过渡按 0 时长收尾、光标透明、
+/// 平滑滚动关掉，再把正在跑的 Web Animations 暂停。
+///
+/// 全程 best-effort:冻结失败最多是图里留了个转圈，不该让截图本身失败。
+/// 只暂停"此刻在跑"的动画并记在 `window.__riotFrozen__` 上，复原时只恢复
+/// 这一批 —— 否则会把页面本来就暂停着的动画错误地放出来。
+async fn freeze_visuals(tab: Tab<'_>) {
+    const JS: &str = r#"(() => {
+        let s = document.getElementById('__riot_freeze__');
+        if (!s) {
+            s = document.createElement('style');
+            s.id = '__riot_freeze__';
+            s.textContent = '*,*::before,*::after{animation-duration:0s !important;animation-delay:0s !important;animation-iteration-count:1 !important;transition-duration:0s !important;transition-delay:0s !important;caret-color:transparent !important;scroll-behavior:auto !important;}';
+            (document.head || document.documentElement).appendChild(s);
+        }
+        window.__riotFrozen__ = [];
+        try {
+            for (const a of document.getAnimations()) {
+                if (a.playState === 'running') { try { a.pause(); window.__riotFrozen__.push(a); } catch (e) {} }
+            }
+        } catch (e) {}
+        return true;
+    })()"#;
+    let _ = tab
+        .cdp("Runtime.evaluate", json!({ "expression": JS }))
+        .await;
+    // 给样式生效、动画停稳一点时间再拍。
+    tokio::time::sleep(Duration::from_millis(120)).await;
+}
+
+/// 撤销 [`freeze_visuals`]:移掉注入的样式，把我们暂停过的动画放回去。
+async fn unfreeze_visuals(tab: Tab<'_>) {
+    const JS: &str = r#"(() => {
+        const s = document.getElementById('__riot_freeze__');
+        if (s) s.remove();
+        try { (window.__riotFrozen__ || []).forEach(a => { try { a.play(); } catch (e) {} }); } catch (e) {}
+        window.__riotFrozen__ = [];
+        return true;
+    })()"#;
+    let _ = tab
+        .cdp("Runtime.evaluate", json!({ "expression": JS }))
+        .await;
+}
+
+async fn screenshot_inner(tab: Tab<'_>) -> Result<String, BrowserError> {
     // 问不出页面尺寸就只拍视口。有图比没图好 —— 而且真到这一步说明页面
     // 本身有问题。
     let Some(content_h) = content_height(tab).await else {
@@ -989,6 +1049,252 @@ pub async fn url_of(tab: Tab<'_>) -> String {
     .ok()
     .and_then(|v| v["result"]["value"].as_str().map(ToOwned::to_owned))
     .unwrap_or_default()
+}
+
+/// 命中测试用的函数:给视口坐标，返回那儿元素的 CSS 选择器 + 一句描述。
+///
+/// `document.elementFromPoint` 收的是视口 CSS 坐标 —— 面板转发的输入坐标
+/// 正是这个（相对视口左上角）。选择器优先用 `#id`，否则往上拼 `tag:nth-of-type`
+/// 链（最多 5 层，够定位又不至于长得没法用）。
+const PICK_FN: &str = r#"(px, py) => {
+    const el = document.elementFromPoint(px, py);
+    if (!el || el.nodeType !== 1) return null;
+    const esc = (s) => (window.CSS && CSS.escape) ? CSS.escape(String(s)) : String(s);
+    const parts = [];
+    let e = el;
+    while (e && e.nodeType === 1 && parts.length < 5) {
+        if (e.id) { parts.unshift('#' + esc(e.id)); break; }
+        let part = e.tagName.toLowerCase();
+        const p = e.parentElement;
+        if (p) {
+            const same = Array.prototype.filter.call(p.children, c => c.tagName === e.tagName);
+            if (same.length > 1) part += ':nth-of-type(' + (same.indexOf(e) + 1) + ')';
+        }
+        parts.unshift(part);
+        e = e.parentElement;
+    }
+    const selector = parts.join(' > ');
+    const tag = el.tagName.toLowerCase();
+    const idPart = el.id ? ('#' + el.id) : '';
+    let clsPart = '';
+    if (typeof el.className === 'string' && el.className.trim()) clsPart = '.' + el.className.trim().split(/\s+/).join('.');
+    const text = (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 60);
+    const description = tag + idPart + clsPart + (text ? ' — "' + text + '"' : '');
+    return { selector, description };
+}"#;
+
+/// 取件模式的悬停高亮:在页面里盖一个半透明蓝框到光标下的元素上（像
+/// DevTools 的元素审查）。框走 `position:fixed` + `pointer-events:none`——
+/// 不占布局、不参与命中测试（否则会把自己盖住的元素挡掉），随下一帧
+/// screencast 一起画出来，前端不用做任何坐标换算。
+///
+/// 用一个常驻的 overlay div 反复挪位置，不是每次新建 —— 移动是高频操作。
+const PICK_HOVER_FN: &str = r#"(px, py) => {
+    let ov = document.getElementById('__riot_pick_ov__');
+    if (!ov) {
+        ov = document.createElement('div');
+        ov.id = '__riot_pick_ov__';
+        ov.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483647;box-sizing:border-box;background:rgba(90,141,214,0.25);border:1px solid rgba(90,141,214,0.9);border-radius:2px;';
+        document.documentElement.appendChild(ov);
+    }
+    const el = document.elementFromPoint(px, py);
+    if (!el || el.id === '__riot_pick_ov__') { ov.style.display = 'none'; return; }
+    const r = el.getBoundingClientRect();
+    ov.style.display = 'block';
+    ov.style.left = r.left + 'px';
+    ov.style.top = r.top + 'px';
+    ov.style.width = r.width + 'px';
+    ov.style.height = r.height + 'px';
+}"#;
+
+/// 把高亮框移到 (x,y) 下的元素上。best-effort。
+pub async fn pick_hover(tab: Tab<'_>, x: f64, y: f64) {
+    let expr = format!("({PICK_HOVER_FN})({x}, {y})");
+    let _ = tab
+        .cdp("Runtime.evaluate", json!({ "expression": expr }))
+        .await;
+}
+
+/// 撤掉悬停高亮框。退出取件模式、鼠标离开画面、或点选完成时调。
+pub async fn pick_clear(tab: Tab<'_>) {
+    let _ = tab
+        .cdp(
+            "Runtime.evaluate",
+            json!({ "expression": "document.getElementById('__riot_pick_ov__')?.remove()" }),
+        )
+        .await;
+}
+
+/// 命中测试:视口坐标 → (选择器, 描述)。点不到元素返回 `None`。
+///
+/// `[取舍]` 走 `elementFromPoint` 一次 evaluate，不走 `DOM.getNodeForLocation`
+/// 配 resolveNode 那套:前者一条命令拿到元素并当场算好选择器，后者要两三次
+/// 往返、还得把节点搬进 Runtime 才能读属性。命中测试是用户点一下就要有反馈
+/// 的交互，越短越好。
+///
+/// `format!` 里 `{PICK_FN}` 是把常量的**值**填进去（值里的 `{}` 不会被再解析），
+/// 只有 `{x}`/`{y}` 是真正的格式参数。
+pub async fn pick_at(tab: Tab<'_>, x: f64, y: f64) -> Option<(String, String)> {
+    let expr = format!("({PICK_FN})({x}, {y})");
+    let r = tab
+        .cdp(
+            "Runtime.evaluate",
+            json!({ "expression": expr, "returnByValue": true }),
+        )
+        .await
+        .ok()?;
+    let v = &r["result"]["value"];
+    if v.is_null() {
+        return None;
+    }
+    let selector = v["selector"].as_str()?.to_owned();
+    let description = v["description"].as_str().unwrap_or(&selector).to_owned();
+    Some((selector, description))
+}
+
+/// 在即将操作的元素上闪一下红色高亮框，让盯着面板的用户看清模型接下来
+/// 要动哪个元素（意图预览）。
+///
+/// `[取舍]` 直接 `callFunctionOn` 作用在这个 objectId 上，不靠选择器 ——
+/// 对象就是马上要点的那个，不会框错。改的是内联 `outline`（不占布局、
+/// 不引起重排），把原值存在 dataset 里、结束再还原。全程 best-effort:
+/// 闪失败最多是少个提示，绝不能挡住真正的操作。
+///
+/// `[约束]` 只由 [`HostBrowser`] 在**面板有人看**时调用。没人看还闪，等于
+/// 给 headless 自动化平白加一次 sleep —— 而那正是这个项目引以为傲的速度。
+pub async fn flash_target(tab: Tab<'_>, object_id: &str) {
+    const ADD: &str = "function(){\
+        this.dataset.riotFlashOutline = this.style.outline || '';\
+        this.dataset.riotFlashOffset = this.style.outlineOffset || '';\
+        this.style.outline = '3px solid #ff3b30';\
+        this.style.outlineOffset = '2px';\
+    }";
+    if tab
+        .cdp(
+            "Runtime.callFunctionOn",
+            json!({ "objectId": object_id, "functionDeclaration": ADD }),
+        )
+        .await
+        .is_err()
+    {
+        return; // 加不上就别等、也别费第二次调用去移除。
+    }
+    // 让高亮停留一瞬，肉眼能看见"要点这里"。这点延迟只在面板开着时付。
+    tokio::time::sleep(Duration::from_millis(140)).await;
+    const REMOVE: &str = "function(){\
+        this.style.outline = this.dataset.riotFlashOutline || '';\
+        this.style.outlineOffset = this.dataset.riotFlashOffset || '';\
+        delete this.dataset.riotFlashOutline;\
+        delete this.dataset.riotFlashOffset;\
+    }";
+    let _ = tab
+        .cdp(
+            "Runtime.callFunctionOn",
+            json!({ "objectId": object_id, "functionDeclaration": REMOVE }),
+        )
+        .await;
+}
+
+/// 读一个元素对应的源码位置（文件:行）和组件名。作用在 objectId 上。
+///
+/// `[取舍]` 依赖开发构建里保留的调试信息，多框架各试一遍:
+/// - React:DOM 节点上的 `__reactFiber$*`，沿 fiber 往上找带 `_debugSource`
+///   的那层（`@babel/plugin-transform-react-jsx-source` 在 dev 下自动注入）；
+///   找不到 source 就退而给组件名。
+/// - Vue 3:`__vueParentComponent.type.__file`；Vue 2:`__vue__.$options.__file`。
+///
+/// 生产构建把这些都抹了 —— 那时返回 null，上层照实说"这个构建没有源码信息"，
+/// 不猜。返回的是一个只含基本类型的小对象，`returnByValue` 安全（不会把整个
+/// fiber 拖回来）。
+const SOURCE_FN: &str = r#"function(){
+    const el = this;
+    const rk = Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+    if (rk) {
+        let f = el[rk];
+        for (let i = 0; i < 12 && f; i++) {
+            const s = f._debugSource;
+            if (s && s.fileName) {
+                let comp = null;
+                const o = f._debugOwner;
+                if (o && o.type) comp = o.type.displayName || o.type.name || null;
+                if (!comp && typeof f.type === 'function') comp = f.type.displayName || f.type.name || null;
+                return { framework: 'react', file: s.fileName, line: s.lineNumber || null, column: s.columnNumber || null, component: comp };
+            }
+            f = f.return;
+        }
+        let g = el[rk];
+        for (let i = 0; i < 12 && g; i++) {
+            if (typeof g.type === 'function') return { framework: 'react', file: null, line: null, column: null, component: g.type.displayName || g.type.name || '(匿名组件)' };
+            g = g.return;
+        }
+    }
+    if (el.__vueParentComponent) {
+        const t = el.__vueParentComponent.type || {};
+        return { framework: 'vue', file: t.__file || null, line: null, column: null, component: t.name || t.__name || null };
+    }
+    if (el.__vue__) {
+        const o = (el.__vue__.$options) || {};
+        return { framework: 'vue2', file: o.__file || null, line: null, column: null, component: o.name || null };
+    }
+    return null;
+}"#;
+
+pub async fn source_of(tab: Tab<'_>, object_id: &str) -> Result<String, BrowserError> {
+    let r = tab
+        .cdp(
+            "Runtime.callFunctionOn",
+            json!({
+                "objectId": object_id,
+                "functionDeclaration": SOURCE_FN,
+                "returnByValue": true,
+            }),
+        )
+        .await?;
+    let v = &r["result"]["value"];
+    if v.is_null() {
+        return Ok("没找到源码信息。这个页面多半是生产构建（去掉了组件调试数据），\
+                   或者不是 React / Vue —— 源码映射只在开发构建里有。"
+            .to_owned());
+    }
+    let fw = v["framework"].as_str().unwrap_or("?");
+    let comp = v["component"].as_str();
+    let file = v["file"].as_str();
+    let line = v["line"].as_i64();
+    let col = v["column"].as_i64();
+
+    let mut out = String::new();
+    if let Some(c) = comp {
+        out.push_str(&format!("组件：{c}\n"));
+    }
+    match (file, line) {
+        (Some(f), Some(l)) => {
+            let c = col.map(|c| format!(":{c}")).unwrap_or_default();
+            out.push_str(&format!("源码：{f}:{l}{c}"));
+        }
+        (Some(f), None) => out.push_str(&format!("源码文件：{f}")),
+        (None, _) => out.push_str(&format!(
+            "框架：{fw}（这个构建没保留文件位置，只能给到组件名）"
+        )),
+    }
+    Ok(out)
+}
+
+/// 文档身份令牌:`performance.timeOrigin` 在同一篇文档里恒定，跨导航/重载
+/// 必变（新文档 = 新 origin）。
+///
+/// `[取舍]` 用它、不数 `LoadEnd` 事件来判断"页面在快照之后重载没有"。
+/// 事件走异步事件流（子进程 → stdout → 宿主事件循环），可能晚于紧跟着
+/// 快照来的那次交互到达 —— 那样会误报"页面重载过"。这个令牌是在**交互
+/// 同一条 CDP 通道**上现读的，和快照记的那次同源，不存在这种竞态。
+/// 问不到就返回 `None`（没有文档、正在换文档），调用方按"未知"处理。
+pub async fn document_token(tab: Tab<'_>) -> Option<f64> {
+    tab.cdp(
+        "Runtime.evaluate",
+        json!({ "expression": "performance.timeOrigin", "returnByValue": true }),
+    )
+    .await
+    .ok()
+    .and_then(|v| v["result"]["value"].as_f64())
 }
 
 /// evaluate 结果的文本上限。

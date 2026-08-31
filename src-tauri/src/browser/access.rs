@@ -68,6 +68,17 @@ pub struct NavState {
     pub can_forward: bool,
 }
 
+/// 面板"取件"的结果：用户在面板里点中的那个元素。
+///
+/// `selector` 能直接喂给模型的定位（BrowserClick 等的 selector），
+/// `description` 是给用户看的一句话（标签、id、类、截断的文字）。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PickResult {
+    pub selector: String,
+    pub description: String,
+}
+
 /// 面板转发过来的一次输入。
 ///
 /// 坐标是**页面坐标**（相对视口左上角，CSS 像素）。面板负责把自己的
@@ -202,6 +213,10 @@ impl Default for Tabs {
     }
 }
 
+/// 最近一次快照的编号表连同它的元数据:是在哪个标签页拍的、当时的文档
+/// 令牌（判断页面之后有没有重载）、以及编号 → 元素的映射。
+type SnapRefs = (TabId, Option<f64>, HashMap<u32, ops::SnapRef>);
+
 pub struct HostBrowser {
     /// 指回自己。
     ///
@@ -262,7 +277,10 @@ pub struct HostBrowser {
     /// 页面自己变了（脚本改 DOM、页内跳转）不主动清:backendDOMNodeId
     /// 跟着节点走，节点还在就照常能点；节点没了 CDP 会报错，那条错误
     /// 会被整形成"重新快照"的提示。
-    snap_refs: Mutex<Option<(TabId, HashMap<u32, ops::SnapRef>)>>,
+    /// 元组里的 `Option<f64>` 是拍快照那一刻的文档令牌（见 [`ops::document_token`]）。
+    /// 交互时拿它和当前文档令牌比:不一致 = 页面在快照之后重载/跳转过，编号
+    /// 指的是上一篇文档里的节点，直接提示重拍，而不是等 CDP 报一个费解的错。
+    snap_refs: Mutex<Option<SnapRefs>>,
     /// 每个标签页累积的 CDP 事件（抓包、对话框、日志）。见 [`super::taps`]。
     ///
     /// `[约束]` 用 `Arc`:事件循环那个 spawn 的任务要长期持有它往里 `ingest`，
@@ -445,7 +463,7 @@ impl HostBrowser {
         self.intercept.lock().await.remove(&tab);
         {
             let mut refs = self.snap_refs.lock().await;
-            if refs.as_ref().is_some_and(|(t, _)| *t == tab) {
+            if refs.as_ref().is_some_and(|(t, _, _)| *t == tab) {
                 *refs = None;
             }
         }
@@ -818,6 +836,38 @@ impl HostBrowser {
         self.cast.lock().await.unwrap_or(CAST_FALLBACK)
     }
 
+    /// 面板"取件"：把面板里的一个坐标命中测试成元素的选择器 + 描述。
+    ///
+    /// 给"用户在面板里点一个元素、交给模型改它"用 —— 用户比划一下就把
+    /// 可见元素落成一个 selector，省得用文字跟模型解释"左上角那个蓝按钮"。
+    /// 坐标是视口 CSS 坐标（和 [`Self::send_input`] 同一套）。点不到返回 `None`。
+    pub async fn pick_at(&self, x: f64, y: f64) -> Result<Option<PickResult>, BrowserUnavailable> {
+        let (b, id) = self.active().await?;
+        Ok(ops::pick_at(Tab { browser: &b, id }, x, y)
+            .await
+            .map(|(selector, description)| PickResult {
+                selector,
+                description,
+            }))
+    }
+
+    /// 取件模式的悬停高亮:把蓝框移到光标下的元素上。高频调用（跟着
+    /// 鼠标动），前端做了节流。
+    pub async fn pick_hover(&self, x: f64, y: f64) -> Result<(), BrowserUnavailable> {
+        let (b, id) = self.active().await?;
+        ops::pick_hover(Tab { browser: &b, id }, x, y).await;
+        Ok(())
+    }
+
+    /// 撤掉悬停高亮。用 `live()` 不 `active()` —— 只是清理，没有页面就没有
+    /// 要清的东西，别为此把浏览器起起来。
+    pub async fn pick_clear(&self) {
+        if let Some(b) = self.live().await {
+            let id = self.tabs.lock().await.active;
+            ops::pick_clear(Tab { browser: &b, id }).await;
+        }
+    }
+
     /// 把面板上的一次输入打到页面里。
     ///
     /// `[取舍]` 走 CDP 的 `Input.*` 而不是在页面里合成 DOM 事件。
@@ -1151,21 +1201,24 @@ impl BrowserAccess for HostBrowser {
             .map_err(|e| BrowserUnavailable(e.to_string()))
     }
 
-    async fn screenshot(&self) -> Result<String, BrowserUnavailable> {
+    async fn screenshot(&self, deterministic: bool) -> Result<String, BrowserUnavailable> {
         let (b, id) = self.active().await?;
-        ops::screenshot(Tab { browser: &b, id })
+        ops::screenshot(Tab { browser: &b, id }, deterministic)
             .await
             .map_err(|e| BrowserUnavailable(e.to_string()))
     }
 
     async fn snapshot(&self) -> Result<String, BrowserUnavailable> {
         let (b, id) = self.active().await?;
-        let (text, refs) = ops::snapshot(Tab { browser: &b, id })
+        let tab = Tab { browser: &b, id };
+        let (text, refs) = ops::snapshot(tab)
             .await
             .map_err(|e| BrowserUnavailable(e.to_string()))?;
         // 编号跟着最新一次快照走。旧的整份换掉而不是合并 —— 两份快照的
         // 同一个号指向不同元素，合并会让"[3] 到底是谁"没有答案。
-        *self.snap_refs.lock().await = Some((id, refs));
+        // 一并记下文档令牌:之后交互时用来判断页面重载过没有。
+        let token = ops::document_token(tab).await;
+        *self.snap_refs.lock().await = Some((id, token, refs));
         Ok(text)
     }
 
@@ -1192,7 +1245,9 @@ impl BrowserAccess for HostBrowser {
         marks.sort_by_key(|(n, _)| *n);
 
         // 编号跟最新快照走（和 snapshot 一致）——交互方法用的就是这套号。
-        *self.snap_refs.lock().await = Some((id, refs));
+        // 同样记下文档令牌，重载检测两条快照路径一致。
+        let token = ops::document_token(tab).await;
+        *self.snap_refs.lock().await = Some((id, token, refs));
 
         let screenshot = ops::screenshot_marked(tab, &marks)
             .await
@@ -1225,6 +1280,7 @@ impl BrowserAccess for HostBrowser {
 
         let before = ops::url_of(tab).await;
         let (x, y) = ops::locate(tab, &oid).await.map_err(stale_target)?;
+        self.flash_if_watched(tab, &oid).await;
         ops::click_at(tab, x, y).await.map_err(stale_target)?;
         ops::settle(tab).await;
 
@@ -1247,6 +1303,7 @@ impl BrowserAccess for HostBrowser {
         // 点一下拿焦点。比 DOM.focus 多一步，但和真人操作一致 ——
         // 不少输入框在 click 上才初始化（日期选择器、代码编辑器）。
         let (x, y) = ops::locate(tab, &oid).await.map_err(stale_target)?;
+        self.flash_if_watched(tab, &oid).await;
         ops::click_at(tab, x, y).await.map_err(stale_target)?;
 
         if !ops::focused_editable(tab).await.map_err(stale_target)? {
@@ -1369,6 +1426,7 @@ impl BrowserAccess for HostBrowser {
                 let (b, id, oid, label) = self.resolve(t).await?;
                 let tab = Tab { browser: &b, id };
                 let (x, y) = ops::locate(tab, &oid).await.map_err(stale_target)?;
+                self.flash_if_watched(tab, &oid).await;
                 ops::hover_at(tab, x, y).await.map_err(stale_target)?;
                 Ok(format!("已悬停在 {label}。"))
             }
@@ -1377,6 +1435,7 @@ impl BrowserAccess for HostBrowser {
                 let tab = Tab { browser: &b, id };
                 let before = ops::url_of(tab).await;
                 let (x, y) = ops::locate(tab, &oid).await.map_err(stale_target)?;
+                self.flash_if_watched(tab, &oid).await;
                 ops::double_click_at(tab, x, y)
                     .await
                     .map_err(stale_target)?;
@@ -1391,6 +1450,7 @@ impl BrowserAccess for HostBrowser {
                 let (b, id, oid, label) = self.resolve(t).await?;
                 let tab = Tab { browser: &b, id };
                 let (x, y) = ops::locate(tab, &oid).await.map_err(stale_target)?;
+                self.flash_if_watched(tab, &oid).await;
                 ops::right_click_at(tab, x, y).await.map_err(stale_target)?;
                 Ok(format!("已右键 {label}。"))
             }
@@ -1410,6 +1470,7 @@ impl BrowserAccess for HostBrowser {
                 let tab = Tab { browser: &b, id };
                 let p1 = ops::locate(tab, &oid_from).await.map_err(stale_target)?;
                 let p2 = ops::locate(tab, &oid_to).await.map_err(stale_target)?;
+                self.flash_if_watched(tab, &oid_from).await;
                 ops::drag_between(tab, p1, p2).await.map_err(stale_target)?;
                 ops::settle(tab).await;
                 Ok(format!("已把 {l_from} 拖到 {l_to}。"))
@@ -1480,6 +1541,31 @@ impl BrowserAccess for HostBrowser {
         }
     }
 
+    async fn source_of(&self, target: Target) -> Result<String, InteractError> {
+        let (b, id, oid, label) = self.resolve(target).await?;
+        let tab = Tab { browser: &b, id };
+        let found = ops::source_of(tab, &oid).await.map_err(stale_target)?;
+        Ok(format!("{label}\n{found}"))
+    }
+
+    async fn snapshot_tab(&self, tab: TabId) -> Result<String, InteractError> {
+        let b = self.get().await.map_err(InteractError::Unavailable)?;
+        // 先校验号存在:对一个不存在的标签页发 CDP 会一路等到超时，
+        // 而这本该是"号给错了"的即时反馈。归 Target，让模型重新列一下。
+        if !self.tabs.lock().await.order.contains(&tab) {
+            return Err(InteractError::Target(format!(
+                "没有标签页 [{tab}]。用 BrowserTabs 的 list 看现在有哪些页。"
+            )));
+        }
+        let (text, _refs) = ops::snapshot(Tab { browser: &b, id: tab })
+            .await
+            .map_err(|e| InteractError::Unavailable(BrowserUnavailable(e.to_string())))?;
+        // `[约束]` 不写 snap_refs。那套编号是给**活动页交互**用的:旁观另一页
+        // 时把它的编号写进去，下一次对活动页的点击就会拿错页的编号去解析。
+        // 所以旁观快照只回文本，不留可交互状态。
+        Ok(text)
+    }
+
     async fn evaluate(&self, expr: &str) -> Result<String, InteractError> {
         let (b, id) = self.active().await.map_err(InteractError::Unavailable)?;
         ops::evaluate(Tab { browser: &b, id }, expr)
@@ -1539,6 +1625,7 @@ impl BrowserAccess for HostBrowser {
                 let url = ops::url_of(Tab { browser: &b, id }).await;
                 Ok(super::netlog::audit(&events, &url))
             }
+            NetQuery::Har => Ok(super::netlog::har(&events)),
         }
     }
 
@@ -1628,6 +1715,14 @@ impl HostBrowser {
     /// 把一个 [`Target`] 解析成当前页面上那个元素:返回进程句柄、标签页号、
     /// 元素的 objectId、给模型看的标签。三种定位方式在这里收敛到同一种
     /// objectId（见 [`ops::locate`] 的说明）。
+    /// 面板有人看时，在即将操作的元素上闪一下高亮（意图预览）。没人看
+    /// （headless / 面板没开）就跳过 —— 不给自动化平白加延迟。
+    async fn flash_if_watched(&self, tab: Tab<'_>, object_id: &str) {
+        if self.frames.lock().await.is_some() {
+            ops::flash_target(tab, object_id).await;
+        }
+    }
+
     async fn resolve(
         &self,
         target: Target,
@@ -1636,7 +1731,7 @@ impl HostBrowser {
         let tab = Tab { browser: &b, id };
         let (object_id, label) = match target {
             Target::Ref(n) => {
-                let r = self.ref_of(id, n).await?;
+                let r = self.ref_of(tab, n).await?;
                 let oid = ops::resolve_backend(tab, r.backend_id)
                     .await
                     .map_err(stale_target)?;
@@ -1673,9 +1768,13 @@ impl HostBrowser {
     /// 校验快照编号并取回它对应的元素。三种查无此号的情况各说各的话 ——
     /// "没拍过快照"、"快照是别的标签页的"、"号不在这份快照里"，模型要做的
     /// 下一步都一样（重新快照），但知道差在哪能少走一步弯路。
-    async fn ref_of(&self, id: TabId, n: u32) -> Result<ops::SnapRef, InteractError> {
+    async fn ref_of(&self, tab: Tab<'_>, n: u32) -> Result<ops::SnapRef, InteractError> {
+        let id = tab.id;
+        // 先在交互这条 CDP 通道上现读当前文档令牌，再拿快照锁 —— 避免持锁
+        // 跨 await 去拿另一把锁（和 snapshot 那边的加锁顺序相反会死锁）。
+        let cur_token = ops::document_token(tab).await;
         let guard = self.snap_refs.lock().await;
-        let Some((snap_tab, refs)) = guard.as_ref() else {
+        let Some((snap_tab, snap_token, refs)) = guard.as_ref() else {
             return Err(InteractError::Target(
                 "还没有拍过页面快照，元素编号无从谈起。\
                  先用 BrowserSnapshot 看页面、拿到 [n] 编号。"
@@ -1686,6 +1785,18 @@ impl HostBrowser {
             return Err(InteractError::Target(
                 "上次快照是在另一个标签页拍的，编号对不上当前页面。\
                  用 BrowserSnapshot 在当前页重新拿编号。"
+                    .into(),
+            ));
+        }
+        // 两次都读到令牌、且不一致 = 页面在快照之后整篇换过（重载/跳转）。
+        // 读不到（任一为 None）就不武断报错 —— 交给下面按号解析，解析失败
+        // 那条 CDP 错误照样会被整形成"重新快照"的提示（保留原有的反应式兜底）。
+        if let (Some(cur), Some(snap)) = (cur_token, *snap_token)
+            && (cur - snap).abs() > f64::EPSILON
+        {
+            return Err(InteractError::Target(
+                "页面在上次快照之后重新加载过（或跳转到了新页面），\
+                 编号已经失效。用 BrowserSnapshot 在当前页重新拿编号。"
                     .into(),
             ));
         }
@@ -2276,7 +2387,7 @@ mod tests {
             .await
             .insert(1, crate::browser::taps::EventTaps::default());
         host.intercept.lock().await.insert(1, Vec::new());
-        *host.snap_refs.lock().await = Some((1, HashMap::new()));
+        *host.snap_refs.lock().await = Some((1, None, HashMap::new()));
 
         host.forget_crashed().await;
 

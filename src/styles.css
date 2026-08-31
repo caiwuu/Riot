@@ -1482,6 +1482,13 @@ pre {
   border-bottom: 1px solid var(--danger-border);
 }
 
+/* 取件模式下画面区用十字光标，暗示"点这里取件、不是操作页面"。
+   高亮框画在页面里（宿主注入，随 screencast 一起来），面板上不再加横条
+   —— 横条会把画面往下挤，一开一关地抖。 */
+.browser-view.picking {
+  cursor: crosshair;
+}
+
 /* 前进后退刷新。面板可以窄到 320px，这三个要是文字按钮，那个宽度下
    地址栏就只剩几十像素了 —— 图标各占 28px，剩下的全留给地址。 */
 .browser-bar .icon {
@@ -2497,67 +2504,84 @@ pre {
   text-align: center;
 }
 
-/* 编辑区里的 @ 引用块：内联，跟着文字走。选中文件后 `@xxx` 从文本里
-   消失变成它 —— 一个可整体删除的实体，而不是一段用户得小心别编辑坏
-   的字符串。 */
-.ref-chip {
+/* 色块：编辑区里的 @ 引用、斜杠命令、浏览器取件的页面元素。内联，跟着
+   文字走 —— 选中文件后 `@xxx` 从文本里消失变成它，一个可整体删除的
+   实体，而不是一段用户得小心别编辑坏的字符串。
+
+   种类之间只差配色和图标（下面的 .chip-* 修饰类），骨架共用这一份。
+   加一种块就在 lib/chips.ts 里加一支，再来这里加一条颜色。 */
+.chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   /* baseline 对齐，块才不会把行高顶开 */
   vertical-align: baseline;
   font-size: 12px;
-  color: var(--accent);
-  background: rgba(90, 141, 214, 0.12);
-  border: 1px solid rgba(90, 141, 214, 0.35);
   border-radius: 5px;
   padding: 0 5px;
   margin: 0 1px;
   white-space: nowrap;
-  /* 不让选区进块里。文件名用 ::after，块内没有文本节点，光标就贴在外侧。 */
+  /* 不让选区进块里。文字和图标都走伪元素，块内**没有任何子节点** ——
+     WebKit 否则会把插入点塞进块内部，退格先"走进去"再删。 */
   user-select: none;
   -webkit-user-select: none;
 }
 
-.ref-chip[data-label]::after {
-  content: attr(data-label);
-}
-
-.ref-chip svg {
+/* 图标。mask + currentColor，跟着每种块的字色走。 */
+.chip::before {
+  content: "";
   flex-shrink: 0;
+  width: 11px;
+  height: 11px;
   opacity: 0.85;
+  background: currentColor;
+  -webkit-mask: var(--chip-icon) center / contain no-repeat;
+  mask: var(--chip-icon) center / contain no-repeat;
 }
 
-/* 气泡里的引用块和输入框里的是同一个东西，用同一套样式 —— 用户看到
-   自己发出去的和刚才打的长得一样。只是不再需要"整块选中"那层交互。 */
-.ref-chip.static {
+.chip::after {
+  content: attr(data-label);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 气泡里的块和输入框里的是同一个东西，用同一套样式 —— 用户看到自己发
+   出去的和刚才打的长得一样。只是不再需要"整块选中"那层交互。 */
+.chip.static {
   user-select: text;
 }
 
-/* 斜杠命令 / 技能色块。和引用块同一种"整块实体"，颜色分开：
-   蓝是文件，橙是命令 —— 扫一眼就知道这段不是普通输入。 */
-.cmd-chip {
-  display: inline-flex;
-  align-items: center;
-  vertical-align: baseline;
-  font-size: 12px;
+/* 蓝是文件，橙是命令，绿是页面上点来的东西 —— 扫一眼就知道这段不是
+   普通输入，以及它是哪一类。 */
+.chip-ref {
+  color: var(--accent);
+  background: rgba(90, 141, 214, 0.12);
+  border: 1px solid rgba(90, 141, 214, 0.35);
+  --chip-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.3' stroke-linejoin='round'%3E%3Cpath d='M9 1.8H4.5a1 1 0 0 0-1 1v10.4a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1V5.3L9 1.8z'/%3E%3Cpath d='M8.9 2v3.4h3.4'/%3E%3C/svg%3E");
+}
+
+.chip-cmd {
   color: #e8c39a;
   background: #4a3420;
   border: 1px solid #6a4a2a;
   border-radius: 6px;
   padding: 1px 7px;
-  margin: 0 1px;
-  white-space: nowrap;
-  user-select: none;
-  -webkit-user-select: none;
 }
 
-.cmd-chip[data-label]::before {
-  content: attr(data-label);
+/* 命令块只有 `/名字`，没有图标 —— content: none 连带把 gap 也去掉。 */
+.chip-cmd::before {
+  content: none;
 }
 
-.cmd-chip.static {
-  user-select: text;
+/* 取件光标图标，和浏览器面板工具栏那个十字呼应。 */
+.chip-elem {
+  color: #8fd6a0;
+  background: rgba(70, 170, 100, 0.12);
+  border: 1px solid rgba(70, 170, 100, 0.4);
+  /* 元素描述可以很长，截断在这儿兜底（chipLabel 已经截过一次）。 */
+  max-width: 260px;
+  overflow: hidden;
+  --chip-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.3'%3E%3Ccircle cx='8' cy='8' r='3'/%3E%3Cpath d='M8 1v2.4M8 12.6V15M1 8h2.4M12.6 8H15' stroke-linecap='round'/%3E%3C/svg%3E");
 }
 
 /* hooks 清单里的 matcher / 参数提示小标。 */
@@ -2600,8 +2624,7 @@ pre {
   color: var(--text);
 }
 
-.slash-item .ref-chip,
-.slash-item .cmd-chip {
+.slash-item .chip {
   flex-shrink: 0;
 }
 
@@ -3533,8 +3556,8 @@ pre {
   background: var(--bg-input-hover);
 }
 
-/* 气泡里的引用块升级成按钮后要抹掉 UA 的按钮壳，外观向 span 版对齐。 */
-button.ref-chip.clickable {
+/* 气泡里的块升级成按钮后要抹掉 UA 的按钮壳，外观向 span 版对齐。 */
+button.chip.clickable {
   font: inherit;
   font-size: 12px;
   cursor: pointer;
@@ -3542,7 +3565,7 @@ button.ref-chip.clickable {
   -webkit-appearance: none;
 }
 
-button.ref-chip.clickable:hover {
+button.chip-ref.clickable:hover {
   background: rgba(90, 141, 214, 0.22);
   border-color: rgba(90, 141, 214, 0.55);
 }
@@ -6266,10 +6289,13 @@ button.field-slider-state:hover {
   gap: 8px;
 }
 
-.msg-editor textarea {
+/* 编辑框是 contenteditable（块要渲染成色块），不是 textarea。
+   高度贴内容长、封顶四成屏 —— 原来 textarea 靠 JS fit，这里 CSS 就够。 */
+.msg-editbox {
   width: 100%;
   min-height: 64px;
-  resize: vertical;
+  max-height: 40vh;
+  overflow-y: auto;
   background: var(--bg);
   color: var(--text);
   border: 1px solid var(--border-strong);
@@ -6278,9 +6304,12 @@ button.field-slider-state:hover {
   font-family: inherit;
   font-size: 14px;
   line-height: 1.55;
+  /* 和 .composer-input 一致：行尾空格要有渲染盒，光标才停得上去。 */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
-.msg-editor textarea:focus {
+.msg-editbox:focus {
   outline: none;
   border-color: var(--accent);
 }

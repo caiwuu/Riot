@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-browser-pick-clear"
+description = "Enables the browser_pick_clear command without any pre-configured scope."
+commands.allow = ["browser_pick_clear"]
+
+[[permission]]
+identifier = "deny-browser-pick-clear"
+description = "Denies the browser_pick_clear command without any pre-configured scope."
+commands.deny = ["browser_pick_clear"]

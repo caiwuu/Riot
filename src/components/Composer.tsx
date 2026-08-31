@@ -3,7 +3,8 @@
  * 斜杠菜单、@ 补全、模式与模型选择、排队面板。从 App.tsx 拆出。
  *
  * 纯文本解析在 `../lib/promptText`（与 Transcript 共用一份规则）；
- * 这里只放 DOM 编辑器机械和 Composer 组件本身。
+ * contenteditable 的块机械在 `../lib/chipEditor`（与消息编辑框共用）；
+ * 这里只放 Composer 组件本身。
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -12,6 +13,7 @@ import {
   clipboardPaths,
   compactSession,
   type ConfigStatus,
+  decodePickFromComposer,
   hasActiveKey,
   type ImageInput,
   type PermissionMode,
@@ -42,313 +44,26 @@ import {
   compactThresholdForWindow,
   fmtTokens,
 } from "../lib/contextWindow";
+import { type ChipSeg, isChipSeg } from "../lib/chips";
+import {
+  caretToEnd,
+  dropQueryAtCaret,
+  handleChipKey,
+  insertChipAtCaret,
+  normalizePads,
+  queryAtCaret,
+  readEditor,
+  writeEditor,
+} from "../lib/chipEditor";
 import { mergeSampling } from "../lib/sampling";
-import { basename } from "../pathDisplay";
 import { Chevron } from "./Chevron";
+import { Chip, FileChip } from "./Chip";
 import { ConfirmDialog, type ConfirmRequest } from "./ConfirmDialog";
 import { ContextRing } from "./ContextRing";
 import { ArrowUpIcon, PencilIcon, PlusIcon, StopIcon, TrashIcon } from "./icons";
 import { ModeMenu, Picker, type PickerSection, modelLabel } from "./pickers";
-import { CmdChip, FileChip } from "./Transcript";
 
 const drafts = new Map<string, Seg[]>();
-
-const CHIP_ICON =
-  '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true">' +
-  '<path d="M9 1.8H4.5a1 1 0 0 0-1 1v10.4a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1V5.3L9 1.8z" ' +
-  'stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>' +
-  '<path d="M8.9 2v3.4h3.4" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>';
-
-/** 造一个引用块。`contenteditable=false` 让它在编辑器里是一个整体。
- *  文件名走 `data-label` + CSS `::after`，块里不放文本节点 —— WebKit
- *  否则会把光标塞进色块内部，退格先"走进去"再删。 */
-function chipEl(path: string): HTMLElement {
-  const span = document.createElement("span");
-  span.className = "ref-chip";
-  span.contentEditable = "false";
-  span.dataset.path = path;
-  span.dataset.label = basename(path) || path;
-  span.title = path;
-  span.innerHTML = CHIP_ICON;
-  return bindChip(span);
-}
-
-/** 造一个命令/技能色块。名字只走 dataset，不拼进 HTML。 */
-function cmdChipEl(name: string): HTMLElement {
-  const span = document.createElement("span");
-  span.className = "cmd-chip";
-  span.contentEditable = "false";
-  span.dataset.cmd = name;
-  span.dataset.label = `/${name}`;
-  span.title = `/${name}`;
-  return bindChip(span);
-}
-
-function isChip(node: Node | null): node is HTMLElement {
-  return node instanceof HTMLElement && (node.dataset.path != null || node.dataset.cmd != null);
-}
-
-function chipAround(node: Node | null, root: HTMLElement): HTMLElement | null {
-  let n: Node | null = node;
-  while (n && n !== root) {
-    if (isChip(n)) return n;
-    n = n.parentNode;
-  }
-  return null;
-}
-
-function skipEmpty(node: Node | null, dir: 1 | -1): Node | null {
-  let n = node;
-  while (n && n.nodeType === Node.TEXT_NODE && !(n.nodeValue ?? "").length) {
-    n = dir === 1 ? n.nextSibling : n.previousSibling;
-  }
-  return n;
-}
-
-function placeCaretAfter(chip: HTMLElement) {
-  const sel = window.getSelection();
-  if (!sel) return;
-  let next = chip.nextSibling;
-  if (!next || next.nodeType !== Node.TEXT_NODE) {
-    next = document.createTextNode("");
-    chip.after(next);
-  }
-  const r = document.createRange();
-  r.setStart(next, 0);
-  r.collapse(true);
-  sel.removeAllRanges();
-  sel.addRange(r);
-}
-
-function placeCaretBefore(chip: HTMLElement) {
-  const sel = window.getSelection();
-  if (!sel) return;
-  let prev = chip.previousSibling;
-  if (!prev || prev.nodeType !== Node.TEXT_NODE) {
-    prev = document.createTextNode("");
-    chip.before(prev);
-  }
-  const r = document.createRange();
-  r.setStart(prev, prev.nodeValue?.length ?? 0);
-  r.collapse(true);
-  sel.removeAllRanges();
-  sel.addRange(r);
-}
-
-/** 点在块上时把光标放到外侧，不要让 WebKit 把插入点放进边框里。 */
-function bindChip(span: HTMLElement): HTMLElement {
-  span.addEventListener("mousedown", (e) => {
-    e.preventDefault();
-    const root = span.parentElement;
-    if (!root) return;
-    root.focus();
-    const mid = span.getBoundingClientRect().left + span.getBoundingClientRect().width / 2;
-    if (e.clientX < mid) placeCaretBefore(span);
-    else placeCaretAfter(span);
-  });
-  return span;
-}
-
-function removeChip(chip: HTMLElement) {
-  const pad = chip.nextSibling;
-  const dropPad =
-    pad?.nodeType === Node.TEXT_NODE && (pad.nodeValue === " " || pad.nodeValue === "");
-  placeCaretBefore(chip);
-  chip.remove();
-  if (dropPad) pad.remove();
-}
-
-/**
- * 光标紧挨着的块。`before` = 块在光标前面（退格要删的那个）。
- * 插块时留下的那个空格算"紧挨着"，好一次退格把块带走。
- */
-function adjacentChip(root: HTMLElement, side: "before" | "after"): HTMLElement | null {
-  const sel = window.getSelection();
-  if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return null;
-  const range = sel.getRangeAt(0);
-  if (!root.contains(range.startContainer)) return null;
-
-  const inside = chipAround(range.startContainer, root);
-  if (inside) return inside;
-
-  const node = range.startContainer;
-  const offset = range.startOffset;
-
-  if (node === root) {
-    const child = root.childNodes[side === "before" ? offset - 1 : offset] ?? null;
-    return isChip(child) ? child : null;
-  }
-
-  if (node.nodeType !== Node.TEXT_NODE) return null;
-  const text = node.nodeValue ?? "";
-  if (side === "before") {
-    if (offset > 0 && !(text.slice(0, offset).trim() === "" && text.slice(offset) === "")) {
-      return null;
-    }
-    const prev = skipEmpty(node.previousSibling, -1);
-    return isChip(prev) ? prev : null;
-  }
-  if (offset < text.length && !(text.slice(offset).trim() === "" && text.slice(0, offset) === "")) {
-    return null;
-  }
-  const next = skipEmpty(node.nextSibling, 1);
-  return isChip(next) ? next : null;
-}
-
-/** 方向键跨过整块，退格/删除一次拿掉整块。处理了就返回 true。 */
-function handleChipKey(e: { key: string; altKey: boolean; metaKey: boolean; ctrlKey: boolean }, root: HTMLElement): boolean {
-  const key = e.key;
-  if (key === "Backspace") {
-    const chip = adjacentChip(root, "before");
-    if (!chip) return false;
-    removeChip(chip);
-    return true;
-  }
-  if (key === "Delete") {
-    const chip = adjacentChip(root, "after");
-    if (!chip) return false;
-    removeChip(chip);
-    return true;
-  }
-  if (key === "ArrowLeft" && !e.altKey && !e.metaKey && !e.ctrlKey) {
-    const chip =
-      chipAround(window.getSelection()?.anchorNode ?? null, root) ?? adjacentChip(root, "before");
-    if (!chip) return false;
-    placeCaretBefore(chip);
-    return true;
-  }
-  if (key === "ArrowRight" && !e.altKey && !e.metaKey && !e.ctrlKey) {
-    const chip =
-      chipAround(window.getSelection()?.anchorNode ?? null, root) ?? adjacentChip(root, "after");
-    if (!chip) return false;
-    placeCaretAfter(chip);
-    return true;
-  }
-  return false;
-}
-
-/** 把编辑区的 DOM 读成段落序列。 */
-function readEditor(el: HTMLElement): Seg[] {
-  const out: Seg[] = [];
-  const push = (s: Seg) => {
-    const last = out[out.length - 1];
-    if (s.kind === "text" && last?.kind === "text") last.value += s.value;
-    else if (s.kind !== "text" || s.value) out.push(s);
-  };
-  const walk = (node: Node, depth: number) => {
-    let first = true;
-    for (const child of Array.from(node.childNodes)) {
-      if (child.nodeType === Node.TEXT_NODE) {
-        push({ kind: "text", value: child.nodeValue ?? "" });
-      } else if (child instanceof HTMLElement) {
-        const path = child.dataset["path"];
-        const cmd = child.dataset["cmd"];
-        if (path) {
-          push({ kind: "ref", value: path });
-        } else if (cmd) {
-          push({ kind: "cmd", value: cmd });
-        } else if (child.tagName === "BR") {
-          push({ kind: "text", value: "\n" });
-        } else {
-          // 浏览器在换行/粘贴时会包一层 div。除了第一层，块级元素的
-          // 边界就是一个换行。
-          if (depth > 0 || !first) push({ kind: "text", value: "\n" });
-          walk(child, depth + 1);
-        }
-      }
-      first = false;
-    }
-  };
-  walk(el, 0);
-  return out;
-}
-
-/** 用段落序列重建编辑区（切会话、发送失败回滚、程序化改写时用）。 */
-function writeEditor(el: HTMLElement, segs: Seg[]) {
-  el.replaceChildren();
-  for (const s of segs) {
-    if (s.kind === "text") el.appendChild(document.createTextNode(s.value));
-    else if (s.kind === "ref") el.appendChild(chipEl(s.value));
-    else el.appendChild(cmdChipEl(s.value));
-  }
-}
-
-
-/** 把光标放到编辑区末尾。 */
-function caretToEnd(el: HTMLElement) {
-  const sel = window.getSelection();
-  if (!sel) return;
-  const r = document.createRange();
-  r.selectNodeContents(el);
-  r.collapse(false);
-  sel.removeAllRanges();
-  sel.addRange(r);
-}
-
-/** 光标前那个还没敲完的 `@查询`。没有就是 undefined（菜单不出）。 */
-function queryAtCaret(el: HTMLElement): string | undefined {
-  const sel = window.getSelection();
-  if (!sel || sel.rangeCount === 0) return undefined;
-  const r = sel.getRangeAt(0);
-  if (!el.contains(r.startContainer) || r.startContainer.nodeType !== Node.TEXT_NODE) {
-    return undefined;
-  }
-  const before = (r.startContainer.nodeValue ?? "").slice(0, r.startOffset);
-  // 边界规则与内核一致：中文后面直接敲 `@` 也要出菜单（"读下@" 是中文
-  // 用户的常态写法，要求先打个空格等于让他们用不了这个菜单）。
-  return /(?:^|[^A-Za-z0-9._%+-])@([^\s@]*)$/.exec(before)?.[1];
-}
-
-/**
- * 在光标处把 `@查询` 换成一个引用块。
- *
- * 光标停在块后面的空格上 —— 用户接着打字就是正常续写，不用再点一下
- * 输入框。
- */
-function insertChipAtCaret(el: HTMLElement, path: string) {
-  const sel = window.getSelection();
-  if (!sel || sel.rangeCount === 0) {
-    el.appendChild(chipEl(path));
-    el.appendChild(document.createTextNode(" "));
-    caretToEnd(el);
-    return;
-  }
-  const range = sel.getRangeAt(0);
-  const node = range.startContainer;
-  if (node.nodeType === Node.TEXT_NODE) {
-    const before = (node.nodeValue ?? "").slice(0, range.startOffset);
-    const m = /(^|[^A-Za-z0-9._%+-])@[^\s@]*$/.exec(before);
-    if (m) {
-      const cut = before.length - (m[0].length - (m[1]?.length ?? 0));
-      (node as Text).deleteData(cut, range.startOffset - cut);
-      range.setStart(node, cut);
-      range.collapse(true);
-    }
-  }
-  const chip = chipEl(path);
-  range.insertNode(chip);
-  const space = document.createTextNode(" ");
-  chip.after(space);
-  const after = document.createRange();
-  after.setStart(space, 1);
-  after.collapse(true);
-  sel.removeAllRanges();
-  sel.addRange(after);
-}
-
-/** 去掉光标前那段 `@查询`（Esc 收起文件菜单时用）。 */
-function dropQueryAtCaret() {
-  const sel = window.getSelection();
-  if (!sel || sel.rangeCount === 0) return;
-  const range = sel.getRangeAt(0);
-  const node = range.startContainer;
-  if (node.nodeType !== Node.TEXT_NODE) return;
-  const before = (node.nodeValue ?? "").slice(0, range.startOffset);
-  const m = /@[^\s@]*$/.exec(before);
-  if (!m) return;
-  const cut = before.length - m[0].length;
-  (node as Text).deleteData(cut, range.startOffset - cut);
-}
 
 /**
  * 权限模式的 UI 缓存，理由同上，但它错了会出安全问题而不只是显示问题。
@@ -644,8 +359,6 @@ export function Composer({
   const [modeConfirm, setModeConfirm] = useState<ConfirmRequest | null>(null);
   /** 这个会话可用的斜杠命令 + 技能。每次挂载拉一次（用户加了 .md 切一下会话就有）。 */
   const [commands, setCommands] = useState<SlashCommand[]>([]);
-  /** 已经落成色块的那条命令/技能名。有它就算有内容，占位提示该让开。 */
-  const [cmdName, setCmdName] = useState<string | null>(null);
   /** 补全菜单里高亮到第几条。 */
   const [slashPick, setSlashPick] = useState(0);
   /** `@` 引用的候选文件。 */
@@ -666,12 +379,17 @@ export function Composer({
     else shotsCache.delete(sessionId);
   }, [sessionId, shots]);
   /**
-   * 编辑区里的文件引用块（按出现顺序）。发出去就清空。
+   * 编辑区里的块（按出现顺序）。发出去就清空。
    *
    * `@wechat.html` 是给解析器看的写法，让用户对着它编辑（删一半、光标
    * 插在中间）只会把引用弄坏。块是一个整体：点 ✕ 或退格整个删掉。
+   *
+   * `[约束]` 三种块合在一个 state 里，"输入框算不算空"才只有一个判据。
+   * 拆成 refs/elems/cmdName 三份时这个判断在五处各写一遍，加第四种块漏
+   * 一处就是"只放了一个块的输入框被当成空的" —— 占位符不让开、发送键
+   * 点不动，而用户明明看见自己放了东西进去。
    */
-  const [refs, setRefs] = useState<string[]>([]);
+  const [chips, setChips] = useState<ChipSeg[]>([]);
   /** 拖/选进来失败的那一条。附件是"扔进去就走"的操作，不报的话用户以为成了。 */
   const [dropError, setDropError] = useState("");
   const [dragging, setDragging] = useState(false);
@@ -679,6 +397,15 @@ export function Composer({
   // 中文 IME：确认候选/上屏英文时，keydown(Enter) 常在 compositionend 之后到达，
   // 此时 nativeEvent.isComposing 已是 false，会被误当成发送。用 ref 盖住这一拍。
   const imeRef = useRef(false);
+
+  /** 引用块挑出来的路径。发送时当附件递给宿主。 */
+  const refs = chips.flatMap((s) => (s.kind === "ref" ? [s.value] : []));
+  /** 已经落成色块的那条命令/技能名。 */
+  const cmdName = chips.find((s) => s.kind === "cmd")?.value ?? null;
+  /** 编辑区里有东西吗。占位提示看它 —— 图在编辑区外面，不算。 */
+  const hasInput = draft.trim().length > 0 || chips.length > 0;
+  /** 能发出去吗。只附了图也是一条消息（"看这个截图"就是这么发的）。 */
+  const canSend = hasInput || shots.length > 0;
 
   const cfg = config.config;
   const hasKey = hasActiveKey(config);
@@ -795,6 +522,9 @@ export function Composer({
   const sync = () => {
     const el = ref.current;
     if (!el) return;
+    // 守卫字符先归位：原生删除/剪切可能吃掉守卫或留下孤儿。IME 组字中
+    // 不动 DOM —— normalize 合并文本节点会打断组字。
+    if (!imeRef.current) normalizePads(el);
     let segs = readEditor(el);
     const known = new Set(commands.map((c) => c.name));
     const promoted = promoteLeadingCmd(segs, known);
@@ -804,15 +534,13 @@ export function Composer({
       segs = promoted;
     }
     const text = segsText(segs);
-    const paths = segs.flatMap((s) => (s.kind === "ref" ? [s.value] : []));
-    const cmd = segs.find((s) => s.kind === "cmd")?.value ?? null;
+    const chipSegs = segs.filter(isChipSeg);
     setDraftRaw(text);
-    setRefs(paths);
-    setCmdName(cmd);
+    setChips(chipSegs);
     setMentionQuery(queryAtCaret(el));
     // 删光内容后浏览器常留一个 `<br>`，读出来是个 "\n"。当成有内容的话，
     // 占位提示不再出现、草稿缓存里也会存下一堆看不见的空行。
-    if (text.trim() || paths.length || cmd) drafts.set(sessionId, segs);
+    if (text.trim() || chipSegs.length) drafts.set(sessionId, segs);
     else drafts.delete(sessionId);
   };
 
@@ -835,7 +563,9 @@ export function Composer({
   const replaceText = (v: string) => {
     const el = ref.current;
     if (!el) return;
-    const keep = readEditor(el).filter((s) => s.kind === "ref" || s.kind === "cmd");
+    // 留下所有块。按 kind 逐个点名的写法每加一种块就漏一次 —— 元素块
+    // 就这么被吞过：取件之后按 Esc 收起半截 `/xxx`，绿块跟着没了。
+    const keep = readEditor(el).filter(isChipSeg);
     setContent(v ? [{ kind: "text", value: v }, ...keep] : keep);
   };
 
@@ -851,8 +581,17 @@ export function Composer({
     const el = ref.current;
     if (!el) return;
     const cur = readEditor(el);
-    const prefix = segsText(cur).trim() ? "\n\n" : "";
-    setContent([...cur, { kind: "text", value: `${prefix}\`\`\`\n${insertText}\n\`\`\`\n` }]);
+    // 浏览器取件走的是这条通道，但它不是一段要围栏的文本，而是一个元素 ——
+    // 渲染成色块，接在现有内容后面。
+    const pick = decodePickFromComposer(insertText);
+    if (pick) {
+      setContent([...cur, { kind: "elem", value: pick.selector, label: pick.description }]);
+    } else {
+      // 终端选中那类:整段包进代码围栏（报错栈里的尖括号/缩进不这么处理
+      // 会被 markdown 吃掉）。
+      const prefix = segsText(cur).trim() ? "\n\n" : "";
+      setContent([...cur, { kind: "text", value: `${prefix}\`\`\`\n${insertText}\n\`\`\`\n` }]);
+    }
     el.focus();
     caretToEnd(el);
     insertedRef.current?.();
@@ -898,12 +637,13 @@ export function Composer({
           .slice(0, 8);
   const pick = Math.min(slashPick, Math.max(matches.length - 1, 0));
 
-  /** 选中一条命令/技能：收成色块，光标停在后面的空格上写参数。 */
+  /** 选中一条命令/技能：收成色块，光标贴在块后面直接写参数。 */
   const chooseSlash = (c: SlashCommand) => {
     const el = ref.current;
     if (!el) return;
-    const refsOnly = readEditor(el).filter((s) => s.kind === "ref");
-    setContent([{ kind: "cmd", value: c.name }, { kind: "text", value: " " }, ...refsOnly]);
+    // 旧命令块被这一条顶掉，其余的块（文件、页面元素）都留着。
+    const keep = readEditor(el).filter((s) => isChipSeg(s) && s.kind !== "cmd");
+    setContent([{ kind: "cmd", value: c.name }, ...keep]);
     setSlashPick(0);
     el.focus();
   };
@@ -936,19 +676,17 @@ export function Composer({
     const el = ref.current;
     if (!el) return;
     el.focus();
-    insertChipAtCaret(el, p);
+    insertChipAtCaret(el, { kind: "ref", value: p });
     setFilePick(0);
     sync();
   };
 
   const submit = () => {
     const text = draft.trim();
-    // 只附了图/只挂了引用、什么都没打也算一条消息 —— "看这个截图"、
-    // "看看这个文件"都是这么发的。
+    // 只附了图/只挂了块、什么都没打也算一条消息 —— "看这个截图"、
+    // "看看这个文件"都是这么发的（见 canSend）。
     // busy 不拦：模型干活时发的消息进排队面板，内核在安全点注入。
-    if ((!text && shots.length === 0 && refs.length === 0 && !cmdName) || !hasKey || !cfg.activeModel) {
-      return;
-    }
+    if (!canSend || !hasKey || !cfg.activeModel) return;
 
     // 斜杠命令：内置的当场执行，能展开的展开成 prompt 再走正常发送。
     //
@@ -974,10 +712,12 @@ export function Composer({
             .join("")
             .trim()
         : (SLASH_SUBMIT_RE.exec(text)?.[2] ?? "");
-      const sentRefs = refs;
+      // 命令块之外的块整个交给 runSlash：失败时要原样放回，成功时元素块
+      // 还得接进正文（展开结果里没有它们的位置）。
+      const sentChips = sentSegsNow.filter((s) => isChipSeg(s) && s.kind !== "cmd");
       setContent([]);
       setShots([]);
-      void runSlash(cmd, args, sentRefs);
+      void runSlash(cmd, args, sentChips);
       return;
     }
 
@@ -1011,7 +751,7 @@ export function Composer({
    * 对话流里显示的是同一段文字。藏起原文只会让"模型为什么这么答"
    * 变得无从追溯（切回会话时更是只剩展开结果）。
    */
-  const runSlash = async (cmd: SlashCommand, args: string, sentRefs: string[] = []) => {
+  const runSlash = async (cmd: SlashCommand, args: string, sentChips: ChipSeg[] = []) => {
     if (cmd.source === "builtin") {
       if (cmd.name === "compact") {
         // 进行中的提示在对话流里（「正在压缩上下文…」），这里不再横幅重复一遍。
@@ -1023,20 +763,21 @@ export function Composer({
       }
       return;
     }
-    // 失败时把 `/命令 参数` 和引用块原样放回去：展开出来的 prompt 是
+    // 失败时把 `/命令 参数` 和块原样放回去：展开出来的 prompt 是
     // 派生物，用户手里那行才是他打的东西。
     const restore = () => {
       const cur = ref.current ? readEditor(ref.current) : [];
-      const back: Seg[] = sentRefs
-        .filter((r) => !cur.some((s) => s.kind === "ref" && s.value === r))
-        .map((value) => ({ kind: "ref", value }));
+      const back = sentChips.filter(
+        (c) => !cur.some((s) => s.kind === c.kind && s.value === c.value),
+      );
       setContent([
         { kind: "cmd", value: cmd.name },
-        { kind: "text", value: args ? ` ${args} ` : " " },
+        { kind: "text", value: args ? ` ${args}` : "" },
         ...back,
         ...cur,
       ]);
     };
+    const sentRefs = sentChips.flatMap((s) => (s.kind === "ref" ? [s.value] : []));
     try {
       const prompt = await slashExpand(sessionId, cmd.name, args);
       if (!prompt) {
@@ -1044,7 +785,13 @@ export function Composer({
         restore();
         return;
       }
-      if (!(await onSend(prompt, [], sentRefs))) restore();
+      // 元素块接在展开结果后面。文件引用有 refs 附件那条通道，元素块没有 ——
+      // 不写进正文的话，用户明明把绿块留在了输入框里，模型却看不见它。
+      const elems = sentChips.filter((s) => s.kind === "elem");
+      const body = elems.length
+        ? `${prompt}\n\n${elems.map((e) => segsToPrompt([e])).join("\n")}`
+        : prompt;
+      if (!(await onSend(body, [], sentRefs))) restore();
     } catch (e) {
       setSlashNote(String(e));
       restore();
@@ -1178,7 +925,7 @@ export function Composer({
         for (const p of files) {
           // 两种分隔符都认:Windows 上拖进来的是 `C:\proj\a.md`。
           const inWs = p.startsWith(`${workspace}/`) || p.startsWith(`${workspace}\\`);
-          insertChipAtCaret(el, inWs ? p.slice(workspace.length + 1) : p);
+          insertChipAtCaret(el, { kind: "ref", value: inWs ? p.slice(workspace.length + 1) : p });
         }
         sync();
       }
@@ -1347,7 +1094,7 @@ export function Composer({
               }}
               onMouseEnter={() => setSlashPick(i)}
             >
-              <CmdChip name={c.name} />
+              <Chip seg={{ kind: "cmd", value: c.name }} />
               {c.argumentHint ? <span className="slash-hint">{c.argumentHint}</span> : null}
               <span className="slash-desc">{c.description}</span>
               {c.source !== "builtin" ? (
@@ -1409,7 +1156,7 @@ export function Composer({
         {/* 引用块住在编辑区里、和文字同一行，所以这里没有单独的块列表。 */}
         <div
           ref={ref}
-          className={draft.trim() || refs.length || cmdName ? "composer-input" : "composer-input empty"}
+          className={hasInput ? "composer-input" : "composer-input empty"}
           contentEditable
           suppressContentEditableWarning
           role="textbox"
@@ -1608,15 +1355,11 @@ export function Composer({
                 <StopIcon />
               </button>
             ) : null}
-            {!busy || draft.trim() || shots.length > 0 || refs.length > 0 || cmdName ? (
+            {!busy || canSend ? (
               <button
                 type="submit"
                 className="send"
-                disabled={
-                  (!draft.trim() && shots.length === 0 && refs.length === 0 && !cmdName) ||
-                  !hasKey ||
-                  !cfg.activeModel
-                }
+                disabled={!canSend || !hasKey || !cfg.activeModel}
                 title={
                   busy ? "排队发送（当前任务完成后自动发出）" : cfg.activeModel ? "发送" : "先选择一个模型"
                 }

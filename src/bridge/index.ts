@@ -1020,6 +1020,58 @@ export function browserInput(sessionId: string, input: BrowserInput): Promise<vo
   return invoke("browser_input", { sessionId, input });
 }
 
+/** 面板取件的结果：用户在面板里点中的那个元素。 */
+export interface PickResult {
+  /** 能直接喂给模型的 CSS 选择器。 */
+  selector: string;
+  /** 给用户看的一句话（标签、id、类、截断的文字）。 */
+  description: string;
+}
+
+/**
+ * 取件结果借用 Composer 现成的 `insertText` 通道送进输入框（省得再从
+ * App 往下多穿一层 prop）。用一个不可能出现在正常文本里的前缀把结构化的
+ * PickResult 编进字符串，Composer 认出前缀就渲染成"元素色块"，认不出就
+ * 照旧当普通文本插入。前缀用 NUL —— 用户不可能打出来。
+ */
+const PICK_SENTINEL = "\u0000riot-pick\u0000";
+
+export function encodePickForComposer(p: PickResult): string {
+  return PICK_SENTINEL + JSON.stringify(p);
+}
+
+/** 认不出前缀返回 null（那就是普通 insertText，走原来的围栏逻辑）。 */
+export function decodePickFromComposer(s: string): PickResult | null {
+  if (!s.startsWith(PICK_SENTINEL)) return null;
+  try {
+    return JSON.parse(s.slice(PICK_SENTINEL.length)) as PickResult;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 面板取件：把面板里的一个坐标命中测试成元素的选择器 + 描述。
+ * 坐标是视口 CSS 坐标（和 browserInput 同一套）。点不到元素返回 null。
+ */
+export function browserPick(
+  sessionId: string,
+  x: number,
+  y: number,
+): Promise<PickResult | null> {
+  return invoke<PickResult | null>("browser_pick", { sessionId, x, y });
+}
+
+/** 取件模式下鼠标移动：把高亮框移到光标下的元素上（前端节流后再调）。 */
+export function browserPickHover(sessionId: string, x: number, y: number): Promise<void> {
+  return invoke("browser_pick_hover", { sessionId, x, y });
+}
+
+/** 撤掉取件高亮框（退出取件模式 / 鼠标离开画面 / 点选完成）。 */
+export function browserPickClear(sessionId: string): Promise<void> {
+  return invoke("browser_pick_clear", { sessionId });
+}
+
 /** 本会话已授权的渗透 scope（host 列表）。给 scope 管理面板看。 */
 export function browserScopeList(sessionId: string): Promise<string[]> {
   return invoke<string[]>("browser_scope_list", { sessionId });

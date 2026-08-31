@@ -8,9 +8,13 @@ import {
   browserHistory,
   browserInput,
   browserNavigate,
+  browserPick,
+  browserPickClear,
+  browserPickHover,
   browserReload,
   browserResize,
   closeBrowser,
+  encodePickForComposer,
   openBrowser,
 } from "../bridge";
 
@@ -37,6 +41,7 @@ export function BrowserPanel({
   panel,
   onPanel,
   onPatchTab,
+  onSendToComposer,
 }: {
   sessionId: string;
   /** 页面状态（App 持有）。地址栏、前进后退的可用性都从它派生。 */
@@ -45,6 +50,9 @@ export function BrowserPanel({
   onPanel: (s: PanelState) => void;
   /** 单页信息的回写（前进后退的回值，作用在激活页上）。 */
   onPatchTab: (info: TabInfo) => void;
+  /** 取件命中的元素文本塞进对话输入框（不直接发 —— 用户还要补指令）。
+   *  没传就退回复制到剪贴板。 */
+  onSendToComposer?: (text: string) => void;
 }) {
   /**
    * 收到过画面没有。只在第一帧翻一次 —— 帧本身不进 React 状态。
@@ -68,6 +76,15 @@ export function BrowserPanel({
   const nextFrame = useRef<BrowserFrame | null>(null);
   const [address, setAddress] = useState("");
   const [busy, setBusy] = useState(false);
+  /**
+   * 取件模式。开着时，鼠标移到哪个元素上就在页面里高亮哪个（像 DevTools
+   * 的元素审查），点一下把它的选择器交给模型（见 browserPick）——用户
+   * 比划一下就能把可见元素落成 selector，省得用文字描述"左上角那个蓝按钮"。
+   *
+   * 高亮画在页面里（宿主注入的 overlay，随 screencast 一起来），不在面板上
+   * 加任何横条 —— 横条会把画面往下挤，一开一关地抖。
+   */
+  const [pickMode, setPickMode] = useState(false);
   /** 导航失败给一行原因 —— 之前 go() 无 catch，慢站/打不开时画面停在原地，
    *  用户分不清"在加载/挂了/没点上"。 */
   const [navError, setNavError] = useState("");
@@ -340,6 +357,37 @@ export function BrowserPanel({
     });
   }, [flushInputs]);
 
+  /**
+   * 取件模式的悬停高亮节流。mousemove 一秒几十上百个，每个都打一次
+   * 命中测试太费 —— 每帧最多发一次，坐标取最新（和滚动/移动同一套思路）。
+   */
+  const hoverRaf = useRef<number | undefined>(undefined);
+  const hoverPos = useRef<{ x: number; y: number } | null>(null);
+  /** 取件的这一下 mousedown 已经消费掉了，别让紧跟的 mouseup 作为裸抬起
+   *  转发给页面（取件时没发过 down，孤零零一个 up 语义不对）。 */
+  const pickedDown = useRef(false);
+  const scheduleHover = useCallback(() => {
+    if (hoverRaf.current !== undefined) return;
+    hoverRaf.current = requestAnimationFrame(() => {
+      hoverRaf.current = undefined;
+      const p = hoverPos.current;
+      if (p) void browserPickHover(sessionId, p.x, p.y).catch(() => {});
+    });
+  }, [sessionId]);
+
+  // 退出取件模式（或面板卸载）时撤掉页面里的高亮框。点选完成也走这条
+  // —— 点完会 setPickMode(false)，cleanup 顺带清掉高亮。
+  useEffect(() => {
+    if (!pickMode) return;
+    return () => {
+      if (hoverRaf.current !== undefined) {
+        cancelAnimationFrame(hoverRaf.current);
+        hoverRaf.current = undefined;
+      }
+      void browserPickClear(sessionId).catch(() => {});
+    };
+  }, [pickMode, sessionId]);
+
   // 卸载时把没发完的丢掉 —— 面板都没了，页面不需要最后那半下滚动。
   useEffect(
     () => () => {
@@ -477,13 +525,68 @@ export function BrowserPanel({
             <WebIcon />
           </button>
         </div>
+        {/* 取件：点面板里的元素，拿到它的选择器交给模型（“点这个、改那个”）。 */}
+        <div className="browser-mode" role="group" aria-label="取件">
+          <button
+            className={pickMode ? "icon active" : "icon"}
+            aria-pressed={pickMode}
+            onClick={() => setPickMode((v) => !v)}
+            title="取件：点面板里的元素，拿到它的选择器交给模型"
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+              <circle
+                cx="8"
+                cy="8"
+                r="3.2"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.4"
+              />
+              <line x1="8" y1="0.5" x2="8" y2="3" stroke="currentColor" strokeWidth="1.4" />
+              <line x1="8" y1="13" x2="8" y2="15.5" stroke="currentColor" strokeWidth="1.4" />
+              <line x1="0.5" y1="8" x2="3" y2="8" stroke="currentColor" strokeWidth="1.4" />
+              <line x1="13" y1="8" x2="15.5" y2="8" stroke="currentColor" strokeWidth="1.4" />
+            </svg>
+          </button>
+        </div>
       </div>
       {navError ? <div className="browser-nav-error">{navError}</div> : null}
 
       <div
-        className="browser-view"
+        className={pickMode ? "browser-view picking" : "browser-view"}
         ref={viewRef}
         onMouseDown={(e) => {
+          // 取件模式:这一下不是操作页面，而是"指给模型看"。命中测试成
+          // 一个选择器、复制进剪贴板，然后退出取件模式 —— 不往页面转发。
+          if (pickMode) {
+            e.preventDefault();
+            pickedDown.current = true; // 抑制紧跟的 mouseup
+            const p = toPage(e);
+            if (p) {
+              setNavError("");
+              void browserPick(sessionId, p.x, p.y)
+                .then((r) => {
+                  if (!r) {
+                    // 命中测试没点到元素（点在空白/留边上）——给一句反馈，
+                    // 而不是静默。
+                    setNavError("没点中任何元素，再点一次页面里的东西。");
+                    return;
+                  }
+                  // 塞进对话输入框（渲染成一个元素色块，用户还要补
+                  // "把它改成…"）；没有这条通道时退回剪贴板，至少能粘出去。
+                  if (onSendToComposer) {
+                    onSendToComposer(encodePickForComposer(r));
+                  } else {
+                    void navigator.clipboard?.writeText(r.selector).catch(() => {});
+                  }
+                })
+                // 别再静默吞错 —— 之前 catch 空实现，权限没放行时点了毫无反应。
+                .catch((err) => setNavError(`取件失败：${String(err)}`));
+            }
+            // 退出取件模式 —— pickMode 的 effect 会顺手撤掉页面里的高亮框。
+            setPickMode(false);
+            return;
+          }
           // `[约束]` 必须拦掉 mousedown 的默认行为。默认行为是"把焦点移给
           // 被点的元素"，而画面区不可聚焦 —— WebKit（Tauri 在 macOS 上的
           // 引擎）会在处理器返回之后把焦点清到 body，正好把下面那句 focus()
@@ -510,6 +613,12 @@ export function BrowserPanel({
           imeRef.current?.focus();
         }}
         onMouseUp={(e) => {
+          // 取件消费掉的那次点击，抬起也一并吞掉（此刻 pickMode 可能已翻回
+          // false —— 点选时 onMouseDown 同步关掉了它，所以单看 pickMode 不够）。
+          if (pickMode || pickedDown.current) {
+            pickedDown.current = false;
+            return;
+          }
           const p = toPage(e);
           if (p) {
             flushInputs(); // 拖拽的最后一段移动要先落地，抬起的位置才对
@@ -528,11 +637,24 @@ export function BrowserPanel({
           e.preventDefault();
         }}
         onMouseMove={(e) => {
+          if (pickMode) {
+            // 取件模式不转发移动，而是把光标下的元素在页面里高亮出来。
+            const p = toPage(e);
+            if (p) {
+              hoverPos.current = { x: p.x, y: p.y };
+              scheduleHover();
+            }
+            return;
+          }
           const p = toPage(e);
           if (p) {
             pending.current.move = { x: p.x, y: p.y }; // 只留最新位置
             scheduleFlush();
           }
+        }}
+        onMouseLeave={() => {
+          // 鼠标移出画面就撤掉高亮，别把最后停的那个框留在页面上。
+          if (pickMode) void browserPickClear(sessionId).catch(() => {});
         }}
         onWheel={(e) => {
           // 两个轴都转发，不自己判断方向。macOS 上按住 shift 滚轮时

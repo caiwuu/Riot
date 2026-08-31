@@ -420,7 +420,7 @@ async fn 高层操作在真实页面上成立() {
 
     // 截图:PNG 的 base64。只验非空和能解码 —— 像素内容不该被断言，
     // 那会让用例随字体渲染的细微变化而红。
-    let shot = ops::screenshot(tab).await.expect("截图");
+    let shot = ops::screenshot(tab, false).await.expect("截图");
     assert!(
         shot.len() > 1000,
         "截图太小，可能是白屏：{} 字节",
@@ -564,7 +564,7 @@ async fn 工具层能真的驱动浏览器() {
         "要抓到加载期间的报错：{logs:?}"
     );
 
-    let shot = browser.screenshot().await.expect("截图");
+    let shot = browser.screenshot(false).await.expect("截图");
     assert!(shot.len() > 1000, "截图应当是有内容的 base64");
 
     let url = browser.current_url().await;
@@ -1617,7 +1617,7 @@ async fn 整页截图不平铺视口() {
         </body>";
     host.navigate(page).await.expect("导航");
 
-    let shot = host.screenshot().await.expect("截图");
+    let shot = host.screenshot(false).await.expect("截图");
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(shot)
         .expect("合法 base64");
@@ -1685,7 +1685,7 @@ async fn 截图体积不随屏幕密度变化() {
     for scale in [1.0_f32, 2.0] {
         host.resize(900, 1000, scale).await.expect("视口");
         host.navigate(page).await.expect("导航");
-        let shot = host.screenshot().await.expect("截图");
+        let shot = host.screenshot(false).await.expect("截图");
         // 工具那边的上限是 2_000_000 字节。留出余量:真实页面比这个测试页
         // 更花，而撞上限的表现是工具直接失败。
         assert!(

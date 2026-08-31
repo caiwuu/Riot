@@ -757,6 +757,46 @@ async fn browser_input(
     b.send_input(input).await.map_err(HostError::Browser)
 }
 
+/// 面板取件:把面板里的一个坐标命中测试成元素的选择器 + 描述，回给前端。
+///
+/// 用户在"取件"模式下点面板某处 —— 前端不把它当真实点击转发，而是调这个
+/// 拿到 selector，再交给用户/模型。坐标是视口 CSS 坐标。
+#[tauri::command]
+async fn browser_pick(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    x: f64,
+    y: f64,
+) -> HostResult<Option<browser::access::PickResult>> {
+    let b = state.panel_browser(&session_id).await?;
+    b.pick_at(x, y).await.map_err(HostError::Browser)
+}
+
+/// 取件模式下鼠标移动:把高亮框移到光标下的元素上。前端已节流。
+#[tauri::command]
+async fn browser_pick_hover(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    x: f64,
+    y: f64,
+) -> HostResult<()> {
+    let b = state.panel_browser(&session_id).await?;
+    b.pick_hover(x, y).await.map_err(HostError::Browser)
+}
+
+/// 撤掉取件高亮框（退出取件模式、鼠标离开画面、点选完成）。
+#[tauri::command]
+async fn browser_pick_clear(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+) -> HostResult<()> {
+    // 浏览器没起来也算成功:没有页面就没有要清的高亮。
+    if let Ok(b) = state.panel_browser(&session_id).await {
+        b.pick_clear().await;
+    }
+    Ok(())
+}
+
 // ── 底部终端面板 ──────────────────────────────────────
 //
 // 和浏览器面板同一条原则：面板里的操作是**用户自己**在敲，不过权限链。
@@ -1137,6 +1177,9 @@ pub fn run() {
             browser_watch_tabs,
             browser_resize,
             browser_input,
+            browser_pick,
+            browser_pick_hover,
+            browser_pick_clear,
             browser_scope_list,
             browser_scope_revoke,
             term_open,

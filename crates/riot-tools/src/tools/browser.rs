@@ -201,6 +201,16 @@ impl Tool for BrowserSnapshot {
 
 // ── 截图 ──────────────────────────────────────────────
 
+/// 截图的入参。
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
+struct ScreenshotInput {
+    /// 截图前把动画/过渡收尾、光标隐藏，让两次截图能做像素对比。
+    /// 做视觉回归、验收前后对照时开;想看动画此刻的样子就别开。默认 false。
+    #[serde(default)]
+    deterministic: bool,
+}
+
 pub struct BrowserScreenshot;
 
 #[async_trait::async_trait]
@@ -213,16 +223,22 @@ impl Tool for BrowserScreenshot {
         "给当前页面截整页的图。判断视觉效果（布局、间距、颜色、有没有错位）\
          用它；只想知道页面上有什么元素的话，BrowserSnapshot 更省。\
          截图会直接显示在界面的工具结果卡片里，用户自己看得到 —— 不要试图\
-         在回复里贴图，也不要说自己无法展示图片。"
+         在回复里贴图，也不要说自己无法展示图片。\
+         要对比改动前后（视觉回归/验收），把 deterministic 设为 true：\
+         截图前会冻结动画、隐藏光标，两张图才能干净地做像素 diff。"
             .to_owned()
     }
 
     fn input_schema(&self) -> schemars::Schema {
-        schemars::schema_for!(NoInput)
+        schemars::schema_for!(ScreenshotInput)
     }
 
-    fn describe(&self, _input: &serde_json::Value) -> String {
-        "给当前页面截图".to_owned()
+    fn describe(&self, input: &serde_json::Value) -> String {
+        if input.get("deterministic").and_then(serde_json::Value::as_bool) == Some(true) {
+            "给当前页面截图（冻结动画）".to_owned()
+        } else {
+            "给当前页面截图".to_owned()
+        }
     }
 
     fn is_read_only(&self, _input: &serde_json::Value) -> bool {
@@ -243,8 +259,10 @@ impl Tool for BrowserScreenshot {
         read_current_page()
     }
 
-    async fn call(&self, _input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
-        let full = match ctx.browser.screenshot().await {
+    async fn call(&self, input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
+        let deterministic =
+            input.get("deterministic").and_then(serde_json::Value::as_bool) == Some(true);
+        let full = match ctx.browser.screenshot(deterministic).await {
             Ok(d) => d,
             Err(e) => return ToolOutcome::failed(unavailable_hint(&e)),
         };
@@ -374,49 +392,140 @@ impl Tool for BrowserView {
     }
 
     async fn call(&self, _input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
-        let view = match ctx.browser.snapshot_marked().await {
-            Ok(v) => v,
-            Err(e) => return ToolOutcome::failed(unavailable_hint(&e)),
-        };
-        let listing = if view.listing.trim().is_empty() {
-            "页面上没有可识别的结构。可能还没导航，或者页面是空的。".to_owned()
-        } else {
-            view.listing
-        };
+        build_marked_outcome(&ctx, None).await
+    }
+}
 
-        // 纯文本模型看不了图，带框截图对它没意义 —— 退回编号清单文本
-        // （等同 BrowserSnapshot）。
-        if !ctx.vision.accepts_images() {
-            return ToolOutcome::ok_text(listing);
-        }
+/// 拍一张带编号框的视口快照，整形成给模型的结果。
+///
+/// BrowserView 用它，交互工具的 `observe: view` 也用它 —— 抽出来是因为
+/// 落盘原图、压缩给模型、超限降级回纯清单这套逻辑一字不差，两处各写一遍
+/// 迟早会漂。
+///
+/// `prefix` 是可选的前置文本：交互工具把"已点击 X"放在清单前面，让模型在
+/// 同一条结果里先看到"做了什么"、紧接着看到"现在长什么样"。
+async fn build_marked_outcome(ctx: &ToolContext, prefix: Option<&str>) -> ToolOutcome {
+    // 前置文本和正文之间空一行，读起来是两段。
+    let with_prefix = |body: String| match prefix {
+        Some(p) if !p.is_empty() => format!("{p}\n\n{body}"),
+        _ => body,
+    };
 
-        // 落盘原图给界面，压缩图给模型（同 BrowserScreenshot 那套）。
-        let raw =
-            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &view.screenshot)
-                .ok();
-        let path = match &raw {
-            Some(bytes) => stash_original(&ctx, bytes).await,
-            None => None,
-        };
-        let (data, media_type) = match raw.as_deref().and_then(super::shrink::for_model) {
-            Some(s) => (s.data, s.media_type),
-            None => (view.screenshot, riot_protocol::browser::SHOT_MEDIA_TYPE),
-        };
-        // 压完还超上限说明图不正常 —— 退回纯清单，编号本身已经够指目标。
-        if data.len() > MAX_SHOT_B64 {
-            return ToolOutcome::ok_text(listing);
-        }
+    let view = match ctx.browser.snapshot_marked().await {
+        Ok(v) => v,
+        Err(e) => return ToolOutcome::failed(unavailable_hint(&e)),
+    };
+    let listing = if view.listing.trim().is_empty() {
+        "页面上没有可识别的结构。可能还没导航，或者页面是空的。".to_owned()
+    } else {
+        view.listing
+    };
 
-        ToolOutcome::Ok {
-            model_content: ToolResultContent::MarkedImage {
-                media_type: media_type.into(),
-                data,
-                path,
-                text: listing,
-            },
-            ui_payload: None,
-            side_messages: Vec::new(),
+    // 纯文本模型看不了图，带框截图对它没意义 —— 退回编号清单文本
+    // （等同 BrowserSnapshot）。
+    if !ctx.vision.accepts_images() {
+        return ToolOutcome::ok_text(with_prefix(listing));
+    }
+
+    // 落盘原图给界面，压缩图给模型（同 BrowserScreenshot 那套）。
+    let raw =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &view.screenshot).ok();
+    let path = match &raw {
+        Some(bytes) => stash_original(ctx, bytes).await,
+        None => None,
+    };
+    let (data, media_type) = match raw.as_deref().and_then(super::shrink::for_model) {
+        Some(s) => (s.data, s.media_type),
+        None => (view.screenshot, riot_protocol::browser::SHOT_MEDIA_TYPE),
+    };
+    // 压完还超上限说明图不正常 —— 退回纯清单，编号本身已经够指目标。
+    if data.len() > MAX_SHOT_B64 {
+        return ToolOutcome::ok_text(with_prefix(listing));
+    }
+
+    ToolOutcome::Ok {
+        model_content: ToolResultContent::MarkedImage {
+            media_type: media_type.into(),
+            data,
+            path,
+            text: with_prefix(listing),
+        },
+        ui_payload: None,
+        side_messages: Vec::new(),
+    }
+}
+
+/// 动作后要不要顺带回看页面。对应交互工具的 `observe` 参数。
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Observe {
+    /// 只回一句动作结果（默认）。
+    None,
+    /// 附页面结构快照（纯文本，等同 BrowserSnapshot）。
+    Snapshot,
+    /// 附带编号框的视口截图（等同 BrowserView）。
+    View,
+}
+
+fn observe_mode(input: &serde_json::Value) -> Observe {
+    match input.get("observe").and_then(serde_json::Value::as_str) {
+        Some("snapshot") => Observe::Snapshot,
+        Some("view") => Observe::View,
+        _ => Observe::None,
+    }
+}
+
+/// 读交互工具可选的 `then_wait` 嵌套条件 + 超时。没给、空对象、或字段都为空
+/// 时返回 `None`（就是"不等待"）。
+///
+/// 复用 [`wait_condition`]：`then_wait` 的字段名和 BrowserWaitFor 完全一致，
+/// 只是套在一层对象里 —— 同一个解析器喂不同的 JSON 节点即可，不另写一份。
+fn then_wait_condition(input: &serde_json::Value) -> Option<(WaitCondition, u64)> {
+    let tw = input.get("then_wait")?;
+    let cond = wait_condition(tw)?;
+    let timeout = tw
+        .get("timeout_ms")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(10_000)
+        // 和 BrowserWaitFor 同一个上限:一次等待挂十分钟只会拖垮整轮。
+        .min(120_000);
+    Some((cond, timeout))
+}
+
+/// 交互动作成功后的收尾:可选地等一个条件、可选地回看页面，拼成一条结果。
+///
+/// 这是"方向一"省回合的核心 —— 把点击/输入 → 等结果渲染 → 再看页面这
+/// 三步压进一次工具调用。
+///
+/// `[约束]` 动作**本身已经成功**了。所以 then_wait 超时、或回看时快照失败，
+/// 都只是"少了后半段信息"，附一句说明即可，绝不能把整条结果翻成失败 ——
+/// 那会让模型以为动作没做成，重来一遍，反而多打一次。唯一的例外是等待
+/// 期间浏览器整个没了（Unavailable）:那之后回看也没有意义，如实报错。
+async fn finish_interaction(
+    ctx: &ToolContext,
+    input: &serde_json::Value,
+    action_msg: String,
+) -> ToolOutcome {
+    let mut msg = action_msg;
+
+    if let Some((cond, timeout)) = then_wait_condition(input) {
+        match ctx.browser.wait_for(cond, timeout).await {
+            Ok(note) => msg = format!("{msg}\n{note}"),
+            Err(InteractError::Unavailable(u)) => {
+                return ToolOutcome::failed(format!("{msg}\n随后等待时：{}", unavailable_hint(&u)));
+            }
+            // 超时/目标类失败:动作做了，只是没等到 —— 附上说明，继续回看。
+            Err(InteractError::Target(note)) => msg = format!("{msg}\n{note}"),
         }
+    }
+
+    match observe_mode(input) {
+        Observe::None => ToolOutcome::ok_text(msg),
+        Observe::Snapshot => match ctx.browser.snapshot().await {
+            Ok(s) if s.trim().is_empty() => ToolOutcome::ok_text(msg),
+            Ok(s) => ToolOutcome::ok_text(format!("{msg}\n\n当前页面结构：\n{s}")),
+            Err(e) => ToolOutcome::ok_text(format!("{msg}\n（顺带回看页面结构失败：{e}）")),
+        },
+        Observe::View => build_marked_outcome(ctx, Some(&msg)).await,
     }
 }
 
@@ -478,6 +587,409 @@ impl Tool for BrowserConsole {
     }
 }
 
+// ── 性能 ──────────────────────────────────────────────
+
+/// 在页面里跑的性能采集脚本。读导航计时 + 用 buffered PerformanceObserver
+/// 收 LCP/CLS，短暂观察一小段再返回。
+///
+/// `[约束]` 全程 try/catch 包住:老页面、非常规文档可能没有某些 entry 类型，
+/// 缺哪个就少哪个字段，绝不能让整段脚本抛异常 —— 那会被 evaluate 当成
+/// "模型脚本写错了"抛回来，而这脚本是我们自己发的。
+///
+/// LCP/CLS 只有 PerformanceObserver 的 `buffered: true` 能把加载期间already
+/// 发生的补报回来;`getEntriesByType` 对这两类拿不全。观察窗 600ms 是在
+/// "等 LCP 稳定"和"别让工具卡太久"之间取的折中（evaluate 有 5s 上限兜底）。
+const PERF_SCRIPT: &str = r#"(async () => {
+    const out = {};
+    try {
+        const nav = performance.getEntriesByType('navigation')[0];
+        if (nav) {
+            out.ttfb_ms = Math.round(nav.responseStart);
+            out.dcl_ms = Math.round(nav.domContentLoadedEventEnd);
+            out.load_ms = Math.round(nav.loadEventEnd);
+            out.transfer_bytes = nav.transferSize || 0;
+        }
+    } catch (e) {}
+    try {
+        const fcp = performance.getEntriesByName('first-contentful-paint')[0];
+        if (fcp) out.fcp_ms = Math.round(fcp.startTime);
+    } catch (e) {}
+    await new Promise(resolve => {
+        let lcp = 0, cls = 0;
+        const obs = [];
+        try {
+            const lo = new PerformanceObserver(l => { for (const e of l.getEntries()) lcp = Math.max(lcp, e.startTime); });
+            lo.observe({ type: 'largest-contentful-paint', buffered: true });
+            obs.push(lo);
+        } catch (e) {}
+        try {
+            const co = new PerformanceObserver(l => { for (const e of l.getEntries()) if (!e.hadRecentInput) cls += e.value; });
+            co.observe({ type: 'layout-shift', buffered: true });
+            obs.push(co);
+        } catch (e) {}
+        setTimeout(() => {
+            obs.forEach(o => { try { o.disconnect(); } catch (e) {} });
+            if (lcp) out.lcp_ms = Math.round(lcp);
+            out.cls = Math.round(cls * 1000) / 1000;
+            resolve();
+        }, 600);
+    });
+    try {
+        const res = performance.getEntriesByType('resource');
+        out.resource_count = res.length;
+        out.slowest = res.map(r => ({ url: r.name, ms: Math.round(r.duration), bytes: r.transferSize || 0 }))
+            .sort((a, b) => b.ms - a.ms).slice(0, 5);
+    } catch (e) {}
+    return out;
+})()"#;
+
+pub struct BrowserPerf;
+
+#[async_trait::async_trait]
+impl Tool for BrowserPerf {
+    fn name(&self) -> &'static str {
+        "BrowserPerf"
+    }
+
+    fn prompt(&self, _ctx: &PromptContext) -> String {
+        "测当前页面的性能:Core Web Vitals（LCP 最大内容绘制、累积布局偏移、\
+         FCP 首次内容绘制）加 TTFB 首字节、DOM 就绪、load 时间、传输字节和\
+         最慢的几个资源，各带好/一般/差的评级。会观察约 0.6 秒再返回。\
+         用户说页面慢、卡时先用它定位是加载慢、渲染慢还是某个资源拖后腿。"
+            .to_owned()
+    }
+
+    fn input_schema(&self) -> schemars::Schema {
+        schemars::schema_for!(NoInput)
+    }
+
+    fn describe(&self, _input: &serde_json::Value) -> String {
+        "测量页面性能指标".to_owned()
+    }
+
+    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        // 只读性能计数器，不改页面。
+        true
+    }
+
+    fn check_permissions(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &PermissionContext,
+    ) -> PermissionResult {
+        read_current_page()
+    }
+
+    async fn call(&self, _input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
+        match ctx.browser.evaluate(PERF_SCRIPT).await {
+            Ok(raw) => ToolOutcome::ok_text(format_perf(&raw)),
+            Err(e) => ToolOutcome::failed(interact_hint(e)),
+        }
+    }
+}
+
+/// 把性能脚本回来的 JSON 整形成给模型的报告。解析不了就原样返回 ——
+/// 那通常意味着页面还没加载，原文本身已经说明问题。
+fn format_perf(raw: &str) -> String {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return format!("性能数据：{raw}");
+    };
+    let ms = |k: &str| v.get(k).and_then(serde_json::Value::as_f64);
+    let mut lines = vec!["页面性能（观察约 0.6s）：".to_owned()];
+
+    // Core Web Vitals 带评级。阈值用 web.dev 的通行标准。
+    if let Some(lcp) = ms("lcp_ms") {
+        lines.push(format!("LCP  {lcp:.0} ms  {}", rate(lcp, 2500.0, 4000.0)));
+    }
+    if let Some(cls) = ms("cls") {
+        lines.push(format!("CLS  {cls:.3}  {}", rate(cls, 0.1, 0.25)));
+    }
+    if let Some(fcp) = ms("fcp_ms") {
+        lines.push(format!("FCP  {fcp:.0} ms  {}", rate(fcp, 1800.0, 3000.0)));
+    }
+    if let Some(ttfb) = ms("ttfb_ms") {
+        lines.push(format!("TTFB {ttfb:.0} ms  {}", rate(ttfb, 800.0, 1800.0)));
+    }
+    if let Some(dcl) = ms("dcl_ms") {
+        lines.push(format!("DOMContentLoaded {dcl:.0} ms"));
+    }
+    if let Some(load) = ms("load_ms") {
+        lines.push(format!("load {load:.0} ms"));
+    }
+    if let (Some(bytes), Some(count)) = (ms("transfer_bytes"), ms("resource_count")) {
+        lines.push(format!(
+            "传输 {} KB，资源 {count:.0} 个",
+            (bytes / 1024.0).round() as i64
+        ));
+    }
+
+    if let Some(slowest) = v.get("slowest").and_then(serde_json::Value::as_array) {
+        let rows: Vec<String> = slowest
+            .iter()
+            .filter_map(|r| {
+                let url = r.get("url").and_then(serde_json::Value::as_str)?;
+                let ms = r.get("ms").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+                let kb = r.get("bytes").and_then(serde_json::Value::as_f64).unwrap_or(0.0) / 1024.0;
+                Some(format!("  {ms:.0} ms  {kb:.0} KB  {url}"))
+            })
+            .collect();
+        if !rows.is_empty() {
+            lines.push("最慢资源：".to_owned());
+            lines.extend(rows);
+        }
+    }
+
+    if lines.len() == 1 {
+        // 一个指标都没取到:多半是还没导航，或页面不支持 Performance API。
+        return format!(
+            "没取到性能指标。可能页面还没加载完，或者不是常规网页。原始数据：{raw}"
+        );
+    }
+    lines.join("\n")
+}
+
+/// 一个指标落在"好 / 一般 / 差"哪一档。`good` 和 `poor` 是两条阈值线，
+/// 越小越好（LCP/CLS/FCP/TTFB 都是这个方向）。
+fn rate(value: f64, good: f64, poor: f64) -> &'static str {
+    if value <= good {
+        "良好"
+    } else if value <= poor {
+        "一般"
+    } else {
+        "差"
+    }
+}
+
+// ── 源码映射 ──────────────────────────────────────────
+
+/// 只定位一个元素的入参（ref/selector/text 三选一），不带别的动作字段。
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
+struct LocateInput {
+    /// 元素编号，来自 BrowserSnapshot 行首的 [n]。
+    #[serde(default)]
+    r#ref: Option<u32>,
+    /// CSS 选择器。
+    #[serde(default)]
+    selector: Option<String>,
+    /// 可见文本。
+    #[serde(default)]
+    text: Option<String>,
+}
+
+pub struct BrowserSourceOf;
+
+#[async_trait::async_trait]
+impl Tool for BrowserSourceOf {
+    fn name(&self) -> &'static str {
+        "BrowserSourceOf"
+    }
+
+    fn prompt(&self, _ctx: &PromptContext) -> String {
+        "把页面上的一个元素映射回源码:组件名 + 文件:行。定位方式同 BrowserClick——\
+         ref（BrowserSnapshot 行首的 [n]）、selector、text 给一个。\
+         用户指着页面某处说「改这个」时，用它直接定位到要改的代码，\
+         省得在项目里靠文字猜是哪段。\
+         只有开发构建（React/Vue dev）保留了源码位置;生产构建里调试信息被抹了，\
+         那时最多给到组件名或明确说没有。"
+            .to_owned()
+    }
+
+    fn input_schema(&self) -> schemars::Schema {
+        schemars::schema_for!(LocateInput)
+    }
+
+    fn describe(&self, input: &serde_json::Value) -> String {
+        match target_from_input(input) {
+            Some(t) => format!("查{}的源码", t.describe()),
+            None => "查元素对应的源码".to_owned(),
+        }
+    }
+
+    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+
+    async fn validate_input(
+        &self,
+        input: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<(), ValidationError> {
+        require_target(input)
+    }
+
+    fn check_permissions(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &PermissionContext,
+    ) -> PermissionResult {
+        read_current_page()
+    }
+
+    async fn call(&self, input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
+        let Some(t) = target_from_input(&input) else {
+            return ToolOutcome::failed("要查哪个元素:给 ref、selector 或 text 之一。");
+        };
+        match ctx.browser.source_of(t).await {
+            Ok(msg) => ToolOutcome::ok_text(msg),
+            Err(e) => ToolOutcome::failed(interact_hint(e)),
+        }
+    }
+}
+
+// ── 旁观另一个标签页 ─────────────────────────────────────
+
+/// 读另一个标签页的入参。
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
+struct ReadTabInput {
+    /// 要读的标签页号，来自 BrowserTabs 的 list。
+    tab: u32,
+}
+
+pub struct BrowserReadTab;
+
+#[async_trait::async_trait]
+impl Tool for BrowserReadTab {
+    fn name(&self) -> &'static str {
+        "BrowserReadTab"
+    }
+
+    fn prompt(&self, _ctx: &PromptContext) -> String {
+        "读另一个标签页的结构，但**不切走**用户当前看的那一页 —— 用于并行\
+         研究、对比多个页面。tab 是 BrowserTabs 的 list 里的标签页号。\
+         回的是纯文本快照，不带可点击编号:要真正操作某一页，先用 BrowserTabs \
+         切过去（点击/输入只作用于当前活动页，那是「你和用户看同一页」的约定）。"
+            .to_owned()
+    }
+
+    fn input_schema(&self) -> schemars::Schema {
+        schemars::schema_for!(ReadTabInput)
+    }
+
+    fn describe(&self, input: &serde_json::Value) -> String {
+        match input.get("tab").and_then(serde_json::Value::as_u64) {
+            Some(n) => format!("读标签页 [{n}] 的结构"),
+            None => "读另一个标签页".to_owned(),
+        }
+    }
+
+    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+
+    fn check_permissions(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &PermissionContext,
+    ) -> PermissionResult {
+        read_current_page()
+    }
+
+    async fn validate_input(
+        &self,
+        input: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<(), ValidationError> {
+        match input.get("tab").and_then(serde_json::Value::as_u64) {
+            Some(_) => Ok(()),
+            None => Err(ValidationError::rejected("缺少标签页号 tab。")),
+        }
+    }
+
+    async fn call(&self, input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
+        let Some(tab) = input
+            .get("tab")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+        else {
+            return ToolOutcome::failed("缺少标签页号 tab。");
+        };
+        match ctx.browser.snapshot_tab(tab).await {
+            Ok(s) if s.trim().is_empty() => {
+                ToolOutcome::ok_text(format!("标签页 [{tab}] 上没有可识别的结构。"))
+            }
+            Ok(s) => ToolOutcome::ok_text(format!(
+                "标签页 [{tab}]（旁观，未切走当前页）：\n{s}"
+            )),
+            Err(e) => ToolOutcome::failed(interact_hint(e)),
+        }
+    }
+}
+
+// ── 导出 HAR ──────────────────────────────────────────
+
+pub struct BrowserHar;
+
+#[async_trait::async_trait]
+impl Tool for BrowserHar {
+    fn name(&self) -> &'static str {
+        "BrowserHar"
+    }
+
+    fn prompt(&self, _ctx: &PromptContext) -> String {
+        "把抓到的网络请求导成一个 HAR 文件（HTTP Archive）—— 可以拖进 Chrome \
+         DevTools 的 Network 面板（右键 → Import HAR）或任何 HAR 查看器里分析。\
+         含每条请求的方法/URL/头/状态/大小/时间，不含响应体（要看某条响应体用 \
+         BrowserNetwork 的 detail）。和抓包同理:先调一次开始累积、刷新或操作页面\
+         产生流量，再导出。"
+            .to_owned()
+    }
+
+    fn input_schema(&self) -> schemars::Schema {
+        schemars::schema_for!(NoInput)
+    }
+
+    fn describe(&self, _input: &serde_json::Value) -> String {
+        "导出网络请求为 HAR".to_owned()
+    }
+
+    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+
+    fn check_permissions(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &PermissionContext,
+    ) -> PermissionResult {
+        read_current_page()
+    }
+
+    async fn call(&self, _input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
+        let har = match ctx.browser.network(NetQuery::Har).await {
+            Ok(h) => h,
+            Err(e) => return ToolOutcome::failed(interact_hint(e)),
+        };
+        // 数一下条数:0 条多半是刚开始累积，别写一个空文件误导用户。
+        let count = serde_json::from_str::<serde_json::Value>(&har)
+            .ok()
+            .and_then(|v| v["log"]["entries"].as_array().map(Vec::len))
+            .unwrap_or(0);
+        if count == 0 {
+            return ToolOutcome::ok_text(
+                "还没抓到网络请求。先调一次这个工具开始累积，再刷新或操作页面\
+                 产生流量，然后再导出。",
+            );
+        }
+
+        let path = ctx
+            .artifacts_dir
+            .join(format!("network-{}.har", ctx.tool_use_id.as_str()));
+        match ctx.fs.write(&path, har.as_bytes()).await {
+            Ok(()) => ToolOutcome::ok_text(format!(
+                "已导出 {count} 条请求到 {}\n用 Chrome DevTools 的 Network 面板\
+                 （右键 → Import HAR）或任何 HAR 查看器打开分析。",
+                path.display()
+            )),
+            // 写不进也别把整条 HAR 塞进上下文（可能几百 KB）——如实说写失败。
+            Err(e) => ToolOutcome::failed(format!(
+                "抓到了 {count} 条请求，但写 HAR 文件失败：{e}"
+            )),
+        }
+    }
+}
+
 // ── 点击 ──────────────────────────────────────────────
 
 /// 点击的入参。三种定位方式给一个即可（优先级 ref > selector > text）。
@@ -499,6 +1011,40 @@ struct ClickInput {
     /// 右键（触发页面的上下文菜单）。默认左键。
     #[serde(default)]
     right: bool,
+    /// 动作后等这个条件成立再返回，省一次单独的 BrowserWaitFor。
+    #[serde(default)]
+    then_wait: Option<ThenWait>,
+    /// 动作后顺带回看页面，省一次单独的快照调用：`"snapshot"` 附页面结构、
+    /// `"view"` 附带编号框的视口截图，默认只回一句结果。
+    #[serde(default)]
+    observe: Option<String>,
+}
+
+/// 交互工具可选的"动作后等待"条件。字段和 BrowserWaitFor 一致，恰好给一个。
+///
+/// 嵌在动作入参里，是为了把"点完 → 等结果渲染出来"合成一次调用 ——
+/// 否则模型点一下、再单独 BrowserWaitFor 一次，凭空多一个回合。
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
+struct ThenWait {
+    /// 等这个 CSS 选择器匹配到元素（出现）。
+    #[serde(default)]
+    selector: Option<String>,
+    /// 等这个 CSS 选择器不再匹配（消失）。
+    #[serde(default)]
+    selector_gone: Option<String>,
+    /// 等页面里出现这段可见文本。
+    #[serde(default)]
+    text: Option<String>,
+    /// 等当前地址包含这个子串。
+    #[serde(default)]
+    url_contains: Option<String>,
+    /// 等网络空闲（SPA 数据加载完）。
+    #[serde(default)]
+    network_idle: bool,
+    /// 最多等多少毫秒。默认 10000。
+    #[serde(default)]
+    timeout_ms: Option<u64>,
 }
 
 pub struct BrowserClick;
@@ -514,7 +1060,10 @@ impl Tool for BrowserClick {
          行首的 [n]，最省）、selector（CSS 选择器）、text（可见文字）。\
          double=true 双击、right=true 右键。目标在视口外会自动滚进视野；\
          点完会报告页面有没有因此跳转。用 ref 报错说编号失效时，\
-         重新 BrowserSnapshot，或改用 selector/text。"
+         重新 BrowserSnapshot，或改用 selector/text。\
+         点击常会触发加载或跳转:与其点完再单独等待、再单独看页面，不如带上 \
+         then_wait（等一个条件成立）和 observe（\"snapshot\" 附结构、\"view\" \
+         附带框截图）—— 一次调用拿到结果，省两个回合。"
             .to_owned()
     }
 
@@ -572,7 +1121,7 @@ impl Tool for BrowserClick {
             ctx.browser.click(t).await
         };
         match result {
-            Ok(msg) => ToolOutcome::ok_text(msg),
+            Ok(msg) => finish_interaction(&ctx, &input, msg).await,
             Err(e) => ToolOutcome::failed(interact_hint(e)),
         }
     }
@@ -598,6 +1147,13 @@ struct TypeInput {
     /// 输入完是否按回车（提交表单、触发搜索）。默认不按。
     #[serde(default)]
     submit: bool,
+    /// 输入后等这个条件成立再返回，省一次单独的 BrowserWaitFor。
+    #[serde(default)]
+    then_wait: Option<ThenWait>,
+    /// 输入后顺带回看页面：`"snapshot"` 附页面结构、`"view"` 附带编号框的
+    /// 视口截图，默认只回一句结果。
+    #[serde(default)]
+    observe: Option<String>,
 }
 
 pub struct BrowserType;
@@ -612,7 +1168,9 @@ impl Tool for BrowserType {
         "往输入框里填文本：点击聚焦、替换原有内容。定位方式给一个:ref \
          （BrowserSnapshot 行首的 [n]）、selector（CSS 选择器）、target_text \
          （输入框附近的可见文字）。submit 为 true 时填完按一次回车 —— \
-         搜索框、单行表单用它能省一次调用。目标不是输入框时会明确报错。"
+         搜索框、单行表单用它能省一次调用。目标不是输入框时会明确报错。\
+         submit 触发搜索/跳转时，配 then_wait（等结果出现或网络空闲）和 \
+         observe（\"view\" / \"snapshot\"）一次拿到结果页，省两个回合。"
             .to_owned()
     }
 
@@ -671,7 +1229,7 @@ impl Tool for BrowserType {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         match ctx.browser.type_text(t, text, submit).await {
-            Ok(msg) => ToolOutcome::ok_text(msg),
+            Ok(msg) => finish_interaction(&ctx, &input, msg).await,
             Err(e) => ToolOutcome::failed(interact_hint(e)),
         }
     }
@@ -702,6 +1260,186 @@ fn type_target(input: &serde_json::Value) -> Option<Target> {
         return Some(Target::Text(t.to_owned()));
     }
     None
+}
+
+// ── 填表 ──────────────────────────────────────────────
+
+/// 表单一个字段的入参:定位（ref/selector/target_text，同 BrowserType）+ 值。
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
+struct FormFieldInput {
+    /// 字段编号，来自 BrowserSnapshot 行首的 [n]。
+    #[serde(default)]
+    r#ref: Option<u32>,
+    /// 字段的 CSS 选择器。
+    #[serde(default)]
+    selector: Option<String>,
+    /// 字段附近的可见文字（标签、占位符）。
+    #[serde(default)]
+    target_text: Option<String>,
+    /// 要填入这个字段的值。会替换原有内容。
+    value: String,
+}
+
+/// 提交目标:点它来提交表单（ref/selector/text 三选一，同 BrowserClick）。
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
+struct SubmitTargetInput {
+    #[serde(default)]
+    r#ref: Option<u32>,
+    #[serde(default)]
+    selector: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+/// 填表的入参:一组字段，外加可选的提交目标与动作后等待/回看。
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
+struct FillFormInput {
+    /// 要填的字段，按给出的顺序逐个填入。
+    fields: Vec<FormFieldInput>,
+    /// 全部填完后点这个元素提交（可选）。不给就只填不提交。
+    #[serde(default)]
+    submit: Option<SubmitTargetInput>,
+    /// 提交后等这个条件成立再返回（配合 submit 用，等结果页）。
+    #[serde(default)]
+    then_wait: Option<ThenWait>,
+    /// 提交后顺带回看：`"snapshot"` 附结构、`"view"` 附带框截图。
+    #[serde(default)]
+    observe: Option<String>,
+}
+
+pub struct BrowserFillForm;
+
+#[async_trait::async_trait]
+impl Tool for BrowserFillForm {
+    fn name(&self) -> &'static str {
+        "BrowserFillForm"
+    }
+
+    fn prompt(&self, _ctx: &PromptContext) -> String {
+        "一次填完一整张表单，而不是每个字段一次 BrowserType。fields 里每项给\
+         定位（ref / selector / target_text 之一）和 value，按顺序逐个填入。\
+         可选 submit 给一个提交按钮的定位（ref / selector / text），填完自动点它；\
+         再配 then_wait / observe 就能一次调用走完「填表 → 提交 → 看结果页」。\
+         登录、搜索、结算这类多字段表单用它，能把好几个回合压成一个。\
+         中途某个字段失败会明确报第几个坏了、前面几个已经填进去了。"
+            .to_owned()
+    }
+
+    fn input_schema(&self) -> schemars::Schema {
+        schemars::schema_for!(FillFormInput)
+    }
+
+    fn describe(&self, input: &serde_json::Value) -> String {
+        let n = input
+            .get("fields")
+            .and_then(|v| v.as_array())
+            .map_or(0, Vec::len);
+        let submit = input.get("submit").is_some_and(|v| !v.is_null());
+        if submit {
+            format!("填写 {n} 个字段并提交")
+        } else {
+            format!("填写 {n} 个字段")
+        }
+    }
+
+    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        false
+    }
+
+    async fn validate_input(
+        &self,
+        input: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<(), ValidationError> {
+        let Some(fields) = input.get("fields").and_then(|v| v.as_array()) else {
+            return Err(ValidationError::rejected("缺少 fields。"));
+        };
+        if fields.is_empty() {
+            return Err(ValidationError::rejected("fields 不能为空。"));
+        }
+        for (i, f) in fields.iter().enumerate() {
+            if type_target(f).is_none() {
+                return Err(ValidationError::rejected(format!(
+                    "第 {} 个字段没给定位:ref / selector / target_text 之一。",
+                    i + 1
+                )));
+            }
+            if f.get("value").and_then(|v| v.as_str()).is_none() {
+                return Err(ValidationError::rejected(format!(
+                    "第 {} 个字段缺少 value。",
+                    i + 1
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn check_permissions(
+        &self,
+        _input: &serde_json::Value,
+        ctx: &PermissionContext,
+    ) -> PermissionResult {
+        interact_consent(ctx)
+    }
+
+    async fn call(&self, input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
+        let Some(fields) = input.get("fields").and_then(|v| v.as_array()) else {
+            return ToolOutcome::failed("缺少 fields。");
+        };
+
+        let mut filled = 0usize;
+        for (i, field) in fields.iter().enumerate() {
+            let Some(t) = type_target(field) else {
+                return ToolOutcome::failed(format!(
+                    "第 {} 个字段没给定位:ref / selector / target_text 之一。",
+                    i + 1
+                ));
+            };
+            let value = field.get("value").and_then(|v| v.as_str()).unwrap_or_default();
+            // 逐个字段都不 submit —— 中途按回车可能提前提交，把还没填的字段
+            // 丢在半张表上。提交统一留到最后走 submit 目标。
+            match ctx.browser.type_text(t.clone(), value, false).await {
+                Ok(_) => filled += 1,
+                Err(e) => {
+                    // 如实报第几个坏了:前面几个已经填进页面了，模型需要知道
+                    // 从哪接着来，而不是重填整张表。
+                    return ToolOutcome::failed(format!(
+                        "填到第 {} 个字段（{}）时失败：{}\n前 {} 个已填入。",
+                        i + 1,
+                        t.describe(),
+                        interact_hint(e),
+                        filled
+                    ));
+                }
+            }
+        }
+
+        let mut msg = format!("已填写 {filled} 个字段");
+        if let Some(submit) = input.get("submit").filter(|v| !v.is_null()) {
+            match target_from_input(submit) {
+                Some(t) => match ctx.browser.click(t.clone()).await {
+                    Ok(m) => msg = format!("{msg}，并{m}"),
+                    Err(e) => {
+                        return ToolOutcome::failed(format!(
+                            "{msg}，但提交（点击{}）失败：{}",
+                            t.describe(),
+                            interact_hint(e)
+                        ));
+                    }
+                },
+                None => {
+                    return ToolOutcome::failed(format!(
+                        "{msg}，但 submit 没给有效定位（ref / selector / text）。"
+                    ));
+                }
+            }
+        }
+
+        finish_interaction(&ctx, &input, msg).await
+    }
 }
 
 // ── 按键 ──────────────────────────────────────────────
@@ -1061,7 +1799,9 @@ impl Tool for BrowserHover {
             return ToolOutcome::failed("要悬停到哪个:给 ref、selector 或 text 之一。");
         };
         match ctx.browser.act(Action::Hover(t)).await {
-            Ok(msg) => ToolOutcome::ok_text(msg),
+            // 悬停常用来引出 tooltip / 悬浮菜单 —— then_wait 等它出现、
+            // observe 顺带看一眼，正是这个工具的高频后续。
+            Ok(msg) => finish_interaction(&ctx, &input, msg).await,
             Err(e) => ToolOutcome::failed(interact_hint(e)),
         }
     }
@@ -2603,11 +3343,125 @@ impl Tool for BrowserCrawl {
     }
 }
 
+// ── 请用户接管 ─────────────────────────────────────────
+
+/// 接管握手的入参。
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
+struct HandoffInput {
+    /// 要请用户在浏览器面板里亲自完成的事，一句话（如"登录你的账号"、
+    /// "输入短信验证码"）。会原样显示在给用户的卡片上。
+    prompt: String,
+}
+
+pub struct BrowserHandoff;
+
+#[async_trait::async_trait]
+impl Tool for BrowserHandoff {
+    fn name(&self) -> &'static str {
+        "BrowserHandoff"
+    }
+
+    fn prompt(&self, _ctx: &PromptContext) -> String {
+        "把当前这一步交给用户在浏览器面板里亲自做 —— 用于只有他本人能完成的\
+         环节:登录、过验证码/二次验证、确认支付、点必须真人点的确认框。\
+         对话里会出现一张卡，用户在面板里做完、点「允许」，你才继续；\
+         他也可以拒绝（放弃这条路）。\
+         prompt 写清楚要他做什么。用之前通常你已经 BrowserView/BrowserSnapshot \
+         看到卡在了登录墙之类的地方。\
+         他做完之后页面已经变了 —— 重新 BrowserSnapshot / BrowserView 再继续，\
+         别沿用之前的编号。\
+         这不是要权限，是请真人操作;所以无人值守时它会失败（没有人能接管），\
+         那时改用别的路子或如实告诉用户卡在哪。"
+            .to_owned()
+    }
+
+    fn input_schema(&self) -> schemars::Schema {
+        schemars::schema_for!(HandoffInput)
+    }
+
+    fn describe(&self, input: &serde_json::Value) -> String {
+        let what = input.get("prompt").and_then(|v| v.as_str()).unwrap_or("接管操作");
+        format!("请用户操作：{what}")
+    }
+
+    /// 模型这一步不碰页面，是把控制权交给用户 —— 从模型视角是只读的。
+    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+
+    /// 不能并行:用户接管期间会改页面状态（登录、跳转），别的浏览器工具
+    /// 这时跑就落在一个正在变的页面上。和 AskUserQuestion 同理。
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        false
+    }
+
+    fn result_budget(&self) -> ResultBudget {
+        // 用户点完就继续，结果只有一句，落盘没意义。
+        ResultBudget::Unlimited
+    }
+
+    async fn validate_input(
+        &self,
+        input: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<(), ValidationError> {
+        match input.get("prompt").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => Ok(()),
+            _ => Err(ValidationError::rejected(
+                "prompt 不能为空:写清楚要用户在面板里做什么。",
+            )),
+        }
+    }
+
+    /// 永远 Ask —— 这个工具的全部意义就是停下来等用户在面板里操作。
+    ///
+    /// `[约束]` 理由用 [`DecisionReason::UserChoice`]，和 AskUserQuestion 同一个
+    /// 暗号:它豁免无人值守的"全部放行"收敛（那种模式下没有真人能接管，
+    /// 于是超时按拒绝处理，模型得知"没人接管"而不是收到一个假的成功）。
+    /// 写成别的理由，卡片会在 bypass / Unattended 下消失，模型拿一个空结果
+    /// 继续，以为用户已经登录了。
+    fn check_permissions(
+        &self,
+        input: &serde_json::Value,
+        _ctx: &PermissionContext,
+    ) -> PermissionResult {
+        let what = input
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("完成一步需要你本人操作的动作");
+        PermissionResult::Ask {
+            message: format!("请在浏览器面板里完成：{what}\n做完后点「允许」继续。"),
+            suggestions: Vec::new(),
+            reason: DecisionReason::UserChoice { remembered: false },
+        }
+    }
+
+    async fn call(&self, input: serde_json::Value, _ctx: ToolContext) -> ToolOutcome {
+        // 走到 call = 用户点了「允许」，也就是"我做完了"。拒绝的话根本不会到这。
+        let what = input
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        ToolOutcome::ok_text(format!(
+            "用户已在面板里完成操作（{what}）。页面状态很可能变了 —— \
+             先用 BrowserSnapshot 或 BrowserView 重新看当前页面，再继续，\
+             不要沿用之前的元素编号。"
+        ))
+    }
+}
+
 // ── 共用 ──────────────────────────────────────────────
 
 /// 会问一次权限的交互工具。滚动不在里面（它免确认），所以"总是允许"
-/// 的建议也只覆盖这三个。
-const INTERACT_TOOLS: [&str; 3] = ["BrowserClick", "BrowserType", "BrowserKey"];
+/// 的建议覆盖这几个。填表和输入同级（都往页面里写内容），一并纳入 ——
+/// 否则用户授权了"输入"、填表却又单独弹一次，是同一种动作问两遍。
+const INTERACT_TOOLS: [&str; 4] = [
+    "BrowserClick",
+    "BrowserType",
+    "BrowserKey",
+    "BrowserFillForm",
+];
 
 /// 从入参里解析出定位目标（ref > selector > text）。三个都没有是 `None`。
 fn target_from_input(input: &serde_json::Value) -> Option<Target> {
@@ -2881,6 +3735,14 @@ pub fn tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(BrowserFuzz),
         Arc::new(BrowserCrawl),
         Arc::new(BrowserReport),
+        // 追加在末尾（prompt cache 前缀稳定性，同 builtin() 的规矩）——
+        // 源码里这些工具和同类放在一起，注册顺序另论。
+        Arc::new(BrowserFillForm),
+        Arc::new(BrowserPerf),
+        Arc::new(BrowserHandoff),
+        Arc::new(BrowserSourceOf),
+        Arc::new(BrowserReadTab),
+        Arc::new(BrowserHar),
     ]
 }
 
@@ -3233,6 +4095,108 @@ mod tests {
                 "type text:邮箱 \"a@b.c\" submit=false".to_owned(),
             ]
         );
+    }
+
+    /// then_wait 把"点完再单独等"折叠进同一次调用 —— 一次工具调用里
+    /// 先 click、紧接着 wait，省掉模型单独发一次 BrowserWaitFor 的回合。
+    #[tokio::test]
+    async fn 点击带_then_wait_折叠等待() {
+        let b = interactive(Ok("已点击 元素 [3]"));
+        let out = BrowserClick
+            .call(
+                serde_json::json!({
+                    "ref": 3,
+                    "then_wait": { "network_idle": true, "timeout_ms": 5000 }
+                }),
+                ctx_browser(Arc::clone(&b), FakeVision::Direct, Arc::new(NullFs)),
+            )
+            .await;
+        assert!(matches!(out, ToolOutcome::Ok { .. }), "应当成功：{out:?}");
+        let calls = b.calls.lock().expect("calls");
+        assert_eq!(
+            *calls,
+            vec!["click ref:3".to_owned(), "wait NetworkIdle 5000".to_owned()],
+            "点击和等待应当在同一次工具调用里先后发生"
+        );
+    }
+
+    /// 填表:按顺序逐个字段 type、最后点提交 —— 整张表一次调用完成，
+    /// 每个字段都不 submit（中途回车会把没填完的表提前交出去）。
+    #[tokio::test]
+    async fn 填表逐字段输入再提交() {
+        let b = interactive(Ok("完成"));
+        let out = BrowserFillForm
+            .call(
+                serde_json::json!({
+                    "fields": [
+                        { "selector": "#u", "value": "alice" },
+                        { "selector": "#p", "value": "secret" }
+                    ],
+                    "submit": { "selector": "#go" }
+                }),
+                ctx_browser(Arc::clone(&b), FakeVision::Direct, Arc::new(NullFs)),
+            )
+            .await;
+        let ToolOutcome::Ok {
+            model_content: ToolResultContent::Text { text },
+            ..
+        } = out
+        else {
+            panic!("应当成功：{out:?}");
+        };
+        assert!(text.contains("已填写 2 个字段"), "{text}");
+        let calls = b.calls.lock().expect("calls");
+        assert_eq!(
+            *calls,
+            vec![
+                "type sel:#u \"alice\" submit=false".to_owned(),
+                "type sel:#p \"secret\" submit=false".to_owned(),
+                "click sel:#go".to_owned(),
+            ],
+            "两个字段逐个填、最后点提交，都在一次调用里"
+        );
+    }
+
+    /// 性能工具把采集脚本回来的 JSON 整形成带评级的报告。
+    #[tokio::test]
+    async fn 性能指标整形成带评级报告() {
+        let json = r#"{"ttfb_ms":210,"dcl_ms":800,"load_ms":1500,"transfer_bytes":358400,"fcp_ms":900,"lcp_ms":1234,"cls":0.03,"resource_count":42,"slowest":[{"url":"https://x.test/bundle.js","ms":1234,"bytes":122880}]}"#;
+        let out = BrowserPerf
+            .call(
+                serde_json::json!({}),
+                ctx_browser(interactive(Ok(json)), FakeVision::Direct, Arc::new(NullFs)),
+            )
+            .await;
+        let ToolOutcome::Ok {
+            model_content: ToolResultContent::Text { text },
+            ..
+        } = out
+        else {
+            panic!("应当成功：{out:?}");
+        };
+        assert!(text.contains("LCP  1234 ms  良好"), "{text}");
+        assert!(text.contains("CLS  0.030  良好"), "{text}");
+        assert!(text.contains("传输 350 KB，资源 42 个"), "{text}");
+        assert!(text.contains("bundle.js"), "最慢资源要列出来：{text}");
+    }
+
+    /// 采集不到指标（比如还没导航）时，不假装有数据，把原文带回。
+    #[tokio::test]
+    async fn 性能无数据时不编造() {
+        let out = BrowserPerf
+            .call(
+                serde_json::json!({}),
+                ctx_browser(interactive(Ok("{}")), FakeVision::Direct, Arc::new(NullFs)),
+            )
+            .await;
+        let ToolOutcome::Ok {
+            model_content: ToolResultContent::Text { text },
+            ..
+        } = out
+        else {
+            panic!("应当成功：{out:?}");
+        };
+        assert!(text.contains("没取到性能指标"), "{text}");
     }
 
     /// BrowserWaitFor 恰好取一个条件，超时封顶，参数原样到宿主。
@@ -3601,6 +4565,160 @@ mod tests {
             &PermissionContext::default(),
         );
         assert!(matches!(r, PermissionResult::Allow { .. }), "{r:?}");
+    }
+
+    /// 用户接管在任何模式下都必须出卡片、且理由是 UserChoice。
+    ///
+    /// 返回别的理由的话，bypass / 无人值守下卡片会被决策链收敛掉 ——
+    /// 模型拿一个空成功继续，以为用户已经登录了。
+    #[test]
+    fn 接管握手在各模式下都出卡片() {
+        use riot_protocol::permission::PermissionModeState;
+        let input = serde_json::json!({ "prompt": "登录你的账号" });
+        for mode in [
+            PermissionMode::Default,
+            PermissionMode::Plan,
+            PermissionMode::BypassPermissions,
+            PermissionMode::Unattended,
+        ] {
+            let ctx = PermissionContext {
+                mode: PermissionModeState(Some(mode)),
+                ..PermissionContext::default()
+            };
+            let r = BrowserHandoff.check_permissions(&input, &ctx);
+            assert!(
+                matches!(
+                    r,
+                    PermissionResult::Ask {
+                        reason: DecisionReason::UserChoice { .. },
+                        ..
+                    }
+                ),
+                "{mode:?} 下没有请用户接管：{r:?}"
+            );
+        }
+    }
+
+    /// 用户点了「允许」（做完了）之后，结果要提示模型重新看页面 ——
+    /// 页面已经变了，旧编号作废。
+    #[tokio::test]
+    async fn 接管完成后提示重新查看页面() {
+        let out = BrowserHandoff
+            .call(
+                serde_json::json!({ "prompt": "过一下验证码" }),
+                ctx_browser(
+                    Arc::new(FakeBrowser::default()),
+                    FakeVision::Direct,
+                    Arc::new(NullFs),
+                ),
+            )
+            .await;
+        let ToolOutcome::Ok {
+            model_content: ToolResultContent::Text { text },
+            ..
+        } = out
+        else {
+            panic!("应当成功：{out:?}");
+        };
+        assert!(text.contains("BrowserSnapshot") || text.contains("BrowserView"), "{text}");
+        assert!(text.contains("过一下验证码"), "要带上做了什么：{text}");
+    }
+
+    /// prompt 为空被校验拦下 —— 卡片上得写清楚让用户做什么。
+    #[tokio::test]
+    async fn 接管缺_prompt_被校验拦下() {
+        let ctx = ctx_browser(
+            Arc::new(FakeBrowser::default()),
+            FakeVision::Direct,
+            Arc::new(NullFs),
+        );
+        let bad = BrowserHandoff
+            .validate_input(&serde_json::json!({ "prompt": "  " }), &ctx)
+            .await;
+        assert!(bad.is_err(), "空白 prompt 不该过");
+    }
+
+    /// 源码映射:定位目标原样到宿主，宿主的结果原样回模型。
+    #[tokio::test]
+    async fn 源码映射路由到宿主() {
+        let b = interactive(Ok("组件：LoginButton\n源码：src/Login.tsx:42:5"));
+        let out = BrowserSourceOf
+            .call(
+                serde_json::json!({ "selector": "#login" }),
+                ctx_browser(Arc::clone(&b), FakeVision::Direct, Arc::new(NullFs)),
+            )
+            .await;
+        let ToolOutcome::Ok {
+            model_content: ToolResultContent::Text { text },
+            ..
+        } = out
+        else {
+            panic!("应当成功：{out:?}");
+        };
+        assert!(text.contains("src/Login.tsx:42"), "{text}");
+        assert_eq!(b.calls.lock().expect("calls")[0], "source_of sel:#login");
+    }
+
+    /// 旁观标签页:tab 号原样到宿主，结果标明是哪一页、且没切走当前页。
+    #[tokio::test]
+    async fn 旁观标签页路由到宿主() {
+        let b = interactive(Ok("[1] link 首页"));
+        let out = BrowserReadTab
+            .call(
+                serde_json::json!({ "tab": 3 }),
+                ctx_browser(Arc::clone(&b), FakeVision::Direct, Arc::new(NullFs)),
+            )
+            .await;
+        let ToolOutcome::Ok {
+            model_content: ToolResultContent::Text { text },
+            ..
+        } = out
+        else {
+            panic!("应当成功：{out:?}");
+        };
+        assert!(text.contains("标签页 [3]"), "要标明是哪一页：{text}");
+        assert_eq!(b.calls.lock().expect("calls")[0], "snapshot_tab 3");
+    }
+
+    /// HAR 导出:有请求时写文件并报条数。
+    #[tokio::test]
+    async fn har_导出写文件并报条数() {
+        let har = r#"{"log":{"version":"1.2","entries":[{"a":1},{"b":2}]}}"#;
+        let b = interactive(Ok(har));
+        // 工件目录得先存在（MemFs 和真实 fs 一样要求父目录在）——生产里
+        // 会话建会话时就建好了。
+        let fs = crate::tools::memfs::MemFs::new().with_dir("/artifacts");
+        let ctx = ctx_browser(Arc::clone(&b), FakeVision::Direct, Arc::new(fs));
+        let out = BrowserHar.call(serde_json::json!({}), ctx).await;
+        let ToolOutcome::Ok {
+            model_content: ToolResultContent::Text { text },
+            ..
+        } = out
+        else {
+            panic!("应当成功：{out:?}");
+        };
+        assert!(text.contains("已导出 2 条请求"), "{text}");
+        assert!(text.contains(".har"), "要给出文件路径：{text}");
+    }
+
+    /// 没抓到请求时不写空文件，给"先累积再导"的提示。
+    #[tokio::test]
+    async fn har_没请求时不写空文件() {
+        let har = r#"{"log":{"version":"1.2","entries":[]}}"#;
+        let out = BrowserHar
+            .call(
+                serde_json::json!({}),
+                ctx_browser(interactive(Ok(har)), FakeVision::Direct, Arc::new(NullFs)),
+            )
+            .await;
+        let ToolOutcome::Ok {
+            model_content: ToolResultContent::Text { text },
+            ..
+        } = out
+        else {
+            panic!("应当成功：{out:?}");
+        };
+        assert!(text.contains("还没抓到"), "{text}");
     }
 
     // ── 授权 scope ────────────────────────────────────

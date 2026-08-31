@@ -18,7 +18,10 @@
 export type Seg =
   | { kind: "text"; value: string }
   | { kind: "ref"; value: string }
-  | { kind: "cmd"; value: string };
+  | { kind: "cmd"; value: string }
+  // 浏览器"取件"点中的页面元素：`value` 是 CSS 选择器（发给模型的），
+  // `label` 是给用户看的短描述（色块上显示的）。发出去时只留选择器。
+  | { kind: "elem"; value: string; label: string };
 
 /** 斜杠名：字母数字、中文、冒号命名空间。名字里不含 `/`，免得把 /usr/bin 认成命令。 */
 const SLASH_CH = String.raw`[\w\p{L}\p{N}:-]`;
@@ -45,6 +48,14 @@ export function segsToPrompt(segs: Seg[]): string {
     .map((s, i) => {
       if (s.kind === "text") return s.value;
       if (s.kind === "cmd") return `/${s.value}`;
+      // 元素色块:发出去带一个可回认的标记 —— 气泡里据此重新画成同一个
+      // 绿色色块（见 Transcript 的 ELEM_MARK_RE）。选择器用反引号裹（选择器
+      // 里不会有反引号，最稳），友好描述用【】裹（先滤掉【】和反引号免得
+      // 打架）。模型看到的是"【描述】`选择器`"，一眼能懂是哪个元素、选择器多少。
+      if (s.kind === "elem") {
+        const label = s.label.replace(/[【】`]/g, "").trim();
+        return `【${label}】\`${s.value}\``;
+      }
       const next = segs[i + 1];
       return mentionToken(s.value, next?.kind === "text" ? next.value : "");
     })
@@ -184,17 +195,65 @@ export function extractMentionSpans(text: string): MentionSpan[] {
  * `segsToPrompt`）。不还原的话，用户看到的是一句夹着裸路径的话，而且
  * 再发一次会连块带标记发出两份同样的引用。
  */
+/** 正文里一段"页面元素"标记 `【描述】\`选择器\``（见 [`segsToPrompt`]）。 */
+export interface ElemSpan {
+  label: string;
+  selector: string;
+  index: number;
+  length: number;
+}
+
+/**
+ * 从正文里挑出元素标记，好把色块画/放回原位。
+ *
+ * `[约束]` 只有这一份实现。输入框放回（[`promptToSegs`]）和气泡渲染
+ * （Transcript）都用它 —— 两处各写一份正则，改了标记格式只会有一边跟上，
+ * 表现是"发出去能显示、撤回回来变裸文字"（真出过）。
+ *
+ * 正则每次新建:带 `g` 的正则有 `lastIndex` 状态，做成模块级常量给两个
+ * 调用方共用，交错调用时会互相把游标顶掉。
+ */
+export function extractElemSpans(text: string): ElemSpan[] {
+  const re = /【([^】]*)】`([^`]+)`/g;
+  const out: ElemSpan[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    out.push({
+      label: m[1] ?? "",
+      selector: m[2] ?? "",
+      index: m.index,
+      length: m[0].length,
+    });
+  }
+  return out;
+}
+
 export function promptToSegs(text: string, refs: string[] = [], skip: string[] = []): Seg[] {
   const segs: Seg[] = [];
   const seen = new Set<string>();
+
+  // 一段普通文本 → text/ref 段（`@路径` 原位还原成引用块）。
+  const pushText = (src: string) => {
+    let last = 0;
+    for (const s of extractMentionSpans(src)) {
+      if (s.index > last) segs.push({ kind: "text", value: src.slice(last, s.index) });
+      segs.push({ kind: "ref", value: s.path });
+      seen.add(s.path);
+      last = s.index + s.length;
+    }
+    if (last < src.length) segs.push({ kind: "text", value: src.slice(last) });
+  };
+
+  // 先切出元素标记:撤回、改排队项这些"把发出去的文本放回输入框"的路径
+  // 都走这里，不还原的话色块会变成一串带【】和反引号的裸文字。
   let last = 0;
-  for (const s of extractMentionSpans(text)) {
-    if (s.index > last) segs.push({ kind: "text", value: text.slice(last, s.index) });
-    segs.push({ kind: "ref", value: s.path });
-    seen.add(s.path);
-    last = s.index + s.length;
+  for (const e of extractElemSpans(text)) {
+    if (e.index > last) pushText(text.slice(last, e.index));
+    segs.push({ kind: "elem", value: e.selector, label: e.label });
+    last = e.index + e.length;
   }
-  if (last < text.length) segs.push({ kind: "text", value: text.slice(last) });
+  if (last < text.length) pushText(text.slice(last));
+
   // 正文里没留下标记的引用（老消息、用户把标记删了）补在末尾 ——
   // 丢掉的话模型就看不到那个文件了。
   for (const r of refs) {

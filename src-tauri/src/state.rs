@@ -1467,7 +1467,7 @@ async fn browser_call(
             Ok(()) => R::Ok,
             Err(e) => host_unavailable(e.0),
         },
-        C::Screenshot => match b.screenshot().await {
+        C::Screenshot { deterministic } => match b.screenshot(deterministic).await {
             Ok(text) => R::Text { text },
             Err(e) => host_unavailable(e.0),
         },
@@ -1501,6 +1501,8 @@ async fn browser_call(
         C::Act { action } => text(b.act(action).await),
         C::Browse { nav } => text(b.browse(nav).await),
         C::Evaluate { expr } => text(b.evaluate(&expr).await),
+        C::SourceOf { target } => text(b.source_of(target).await),
+        C::SnapshotTab { tab } => text(b.snapshot_tab(tab).await),
         C::Upload { target, paths } => text(b.upload(target, paths).await),
         C::Cookies => text(b.cookies().await),
         C::Network { query } => text(b.network(query).await),

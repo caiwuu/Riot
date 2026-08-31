@@ -179,6 +179,9 @@ export function App() {
   /** 用户从终端选中、要交给模型的一段输出。塞进输入框而不是直接发送 ——
    *  他多半还要在前面补一句"这个报错怎么回事"。 */
   const [termSnippet, setTermSnippet] = useState<string | null>(null);
+  /** 用户在浏览器面板"取件"点中的元素选择器。同样塞进输入框而不是直接发 ——
+   *  他还要补一句"把它改成…"。和 termSnippet 共用 Composer 的 insertText 通道。 */
+  const [pickSnippet, setPickSnippet] = useState<string | null>(null);
   /** 最近看过的会话 id（LRU）。这些 Chat 卸不掉，切回去是显示/隐藏。 */
   const [kept, setKept] = useState<string[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(
@@ -1047,8 +1050,11 @@ export function App() {
                       }}
                       onTurnEnd={() => setChangesRev((n) => n + 1)}
                       onBusy={(b) => patchSession(s.id, { busy: b })}
-                      insertText={visible ? termSnippet : null}
-                      onInserted={() => setTermSnippet(null)}
+                      insertText={visible ? (termSnippet ?? pickSnippet) : null}
+                      onInserted={() => {
+                        setTermSnippet(null);
+                        setPickSnippet(null);
+                      }}
                     />
                   </div>
                 );
@@ -1174,6 +1180,7 @@ export function App() {
                   panel={browserPages}
                   onPanel={applyBrowserPanel}
                   onPatchTab={patchBrowserTab}
+                  onSendToComposer={setPickSnippet}
                 />
                 <ScopePanel sessionId={activeSession.id} />
               </>
