@@ -96,6 +96,26 @@ const COMMANDS: &[&str] = &[
 ];
 
 fn main() {
+    // Windows 上给**测试二进制**嵌一份 Common-Controls v6 manifest。
+    //
+    // [约束] 缺了它，`cargo test -p riot-host` 在 Windows 上一个测试都跑不到：
+    // tauri 栈（notification 插件的 Windows 后端）导入 comctl32.dll 的
+    // TaskDialogIndirect，该符号只在 v6 有，而加载器只对 manifest 里声明了
+    // v6 依赖的二进制解析 v6。正式 app 的 manifest 由下面的 tauri-build 嵌入，
+    // 但 cargo 不给测试二进制任何 manifest —— 加载器退回 v5，进程死于
+    // STATUS_ENTRYPOINT_NOT_FOUND(0xc0000139)。rustc-link-arg-tests 只作用
+    // 于测试目标，app 构建不受影响；/MANIFESTINPUT 是 MSVC 链接器语法，
+    // 按 target 门控，别的平台一个字都不发。
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        let manifest = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap())
+            .join("tests.manifest");
+        println!("cargo:rerun-if-changed={}", manifest.display());
+        println!("cargo:rustc-link-arg-tests=/MANIFEST:EMBED");
+        println!("cargo:rustc-link-arg-tests=/MANIFESTINPUT:{}", manifest.display());
+    }
+
     // 显式声明命令白名单。
     //
     // [约束] 不这么做的话，注册在 invoke_handler 里的自定义命令**默认对所有
