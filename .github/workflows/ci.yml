@@ -94,6 +94,19 @@ jobs:
       - uses: ./.github/actions/prepare-host
       - run: cargo clippy -p riot-host --all-targets -- -D warnings
       - run: cargo test -p riot-host
+      # 测试进程死于 0xc0000139（STATUS_ENTRYPOINT_NOT_FOUND）时，缺的是
+      # 哪个 DLL 的哪个符号只有导入表说了算 —— 别猜（win-sandbox-e2e 的
+      # 探针哲学：把猜变成数据）。首例是 comctl32 的 TaskDialogIndirect，
+      # 修法见 src-tauri/build.rs 的 /DELAYLOAD 段。
+      - name: 诊断｜测试二进制的 DLL 导入表（仅失败时）
+        if: failure()
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -find 'VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+          Get-ChildItem target\debug\deps\riot_host_lib-*.exe | ForEach-Object {
+            "=== $($_.Name) ==="
+            & $dumpbin /imports $_.FullName
+          }
       # Windows 沙箱的后端只在这个平台编译，本机 Mac 碰不到 ——
       # clippy 和 token 单测都得靠这里真跑。
       - run: cargo clippy -p riot-runtime --all-targets -- -D warnings
