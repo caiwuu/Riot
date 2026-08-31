@@ -153,8 +153,8 @@ function applyOS () {
   if (detect) {
     detect.innerHTML =
       os === "mac"
-        ? "检测到你正在使用 <strong>macOS</strong>，已为你标出推荐版本。"
-        : "检测到你正在使用 <strong>Windows</strong>，已为你标出推荐版本。";
+        ? "已探测到 <strong>macOS</strong> 环境，推荐构建已为你标出。"
+        : "已探测到 <strong>Windows</strong> 环境，推荐构建已为你标出。";
   }
 
   const card = document.getElementById(os === "mac" ? "dl-card-mac" : "dl-card-win");

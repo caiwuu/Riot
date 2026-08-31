@@ -6,12 +6,12 @@
     <title>Riot — 跑在本机的 AI Agent</title>
     <meta
       name="description"
-      content="Riot 是跑在本机的 AI Agent：读代码、改文件、跑命令、出文档，每一步都在你眼前，动手之前先问你。macOS 与 Windows 双平台，免费且 MIT 开源。"
+      content="Riot 是一台以 Rust 铸核、跑在本机的 AI Agent 引擎。内嵌 Chromium 直连渲染层，浏览器操作比 Codex 快 10 倍；DOM 拾取、抓包改包、请求重放一气呵成，可编排定时任务，直出 Word / Excel / PPT / PDF，会话时间线与系统提示词皆可重写。macOS 与 Windows 原生双平台，MIT 开源。"
     />
     <meta property="og:title" content="Riot — 跑在本机的 AI Agent" />
     <meta
       property="og:description"
-      content="读代码、改文件、跑命令、出文档，每一步都在你眼前，动手之前先问你。"
+      content="Rust 铸核的本机 AI Agent：内嵌浏览器比 Codex 快 10 倍，抓包逆向、DOM 拾取、定时编排、文档直出，全链路不出你的机器。"
     />
     <meta property="og:type" content="website" />
     <link rel="icon" href="assets/riot-logo.png" />
@@ -22,7 +22,7 @@
       rel="stylesheet"
     />
     <!-- 带版本参数防缓存：改样式/脚本后浏览器立刻拿到新文件，调整 v 值即可 -->
-    <link rel="stylesheet" href="style.css?v=12" />
+    <link rel="stylesheet" href="style.css?v=14" />
     <noscript>
       <style>
         .hl-fallback {
@@ -41,7 +41,14 @@
     <header class="nav" id="nav">
       <div class="container nav-inner">
         <a class="brand" href="#top" aria-label="Riot 首页">
-          <span class="brand-badge" aria-hidden="true">R</span>
+          <img
+            class="brand-badge"
+            src="assets/riot-logo.png"
+            alt=""
+            width="28"
+            height="28"
+            aria-hidden="true"
+          />
           <span class="brand-name">RIOT</span>
         </a>
 
@@ -110,7 +117,7 @@
         <div class="hero-horizon" aria-hidden="true"></div>
 
         <p class="hero-sub">
-          一个真正在你电脑上干活的 AI 助手——读代码、改文件、跑命令、控浏览器、出文档
+          深度优化的高性能智能体：session 与系统提示词任你重写，渗透破甲专项调校。
         </p>
 
         <div class="hero-actions">
@@ -144,8 +151,8 @@
       <section class="showcase">
         <div class="container hero-shot-wrap" data-reveal>
           <p class="hero-facts" aria-hidden="true">
-            <span>比 Codex 快 10×</span><i></i><span>内置浏览器 · 抓包逆向</span><i></i
-            ><span>Word · Excel · PPT · PDF</span><i></i><span>定时任务 · MIT 开源</span>
+            <span>Rust 内核 · 进程隔离</span><i></i><span>抓包逆向 · DOM 拾取</span><i></i
+            ><span>Word · Excel · PPT · PDF</span><i></i><span>MIT 开源</span>
           </p>
           <div class="hero-shot">
             <div class="window">
@@ -167,7 +174,7 @@
 
       <!-- 模型 ticker -->
       <section class="ticker" aria-label="支持的模型服务">
-        <p class="ticker-label">支持多种协议</p>
+        <p class="ticker-label">全协议兼容</p>
         <div class="marquee">
           <div class="marquee-track">
             <span>OpenAI 兼容</span><i>/</i><span>Anthropic Messages</span><i>/</i
@@ -184,35 +191,35 @@
       <section class="section" id="product">
         <div class="container">
           <div class="section-head" data-reveal>
-            <p class="eyebrow">01 / 产品</p>
-            <h2>一扇窗口，把活干完</h2>
+            <p class="eyebrow">01 / 架构</p>
+            <h2>不是插件，是一台引擎</h2>
             <p class="section-sub">
-              打开项目，交代任务，等着验收。整个过程不离开你的电脑，代码和文件也不会被送去任何云端。
+              内核以 Rust 从零铸造，独立成进程运行，与界面彻底解耦。它不寄生于任何编辑器，也不把你的代码交给任何云端。
             </p>
           </div>
 
           <div class="pillars">
             <article class="pillar" data-reveal>
               <span class="pillar-num">01</span>
-              <h3>稳，是第一位的</h3>
-              <p class="pillar-tag">引擎独立 — 不丢会话</p>
+              <h3>稳定性，刻进架构</h3>
+              <p class="pillar-tag">进程隔离 — 崩而不溃</p>
               <p>
-                Agent 引擎独立于窗口运行，任务再重界面也不卡；就算它出了错，你的工作现场也完好无损。
+                Agent 内核以独立进程运行，与 UI 彻底解耦。任务再重，界面丝毫不卡；进程即便异常退出，现场状态完好如初。
               </p>
             </article>
             <article class="pillar" data-reveal data-reveal-delay="1">
               <span class="pillar-num">02</span>
-              <h3>权限握在你手里</h3>
-              <p class="pillar-tag">先问再做 — 随时收回</p>
-              <p>每一次写文件、每一条命令，默认都先经过你。信得过了，再一档一档放权。</p>
+              <h3>权限，寸土不让</h3>
+              <p class="pillar-tag">六档闸门 — 随时回收</p>
+              <p>每一次落盘、每一条命令，默认经你授权。六档权限逐级放行，信任多少，就交付多少。</p>
             </article>
             <article class="pillar" data-reveal data-reveal-delay="2">
               <span class="pillar-num">03</span>
-              <h3>一个窗口就够了</h3>
+              <h3>一处，即是全部</h3>
               <p class="pillar-tag">对话 — 终端 — 浏览器</p>
               <p>
-                对话、终端、浏览器、代码改动全在一处。拖个文件、<code>@</code>
-                一下就能把上下文交给它。
+                对话、终端、浏览器、代码变更共享同一份上下文。拖入文件或 <code>@</code>
+                引用，路径与内容即刻注入内核。
               </p>
             </article>
           </div>
@@ -224,9 +231,9 @@
         <div class="container">
           <div class="section-head" data-reveal>
             <p class="eyebrow">02 / 能力</p>
-            <h2>交代任务，剩下的交给 Riot</h2>
+            <h2>一句指令，调度整条工具链</h2>
             <p class="section-sub">
-              用一句话说清楚你要什么。它自己查、自己做，拿不准的事，回来问你。
+              一句话勾勒意图，它自主检索、自主执行、自主校验。连续只读操作自动并行展开，最多十路同时推进，结果按序归并。
             </p>
           </div>
 
@@ -245,8 +252,8 @@
                   <path d="M13 2 4 14h7l-1 8 9-12h-7z" />
                 </svg>
               </div>
-              <h3>比 Codex 快 10 倍</h3>
-              <p>Rust 独立内核，工具并行调用、结果流式回吐。多个只读操作一起跑，不用一个个排队等。</p>
+              <h3>浏览器操作，比 Codex 快 10 倍</h3>
+              <p>点击、截图、读页面，指令即发即达。这 10 倍的差距，是逐帧压榨出来的。</p>
               <div class="speed-bars" aria-hidden="true">
                 <div class="speed-row">
                   <span class="speed-name">Riot</span>
@@ -277,10 +284,10 @@
                   <path d="M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" />
                 </svg>
               </div>
-              <h3>浏览器，就长在窗口里</h3>
+              <h3>一枚内嵌的 Chromium</h3>
               <p>
-                内嵌 Chromium，不用另开 Chrome。导航、点击、填表、截图、跑
-                JS——它和你看的是同一个页面，做过什么一目了然。
+                完整浏览器内核直接嵌入进程，无需外挂 Chrome。导航、点击、填表、截图、注入
+                JS，全部落在同一份 DOM 上——它与你所见，像素级一致。
               </p>
               <div class="mini-browser" aria-hidden="true">
                 <div class="mb-bar">
@@ -314,10 +321,10 @@
                   <path d="M8 13h8M8 17h5" />
                 </svg>
               </div>
-              <h3>Word、Excel、PPT、PDF，直接交付</h3>
+              <h3>Word、Excel、PPT、PDF，代码级直出</h3>
               <p>
-                不止会写代码——报告、表格、幻灯片它都能直接产出：公式真实可算，版式自己逐页渲染检查过才交给你。装上文档能力包即可，不用装
-                Office。
+                岂止写代码。报告、报表、幻灯片一并产出：公式真实求值，版式逐页渲染自检，PDF
+                表单可读可填。挂载文档运行时即可，全程不依赖 Office。
               </p>
               <div class="file-badges" aria-hidden="true">
                 <span class="fb">DOCX</span>
@@ -342,8 +349,8 @@
                   <path d="M12 7v5l3.5 2" />
                 </svg>
               </div>
-              <h3>到点，自己开工</h3>
-              <p>每天出份晨报、每周清一次日志——说好时间和频率，它按时自己跑。</p>
+              <h3>定时编排，无人值守</h3>
+              <p>延时、每日、工作日、每周、指定时刻——设好触发策略，它便自行开工，漏跑还会补。</p>
               <div class="sched-list" aria-hidden="true">
                 <div class="sched-item">
                   <span class="sched-dot on"></span><span class="sched-t">每天 09:00</span
@@ -375,8 +382,8 @@
                   <circle cx="12" cy="12" r="4" />
                 </svg>
               </div>
-              <h3>指哪，改哪</h3>
-              <p>在浏览器里点一下页面元素，选择器和上下文直接进输入框，省掉描述「那个按钮」的功夫。</p>
+              <h3>指针落处，即是上下文</h3>
+              <p>悬停高亮、点击命中，选择器与结构上下文即刻注入对话——从此告别「那个按钮」式的比划。</p>
               <div class="pick-demo" aria-hidden="true">
                 <div class="pick-box">
                   <span class="pick-el">&lt;button class="btn-primary"&gt;</span>
@@ -397,7 +404,89 @@
                   stroke-linecap="round"
                   stroke-linejoin="round"
                 >
-                  <path d="M22 12h-4l-3 9L
+                  <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+                </svg>
+              </div>
+              <h3>抓包、改包、逆向，破甲一条龙</h3>
+              <p>
+                被动抓包、HAR 导出、请求重放、拦截改包、Cookie 与密钥扫描、Fuzz
+                探测——网页调试与授权渗透的全套军火，一件不缺。
+              </p>
+              <div class="net-panel" aria-hidden="true">
+                <div class="net-row">
+                  <span class="net-m get">GET</span><span class="net-u">/api/user/profile</span
+                  ><span class="net-s ok">200</span>
+                </div>
+                <div class="net-row">
+                  <span class="net-m post">POST</span><span class="net-u">/api/auth/login</span
+                  ><span class="net-s warn">重放</span>
+                </div>
+                <div class="net-row is-block">
+                  <span class="net-m post">POST</span><span class="net-u">/api/track/report</span
+                  ><span class="net-s blk">拦截</span>
+                </div>
+                <div class="net-row">
+                  <span class="net-m get">GET</span><span class="net-u">/api/config.json</span
+                  ><span class="net-s ok">200</span>
+                </div>
+              </div>
+            </article>
+
+            <!-- 会话控制 -->
+            <article class="bento-card span-3 card-chat" data-reveal>
+              <div class="bento-icon" aria-hidden="true">
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.4"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path d="M21 14a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h9" />
+                  <path d="M18.6 2.6a1.4 1.4 0 0 1 2 2L15.2 10l-2.9 1 1-2.9z" />
+                </svg>
+              </div>
+              <h3>会话时间线，任你重写</h3>
+              <p>历史消息随手改写、整轮回滚、重新生成；系统提示词按会话注入，模型的每一句都照你立的规矩来。</p>
+              <div class="chat-edit" aria-hidden="true">
+                <div class="ce-bubble">
+                  把这个接口换成 GraphQL
+                  <span class="ce-actions"
+                    ><span class="ce-btn">编辑</span><span class="ce-btn">重新生成</span
+                    ><span class="ce-btn">删除本轮</span></span
+                  >
+                </div>
+                <div class="ce-sys">
+                  <span class="ce-sys-label">System</span>始终用 TypeScript，注释写中文
+                </div>
+              </div>
+            </article>
+
+            <!-- 自带模型 -->
+            <article class="bento-card span-3" data-reveal data-reveal-delay="1">
+              <div class="bento-icon" aria-hidden="true">
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.4"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <rect x="4" y="4" width="16" height="16" rx="3" />
+                  <path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3" />
+                </svg>
+              </div>
+              <h3>你的模型，你的 API</h3>
+              <p>
+                DeepSeek、Kimi、Qwen、OpenRouter、Ollama……任意兼容端点即插即用。密钥本地加密驻留，绝不经手任何中间服务器。
+              </p>
+              <div class="code-chips" aria-hidden="true">
+                <code>DeepSeek</code><code>Kimi</code><code>Qwen</code><code>Ollama</code>
+              </div>
+            </article>
+          </div>
         </div>
       </section>
 
@@ -406,25 +495,25 @@
         <div class="container security-grid">
           <div class="security-copy" data-reveal>
             <p class="eyebrow">03 / 设计原则</p>
-            <h2>你的代码，<br />不离开你的电脑</h2>
+            <h2>你的代码，<br />寸步不离本机</h2>
             <ul class="principles">
               <li>
-                <h4>一切都在本地</h4>
+                <h4>本地优先，绝不上云</h4>
                 <p>
-                  读写文件、执行命令，全部发生在你的机器上。唯一出门的流量，是发给你自己选的模型服务。
+                  文件读写、命令执行，悉数发生在你的机器上。唯一的出站流量，只流向你亲自指定的模型端点。
                 </p>
               </li>
               <li>
-                <h4>先问，再动手</h4>
-                <p>写入和执行，默认都要你点头。拿不准的操作，它宁可多问一句，也不自作主张。</p>
+                <h4>先授权，后执行</h4>
+                <p>落盘与执行默认需你确认。判不准的动作，它宁可多问一句，绝不擅自行动。</p>
               </li>
               <li>
-                <h4>崩了也不丢东西</h4>
-                <p>Agent 引擎独立运行，就算出了问题，窗口照常工作，会话随时找得回来。</p>
+                <h4>进程隔离，崩而不溃</h4>
+                <p>内核独立成进程，纵使异常退出，界面照常运转，会话随时可复原。</p>
               </li>
               <li>
-                <h4>出错，自己纠正</h4>
-                <p>命令失败了，它会读懂报错、换个思路再来，而不是停在原地等你救场。</p>
+                <h4>自省闭环，自主纠错</h4>
+                <p>命令失败，它会解析报错、另辟路径重试，而不是停在原地等你救场。</p>
               </li>
             </ul>
           </div>
@@ -460,9 +549,9 @@
         <div class="container">
           <div class="section-head section-head-center" data-reveal>
             <p class="eyebrow">04 / 下载</p>
-            <h2>立即下载，开始使用</h2>
+            <h2>即刻部署，接管全局</h2>
             <p class="section-sub" id="download-detect">
-              macOS 与 Windows 双平台，免费且 MIT 开源。
+              macOS 与 Windows 原生双平台构建，MIT 开源，永久免费。
             </p>
           </div>
 
@@ -479,7 +568,7 @@
               <h3>macOS 版</h3>
               <p class="dl-req">macOS 12+ · Apple Silicon 与 Intel</p>
               <p class="dl-desc">
-                拖进「应用程序」就能用。填上你的 API key，一分钟内开始第一段对话。
+                拖入「应用程序」即刻就位。填入 API key，六十秒内开启第一段对话。
               </p>
               <a
                 class="btn btn-primary btn-block js-dl-mac"
@@ -502,7 +591,7 @@
               </div>
               <h3>Windows 版</h3>
               <p class="dl-req">Windows 10 / 11 · x64</p>
-              <p class="dl-desc">标准安装向导，一路下一步。全部能力与 macOS 版完全一致。</p>
+              <p class="dl-desc">标准向导，一路直达。能力与 macOS 版逐一对齐，毫无删减。</p>
               <a
                 class="btn btn-primary btn-block js-dl-win"
                 href="https://github.com/caiwuu/Riot/releases/latest"
@@ -515,7 +604,7 @@
           </div>
 
           <p class="dl-foot" data-reveal>
-            需要 Linux 或想从源码构建？仓库自带完整构建脚本——<a
+            需要 Linux，或想从源码亲手构建？仓库附完整构建链——<a
               href="https://github.com/caiwuu/Riot"
               target="_blank"
               rel="noopener"
@@ -531,10 +620,17 @@
       <div class="container footer-inner">
         <div class="footer-brand">
           <a class="brand" href="#top" aria-label="回到顶部">
-            <span class="brand-badge" aria-hidden="true">R</span>
+            <img
+              class="brand-badge"
+              src="assets/riot-logo.png"
+              alt=""
+              width="28"
+              height="28"
+              aria-hidden="true"
+            />
             <span class="brand-name">RIOT</span>
           </a>
-          <p>跑在本机的 AI Agent。<br />你的模型，你的机器，你的 Agent。</p>
+          <p>以 Rust 铸核的本机 AI Agent。<br />你的模型，你的机器，你的主权。</p>
         </div>
         <nav class="footer-col" aria-label="产品">
           <h5>产品</h5>
@@ -573,6 +669,6 @@
       <div class="footer-watermark" aria-hidden="true">RIOT</div>
     </footer>
 
-    <script src="script.js?v=23"></script>
+    <script src="script.js?v=24"></script>
   </body>
 </html>
