@@ -480,6 +480,18 @@ pub struct ProcessOutput {
 pub trait Clock: Send + Sync {
     /// 当前 Unix 毫秒时间戳。
     fn now_ms(&self) -> u64;
+
+    /// 本地时区相对 UTC 的偏移分钟数（东正西负，UTC+8 = 480）。
+    ///
+    /// 给轮首时钟行用：模型对消息之间隔了多久零感知，注入的时刻要按
+    /// 用户的本地时间渲染才对得上「上午/下午」这类说法。
+    ///
+    /// 默认 0：测试替身和拿不到时区的平台诚实退回 UTC。渲染侧必须把
+    /// 偏移一并写出来（`UTC+8` / `UTC`），不许把 UTC 时刻假装成本地时刻。
+    fn tz_offset_minutes(&self) -> i32 {
+        0
+    }
+
     async fn sleep_ms(&self, ms: u64);
 }
 

@@ -1367,6 +1367,40 @@
       },
       "type": "object"
     },
+    "MissedRun": {
+      "description": "启动时发现的错过运行（上次 App 没开着，到点没跑成）。",
+      "properties": {
+        "count": {
+          "description": "错过了几次（关机三天的每日任务就是 3）。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lastLocal": {
+          "type": "string"
+        },
+        "lastMs": {
+          "description": "最近一次错过的时刻。",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "taskId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "taskId",
+        "name",
+        "count",
+        "lastMs",
+        "lastLocal"
+      ],
+      "type": "object"
+    },
     "ModelEndpoint": {
       "description": "一个已解析的模型端点:宿主把 provider 配置和明文 key 都填好,内核直接\n拿它建 Provider。\n\n这是 `config::ResolvedModel` 的\"传输版\" —— 区别在于 `api_key` 是**明文**\n(宿主已从环境变量 / auth.json 解析出来),而不是一个待查的变量名。\n拆进程后内核拿不到 auth.json,key 必须在宿主这一侧解析完再传进来。",
       "properties": {
@@ -2000,6 +2034,82 @@
         "refs"
       ],
       "type": "object"
+    },
+    "Repeat": {
+      "description": "重复规则。\n\n`Once` 不带时刻 —— 一次性任务的时刻就是 [`ScheduledTask::next_run_ms`]，\n再存一份就有\"哪个说了算\"的问题。",
+      "oneOf": [
+        {
+          "description": "只跑一次，跑完自动停用。",
+          "properties": {
+            "kind": {
+              "const": "once",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "每天 `time`（本地时间 \"HH:MM\"）。",
+          "properties": {
+            "kind": {
+              "const": "daily",
+              "type": "string"
+            },
+            "time": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "time"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "周一到周五的 `time`。",
+          "properties": {
+            "kind": {
+              "const": "weekdays",
+              "type": "string"
+            },
+            "time": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "time"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "每周 `weekday`（1=周一 … 7=周日）的 `time`。",
+          "properties": {
+            "kind": {
+              "const": "weekly",
+              "type": "string"
+            },
+            "time": {
+              "type": "string"
+            },
+            "weekday": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "weekday",
+            "time"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "RpcError": {
       "properties": {
@@ -3273,6 +3383,45 @@
         }
       ]
     },
+    "RunTargetSpec": {
+      "description": "运行目标（编辑面板的\"运行于\"）。",
+      "oneOf": [
+        {
+          "description": "每次新开会话，绑定这个项目根。",
+          "properties": {
+            "kind": {
+              "const": "new_session",
+              "type": "string"
+            },
+            "root": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "root"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "在指定会话里续跑。",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "session",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "SafetyKind": {
       "oneOf": [
         {
@@ -3346,6 +3495,167 @@
           "type": "string"
         }
       ]
+    },
+    "SchedulePatch": {
+      "description": "编辑任务的补丁（前端详情面板保存时用）。None = 那一项不动。",
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RunTargetSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "when": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WhenSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "重设时间。宿主重算下次运行；已跑完的一次性任务借此复活。"
+        }
+      },
+      "type": "object"
+    },
+    "ScheduleRun": {
+      "description": "宿主 → 前端的全局事件：某个定时任务开跑了 / 跑完了。\n前端靠它刷新会话列表（新会话要立即出现在侧栏）和任务面板。",
+      "properties": {
+        "error": {
+          "description": "开跑失败时的原因（会话没了、模型没配好）。phase=Done 且它为\nSome 时，前端把它当失败显示。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "phase": {
+          "$ref": "#/$defs/ScheduleRunPhase"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "taskId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "taskId",
+        "name",
+        "sessionId",
+        "phase"
+      ],
+      "type": "object"
+    },
+    "ScheduleRunPhase": {
+      "enum": [
+        "started",
+        "done"
+      ],
+      "type": "string"
+    },
+    "ScheduledTask": {
+      "description": "一个定时任务的视图。宿主是唯一生产者。",
+      "properties": {
+        "createdAtMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "enabled": {
+          "description": "false = 暂停中（或一次性任务已跑完）。",
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "lastRunLocal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastRunMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "lastSessionId": {
+          "description": "上次运行产生（或续跑）的会话，前端点它跳过去看结果。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "nextRunLocal": {
+          "description": "`next_run_ms` 的本地时间文字（宿主现算，如 \"2026-08-31 15:30\"）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nextRunMs": {
+          "description": "下次运行的 Unix 毫秒。None = 不会再跑。",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "repeat": {
+          "$ref": "#/$defs/Repeat"
+        },
+        "root": {
+          "description": "新开会话时绑定的项目根。",
+          "type": "string"
+        },
+        "sessionId": {
+          "description": "Some = 到点在这个会话里续跑；None = 每次新开会话。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "prompt",
+        "repeat",
+        "root",
+        "enabled",
+        "createdAtMs"
+      ],
+      "type": "object"
     },
     "SessionSummary": {
       "properties": {
@@ -4185,6 +4495,105 @@
         "search_enabled"
       ],
       "type": "object"
+    },
+    "WhenSpec": {
+      "description": "创建任务时对时间的说法。解析与计算在宿主。\n\n`After` 存在的理由：模型对\"现在几点\"没有可靠感知，\"90 分钟后\"这种\n相对说法它不会算错；绝对时间给错了，宿主会报错并附上当前时刻让它自纠。",
+      "oneOf": [
+        {
+          "description": "一次性，绝对本地时间 \"YYYY-MM-DD HH:MM\"。",
+          "properties": {
+            "at": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "once",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "at"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "一次性，从现在起 `minutes` 分钟后。",
+          "properties": {
+            "kind": {
+              "const": "after",
+              "type": "string"
+            },
+            "minutes": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "minutes"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "每天 \"HH:MM\"。",
+          "properties": {
+            "kind": {
+              "const": "daily",
+              "type": "string"
+            },
+            "time": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "time"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "工作日 \"HH:MM\"。",
+          "properties": {
+            "kind": {
+              "const": "weekdays",
+              "type": "string"
+            },
+            "time": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "time"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "每周 `weekday`（1=周一 … 7=周日）的 \"HH:MM\"。",
+          "properties": {
+            "kind": {
+              "const": "weekly",
+              "type": "string"
+            },
+            "time": {
+              "type": "string"
+            },
+            "weekday": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "weekday",
+            "time"
+          ],
+          "type": "object"
+        }
+      ]
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -4195,6 +4604,9 @@
     },
     "message": {
       "$ref": "#/$defs/Message"
+    },
+    "missed_run": {
+      "$ref": "#/$defs/MissedRun"
     },
     "permission_ask": {
       "$ref": "#/$defs/PermissionAsk"
@@ -4213,6 +4625,15 @@
     },
     "rpc_response": {
       "$ref": "#/$defs/RpcResponse"
+    },
+    "schedule_patch": {
+      "$ref": "#/$defs/SchedulePatch"
+    },
+    "schedule_run": {
+      "$ref": "#/$defs/ScheduleRun"
+    },
+    "scheduled_task": {
+      "$ref": "#/$defs/ScheduledTask"
     }
   },
   "required": [
@@ -4223,7 +4644,11 @@
     "rpc_notification",
     "permission_ask",
     "permission_response",
-    "provider_event"
+    "provider_event",
+    "scheduled_task",
+    "missed_run",
+    "schedule_run",
+    "schedule_patch"
   ],
   "title": "ProtocolRoot",
   "type": "object"

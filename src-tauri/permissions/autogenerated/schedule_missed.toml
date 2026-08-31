@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-schedule-missed"
+description = "Enables the schedule_missed command without any pre-configured scope."
+commands.allow = ["schedule_missed"]
+
+[[permission]]
+identifier = "deny-schedule-missed"
+description = "Denies the schedule_missed command without any pre-configured scope."
+commands.deny = ["schedule_missed"]

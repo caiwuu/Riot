@@ -908,6 +908,70 @@ export type RpcResponse =
 export type LineKind = "context" | "add" | "del";
 export type ChangeStatus = ("created" | "modified" | "deleted") | "renamed";
 export type RpcErrorCode = ("session_not_found" | "invalid_params" | "internal") | "turn_in_progress";
+/**
+ * 运行目标（编辑面板的"运行于"）。
+ */
+export type RunTargetSpec =
+  | {
+      kind: "new_session";
+      root: string;
+    }
+  | {
+      id: string;
+      kind: "session";
+    };
+/**
+ * 创建任务时对时间的说法。解析与计算在宿主。
+ *
+ * `After` 存在的理由：模型对"现在几点"没有可靠感知，"90 分钟后"这种
+ * 相对说法它不会算错；绝对时间给错了，宿主会报错并附上当前时刻让它自纠。
+ */
+export type WhenSpec =
+  | {
+      at: string;
+      kind: "once";
+    }
+  | {
+      kind: "after";
+      minutes: number;
+    }
+  | {
+      kind: "daily";
+      time: string;
+    }
+  | {
+      kind: "weekdays";
+      time: string;
+    }
+  | {
+      kind: "weekly";
+      time: string;
+      weekday: number;
+    };
+export type ScheduleRunPhase = "started" | "done";
+/**
+ * 重复规则。
+ *
+ * `Once` 不带时刻 —— 一次性任务的时刻就是 [`ScheduledTask::next_run_ms`]，
+ * 再存一份就有"哪个说了算"的问题。
+ */
+export type Repeat =
+  | {
+      kind: "once";
+    }
+  | {
+      kind: "daily";
+      time: string;
+    }
+  | {
+      kind: "weekdays";
+      time: string;
+    }
+  | {
+      kind: "weekly";
+      time: string;
+      weekday: number;
+    };
 
 /**
  * 把所有顶层类型收进一个 root，让生成的 schema 共享同一份 `$defs`。
@@ -916,12 +980,16 @@ export type RpcErrorCode = ("session_not_found" | "invalid_params" | "internal")
 export interface ProtocolRoot {
   agent_event: AgentEvent;
   message: Message;
+  missed_run: MissedRun;
   permission_ask: PermissionAsk;
   permission_response: PermissionResponse;
   provider_event: ProviderEvent;
   rpc_notification: RpcNotification;
   rpc_request: RpcRequest;
   rpc_response: RpcResponse;
+  schedule_patch: SchedulePatch;
+  schedule_run: ScheduleRun;
+  scheduled_task: ScheduledTask;
 }
 export interface MessageMeta {
   /**
@@ -1006,6 +1074,22 @@ export interface AskChoiceOption {
    * 给用户看的文案。
    */
   label: string;
+}
+/**
+ * 启动时发现的错过运行（上次 App 没开着，到点没跑成）。
+ */
+export interface MissedRun {
+  /**
+   * 错过了几次（关机三天的每日任务就是 3）。
+   */
+  count: number;
+  lastLocal: string;
+  /**
+   * 最近一次错过的时刻。
+   */
+  lastMs: number;
+  name: string;
+  taskId: string;
 }
 /**
  * 提交一轮所需的完整配置(`turn.submit` 的 RPC 载荷,除用户输入之外的一切)。
@@ -1299,4 +1383,67 @@ export interface ToolInfo {
 export interface RpcError {
   code: RpcErrorCode;
   message: string;
+}
+/**
+ * 编辑任务的补丁（前端详情面板保存时用）。None = 那一项不动。
+ */
+export interface SchedulePatch {
+  name?: string | null;
+  prompt?: string | null;
+  target?: RunTargetSpec | null;
+  /**
+   * 重设时间。宿主重算下次运行；已跑完的一次性任务借此复活。
+   */
+  when?: WhenSpec | null;
+}
+/**
+ * 宿主 → 前端的全局事件：某个定时任务开跑了 / 跑完了。
+ * 前端靠它刷新会话列表（新会话要立即出现在侧栏）和任务面板。
+ */
+export interface ScheduleRun {
+  /**
+   * 开跑失败时的原因（会话没了、模型没配好）。phase=Done 且它为
+   * Some 时，前端把它当失败显示。
+   */
+  error?: string | null;
+  name: string;
+  phase: ScheduleRunPhase;
+  sessionId: string;
+  taskId: string;
+}
+/**
+ * 一个定时任务的视图。宿主是唯一生产者。
+ */
+export interface ScheduledTask {
+  createdAtMs: number;
+  /**
+   * false = 暂停中（或一次性任务已跑完）。
+   */
+  enabled: boolean;
+  id: string;
+  lastRunLocal?: string | null;
+  lastRunMs?: number | null;
+  /**
+   * 上次运行产生（或续跑）的会话，前端点它跳过去看结果。
+   */
+  lastSessionId?: string | null;
+  name: string;
+  /**
+   * `next_run_ms` 的本地时间文字（宿主现算，如 "2026-08-31 15:30"）。
+   */
+  nextRunLocal?: string | null;
+  /**
+   * 下次运行的 Unix 毫秒。None = 不会再跑。
+   */
+  nextRunMs?: number | null;
+  prompt: string;
+  repeat: Repeat;
+  /**
+   * 新开会话时绑定的项目根。
+   */
+  root: string;
+  /**
+   * Some = 到点在这个会话里续跑；None = 每次新开会话。
+   */
+  sessionId?: string | null;
 }

@@ -27,6 +27,7 @@ pub mod kernel;
 pub mod packs;
 pub mod pasteboard;
 pub mod persist;
+pub mod schedule;
 pub mod state;
 pub mod term;
 pub mod term_access;
@@ -75,6 +76,9 @@ pub enum HostError {
     /// 非故障结局），前端直接显示即可。
     #[error("{0}")]
     Sandbox(String),
+    /// 定时任务操作。文案已经是人话，前端直接显示。
+    #[error("{0}")]
+    Schedule(String),
 }
 
 // Tauri 要求错误类型可序列化。thiserror 不给 Serialize，手写一层。
@@ -193,6 +197,67 @@ async fn search_files(
     query: String,
 ) -> HostResult<Vec<String>> {
     state.search_files(&session_id, &query).await
+}
+
+/// 定时任务清单（管理面板）。
+#[tauri::command]
+async fn schedule_list(
+    state: tauri::State<'_, AppState>,
+) -> HostResult<Vec<riot_protocol::ScheduledTask>> {
+    Ok(state.schedule_list().await)
+}
+
+/// 暂停 / 恢复一个定时任务。返回更新后的任务。
+#[tauri::command]
+async fn schedule_set_enabled(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    enabled: bool,
+) -> HostResult<riot_protocol::ScheduledTask> {
+    state
+        .schedule_set_enabled(&id, enabled)
+        .await
+        .map_err(HostError::Schedule)
+}
+
+/// 编辑一个定时任务（详情面板的保存）。返回更新后的任务。
+#[tauri::command]
+async fn schedule_update(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    patch: riot_protocol::SchedulePatch,
+) -> HostResult<riot_protocol::ScheduledTask> {
+    state
+        .schedule_update(&id, patch)
+        .await
+        .map_err(HostError::Schedule)
+}
+
+/// 删除一个定时任务。
+#[tauri::command]
+async fn schedule_delete(state: tauri::State<'_, AppState>, id: String) -> HostResult<()> {
+    state.schedule_delete(&id).await.map_err(HostError::Schedule)
+}
+
+/// 立即跑一次（「立即运行」按钮和错过补跑共用）。
+#[tauri::command]
+async fn schedule_run_now(state: tauri::State<'_, AppState>, id: String) -> HostResult<()> {
+    state.schedule_run_now(&id).await.map_err(HostError::Schedule)
+}
+
+/// 启动时发现的错过运行清单。
+#[tauri::command]
+async fn schedule_missed(
+    state: tauri::State<'_, AppState>,
+) -> HostResult<Vec<riot_protocol::MissedRun>> {
+    Ok(state.schedule_missed().await)
+}
+
+/// 用户看过错过提示了，清掉别再弹。
+#[tauri::command]
+async fn schedule_ack_missed(state: tauri::State<'_, AppState>) -> HostResult<()> {
+    state.schedule_ack_missed().await;
+    Ok(())
 }
 
 /// 排队面板：当前排着的插话清单。
@@ -1155,6 +1220,13 @@ pub fn run() {
             slash_expand,
             hooks_list,
             search_files,
+            schedule_list,
+            schedule_set_enabled,
+            schedule_update,
+            schedule_delete,
+            schedule_run_now,
+            schedule_missed,
+            schedule_ack_missed,
             interrupt,
             session_changes,
             session_git_changes,
@@ -1236,8 +1308,14 @@ pub fn run() {
                 vibrancy::apply(&main);
             }
 
+            // 系统通知与全局 emit 要用应用句柄。要在 spawn_host_bridge
+            // 之前挂上 —— 消费 Done 通知的任务里就会用它发任务完成通知。
+            app.state::<AppState>().inner().attach_app(app.handle().clone());
             // 接上内核事件里宿主要消费的那几件(busy / mode 回流)。
             app.state::<AppState>().inner().spawn_host_bridge();
+            // 定时任务的调度循环（20 秒一查）。调度权威在宿主，
+            // 只在 App 运行时生效；错过的到点由启动对账收进补跑提示。
+            schedule::spawn_ticker(app.handle().clone());
             let state = app.state::<AppState>().inner().clone();
             tauri::async_runtime::spawn(async move {
                 // 先按已装的能力包对齐 MCP 配置，再连。分两步的话，包里的

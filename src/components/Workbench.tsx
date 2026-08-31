@@ -66,8 +66,7 @@ export function WorkbenchTabs({
   onClosePage: (pageId: number) => void;
   /** "+"按钮。菜单项由 App 提供（全局 ContextMenu），这里只报点击位置。 */
   onAdd: (e: React.MouseEvent) => void;
-  /** 钉在右端的窗口级分栏开关（见 chrome 的 WindowControls）。抽屉开着
-   *  时窗口的右上角就是这里，那三个键得在这条栏上。 */
+  /** 右端附加（窗口开关已钉在 .shell 上，这里一般不传）。 */
   trailing?: React.ReactNode;
 }) {
   return (

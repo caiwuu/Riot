@@ -24,16 +24,55 @@ export interface MenuState {
   x: number;
   y: number;
   entries: { label: string; danger?: boolean; action: () => void }[];
+  /** 打开菜单的那一行。鼠标落到菜单上时 :hover 会丢，靠这个保住行高亮。 */
+  anchor?: string;
 }
 
 /* ── 顶部工具栏 ─────────────────────────────── */
 
 /**
+ * 侧栏收起后出现在顶栏左端的展开钮。宽度（含 macOS 红绿灯让位）跟
+ * 侧栏壳同一拍、同一条曲线收放。钮自己进文档流会把标题瞬间挤到右边，
+ * 折叠时就像先闪一下。
+ */
+export function SidebarReveal({
+  visible,
+  onToggle,
+}: {
+  visible: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div
+      className={[
+        "tb-traffic",
+        visible ? "show" : "",
+        visible && IS_MAC ? "lights" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+    >
+      {visible ? (
+        <button
+          className="tb-btn"
+          onClick={onToggle}
+          title="展开侧边栏（⌘B）"
+          aria-label="展开侧边栏"
+        >
+          <SidebarToggleIcon />
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/**
  * 主区顶部的工具栏（照 Codex）：左边收放侧栏，中间是当前会话的标题
  * （点开就是会话菜单），右边是会话设置。整条都是窗口拖拽区。
  *
- * 侧栏开关留在左边 —— 它就贴着自己管的那一栏，指哪开哪。终端和侧边
- * 面板的开关不在这里：那两块在窗口的下边和右边，归 [`WindowControls`]。
+ * 侧栏开着时开关坐在侧栏顶栏（贴着自己管的那一栏）；收起后才出现在
+ * 这条顶栏左端，否则没入口把它打开。终端和侧边面板的开关不在这里：
+ * 那两块在窗口的下边和右边，归 [`WindowControls`]。
  */
 export function TopBar({
   sidebarOpen,
@@ -44,7 +83,7 @@ export function TopBar({
   sessionCfgEnabled,
   onToggleSessionCfg,
   onOpenBrowser,
-  controls,
+  reserveControls,
 }: {
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
@@ -56,24 +95,12 @@ export function TopBar({
   onToggleSessionCfg: () => void;
   /** 渗透授权角标要能直达浏览器标签 —— 撤销入口（ScopePanel）在那里。 */
   onOpenBrowser: () => void;
-  /** 窗口级分栏开关。抽屉收起时这条栏的右端就是窗口右上角，由它承载；
-   *  抽屉开着时交给抽屉的标签栏（见 WindowControls 的说明）。 */
-  controls?: React.ReactNode;
+  /** 抽屉收起后窗口开关钉在右上角，顶栏用空槽给设置钮让位。 */
+  reserveControls?: boolean;
 }) {
-  // 侧栏收起后 macOS 的红绿灯悬在主区左上角，工具栏给它们让位。
-  // 全屏没有红绿灯（见 shell[data-fullscreen]），Windows/Linux 的窗口
-  // 按钮在右上且不在 webview 里，都不用让。
-  const padTraffic = !sidebarOpen && IS_MAC;
   return (
-    <header className={padTraffic ? "topbar pad-traffic" : "topbar"} data-tauri-drag-region>
-      <button
-        className={sidebarOpen ? "tb-btn active" : "tb-btn"}
-        onClick={onToggleSidebar}
-        title={sidebarOpen ? "收起侧边栏（⌘B）" : "展开侧边栏（⌘B）"}
-        aria-label={sidebarOpen ? "收起侧边栏" : "展开侧边栏"}
-      >
-        <SidebarToggleIcon />
-      </button>
+    <header className="topbar" data-tauri-drag-region>
+      <SidebarReveal visible={!sidebarOpen} onToggle={onToggleSidebar} />
 
       {session ? (
         <button
@@ -102,7 +129,7 @@ export function TopBar({
       >
         <GearIcon />
       </button>
-      {controls}
+      <div className={reserveControls ? "tb-win-slot show" : "tb-win-slot"} />
     </header>
   );
 }
@@ -111,12 +138,11 @@ export function TopBar({
  * 窗口级的分栏开关：底部终端、右侧面板。
  *
  * `[约束]` 它们停的是**窗口**的右上角，不是某一栏的右上角。这两个键改的
- * 是整个窗口怎么分块，跟着对话列走的话，抽屉一开它们就落到窗口中间去了
- * （图标指着"最右边那一栏"，人却在中间点它）。所以抽屉收起时由顶栏渲染，
- * 抽屉开着时由抽屉的标签栏渲染 —— 那时窗口的右上角属于抽屉。
+ * 是整个窗口怎么分块，钉在窗口右上角（见 .win-controls.docked）。
+ * 不进顶栏 / 抽屉的文档流 —— 换座位会在开合时闪一下。
  *
- * 侧栏开关不在这里：它在顶栏左端，紧贴自己管的那一栏。会话设置也不在，
- * 它管的是单个会话的参数，留在消息栏。
+ * 侧栏开关不在这里：开着时在侧栏顶栏，收起后回到主区顶栏左端。
+ * 会话设置也不在，它管的是单个会话的参数，留在消息栏。
  */
 export function WindowControls({
   terminalOpen,
@@ -139,7 +165,7 @@ export function WindowControls({
   return (
     // 按钮之间的缝也归窗口拖拽 —— 顶栏其余空白处都是这么用的，
     // 到了这一组突然拖不动会显得这块是"别的东西"。
-    <div className="win-controls" data-tauri-drag-region>
+    <div className="win-controls docked" data-tauri-drag-region>
       <button
         className={terminalOpen ? "tb-btn active" : "tb-btn"}
         onClick={onToggleTerminal}

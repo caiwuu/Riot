@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-schedule-delete"
+description = "Enables the schedule_delete command without any pre-configured scope."
+commands.allow = ["schedule_delete"]
+
+[[permission]]
+identifier = "deny-schedule-delete"
+description = "Denies the schedule_delete command without any pre-configured scope."
+commands.deny = ["schedule_delete"]

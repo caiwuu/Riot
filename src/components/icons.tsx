@@ -207,6 +207,42 @@ export function DotsIcon() {
   );
 }
 
+/** 定时任务（侧栏一级菜单）。 */
+export function ClockIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.5" />
+      <path
+        d="M8 4.8V8l2.2 1.6"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+/** 跳到另一处（任务详情里打开对应会话）。 */
+export function ArrowOutIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M6 3.5H4.2A1.2 1.2 0 003 4.7v7.1c0 .66.54 1.2 1.2 1.2h7.1c.66 0 1.2-.54 1.2-1.2V10"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
+      <path
+        d="M9 3.5h3.5V7M12.5 3.5L8 8"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 export function EyeIcon() {
   return (
     <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden>

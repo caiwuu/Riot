@@ -20,13 +20,18 @@ import type {
   ImageInput as GeneratedImageInput,
   McpServerStatus as GeneratedMcpServerStatus,
   Message,
+  MissedRun,
   PendingAsk,
   PermissionAsk,
   PermissionMode,
   PermissionResponse,
   QueuedSummary as GeneratedQueuedSummary,
+  SchedulePatch,
+  ScheduleRun,
+  ScheduledTask,
   ThinkingEffort,
   ThinkingPolicy as GeneratedThinkingPolicy,
+  WhenSpec,
 } from "./generated";
 
 export type {
@@ -34,10 +39,15 @@ export type {
   FileChange,
   GitChanges,
   Message,
+  MissedRun,
   PendingAsk,
   PermissionAsk,
   PermissionMode,
   PermissionResponse,
+  SchedulePatch,
+  ScheduleRun,
+  ScheduledTask,
+  WhenSpec,
 };
 
 /** 服务方协议。决定请求格式、认证头和哪些采样参数可发送。
@@ -1035,9 +1045,20 @@ export interface PickResult {
  * 照旧当普通文本插入。前缀用 NUL —— 用户不可能打出来。
  */
 const PICK_SENTINEL = "\u0000riot-pick\u0000";
+const PLAIN_SENTINEL = "\u0000riot-plain\u0000";
 
 export function encodePickForComposer(p: PickResult): string {
   return PICK_SENTINEL + JSON.stringify(p);
+}
+
+/** 定时任务开场白：原样进输入框，不要包代码围栏（那是终端选区用的）。 */
+export function encodePlainForComposer(s: string): string {
+  return PLAIN_SENTINEL + s;
+}
+
+export function decodePlainFromComposer(s: string): string | null {
+  if (!s.startsWith(PLAIN_SENTINEL)) return null;
+  return s.slice(PLAIN_SENTINEL.length);
 }
 
 /** 认不出前缀返回 null（那就是普通 insertText，走原来的围栏逻辑）。 */
@@ -1224,6 +1245,90 @@ export async function notify(title: string, body: string): Promise<void> {
   } catch {
     // 平台不支持或用户拒绝 —— 无声跳过
   }
+}
+
+/* ── 定时任务 ───────────────────────────────── */
+
+/** 全部定时任务，next_run 近的在前。 */
+export async function scheduleList(): Promise<ScheduledTask[]> {
+  return invoke("schedule_list");
+}
+
+/** 暂停 / 恢复。返回更新后的任务（恢复会重算下次运行）。 */
+export async function scheduleSetEnabled(id: string, enabled: boolean): Promise<ScheduledTask> {
+  return invoke("schedule_set_enabled", { id, enabled });
+}
+
+/** 编辑任务（详情面板的保存）。补丁里没给的项不动。 */
+export async function scheduleUpdate(id: string, patch: SchedulePatch): Promise<ScheduledTask> {
+  return invoke("schedule_update", { id, patch });
+}
+
+export async function scheduleDelete(id: string): Promise<void> {
+  return invoke("schedule_delete", { id });
+}
+
+/** 立即跑一次（「立即运行」与错过补跑共用），不影响周期任务的节奏。 */
+export async function scheduleRunNow(id: string): Promise<void> {
+  return invoke("schedule_run_now", { id });
+}
+
+/** 启动时发现的错过运行（App 关着时到点没跑成的）。 */
+export async function scheduleMissed(): Promise<MissedRun[]> {
+  return invoke("schedule_missed");
+}
+
+/** 用户看过错过提示了（补跑或算了都一样），清掉别再弹。 */
+export async function scheduleAckMissed(): Promise<void> {
+  return invoke("schedule_ack_missed");
+}
+
+/**
+ * 定时任务开跑 / 跑完的全局事件。前端拿它立即刷新会话列表
+ * （后台新会话要马上出现在侧栏）和任务面板。
+ */
+export function subscribeScheduleRuns(cb: (run: ScheduleRun) => void): () => void {
+  let stopped = false;
+  let unlisten: (() => void) | undefined;
+  void (async () => {
+    try {
+      const { listen } = await import("@tauri-apps/api/event");
+      unlisten = await listen<ScheduleRun>("schedule_run", (e) => {
+        if (!stopped) cb(e.payload);
+      });
+      if (stopped) unlisten();
+    } catch {
+      // 不在 Tauri 里（纯浏览器、组件测试）就没有定时任务。
+    }
+  })();
+  return () => {
+    stopped = true;
+    unlisten?.();
+  };
+}
+
+/**
+ * 任务表变更（创建 / 暂停恢复 / 删除）。变更多半来自模型调工具 ——
+ * 不订阅它的话，侧栏要等到任务首次运行才看得见刚创建的任务。
+ */
+export function subscribeScheduleChanges(cb: () => void): () => void {
+  let stopped = false;
+  let unlisten: (() => void) | undefined;
+  void (async () => {
+    try {
+      const { listen } = await import("@tauri-apps/api/event");
+      unlisten = await listen("schedule_changed", () => {
+        if (!stopped) cb();
+      });
+      if (stopped) unlisten();
+    } catch {
+      // 不在 Tauri 里就没有定时任务。
+    }
+  })();
+  return () => {
+    stopped = true;
+    unlisten?.();
+  };
 }
 
 /** 弹系统的目录选择框。`defaultPath` 指定起始目录（如会话根）。 */

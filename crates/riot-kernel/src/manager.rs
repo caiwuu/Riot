@@ -116,6 +116,10 @@ impl SessionManager {
             session_id: id.clone(),
             bridge: Arc::clone(&self.bridge),
         }));
+        session.attach_schedule(Arc::new(crate::bridge::RemoteSchedule {
+            session_id: id.clone(),
+            bridge: Arc::clone(&self.bridge),
+        }));
     }
 
     fn now_ms() -> u64 {

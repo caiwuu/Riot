@@ -110,6 +110,24 @@ impl Clock for TokioClock {
             .unwrap_or(0)
     }
 
+    /// 本地时区偏移。每次现查不缓存 —— 夏令时切换和用户改时区都该
+    /// 下一轮就生效，而 `localtime_r` 本来就只是一次结构体填充的开销。
+    ///
+    /// `localtime_r` 是唯一同时覆盖 macOS/Linux 的标准做法；为这一个数
+    /// 引整套 chrono 不划算（同 riot-tools date.rs 的取舍）。Windows 走
+    /// trait 默认值 0：时钟行会诚实标注 UTC，不会把 UTC 假装成本地时刻。
+    #[cfg(unix)]
+    fn tz_offset_minutes(&self) -> i32 {
+        let secs = (self.now_ms() / 1000) as libc::time_t;
+        // SAFETY: tm 是本线程栈上的出参，zeroed 的 tm 对 localtime_r 合法
+        // （它只写不读）；localtime_r 是线程安全变体。
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
+            return 0;
+        }
+        (tm.tm_gmtoff / 60) as i32
+    }
+
     #[allow(clippy::disallowed_methods)]
     async fn sleep_ms(&self, ms: u64) {
         tokio::time::sleep(Duration::from_millis(ms)).await;

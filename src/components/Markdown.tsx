@@ -67,9 +67,58 @@ type MdNode = {
   type: string;
   value?: string;
   lang?: string | null;
+  url?: string;
+  position?: { start?: { offset?: number } };
   data?: { hProperties?: Record<string, string> };
   children?: MdNode[];
 };
+
+/**
+ * 全角标点：裸 URL 撞上它们就该收尾。真实 URL 里这些字符几乎不会
+ * 裸出现（浏览器复制出来是百分号编码），出现即意味着"正文开始了"。
+ * 全角字母数字和汉字不在内 —— `wiki/汉字` 这类路径是合法的。
+ * U+3000（全角空格）也算：GFM 只认 ASCII 空白，它拦不住自动链接。
+ */
+const CJK_PUNCT =
+  /[\u2018-\u201F\u2026\u3000-\u3002\u3008-\u3011\u3014-\u301F\uFF01-\uFF0F\uFF1A-\uFF20\uFF3B-\uFF40\uFF5B-\uFF65]/;
+
+/**
+ * 把 GFM 自动识别的裸链接在第一个全角标点处截断，截掉的尾巴还回正文。
+ *
+ * GFM 自动链接到空白才停，尾部修剪只认 ASCII 标点。中文语境里
+ * `（https://linux.do/latest）。需要…` 会把 `）。需要…` 整段吞进
+ * URL —— 链接点开是 404，满屏蓝字也没法读。
+ *
+ * 只动自动链接（文字与 URL 一字不差、起点重合）；`[文字](url)` 和
+ * `<url>` 是作者明确划的边界，URL 里就算有全角字符也照单全收。
+ */
+function remarkCjkAutolinks() {
+  return (tree: MdNode) => {
+    walk(tree, (node) => {
+      const kids = node.children;
+      if (!kids) return;
+      for (let i = 0; i < kids.length; i++) {
+        const link = kids[i];
+        if (!link || link.type !== "link" || link.children?.length !== 1) continue;
+        const text = link.children[0];
+        if (!text || text.type !== "text") continue;
+        const value = text.value ?? "";
+        const url = link.url ?? "";
+        // 自动链接的特征：链接文字与 URL 一致（www 裸域名会被 GFM 补上
+        // http:// 前缀），且节点起点与文字起点重合（`<url>` 的起点在 `<`，
+        // `[文字](url)` 的起点在 `[`，都会错开）。
+        if (url !== value && url !== `http://${value}`) continue;
+        if (link.position?.start?.offset !== text.position?.start?.offset) continue;
+        const m = CJK_PUNCT.exec(value);
+        if (!m || m.index === 0) continue;
+        const tail = value.slice(m.index);
+        text.value = value.slice(0, m.index);
+        link.url = url.slice(0, url.length - tail.length);
+        kids.splice(i + 1, 0, { type: "text", value: tail });
+      }
+    });
+  };
+}
 
 /** 软换行前后的空白：断行时要吃掉，否则新行开头挂着缩进。 */
 const SOFT_BREAK = /[\t ]*\n[\t ]*/;
@@ -170,7 +219,9 @@ export const Markdown = memo(function Markdown({
     <div className="md">
       <ReactMarkdown
         remarkPlugins={
-          breaks ? [remarkGfm, remarkCodeRefs, remarkSoftBreaks] : [remarkGfm, remarkCodeRefs]
+          breaks
+            ? [remarkGfm, remarkCjkAutolinks, remarkCodeRefs, remarkSoftBreaks]
+            : [remarkGfm, remarkCjkAutolinks, remarkCodeRefs]
         }
         rehypePlugins={[[rehypeHighlight, { ignoreMissing: true, detect: false }]]}
         urlTransform={keepFileUrls}

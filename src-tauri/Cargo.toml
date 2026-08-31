@@ -60,6 +60,9 @@ ignore = "0.4.33"
 sha2.workspace = true
 tar.workspace = true
 zstd.workspace = true
+# 定时任务的本地时间运算（"每天 08:00"的下一次是几点）。只在宿主 ——
+# 时间只有宿主碰（riot-protocol::schedule 模块头），内核不做时区运算。
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 similar = { version = "3.1.2", default-features = false, features = ["text", "inline"] }
 tauri-plugin-notification = "2.3.3"
 

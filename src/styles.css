@@ -50,7 +50,7 @@
   --bg-hover: #2b2b2b;
   /* 菜单区专用一档。侧栏/设置导航底色比正文浅 —— hover 和选中态
      也得整体抬高才看得出来，所以配了自己的 hover/active，
-     并在 .sidebar / .settings-nav 里就地覆盖 --bg-hover。 */
+     并在 .sidebar / .settings-side 里就地覆盖 --bg-hover。 */
   --bg-nav: #252525;
   --bg-nav-hover: #303030;
   --bg-nav-active: #373737;
@@ -302,6 +302,31 @@ button:disabled {
   outline: none;
 }
 
+/* 菜单项也是例外：菜单打开时程序把焦点放到第一项上（为了键盘直接能用），
+   WebKit 把这种脚本聚焦当键盘聚焦，鼠标一点开就套光环。菜单的焦点本来
+   就该用底色表达（原生菜单同款）—— 键盘 ↑↓ 走到哪行，哪行亮。 */
+.ctx-item:focus-visible {
+  outline: none;
+  background: var(--bg-hover);
+}
+
+.ctx-item.danger:focus-visible {
+  background: color-mix(in srgb, var(--danger) 12%, var(--bg-card));
+}
+
+/* 弹窗的初始焦点（确认框的「取消」等 autoFocus 按钮）同理被当成键盘
+   聚焦。弹窗按钮都有实体边框，键盘焦点用边框提亮表达 —— 比 2px 光环
+   柔和，初始焦点看起来就是"默认按钮"的意思，键盘 Tab 的指示也还在。 */
+.modal-actions button:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* 弹窗壳（tabIndex=-1，打开时接住焦点的那个 div）永远不该有光环。 */
+.modal:focus-visible {
+  outline: none;
+}
+
 button.primary {
   background: var(--accent-dim);
   border-color: #3d5f94;
@@ -386,10 +411,62 @@ pre {
   font-size: 12px;
 }
 
+/* ── 面板开合动画壳（SlidePanel）────────────── */
+
+/* 尺寸动画在壳上，内容在固定尺寸的内层里被裁切（见 SlidePanel.tsx）。 */
+.slide-panel {
+  flex-shrink: 0;
+  display: flex;
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+}
+
+.slide-panel.ay {
+  flex-direction: column;
+}
+
+/* 右侧 / 底栏：内层贴外缘。壳收的是靠主区的那一边，窗口角上的
+   开关不会先被裁掉。 */
+.slide-panel.end {
+  justify-content: flex-end;
+}
+
+/* transition 只在开合瞬间在场（.animating），拖宽时没有 —— 否则宽度
+   追着鼠标发飘。曲线偏 ease-out：面板出场要果断，收尾要轻。 */
+.slide-panel.animating.ax {
+  transition: width 0.24s cubic-bezier(0.25, 0.8, 0.3, 1);
+}
+
+.slide-panel.animating.ay {
+  transition: height 0.24s cubic-bezier(0.25, 0.8, 0.3, 1);
+}
+
+.slide-panel-inner {
+  flex-shrink: 0;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+.slide-panel.ay .slide-panel-inner {
+  flex-direction: column;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .slide-panel.animating.ax,
+  .slide-panel.animating.ay,
+  .tb-traffic,
+  .tb-win-slot {
+    transition: none;
+  }
+}
+
 /* ── 骨架 ───────────────────────────────────── */
 
 /* 一行三列：侧栏 | 主区（工具栏/对话/终端）| 抽屉（全高，Codex 同款）。 */
 .shell {
+  position: relative;
   display: flex;
   height: 100%;
   /* 各列最小宽度之和可能超过窗口（侧栏拖满 + 抽屉全开），溢出时裁掉
@@ -420,13 +497,34 @@ pre {
   user-select: none;
 }
 
-/* 侧栏收起时给 macOS 的红绿灯让位。全屏没有红绿灯，别留空白。 */
-.topbar.pad-traffic {
-  padding-left: 84px;
+/* 展开钮 + macOS 红绿灯让位。宽度跟侧栏壳同时长同曲线；钮不进
+   标题的文档流，否则折叠那一拍标题会先被挤到右边。 */
+.tb-traffic {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  overflow: hidden;
+  width: 0;
+  /* 收起时吃掉 .topbar 的 gap，否则 0 宽占位仍会在标题前留 6px。 */
+  margin-right: -6px;
+  transition:
+    width 0.24s cubic-bezier(0.25, 0.8, 0.3, 1),
+    margin-right 0.24s cubic-bezier(0.25, 0.8, 0.3, 1);
 }
 
-.shell[data-fullscreen] .topbar.pad-traffic {
-  padding-left: 10px;
+.tb-traffic.show {
+  width: 28px;
+  margin-right: 0;
+}
+
+/* .topbar 固有 padding 10px；84-10=74 是红绿灯让位，加上钮 28。 */
+.tb-traffic.show.lights {
+  width: 102px;
+}
+
+.shell[data-fullscreen] .tb-traffic.show.lights {
+  width: 28px;
 }
 
 .tb-btn {
@@ -520,16 +618,34 @@ pre {
   align-self: stretch;
 }
 
-/* 窗口级分栏开关（侧栏 / 终端 / 侧边面板）。抽屉收起时坐在顶栏右端，
-   开着时坐在抽屉标签栏右端 —— 两处都是窗口的右上角，所以样式共用。
-   左边多留一点：和会话设置（管的是单个会话）之间要有一道呼吸，
-   不然五个图标连成一排，看不出哪些管窗口、哪些管会话。 */
+/* 窗口级分栏开关（终端 / 侧边面板）。钉在窗口右上角，不进顶栏或
+   抽屉的文档流 —— 换座位会在开合时先闪到缝上再滑回来。
+   顶栏 / 抽屉标签栏用等宽槽让位，设置钮和标签不会钻到按钮底下。 */
 .win-controls {
   flex: none;
   display: flex;
   align-items: center;
   gap: 2px;
-  margin-left: 6px;
+}
+
+.win-controls.docked {
+  position: absolute;
+  top: 0;
+  right: 10px;
+  height: 44px;
+  z-index: var(--z-panel);
+}
+
+/* 6px 呼吸 + 两枚 28px 钮 + 2px 缝。抽屉收起时顶栏才让位；开合跟
+   侧栏同一条曲线，设置钮单调靠近按钮，不会先冲过它们再被挤回来。 */
+.tb-win-slot {
+  flex-shrink: 0;
+  width: 0;
+  transition: width 0.24s cubic-bezier(0.25, 0.8, 0.3, 1);
+}
+
+.tb-win-slot.show {
+  width: 64px;
 }
 
 /* ── 拖拽分隔线 ─────────────────────────────── */
@@ -651,16 +767,16 @@ pre {
   user-select: none;
 }
 
+/* 侧栏顶栏：跟主区 .topbar 同高，两边才对得齐。开关靠右，贴着自己
+   管的那条缝。负 margin 吃掉 .sidebar 的水平 padding，整行可拖窗口。 */
 .traffic-space {
   height: 44px;
   flex-shrink: 0;
-}
-
-/* Windows / Linux 没有左上角红绿灯；全屏时 macOS 红绿灯也消失。
-   44px 留白就浪费了；但一点不留会让「打开目录」贴顶。 */
-.traffic-space.compact,
-.shell[data-fullscreen] .traffic-space {
-  height: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  margin: 0 -10px;
+  padding: 0 8px;
 }
 
 .new-thread {
@@ -683,7 +799,8 @@ pre {
      落到上一行的 auto。macOS 不写 ::-webkit-scrollbar 几何，走系统
      overlay：滚才出现。 */
   overflow-y: overlay;
-  margin-top: 14px;
+  /* 和上方菜单项到「打开目录」的间距同一个数 —— 三段等距才不别扭。 */
+  margin-top: 10px;
   /* 滚出侧栏的右内边距，滑块贴着分隔线；padding 把会话行推回原位。 */
   margin-right: -10px;
   padding-right: 10px;
@@ -770,13 +887,15 @@ pre {
 /* hover 画在整行上，把旁边的 + / … 一起罩进去。折叠仍然只绑在
    .project-toggle 上，点按钮不会折起来。 */
 .project-head:hover,
-.project-head:focus-within {
+.project-head:focus-within,
+.project-head.menu-open {
   background: var(--bg-hover);
   color: var(--text);
 }
 
 .project-head:hover .chevron,
-.project-head:focus-within .chevron {
+.project-head:focus-within .chevron,
+.project-head.menu-open .chevron {
   color: var(--text-dim);
 }
 
@@ -856,8 +975,10 @@ pre {
 
 .project-head:hover .row-btn,
 .project-head:focus-within .row-btn,
+.project-head.menu-open .row-btn,
 .thread:hover .row-btn,
-.thread:focus-within .row-btn {
+.thread:focus-within .row-btn,
+.thread.menu-open .row-btn {
   opacity: 1;
 }
 
@@ -875,7 +996,8 @@ pre {
 }
 
 .thread:hover,
-.thread:focus-within {
+.thread:focus-within,
+.thread.menu-open {
   background: var(--bg-hover);
 }
 
@@ -1164,7 +1286,8 @@ pre {
   /* `[约束]` 右内边距必须和顶栏（.topbar）的一致。那组窗口开关在抽屉
      开合时会在这两条栏之间换座位，两边留白差一点，按钮就会在点下去的
      瞬间横向跳一下 —— 看起来像点歪了。左边可以不同：那是标签的起点。 */
-  padding: 0 10px 0 8px;
+  /* 右边让给钉死的窗口开关（10px 边距 + 64px 槽），标签不要钻到下面。 */
+  padding: 0 74px 0 8px;
   border-left: 1px solid var(--border);
   /* 不画下边线（Codex 同款）：顶栏那条横线到抽屉这一列就该停住。以前
      画它是为了和浏览器面板自带的那排页面标签分界，而页面标签早已提到
@@ -2434,8 +2557,11 @@ pre {
   position: fixed;
   inset: 0;
   z-index: var(--z-viewer);
+  display: flex;
+  align-items: center;
+  justify-content: center;
   overflow: auto;
-  padding: 64px 48px 48px;
+  padding: 56px 24px 24px;
   box-sizing: border-box;
   background: rgba(8, 9, 12, 0.85);
   backdrop-filter: blur(8px);
@@ -2445,8 +2571,11 @@ pre {
 
 .shot-viewer img {
   display: block;
-  max-width: 100%;
-  margin: 0 auto;
+  max-width: calc(100vw - 48px);
+  max-height: calc(100vh - 80px);
+  width: auto;
+  height: auto;
+  object-fit: contain;
   border-radius: 6px;
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
   cursor: default;
@@ -2529,7 +2658,7 @@ pre {
 
 /* 图标。mask + currentColor，跟着每种块的字色走。 */
 .chip::before {
-  content: "";
+  content: '';
   flex-shrink: 0;
   width: 11px;
   height: 11px;
@@ -2821,6 +2950,21 @@ pre {
   background: var(--bg);
 }
 
+.attachment-view {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: zoom-in;
+}
+
+.attachment-view:hover:not(:disabled) {
+  background: none;
+  filter: brightness(1.08);
+}
+
 .attachment img {
   width: 100%;
   height: 100%;
@@ -2834,6 +2978,7 @@ pre {
   position: absolute;
   top: 2px;
   right: 2px;
+  z-index: 1;
   width: 16px;
   height: 16px;
   padding: 0;
@@ -3577,27 +3722,36 @@ button.chip-ref.clickable:hover {
   inset: 0;
   z-index: var(--z-modal);
   display: flex;
-  flex-direction: column;
   background: var(--bg);
+}
+
+/* 左列通顶，跟主界面 .sidebar 同一套：浅底、自己的 hover、宽度由
+   内联样式跟会话侧栏对齐。返回在这一列顶上，不再横跨整窗。 */
+.settings-side {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-nav);
+  --bg-hover: var(--bg-nav-hover);
+  padding: 0 10px 10px;
 }
 
 .settings-head {
+  height: 44px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 12px;
-  height: 44px;
-  padding: 0 12px 0 10px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg);
+  justify-content: flex-end;
+  margin: 0 -10px;
+  padding: 0 8px;
 }
 
-.settings-head.pad-traffic {
+.settings-head.pad-lights {
   padding-left: 84px;
 }
 
-.shell[data-fullscreen] .settings-head.pad-traffic {
-  padding-left: 10px;
+.shell[data-fullscreen] .settings-head.pad-lights {
+  padding-left: 8px;
 }
 
 .settings-back {
@@ -3617,12 +3771,6 @@ button.chip-ref.clickable:hover {
   color: var(--text);
 }
 
-.settings-main {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-}
-
 /* 说明在左、动作按钮在右的一行（测试连接、删除服务方）。 */
 .row-between {
   display: flex;
@@ -3636,17 +3784,14 @@ button.chip-ref.clickable:hover {
   min-width: 0;
 }
 
-/* 设置左侧的分类列表也是菜单，跟侧栏同一档底色和 hover。 */
+/* 分类列表在左列里滚，底色/hover 继承 .settings-side。 */
 .settings-nav {
-  width: 208px;
-  flex-shrink: 0;
-  background: var(--bg-nav);
-  --bg-hover: var(--bg-nav-hover);
-  border-right: 1px solid var(--border);
-  padding: 6px 10px 20px;
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  padding: 6px 0 10px;
 }
 
 .settings-nav-group {
@@ -3754,8 +3899,21 @@ button.chip-ref.clickable:hover {
 .settings-body {
   flex: 1;
   min-width: 0;
-  padding: 12px 40px 72px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 跟主区 .topbar 同高的拖拽带：标题从这条下面起，两边顶对齐。 */
+.settings-body-top {
+  height: 44px;
+  flex-shrink: 0;
+}
+
+.settings-scroll {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  padding: 12px 40px 72px;
 }
 
 /* 正文限宽居中。铺满整屏的话，一个 1600px 宽的窗口会把「名称」和它的
@@ -4141,6 +4299,7 @@ button.chip-ref.clickable:hover {
   position: absolute;
   right: 0;
   bottom: 0;
+  z-index: 1;
   width: 16px;
   height: 16px;
   padding: 0;
@@ -7442,4 +7601,785 @@ button.field-slider-state:hover {
 
 .change-copy:hover {
   color: var(--text);
+}
+
+/* ── 侧栏分组与定时任务 ─────────────────────── */
+
+/* 大分组（定时任务 / 项目）的标题行：折叠开关 + hover 出现的 +。
+   交互模式照 .project-head：hover 罩整行，按钮不参与折叠。 */
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 4px 2px 6px;
+  border-radius: 8px;
+}
+
+/* hover 画在整行上，把右边的 + 一起罩进去（和 .project-head 同一条
+   规矩）。标题本身是 button，会吃到全局 button:hover 的底色 —— 只亮
+   文字那截、按钮悬在色块外面，看着像高亮没罩到，所以下面把它压回
+   透明，让整行那层独自负责。 */
+.section-head:hover,
+.section-head:focus-within {
+  background: var(--bg-hover);
+}
+
+.section-toggle:hover:not(:disabled) {
+  background: transparent;
+}
+
+.section-head:hover .row-btn,
+.section-head:focus-within .row-btn {
+  opacity: 1;
+}
+
+.section-toggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 2px;
+  background: none;
+  border: none;
+  text-align: left;
+  color: var(--text-faint);
+}
+
+.section-toggle:hover {
+  color: var(--text-dim);
+}
+
+.section-name {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
+.section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+/* 一级菜单项上的错过红点。 */
+.side-badge {
+  min-width: 16px;
+  padding: 1px 5px;
+  border-radius: 8px;
+  background: #a33d3d;
+  color: #f2dede;
+  font-size: 10px;
+  line-height: 14px;
+  text-align: center;
+}
+
+/* 侧栏主体里的一级菜单项（定时任务）。基础样式来自 .side-item，
+   这里只管间距和"页面在前台"的高亮。
+   节奏：「打开目录」→ 10px → 菜单项 → 10px（.threads 的 margin-top）
+   → 「项目」，上下均衡；再往下分组之间由 .threads 的 gap 拉开。 */
+.side-nav {
+  margin: 10px 0 0;
+}
+
+.side-nav .side-label {
+  flex: 1;
+}
+
+.side-nav.active {
+  background: var(--bg-nav-active);
+  color: var(--text);
+}
+
+/* ── 定时任务页（主区） ─────────────────────── */
+
+.sched-page {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+/* 左列：列表。详情开着时它被压缩，各自滚动。 */
+.sp-main-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 页面自己的顶部区：窗口拖拽 + 侧栏开关（这页没有 TopBar）。
+   和页面同底色、无分隔线 —— 它不是一条"栏"，只是左上角一个开关。 */
+.sp-chrome {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+}
+
+.sp-chrome:has(.tb-traffic.show) {
+  padding: 8px 10px 0;
+}
+
+.sp-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 24px 48px;
+}
+
+.sp-inner {
+  max-width: 640px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.sp-head h2 {
+  margin: 0 0 4px;
+  font-size: 20px;
+}
+
+.sp-sub {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.sp-search {
+  width: 100%;
+  padding: 9px 14px;
+  border-radius: 10px;
+}
+
+.sp-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sp-tabs {
+  flex: 1;
+  display: flex;
+  gap: 4px;
+}
+
+.sp-tab {
+  padding: 4px 12px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.sp-tab.active {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.sp-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.sp-clear,
+.sp-create {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  font-size: 12px;
+}
+
+.sp-clear {
+  background: transparent;
+  color: var(--text-dim);
+}
+
+.sp-clear:disabled {
+  opacity: 0.4;
+}
+
+.sp-missed {
+  border: 1px solid #6b4a2a;
+  background: rgba(160, 110, 50, 0.12);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sp-missed-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #d9b38a;
+}
+
+.sp-missed-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.sp-missed-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sp-missed-btn {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  background: var(--bg-hover);
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+}
+
+.sp-missed-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: #3d5f94;
+}
+
+.sp-missed-foot {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.sp-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sp-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 10px;
+  padding: 0 8px 0 0;
+}
+
+.sp-row:hover,
+.sp-row:focus-within,
+.sp-row.menu-open {
+  background: var(--bg-hover);
+}
+
+/* 选中行常亮（详情面板正对着它）。 */
+.sp-row.selected {
+  background: var(--bg-nav-active);
+}
+
+.sp-row.paused {
+  opacity: 0.55;
+}
+
+.sp-row .row-btn {
+  padding: 6px;
+}
+
+.sp-row:hover .row-btn,
+.sp-row:focus-within .row-btn,
+.sp-row.menu-open .row-btn {
+  opacity: 1;
+}
+
+.sp-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 4px 9px 12px;
+  background: none;
+  border: none;
+  text-align: left;
+}
+
+/* 行主体是 button，压掉全局 button:hover —— 高亮由整行负责。 */
+.sp-row-main:hover:not(:disabled) {
+  background: transparent;
+}
+
+.sp-ring {
+  flex-shrink: 0;
+  color: var(--text-faint);
+}
+
+.sp-row-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sp-row-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.sp-row-missed {
+  margin-left: 8px;
+  font-size: 11px;
+  color: #d9a662;
+}
+
+.sp-row-meta {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.sp-empty {
+  padding: 28px 12px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.sp-suggest {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sp-suggest-caption {
+  padding: 0 12px 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-faint);
+}
+
+.sp-suggest-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 9px 12px;
+  background: none;
+  border: none;
+  border-radius: 10px;
+  text-align: left;
+}
+
+.sp-suggest-row:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.sp-suggest-when {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+/* ── 详情面板（右列，Codex 同款） ───────────── */
+
+/* 宽度由内联样式给（用户拖出来的值），左缘的 Resizer 负责调。
+   窗口不够宽时允许被压 —— 列表是主体，详情是辅助。
+   底色和主区同一块实底（--bg）：透明会让磨砂材质把背后窗口的颜色
+   透进来，和左边实底的任务页拼在一起就是两个色。 */
+.sp-detail {
+  flex-shrink: 1;
+  min-width: 240px;
+  overflow-y: auto;
+  border-left: 1px solid var(--border);
+  padding: 14px 16px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--bg);
+}
+
+.sp-d-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+}
+
+.sp-d-status {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.sp-d-status.live {
+  color: var(--accent);
+}
+
+.sp-d-space {
+  flex: 1;
+}
+
+.sp-d-save {
+  box-sizing: border-box;
+  height: 28px;
+  min-width: 52px;
+  padding: 0 10px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+/* 没改动时占着位但不显示，避免出现/消失把右边图标和整栏高度顶一下。 */
+.sp-d-save.idle {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* 头部操作键常显（不像列表行等 hover）—— 面板就这几个键。 */
+.sp-detail .row-btn {
+  box-sizing: border-box;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  opacity: 0.7;
+}
+
+.sp-detail .row-btn:hover {
+  opacity: 1;
+}
+
+/* 名字当标题编辑：平时无边框，落焦时再显出输入框的样子。 */
+.sp-d-name {
+  width: 100%;
+  padding: 4px 6px;
+  margin: 0 -6px;
+  background: transparent;
+  border-color: transparent;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.sp-d-name:hover,
+.sp-d-name:focus {
+  border-color: var(--border-strong);
+  background: var(--bg);
+}
+
+/* 提示词框跟设置里「提示词 / 内容」同一套（.preset-body-input + 自制拉伸角）。 */
+.sp-detail .ta-resize {
+  flex-shrink: 0;
+}
+
+.sp-d-caption {
+  margin-top: 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-faint);
+}
+
+/* 设置组：圆角卡片，行与行用分隔线。 */
+.sp-d-group {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-card) 55%, transparent);
+}
+
+.sp-d-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.sp-d-row + .sp-d-row {
+  border-top: 1px solid var(--border);
+}
+
+.sp-d-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 行右侧的紧凑控件：无边框、右对齐，像 Codex 的行内下拉。 */
+.sp-d-select,
+.sp-d-input {
+  max-width: 60%;
+  padding: 3px 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  text-align: right;
+}
+
+.sp-d-select:hover,
+.sp-d-input:hover,
+.sp-d-select:focus,
+.sp-d-input:focus {
+  border-color: var(--border-strong);
+  background: var(--bg);
+}
+
+/* FieldSelect（设置页同款自制下拉）在设置行里的紧凑皮肤：
+   平时融进行里，hover / 打开时才显出输入框的样子。 */
+.sp-d-row .sp-d-field {
+  max-width: 60%;
+  padding: 3px 8px;
+  font-size: 13px;
+  background: transparent;
+  border-color: transparent;
+}
+
+.sp-d-row .sp-d-field:hover:not(:disabled),
+.sp-d-row .sp-d-field[aria-expanded='true'] {
+  background: var(--bg);
+  border-color: var(--border-strong);
+}
+
+.sp-d-field .field-select-label {
+  text-align: right;
+}
+
+/* ── 时间 / 日期时间选择弹层（壳复用 .field-select-menu） ── */
+
+.tp-pop {
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  overflow: hidden;
+}
+
+.tp-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.tp-col-caption {
+  padding: 2px 0 6px;
+  font-size: 11px;
+  text-align: center;
+  color: var(--text-faint);
+}
+
+.tp-col-list {
+  flex: 1;
+  min-height: 0;
+  max-height: 236px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tp-item {
+  flex-shrink: 0;
+  padding: 5px 0;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  text-align: center;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.tp-item:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.tp-item.picked {
+  background: var(--accent-dim);
+  color: #c8d8f0;
+}
+
+/* 日期时间：左日历 + 右时/分两列。 */
+.dtp .tp-col {
+  flex: 0 0 52px;
+}
+
+.dtp-cal {
+  flex: 1;
+  min-width: 0;
+}
+
+.dtp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.dtp-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.dtp-nav {
+  padding: 0 8px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  font-size: 15px;
+  line-height: 22px;
+  color: var(--text-dim);
+}
+
+.dtp-nav:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.dtp-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+}
+
+.dtp-dow {
+  padding: 2px 0 4px;
+  font-size: 10px;
+  text-align: center;
+  color: var(--text-faint);
+}
+
+.dtp-day {
+  aspect-ratio: 1;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.dtp-day:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.dtp-day.today {
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+.dtp-day.picked {
+  background: var(--accent-dim);
+  color: #c8d8f0;
+}
+
+.dtp-day:disabled {
+  opacity: 0.3;
+}
+
+.sp-d-time {
+  text-align: left;
+}
+
+.sp-d-foot {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+/* 会话选择器：行内按钮 + 底下弹出的搜索列表。 */
+.sp-picker {
+  position: relative;
+  max-width: 60%;
+}
+
+.sp-picker-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.sp-picker-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sp-picker-pop {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 30;
+  width: 280px;
+  max-height: 320px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+
+.sp-picker-search {
+  margin: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.sp-picker-list {
+  overflow-y: auto;
+  padding: 0 6px 6px;
+}
+
+.sp-picker-group {
+  padding: 6px 8px 2px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.sp-picker-item {
+  display: block;
+  width: 100%;
+  padding: 6px 8px;
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  text-align: left;
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sp-picker-item:hover:not(:disabled),
+.sp-picker-item:focus-visible {
+  outline: none;
+  background: var(--bg-hover);
+}
+
+.sp-picker-item.picked {
+  color: var(--accent);
+}
+
+.sp-picker-empty {
+  padding: 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+  text-align: center;
 }

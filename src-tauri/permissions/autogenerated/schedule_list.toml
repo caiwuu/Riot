@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-schedule-list"
+description = "Enables the schedule_list command without any pre-configured scope."
+commands.allow = ["schedule_list"]
+
+[[permission]]
+identifier = "deny-schedule-list"
+description = "Denies the schedule_list command without any pre-configured scope."
+commands.deny = ["schedule_list"]

@@ -106,7 +106,9 @@ function installMacOverlayScrollbar() {
     }
     const r = el.getBoundingClientRect();
     const pad = 3;
-    const track = Math.max(0, r.height - pad * 2);
+    // 自制拉伸角在右下 16px，滑块别压上去（设置里的提示词和任务详情共用）。
+    const grip = el.closest(".ta-resize") ? 16 : 0;
+    const track = Math.max(0, r.height - pad * 2 - grip);
     const h = Math.min(track, Math.max(18, (clientHeight / scrollHeight) * track));
     const max = scrollHeight - clientHeight;
     // 倒排滚动容器（对话流是 column-reverse）原点在底部、scrollTop ≤ 0，

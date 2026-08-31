@@ -19,6 +19,7 @@ pub mod permission;
 pub mod provider;
 pub mod rpc;
 pub mod runner;
+pub mod schedule;
 pub mod terminal;
 pub mod tool;
 pub mod turn;
@@ -54,6 +55,10 @@ pub use provider::{
     ThinkingEffort, ThinkingPolicy, ToolSpec,
 };
 pub use rpc::{RpcEnvelope, RpcError, RpcErrorCode, RpcNotification, RpcRequest, RpcResponse};
+pub use schedule::{
+    MissedRun, NoSchedule, Repeat, RunTargetSpec, ScheduleAccess, ScheduleError, SchedulePatch,
+    ScheduleRun, ScheduleRunPhase, ScheduleSpec, ScheduledTask, WhenSpec,
+};
 pub use tool::{
     Clock, FileMeta, FileState, FileStateCache, FileSystem, FileView, InterruptBehavior,
     ProcessOutput, ProcessRunner, ProcessSpec, ProgressSink, PromptContext, ResultBudget, Tool,

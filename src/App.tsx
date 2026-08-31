@@ -15,6 +15,7 @@ import {
   type ConfigStatus,
   createSession,
   deleteSession,
+  encodePlainForComposer,
   getConfig,
   type ImageInput,
   listSessions,
@@ -24,13 +25,23 @@ import {
   pickDirectory,
   pickFiles,
   probeDirs,
+  type MissedRun,
   removeProject,
   renameSession,
   revealInFinder,
+  scheduleAckMissed,
+  scheduleDelete,
+  scheduleList,
+  scheduleMissed,
+  scheduleRunNow,
+  scheduleSetEnabled,
+  type ScheduledTask,
   type SessionInfo,
   setConfig as saveConfig,
   setWindowTitle,
   subscribeFullscreen,
+  subscribeScheduleChanges,
+  subscribeScheduleRuns,
 } from "./bridge";
 import { BrowserPanel } from "./components/BrowserPanel";
 import { GitChangesPanel } from "./components/GitChangesPanel";
@@ -77,7 +88,9 @@ import {
   type WorkbenchState,
   type WorkbenchTab,
 } from "./components/Workbench";
+import { isDoneSchedule, ScheduleDetail, SchedulesPage } from "./components/SchedulesPage";
 import { Sidebar } from "./components/Sidebar";
+import { SlidePanel, usePresence } from "./components/SlidePanel";
 import { Welcome } from "./components/Welcome";
 import { Composer, forgetComposerSession } from "./components/Composer";
 import {
@@ -105,7 +118,26 @@ const LS = {
   sidebarOpen: "riot.layout.sidebarOpen",
   drawer: "riot.layout.drawer",
   term: "riot.layout.term",
+  schedDetail: "riot.layout.schedDetail",
+  recency: "riot.session.recency",
 };
+
+/** 侧栏按「最近聊过」排。纯 UI 顺序，不进宿主索引。 */
+function loadRecency(): Record<string, number> {
+  try {
+    const raw = localStorage.getItem(LS.recency);
+    if (!raw) return {};
+    const v: unknown = JSON.parse(raw);
+    if (!v || typeof v !== "object") return {};
+    const out: Record<string, number> = {};
+    for (const [k, n] of Object.entries(v as Record<string, unknown>)) {
+      if (typeof n === "number" && Number.isFinite(n)) out[k] = n;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
 
 
 
@@ -116,6 +148,8 @@ const SIDEBAR = { def: 280, min: 180, max: 420 };
 /** 抽屉窄过这个值页面就没法看了，浏览器面板自己也有同样的下限。 */
 const DRAWER_MIN = 320;
 const TERM = { def: 260, min: 110 };
+/** 定时任务详情（占用系统右侧栏的位置，宽度独立于工作台抽屉）。 */
+const SCHED_DETAIL = { def: 612, min: 500, max: 1008 };
 
 /** 抽屉的默认宽度跟着窗口走 —— 固定像素在小窗口上会把对话挤没。 */
 const drawerDefault = () => Math.round(window.innerWidth * 0.42);
@@ -144,8 +178,41 @@ export function App() {
   const [bootError, setBootError] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [active, setActive] = useState<string | null>(null);
+  /** 每个会话最近一次真开聊的时刻。侧栏同项目里按它倒序。 */
+  const [recency, setRecency] = useState(loadRecency);
+  /**
+   * 把会话顶到它那组最前。
+   *
+   * `[约束]` 只在**真开聊**（开轮）和新建时调，切换会话不算。翻旧会话
+   * 找一句话是高频动作，跟着改顺序的话，用户扫两眼列表就被重排一遍，
+   * 再也回不到刚才看的位置。
+   */
+  const touchSession = useCallback((id: string) => {
+    setRecency((prev) => {
+      const next = { ...prev, [id]: Date.now() };
+      localStorage.setItem(LS.recency, JSON.stringify(next));
+      return next;
+    });
+  }, []);
+  const sawBusy = useRef(new Set<string>());
   const [booting, setBooting] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
+  /** 定时任务页在主区前台（侧栏一级菜单进入，选会话退出）。 */
+  const [schedulePage, setSchedulePage] = useState(false);
+  /** 详情面板正看着的任务。详情占用系统右侧栏（工作台抽屉的位置）。 */
+  const [selectedSchedule, setSelectedSchedule] = useState<string | null>(null);
+  /** 详情侧栏宽度（拖出来的值）。 */
+  const [schedDetailW, setSchedDetailW] = useState(() => {
+    const v = loadPx(LS.schedDetail, SCHED_DETAIL.def);
+    // 旧默认 340，加宽之后低于新下限的存值作废。
+    return v < SCHED_DETAIL.min ? SCHED_DETAIL.def : v;
+  });
+  /** 定时任务清单（任务页展示）。 */
+  const [schedules, setSchedules] = useState<ScheduledTask[]>([]);
+  /** 启动时发现的错过运行。行上标黄；补跑/忽略后逐条消掉。 */
+  const [missedSchedules, setMissedSchedules] = useState<MissedRun[]>([]);
+  /** 创建定时任务的开场白。走 Composer 的 insertText 通道。 */
+  const [schedSnippet, setSchedSnippet] = useState<string | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
   /** 目录已不在磁盘上、等用户决定怎么处理的那个项目。 */
@@ -187,6 +254,23 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(
     () => localStorage.getItem(LS.sidebarOpen) !== "0",
   );
+  /** 侧栏壳真正改宽度的那一拍。顶栏让位跟这个走，不能跟 sidebarOpen。 */
+  const [sidebarVisual, setSidebarVisual] = useState(
+    () => localStorage.getItem(LS.sidebarOpen) !== "0",
+  );
+  /** 终端收起动画那一拍里内容还要显示（见 TerminalPanel 的 visible）。
+   *  放在状态区：App 有条件早退，hook 不能出现在那之后。 */
+  const termPresent = usePresence(showTerm);
+  /** 任务详情占着右侧栏时，工作台抽屉让位。hook 必须在早退之前。 */
+  const scheduleDetailOpen = Boolean(
+    schedulePage && selectedSchedule && schedules.some((t) => t.id === selectedSchedule),
+  );
+  const rightDrawerOpen = Boolean(active && wb.open && !scheduleDetailOpen);
+  /** 抽屉还在画面上（含收起动画）。内容要留着，否则是空壳在滑。 */
+  const drawerPresent = usePresence(rightDrawerOpen);
+  /** 壳真正开始改宽度的那一拍。窗口开关跟这个走：跟收起动画对齐
+   *  坐回顶栏，设置钮才不会先被主区拽到窗口右缘、再被开关挤回来。 */
+  const [drawerVisual, setDrawerVisual] = useState(false);
   const [sidebarW, setSidebarW] = useState(() => loadPx(LS.sidebar, SIDEBAR.def));
   const [drawerW, setDrawerW] = useState(() => loadPx(LS.drawer, drawerDefault()));
   const [termH, setTermH] = useState(() => loadPx(LS.term, TERM.def));
@@ -509,6 +593,8 @@ export function App() {
       });
       setSessions((prev) => [...prev, info]);
       setActive(info.id);
+      touchSession(info.id);
+      setSchedulePage(false);
     } catch (e) {
       // 目录被删是可恢复的：问要不要从列表拿掉或另选，别整页「出错了」。
       if (isMissingProjectError(e)) {
@@ -518,7 +604,7 @@ export function App() {
       }
       noteError("无法创建会话", e);
     }
-  }, [noteError]);
+  }, [noteError, touchSession]);
 
   const openProject = useCallback(async () => {
     const dir = await pickDirectory();
@@ -583,6 +669,46 @@ export function App() {
     [config],
   );
 
+  /** 重拉任务清单（创建/删除/到点运行后侧栏要立即对齐）。 */
+  const reloadSchedules = useCallback(() => {
+    scheduleList()
+      .then(setSchedules)
+      .catch(() => {});
+  }, []);
+
+  // 定时任务：启动时拉清单和"错过了什么"；表变了（模型调工具创建/
+  // 删除）就重拉；任务开跑/跑完时还要对齐会话列表 —— 后台新建的会话
+  // 要马上出现在侧栏，不能等下一次轮询。
+  useEffect(() => {
+    reloadSchedules();
+    scheduleMissed()
+      .then(setMissedSchedules)
+      .catch(() => {});
+    const offRuns = subscribeScheduleRuns(() => {
+      reloadSchedules();
+      listSessions()
+        .then(setSessions)
+        .catch(() => {});
+    });
+    const offChanges = subscribeScheduleChanges(reloadSchedules);
+    return () => {
+      offRuns();
+      offChanges();
+    };
+  }, [reloadSchedules]);
+
+  /**
+   * 处理掉一条错过记录（补跑或忽略）。全部处理完才告诉宿主清空 ——
+   * 宿主只有整体 ack，逐条的账在前端记。
+   */
+  const settleMissed = useCallback((taskId: string) => {
+    setMissedSchedules((prev) => {
+      const left = prev.filter((m) => m.taskId !== taskId);
+      if (left.length === 0 && prev.length > 0) void scheduleAckMissed().catch(() => {});
+      return left;
+    });
+  }, []);
+
   // 后台会话的忙碌状态没有事件可订阅（只有挂载中的会话有事件流），
   // 侧栏的"正在跑"指示点只能靠轮询对齐。只在确实有会话在跑时才轮 ——
   // 全员空闲时一次都不发。
@@ -596,6 +722,37 @@ export function App() {
     }, 5000);
     return () => clearInterval(t);
   }, [anyBusy]);
+
+  // 会话刚开跑（含后台定时任务）顶到该项目最前。启动那次 busy 快照
+  // 不当作一次新的聊天 —— 否则每次打开 App 列表都会被正在跑的会话打乱。
+  useEffect(() => {
+    const now = new Set(sessions.filter((s) => s.busy).map((s) => s.id));
+    if (!booting) {
+      for (const id of now) {
+        if (!sawBusy.current.has(id)) touchSession(id);
+      }
+    }
+    sawBusy.current = now;
+  }, [sessions, booting, touchSession]);
+
+  // 删掉的会话从顺序表里拿掉，免得 localStorage 越积越大。
+  useEffect(() => {
+    if (booting) return;
+    const alive = new Set(sessions.map((s) => s.id));
+    setRecency((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const id of Object.keys(next)) {
+        if (!alive.has(id)) {
+          delete next[id];
+          changed = true;
+        }
+      }
+      if (!changed) return prev;
+      localStorage.setItem(LS.recency, JSON.stringify(next));
+      return next;
+    });
+  }, [sessions, booting]);
 
   /**
    * 全局 ⌘ 快捷键。macOS 用户带着 Finder/浏览器的肌肉记忆来 ——
@@ -785,6 +942,7 @@ export function App() {
         info,
       ]);
       setActive(info.id);
+      touchSession(info.id);
       setMissing((prev) => {
         const n = new Set(prev);
         n.delete(root);
@@ -807,6 +965,7 @@ export function App() {
     setMenu({
       x: e.clientX,
       y: e.clientY,
+      anchor: `session:${s.id}`,
       entries: [
         {
           label: "重命名",
@@ -840,6 +999,7 @@ export function App() {
     setMenu({
       x: e.clientX,
       y: e.clientY,
+      anchor: `project:${root}`,
       entries: [
         { label: "新会话", action: () => void newSession(root) },
         { label: "在访达中显示", action: () => void revealInFinder(root) },
@@ -863,6 +1023,88 @@ export function App() {
         },
       ],
     });
+  };
+
+  /** 定时任务行的「…」/ 右键菜单。操作全收在这里，行本身只负责跳转。 */
+  const scheduleMenu = (e: React.MouseEvent, t: ScheduledTask) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const missed = missedSchedules.find((m) => m.taskId === t.id);
+    const entries: MenuState["entries"] = [];
+    if (missed) {
+      entries.push({
+        label: `补跑一次（错过 ${missed.count} 次）`,
+        action: () => {
+          settleMissed(t.id);
+          void scheduleRunNow(t.id).catch((err: unknown) => noteError("补跑没成", err));
+        },
+      });
+      entries.push({ label: "忽略这次错过", action: () => settleMissed(t.id) });
+    }
+    entries.push({
+      label: "立即运行",
+      action: () => void scheduleRunNow(t.id).catch((err: unknown) => noteError("没跑起来", err)),
+    });
+    // 一次性任务跑完就没有"恢复"可言 —— 时刻已经过了，恢复了也不会再跑。
+    const spent = t.repeat.kind === "once" && !t.enabled && !t.nextRunMs;
+    if (!spent) {
+      entries.push({
+        label: t.enabled ? "暂停" : "恢复",
+        action: () =>
+          void scheduleSetEnabled(t.id, !t.enabled)
+            .then(reloadSchedules)
+            .catch((err: unknown) => noteError(t.enabled ? "暂停失败" : "恢复失败", err)),
+      });
+    }
+    // 和点击行同一个判定：会话还活着才给入口，跳到已删除的会话
+    // 只会退回欢迎页，看起来像点坏了。
+    if (t.lastSessionId && sessions.some((s) => s.id === t.lastSessionId)) {
+      const sid = t.lastSessionId;
+      entries.push({
+        label: "看上次运行",
+        action: () => {
+          setActive(sid);
+          setSchedulePage(false);
+        },
+      });
+    }
+    entries.push({
+      label: "删除任务",
+      danger: true,
+      action: () =>
+        setConfirm({
+          title: `删除「${t.name}」？`,
+          body: "到点就不会再跑了。已经跑过的会话不受影响。",
+          confirmLabel: "删除",
+          action: () =>
+            void scheduleDelete(t.id)
+              .then(reloadSchedules)
+              .catch((err: unknown) => noteError("删除失败", err)),
+        }),
+    });
+    setMenu({ x: e.clientX, y: e.clientY, anchor: `schedule:${t.id}`, entries });
+  };
+
+  /**
+   * 把一段开场白送回输入框（创建的主入口是对话）。任务页会退到后台，
+   * 让会话接手 —— 没有活跃会话就什么都不做。
+   */
+  const scheduleCompose = (snippet: string) => {
+    if (!activeSession) return;
+    setSchedSnippet(encodePlainForComposer(snippet));
+    setSchedulePage(false);
+  };
+
+  /** 错过补跑：立即跑一次并把这条错过消掉。 */
+  const rerunMissed = (m: MissedRun) => {
+    settleMissed(m.taskId);
+    void scheduleRunNow(m.taskId).catch((err: unknown) => noteError("补跑没成", err));
+  };
+
+  /** 错过全部忽略。 */
+  const dismissAllMissed = () => {
+    setMissedSchedules([]);
+    void scheduleAckMissed().catch(() => {});
   };
 
   /** 工作台标签栏的"+"菜单：往抽屉里添一个标签。已开着的项只是激活。
@@ -915,12 +1157,13 @@ export function App() {
     );
   }
 
-  /** 抽屉此刻在不在画面上。它决定窗口的右上角归谁 —— 见下面 controls。 */
+  /** 抽屉逻辑上开着。窗口右上角归谁看 drawerPresent（含收起动画）。 */
   const drawerVisible = activeSession !== null && wb.open;
-  /**
-   * 窗口级分栏开关。同一份节点挂在两处之一：抽屉开着时挂在抽屉的标签栏
-   * 上，收起时挂在顶栏右端 —— 两种情况下它都正好落在**窗口**的右上角。
-   */
+  /** 任务详情占用的就是抽屉这个位置：任务页前台 + 选中了任务才有。 */
+  const selSchedule = schedulePage
+    ? (schedules.find((t) => t.id === selectedSchedule) ?? null)
+    : null;
+  /** 窗口级分栏开关。钉在 .shell 右上角，不进顶栏 / 抽屉文档流。 */
   const windowControls = (
     <WindowControls
       terminalOpen={showTerm}
@@ -938,8 +1181,7 @@ export function App() {
   return (
     <ProjectRootContext.Provider value={activeSession?.root ?? ""}>
     <div className="shell" data-fullscreen={fullscreen ? "" : undefined}>
-      {sidebarOpen ? (
-        <>
+      <SlidePanel axis="x" open={sidebarOpen} size={sidebarW} keepMounted onVisualOpen={setSidebarVisual}>
           <Sidebar
             width={sidebarW}
             projects={projects}
@@ -947,48 +1189,67 @@ export function App() {
             sessions={sessions}
             active={active}
             renaming={renaming}
-            onSelect={setActive}
+            onSelect={(id) => {
+              setActive(id);
+              setSchedulePage(false);
+            }}
+            recency={recency}
             onNewSession={newSession}
             onOpenProject={openProject}
             onSettings={() => setShowSettings(true)}
+            onSchedules={() => {
+              // 任务详情要占用右侧栏 —— 工作台开着就先收起来。
+              // 进菜单不记住上次打开的详情，每次都从列表开始。
+              collapseDrawer();
+              setSelectedSchedule(null);
+              setSchedulePage(true);
+            }}
+            schedulesActive={schedulePage}
+            missedSchedules={missedSchedules.length}
             onSessionMenu={sessionMenu}
             onProjectMenu={projectMenu}
+            menuAnchor={menu?.anchor ?? null}
             onRenameSubmit={doRename}
             onRenameCancel={() => setRenaming(null)}
+            onCollapse={toggleSidebar}
           />
-          <Resizer
-            axis="x"
-            onStart={() => {
-              dragFrom.current = sidebarW;
-              dragLive.current = sidebarW;
-            }}
-            onDelta={(d) => {
-              const w = clamp(dragFrom.current + d, SIDEBAR.min, SIDEBAR.max);
-              dragLive.current = w;
-              setSidebarW(w);
-            }}
-            onEnd={() => savePx(LS.sidebar, dragLive.current)}
-            onReset={() => {
-              setSidebarW(SIDEBAR.def);
-              savePx(LS.sidebar, SIDEBAR.def);
-            }}
-          />
-        </>
+      </SlidePanel>
+      {sidebarOpen ? (
+        <Resizer
+          axis="x"
+          onStart={() => {
+            dragFrom.current = sidebarW;
+            dragLive.current = sidebarW;
+          }}
+          onDelta={(d) => {
+            const w = clamp(dragFrom.current + d, SIDEBAR.min, SIDEBAR.max);
+            dragLive.current = w;
+            setSidebarW(w);
+          }}
+          onEnd={() => savePx(LS.sidebar, dragLive.current)}
+          onReset={() => {
+            setSidebarW(SIDEBAR.def);
+            savePx(LS.sidebar, SIDEBAR.def);
+          }}
+        />
       ) : null}
 
       <div className="main">
-        <TopBar
-          sidebarOpen={sidebarOpen}
-          onToggleSidebar={toggleSidebar}
-          session={activeSession}
-          onSessionMenu={sessionMenu}
-          sessionCfgOpen={showSessionCfg}
-          sessionCfgEnabled={activeSession !== null}
-          onToggleSessionCfg={() => setShowSessionCfg((v) => !v)}
-          onOpenBrowser={() => activateTab({ kind: "browser" })}
-          // 抽屉开着时窗口的右上角是抽屉的，那三个键挂到它的标签栏上去。
-          controls={drawerVisible ? null : windowControls}
-        />
+        {/* 任务页不要这条会话工具栏 —— 标题、设置、面板开关管的都是
+            会话。侧栏收起时开关由任务页顶部区承接，开着时在侧栏顶栏。 */}
+        {schedulePage ? null : (
+          <TopBar
+            sidebarOpen={sidebarVisual}
+            onToggleSidebar={toggleSidebar}
+            session={activeSession}
+            onSessionMenu={sessionMenu}
+            sessionCfgOpen={showSessionCfg}
+            sessionCfgEnabled={activeSession !== null}
+            onToggleSessionCfg={() => setShowSessionCfg((v) => !v)}
+            onOpenBrowser={() => activateTab({ kind: "browser" })}
+            reserveControls={!drawerVisual}
+          />
+        )}
 
         {updateNotice ? (
           <div className="update-banner" role="status">
@@ -1009,9 +1270,43 @@ export function App() {
 
         <div className="workarea">
           <div className="chat-col">
+            {schedulePage ? (
+              <SchedulesPage
+                schedules={schedules}
+                missed={missedSchedules}
+                selected={selectedSchedule}
+                onSelect={setSelectedSchedule}
+                sidebarOpen={sidebarVisual}
+                onToggleSidebar={toggleSidebar}
+                onMenu={scheduleMenu}
+                menuAnchor={menu?.anchor ?? null}
+                onCreate={() => scheduleCompose("帮我设一个定时任务：")}
+                onClearDone={() => {
+                  const done = schedules.filter(isDoneSchedule);
+                  if (done.length === 0) return;
+                  setConfirm({
+                    title: `清理 ${done.length} 个已完成的任务？`,
+                    body: "一次性任务跑完的记录会从列表里去掉。已经跑过的会话不受影响。",
+                    confirmLabel: "清理",
+                    action: () =>
+                      void Promise.all(done.map((t) => scheduleDelete(t.id)))
+                        .then(() => {
+                          setSelectedSchedule((id) =>
+                            id && done.some((t) => t.id === id) ? null : id,
+                          );
+                          reloadSchedules();
+                        })
+                        .catch((err: unknown) => noteError("清理失败", err)),
+                  });
+                }}
+                onSuggest={scheduleCompose}
+                onRerunMissed={rerunMissed}
+                onDismissMissed={dismissAllMissed}
+              />
+            ) : null}
             {activeSession ? (
               mountedSessions.map((s) => {
-                const visible = s.id === activeSession.id;
+                const visible = !schedulePage && s.id === activeSession.id;
                 return (
                   <div
                     key={s.id}
@@ -1050,23 +1345,24 @@ export function App() {
                       }}
                       onTurnEnd={() => setChangesRev((n) => n + 1)}
                       onBusy={(b) => patchSession(s.id, { busy: b })}
-                      insertText={visible ? (termSnippet ?? pickSnippet) : null}
+                      insertText={visible ? (termSnippet ?? pickSnippet ?? schedSnippet) : null}
                       onInserted={() => {
                         setTermSnippet(null);
                         setPickSnippet(null);
+                        setSchedSnippet(null);
                       }}
                     />
                   </div>
                 );
               })
-            ) : (
+            ) : !schedulePage ? (
               <Welcome
                 projects={projects}
                 missing={missing}
                 onNewSession={newSession}
                 onOpenProject={openProject}
               />
-            )}
+            ) : null}
           </div>
         </div>
 
@@ -1094,16 +1390,20 @@ export function App() {
             }}
           />
         ) : null}
-        {/* 常驻挂载：收起只是 display:none，shell 和回滚缓冲都留着。 */}
-        <TerminalPanel
-          visible={showTerm}
-          height={termH}
-          sessionId={activeSession?.id ?? null}
-          defaultRoot={activeSession?.root ?? projects[0] ?? null}
-          onHide={() => setShowTerm(false)}
-          onAgentTerminal={() => setShowTerm(true)}
-          onSendSelection={setTermSnippet}
-        />
+        {/* 常驻挂载（keepMounted）：收起只是壳收到 0，shell 和回滚缓冲
+            都留着。visible 用 termPresent —— 收起动画那一拍里内容还得
+            显示着，不然是内容先消失、空壳再收起。 */}
+        <SlidePanel axis="y" anchor="end" open={showTerm} size={termH} keepMounted>
+          <TerminalPanel
+            visible={termPresent}
+            height={termH}
+            sessionId={activeSession?.id ?? null}
+            defaultRoot={activeSession?.root ?? projects[0] ?? null}
+            onHide={() => setShowTerm(false)}
+            onAgentTerminal={() => setShowTerm(true)}
+            onSendSelection={setTermSnippet}
+          />
+        </SlidePanel>
       </div>
 
       {/* 抽屉是 main 的兄弟：整列全高（Codex 同款），terminal 只垫在对话
@@ -1113,32 +1413,88 @@ export function App() {
           里面是多标签工作台：顶部一条统一标签栏，浏览器 / Git 改动 /
           每个预览文件各占一个标签，共存不互斥。整列同一时刻仍只显示
           一个标签的内容 —— 并排铺开会把对话挤成一条缝。宽度所有标签
-          共享，拖过一次全都记住。 */}
-      {drawerVisible && activeSession ? (
-        <>
-          <Resizer
-            axis="x"
-            onStart={() => {
-              dragFrom.current = drawerW;
-              dragLive.current = drawerW;
-            }}
-            onDelta={(d) => {
-              // 抽屉拖的是左缘：往左（负位移）变宽
-              const w = clamp(
-                dragFrom.current - d,
-                DRAWER_MIN,
-                Math.round(window.innerWidth * 0.7),
-              );
-              dragLive.current = w;
-              setDrawerW(w);
-            }}
-            onEnd={() => savePx(LS.drawer, dragLive.current)}
-            onReset={() => {
-              const w = drawerDefault();
-              setDrawerW(w);
-              savePx(LS.drawer, w);
+          共享，拖过一次全都记住。
+
+          任务页前台时这个位置归定时任务详情（进入任务页时工作台已被
+          收起，见侧栏的 onSchedules）。 */}
+      {selSchedule ? (
+        <Resizer
+          axis="x"
+          onStart={() => {
+            dragFrom.current = schedDetailW;
+            dragLive.current = schedDetailW;
+          }}
+          onDelta={(d) => {
+            // 详情拖的是左缘：往左（负位移）变宽
+            const w = clamp(
+              dragFrom.current - d,
+              SCHED_DETAIL.min,
+              Math.min(SCHED_DETAIL.max, Math.round(window.innerWidth * 0.7)),
+            );
+            dragLive.current = w;
+            setSchedDetailW(w);
+          }}
+          onEnd={() => savePx(LS.schedDetail, dragLive.current)}
+          onReset={() => {
+            setSchedDetailW(SCHED_DETAIL.def);
+            savePx(LS.schedDetail, SCHED_DETAIL.def);
+          }}
+        />
+      ) : null}
+      <SlidePanel axis="x" anchor="end" open={selSchedule !== null} size={schedDetailW} keepMounted>
+        {selSchedule ? (
+          <ScheduleDetail
+            key={selSchedule.id}
+            task={selSchedule}
+            width={schedDetailW}
+            sessions={sessions}
+            projects={projects}
+            onClose={() => setSelectedSchedule(null)}
+            onMenu={scheduleMenu}
+            onError={noteError}
+            onOpenSession={(id) => {
+              setActive(id);
+              setSelectedSchedule(null);
+              setSchedulePage(false);
             }}
           />
+        ) : null}
+      </SlidePanel>
+
+      {!selSchedule && drawerVisible && activeSession ? (
+        <Resizer
+          axis="x"
+          onStart={() => {
+            dragFrom.current = drawerW;
+            dragLive.current = drawerW;
+          }}
+          onDelta={(d) => {
+            // 抽屉拖的是左缘：往左（负位移）变宽
+            const w = clamp(
+              dragFrom.current - d,
+              DRAWER_MIN,
+              Math.round(window.innerWidth * 0.7),
+            );
+            dragLive.current = w;
+            setDrawerW(w);
+          }}
+          onEnd={() => savePx(LS.drawer, dragLive.current)}
+          onReset={() => {
+            const w = drawerDefault();
+            setDrawerW(w);
+            savePx(LS.drawer, w);
+          }}
+        />
+      ) : null}
+      <SlidePanel
+        axis="x"
+        anchor="end"
+        open={rightDrawerOpen}
+        size={drawerW}
+        keepMounted
+        onVisualOpen={setDrawerVisual}
+      >
+        {drawerPresent && activeSession ? (
           <div className="drawer" style={{ width: drawerW }}>
             {/* 标签栏常在（哪怕一个标签都没有）：它同时是窗口右上角那三个
                 分栏开关的座位，抽屉开着的时候不能没有它。 */}
@@ -1154,7 +1510,6 @@ export function App() {
               onSelectPage={selectBrowserPage}
               onClosePage={closeBrowserPage}
               onAdd={workbenchAddMenu}
-              trailing={windowControls}
             />
             {/* 空状态即"添加面板"菜单（Codex 同款）。只列侧边标签；
                 终端停靠在底部，入口在窗口开关那一组里。 */}
@@ -1206,8 +1561,11 @@ export function App() {
               />
             ) : null}
           </div>
-        </>
-      ) : null}
+        ) : null}
+      </SlidePanel>
+
+      {/* 钉在窗口右上角。任务页没有这条会话工具栏，开关也不露。 */}
+      {schedulePage ? null : windowControls}
 
       {showSettings ? (
         <Settings
@@ -1220,6 +1578,7 @@ export function App() {
           updateChecking={update.checking}
           updateError={update.error}
           onCheckUpdate={() => void update.check()}
+          navWidth={sidebarW}
         />
       ) : null}
 

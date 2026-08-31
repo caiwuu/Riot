@@ -22,8 +22,11 @@ use riot_protocol::browser::{
     NetQuery, TabId, Target, WaitCondition,
 };
 use riot_protocol::env::{EnvProbe, EnvSnapshot};
-use riot_protocol::hostcall::{BrowserCall, HostCallErrorKind, HostRequest, HostResponse};
+use riot_protocol::hostcall::{
+    BrowserCall, HostCallErrorKind, HostRequest, HostResponse, ScheduleCall,
+};
 use riot_protocol::id::SessionId;
+use riot_protocol::schedule::{ScheduleAccess, ScheduleError, ScheduleSpec, ScheduledTask};
 use riot_protocol::terminal::{TerminalAccess, TerminalInfo, TerminalUnavailable};
 
 use crate::manager::Outbound;
@@ -169,6 +172,65 @@ impl EnvProbe for RemoteEnv {
             // 拿不到就是"这一轮没有感知"。工具都还在，模型不因此变盲，
             // 不值得为一次采样失败打断轮次。
             _ => None,
+        }
+    }
+}
+
+/// 宿主定时任务调度器的远程代理。
+pub struct RemoteSchedule {
+    pub session_id: SessionId,
+    pub bridge: Arc<HostBridge>,
+}
+
+impl RemoteSchedule {
+    async fn call(&self, call: ScheduleCall) -> Result<HostResponse, ScheduleError> {
+        self.bridge
+            .call(HostRequest::ScheduleCall {
+                session_id: self.session_id.clone(),
+                call,
+            })
+            .await
+            .map_err(ScheduleError)
+    }
+}
+
+#[async_trait]
+impl ScheduleAccess for RemoteSchedule {
+    async fn create(&self, spec: ScheduleSpec) -> Result<ScheduledTask, ScheduleError> {
+        match self.call(ScheduleCall::Create { spec }).await? {
+            HostResponse::Schedule { task } => Ok(task),
+            HostResponse::Error { message, .. } => Err(ScheduleError(message)),
+            other => Err(ScheduleError(format!("宿主回了意外形状:{other:?}"))),
+        }
+    }
+
+    async fn list(&self) -> Result<Vec<ScheduledTask>, ScheduleError> {
+        match self.call(ScheduleCall::List).await? {
+            HostResponse::Schedules { tasks } => Ok(tasks),
+            HostResponse::Error { message, .. } => Err(ScheduleError(message)),
+            other => Err(ScheduleError(format!("宿主回了意外形状:{other:?}"))),
+        }
+    }
+
+    async fn set_enabled(&self, id: &str, enabled: bool) -> Result<ScheduledTask, ScheduleError> {
+        match self
+            .call(ScheduleCall::SetEnabled {
+                id: id.to_owned(),
+                enabled,
+            })
+            .await?
+        {
+            HostResponse::Schedule { task } => Ok(task),
+            HostResponse::Error { message, .. } => Err(ScheduleError(message)),
+            other => Err(ScheduleError(format!("宿主回了意外形状:{other:?}"))),
+        }
+    }
+
+    async fn delete(&self, id: &str) -> Result<(), ScheduleError> {
+        match self.call(ScheduleCall::Delete { id: id.to_owned() }).await? {
+            HostResponse::Ok => Ok(()),
+            HostResponse::Error { message, .. } => Err(ScheduleError(message)),
+            other => Err(ScheduleError(format!("宿主回了意外形状:{other:?}"))),
         }
     }
 }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-schedule-ack-missed"
+description = "Enables the schedule_ack_missed command without any pre-configured scope."
+commands.allow = ["schedule_ack_missed"]
+
+[[permission]]
+identifier = "deny-schedule-ack-missed"
+description = "Denies the schedule_ack_missed command without any pre-configured scope."
+commands.deny = ["schedule_ack_missed"]

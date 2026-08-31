@@ -14,6 +14,7 @@ import {
   compactSession,
   type ConfigStatus,
   decodePickFromComposer,
+  decodePlainFromComposer,
   hasActiveKey,
   type ImageInput,
   type PermissionMode,
@@ -62,6 +63,7 @@ import { ConfirmDialog, type ConfirmRequest } from "./ConfirmDialog";
 import { ContextRing } from "./ContextRing";
 import { ArrowUpIcon, PencilIcon, PlusIcon, StopIcon, TrashIcon } from "./icons";
 import { ModeMenu, Picker, type PickerSection, modelLabel } from "./pickers";
+import { ShotViewer } from "./ToolCard";
 
 const drafts = new Map<string, Seg[]>();
 
@@ -370,6 +372,8 @@ export function Composer({
   const [slashNote, setSlashNote] = useState("");
   /** 待发的图。发出去就清空。挂载时从模块级缓存恢复（见 shotsCache）。 */
   const [shots, setShots] = useState<Shot[]>(() => shotsCache.get(sessionId) ?? []);
+  /** 输入框里点开的待发图。和对话流共用 ShotViewer。 */
+  const [viewShot, setViewShot] = useState<Shot | null>(null);
 
   // 写通到模块级缓存。挂在 effect 而不是每个 setShots 调用点：
   // 调用点有五六处（粘贴、拖放、删除、发送、失败回滚），漏一处
@@ -587,10 +591,13 @@ export function Composer({
     if (pick) {
       setContent([...cur, { kind: "elem", value: pick.selector, label: pick.description }]);
     } else {
-      // 终端选中那类:整段包进代码围栏（报错栈里的尖括号/缩进不这么处理
-      // 会被 markdown 吃掉）。
       const prefix = segsText(cur).trim() ? "\n\n" : "";
-      setContent([...cur, { kind: "text", value: `${prefix}\`\`\`\n${insertText}\n\`\`\`\n` }]);
+      const plain = decodePlainFromComposer(insertText);
+      // 定时任务开场白原样插入。终端选中那类才包代码围栏（报错栈里的
+      // 尖括号/缩进不这么处理会被 markdown 吃掉）。
+      const value =
+        plain != null ? `${prefix}${plain}` : `${prefix}\`\`\`\n${insertText}\n\`\`\`\n`;
+      setContent([...cur, { kind: "text", value }]);
     }
     el.focus();
     caretToEnd(el);
@@ -1139,7 +1146,14 @@ export function Composer({
           <div className="attachments">
             {shots.map((s) => (
               <div className="attachment" key={s.id} title={s.name}>
-                <img src={`data:${s.mediaType};base64,${s.data}`} alt={s.name} />
+                <button
+                  type="button"
+                  className="attachment-view"
+                  onClick={() => setViewShot(s)}
+                  aria-label={`查看 ${s.name}`}
+                >
+                  <img src={`data:${s.mediaType};base64,${s.data}`} alt={s.name} />
+                </button>
                 <button
                   type="button"
                   className="attachment-remove"
@@ -1151,6 +1165,13 @@ export function Composer({
               </div>
             ))}
           </div>
+        ) : null}
+        {viewShot ? (
+          <ShotViewer
+            src={`data:${viewShot.mediaType};base64,${viewShot.data}`}
+            alt={viewShot.name}
+            onClose={() => setViewShot(null)}
+          />
         ) : null}
 
         {/* 引用块住在编辑区里、和文字同一行，所以这里没有单独的块列表。 */}

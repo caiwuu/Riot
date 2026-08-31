@@ -62,6 +62,25 @@ pub enum HostRequest {
     /// 见 docs/ENV_DESIGN.md §3。
     #[serde(rename = "env.snapshot")]
     EnvSnapshot { session_id: SessionId },
+
+    /// 定时任务操作。调度权威在宿主(riot_protocol::schedule 模块头),
+    /// 内核的 Schedule 工具经这里转发。session_id 是发起会话:创建
+    /// "在本会话续跑"的任务时,宿主拿它当目标;新会话任务拿它查项目根。
+    #[serde(rename = "schedule.call")]
+    ScheduleCall {
+        session_id: SessionId,
+        call: ScheduleCall,
+    },
+}
+
+/// [`crate::schedule::ScheduleAccess`] 各方法的序列化形状,一一对应。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ScheduleCall {
+    Create { spec: crate::schedule::ScheduleSpec },
+    List,
+    SetEnabled { id: String, enabled: bool },
+    Delete { id: String },
 }
 
 /// [`crate::browser::BrowserAccess`] 各方法的序列化形状,一一对应。
@@ -148,7 +167,15 @@ pub enum HostResponse {
     Marked { listing: String, screenshot: String },
     /// env.snapshot。
     Env { snapshot: crate::env::EnvSnapshot },
-    /// 无返回数据的成功(terminal.kill、browser.navigate)。
+    /// schedule.call 的 create / set_enabled:操作后的任务视图。
+    Schedule {
+        task: crate::schedule::ScheduledTask,
+    },
+    /// schedule.call 的 list。
+    Schedules {
+        tasks: Vec<crate::schedule::ScheduledTask>,
+    },
+    /// 无返回数据的成功(terminal.kill、browser.navigate、schedule 删除)。
     Ok,
     /// 失败。`kind` 必须区分开 —— 工具层对两种失败给模型的指引相反:
     /// 不可用 → 别重试、换别的工具;目标失效 → 重拍快照再来。

@@ -24,6 +24,10 @@ use riot_protocol::id::{IdGenerator, NanoIdGenerator, SessionId};
 use riot_protocol::message::Message;
 use riot_protocol::permission::{PendingAsk, PermissionMode, PermissionResponse};
 use riot_protocol::rpc::{RpcRequest, RpcResponse};
+use riot_protocol::schedule::{
+    MissedRun, Repeat, RunTargetSpec, SchedulePatch, ScheduleRun, ScheduleRunPhase, ScheduleSpec,
+    ScheduledTask,
+};
 
 use crate::config::AppConfig;
 use crate::fence::Fence;
@@ -166,6 +170,24 @@ struct Inner {
     browsers: Mutex<HashMap<String, Arc<crate::browser::access::HostBrowser>>>,
     /// 环境告警的去重表（env.snapshot 用）。见 `env_probe`。
     env_alerts: crate::env_probe::AlertSeen,
+    /// 定时任务：任务表 + 运行认领 + 启动时发现的错过。
+    /// 落盘（schedules.json）在拿着这把锁时同步做 —— 和 index_lock 同一条
+    /// "快照与写盘一个临界区"的规矩，否则并发保存会让旧快照后落盘。
+    schedules: Mutex<SchedState>,
+    /// Tauri 应用句柄。setup 时挂上；系统通知和全局 emit 靠它。
+    /// 单元测试不挂 —— 拿不到就静默跳过那两件事。
+    app: std::sync::OnceLock<tauri::AppHandle>,
+}
+
+/// 定时任务的内存状态。
+#[derive(Default)]
+struct SchedState {
+    tasks: Vec<crate::schedule::PersistedTask>,
+    /// 正在跑的任务：session_id → task_id。[`HostNotice::Done`] 按它认领
+    /// "这轮结束是不是某个定时任务跑完了"。
+    running: HashMap<String, String>,
+    /// 启动时发现的错过运行。前端确认（补跑或算了）后清空。
+    missed: Vec<MissedRun>,
 }
 
 impl Inner {
@@ -193,6 +215,8 @@ impl Inner {
             terminals: crate::term::Terminals::default(),
             browsers: Mutex::default(),
             env_alerts: crate::env_probe::AlertSeen::default(),
+            schedules: Mutex::default(),
+            app: std::sync::OnceLock::new(),
         }
     }
 }
@@ -251,10 +275,31 @@ impl AppState {
             tracing::info!(count = map.len(), "从磁盘恢复了 {} 个会话", map.len());
         }
 
+        // 定时任务表：读 + 启动对账。错过的到点收进清单等用户决定，
+        // 任务表本身修到面向未来的状态（见 schedule::reconcile_on_start）。
+        let mut book = crate::schedule::load(&inner.sessions_dir);
+        let (missed, dirty) =
+            crate::schedule::reconcile_on_start(&mut book.tasks, crate::schedule::now_ms());
+        if dirty && let Err(e) = crate::schedule::save(&inner.sessions_dir, &book) {
+            tracing::warn!(error = %e, "任务表对账结果没写盘，下次启动会重报一遍错过");
+        }
+        if !missed.is_empty() {
+            tracing::info!(
+                count = missed.len(),
+                "有 {} 个定时任务在 App 关着时错过了到点",
+                missed.len()
+            );
+        }
+
         Self(Arc::new(Inner {
             sessions: Mutex::new(map),
             seq: AtomicU64::new(next_seq),
             browsers: Mutex::new(browsers_map),
+            schedules: Mutex::new(SchedState {
+                tasks: book.tasks,
+                running: HashMap::new(),
+                missed,
+            }),
             ..inner
         }))
     }
@@ -282,6 +327,8 @@ impl AppState {
                         if let Some(m) = state.0.sessions.lock().await.get_mut(&session_id) {
                             m.busy = false;
                         }
+                        // 这轮结束可能是某个定时任务跑完了：认领、通知、广播。
+                        state.finish_schedule_run(&session_id).await;
                     }
                     HostNotice::ModeChanged { session_id, mode } => {
                         if let Some(m) = state.0.sessions.lock().await.get_mut(&session_id) {
@@ -317,6 +364,9 @@ impl AppState {
                             m.hydrated = false;
                             m.busy = false;
                         }
+                        // 跑着的定时任务也随内核没了。不清的话那些 Done
+                        // 永远不来，认领表里的条目就永远挂着。
+                        state.0.schedules.lock().await.running.clear();
                     }
                 }
             }
@@ -864,6 +914,22 @@ impl AppState {
         refs: Vec<String>,
     ) -> HostResult<Option<String>> {
         self.require_sink(session_id).await?;
+        self.submit_turn(session_id, text, images, refs).await
+    }
+
+    /// [`Self::send_turn`] 去掉"前端必须在听"的那道检查。
+    ///
+    /// **只给调度器用。** 定时任务到点时多半没人盯着那个会话 —— 事件没有
+    /// 出口就丢（transcript 照写，用户点开会话时从历史水合），busy 标记
+    /// 照立（侧栏指示点就是这么亮的）。用户主动发消息仍走 send_turn：
+    /// 没有出口时发出去只会永远转圈，那是 bug 不是后台运行。
+    async fn submit_turn(
+        &self,
+        session_id: &str,
+        text: &str,
+        images: Vec<riot_protocol::ImageInput>,
+        refs: Vec<String>,
+    ) -> HostResult<Option<String>> {
         self.ensure_hydrated(session_id).await?;
         let sampling = {
             let g = self.0.sessions.lock().await;
@@ -1403,6 +1469,412 @@ impl AppState {
     pub async fn shutdown(&self) {
         self.0.kernel.shutdown().await;
     }
+
+    // ────────────────────────────────────────────────────────
+    // 定时任务。调度权威在宿主（riot_protocol::schedule 模块头）。
+    // ────────────────────────────────────────────────────────
+
+    /// 挂上 Tauri 应用句柄。setup 时调一次；系统通知和全局 emit 靠它，
+    /// 没挂（单元测试）就静默跳过那两件事。
+    pub fn attach_app(&self, app: tauri::AppHandle) {
+        let _ = self.0.app.set(app);
+    }
+
+    /// 创建定时任务。`origin_session` 是发起会话：`in_this_session` 的
+    /// 目标就是它，新会话任务从它取项目根。
+    ///
+    /// 错误是给模型（或前端）的人话 —— 时间给错了会附上当前时刻。
+    pub async fn schedule_create(
+        &self,
+        origin_session: &str,
+        spec: ScheduleSpec,
+    ) -> Result<ScheduledTask, String> {
+        let root = self
+            .session_root(origin_session)
+            .await
+            .map_err(|_| "发起会话不存在，创建不了定时任务。".to_owned())?;
+        let now = crate::schedule::now_ms();
+        let (repeat, first_run) = crate::schedule::resolve_spec(&spec.when, now)?;
+
+        let task = crate::schedule::PersistedTask {
+            id: NanoIdGenerator.next_id("sch"),
+            name: spec.name,
+            prompt: spec.prompt,
+            repeat,
+            session_id: spec.in_this_session.then(|| origin_session.to_owned()),
+            root: root.display().to_string(),
+            enabled: true,
+            next_run_ms: Some(first_run),
+            last_run_ms: None,
+            last_session_id: None,
+            created_at_ms: now,
+        };
+
+        {
+            let mut g = self.0.schedules.lock().await;
+            // 上限防失控：模型抽风循环创建、或用户忘了删，都不该积出一个
+            // 每分钟都在烧模型调用的任务堆。
+            if g.tasks.len() >= 50 {
+                return Err("定时任务已经有 50 个了（上限）。先删掉不用的再建。".to_owned());
+            }
+            g.tasks.push(task.clone());
+            self.persist_schedules(&g);
+        }
+        self.emit_schedule_changed();
+        Ok(task.to_view())
+    }
+
+    /// 全部任务的视图，next_run 近的在前。
+    pub async fn schedule_list(&self) -> Vec<ScheduledTask> {
+        let g = self.0.schedules.lock().await;
+        let mut out: Vec<ScheduledTask> = g.tasks.iter().map(|t| t.to_view()).collect();
+        out.sort_by_key(|t| (t.next_run_ms.is_none(), t.next_run_ms, t.created_at_ms));
+        out
+    }
+
+    /// 暂停 / 恢复。恢复周期任务时重算下次运行 —— 暂停期间的 next_run
+    /// 已经是过去时，不重算的话恢复瞬间就触发一次。
+    pub async fn schedule_set_enabled(
+        &self,
+        id: &str,
+        enabled: bool,
+    ) -> Result<ScheduledTask, String> {
+        let view = {
+            let mut g = self.0.schedules.lock().await;
+            let t = g
+                .tasks
+                .iter_mut()
+                .find(|t| t.id == id)
+                .ok_or_else(|| format!("没有 id 为 {id} 的任务。先用 list 查一遍。"))?;
+            t.enabled = enabled;
+            if enabled {
+                let now = crate::schedule::now_ms();
+                match &t.repeat {
+                    Repeat::Once => {
+                        // 一次性任务的时刻还在未来才能恢复；已经过了就没有
+                        // "恢复"可言 —— 要么立即补跑要么删掉。
+                        if t.next_run_ms.is_none_or(|ts| ts <= now) {
+                            t.enabled = false;
+                            return Err(
+                                "这个一次性任务的时刻已经过了。要现在跑用 run_now（前端的「立即运行」），\
+                                 不跑就删了它。"
+                                    .to_owned(),
+                            );
+                        }
+                    }
+                    repeat => t.next_run_ms = crate::schedule::next_run(repeat, now),
+                }
+            }
+            let view = t.to_view();
+            self.persist_schedules(&g);
+            view
+        };
+        self.emit_schedule_changed();
+        Ok(view)
+    }
+
+    /// 编辑任务（详情面板的保存）。补丁里 None 的项不动。
+    pub async fn schedule_update(
+        &self,
+        id: &str,
+        patch: SchedulePatch,
+    ) -> Result<ScheduledTask, String> {
+        // 需要 await 的校验先做完，再进锁改表。
+        let target = match patch.target {
+            Some(RunTargetSpec::Session { id: sid }) => {
+                self.require_session(&sid)
+                    .await
+                    .map_err(|_| "指定的会话不存在（可能已被删除）。".to_owned())?;
+                // 续跑不用 root，但让它指向该会话的根，语义保持一致。
+                let root = self
+                    .session_root(&sid)
+                    .await
+                    .map_err(|_| "指定的会话不存在。".to_owned())?;
+                Some((Some(sid), root.display().to_string()))
+            }
+            Some(RunTargetSpec::NewSession { root }) => {
+                if !std::path::Path::new(&root).is_dir() {
+                    return Err(format!("项目目录不存在：{root}"));
+                }
+                Some((None, root))
+            }
+            None => None,
+        };
+        let when_resolved = patch
+            .when
+            .map(|w| crate::schedule::resolve_spec(&w, crate::schedule::now_ms()))
+            .transpose()?;
+
+        let view = {
+            let mut g = self.0.schedules.lock().await;
+            let t = g
+                .tasks
+                .iter_mut()
+                .find(|t| t.id == id)
+                .ok_or_else(|| format!("没有 id 为 {id} 的任务。"))?;
+            if let Some(name) = patch.name {
+                let name = name.trim().to_owned();
+                if name.is_empty() {
+                    return Err("任务名不能为空。".to_owned());
+                }
+                t.name = name;
+            }
+            if let Some(prompt) = patch.prompt {
+                let prompt = prompt.trim().to_owned();
+                if prompt.is_empty() {
+                    return Err("提示词不能为空 —— 到点发出去的就是它。".to_owned());
+                }
+                t.prompt = prompt;
+            }
+            if let Some((repeat, first)) = when_resolved {
+                t.repeat = repeat;
+                t.next_run_ms = Some(first);
+                // 改了时间就是想让它跑：暂停/已跑完的一并复活。
+                t.enabled = true;
+            }
+            if let Some((sid, root)) = target {
+                t.session_id = sid;
+                t.root = root;
+            }
+            let view = t.to_view();
+            self.persist_schedules(&g);
+            view
+        };
+        self.emit_schedule_changed();
+        Ok(view)
+    }
+
+    /// 删除任务。删不存在的报错 —— 对模型"没有这个 id"比静默成功有用。
+    pub async fn schedule_delete(&self, id: &str) -> Result<(), String> {
+        {
+            let mut g = self.0.schedules.lock().await;
+            let before = g.tasks.len();
+            g.tasks.retain(|t| t.id != id);
+            if g.tasks.len() == before {
+                return Err(format!("没有 id 为 {id} 的任务。先用 list 查一遍。"));
+            }
+            self.persist_schedules(&g);
+        }
+        self.emit_schedule_changed();
+        Ok(())
+    }
+
+    /// 立即跑一次（前端的「立即运行」和错过补跑共用）。
+    /// 不动 next_run —— 手动跑一次不该改变周期任务的节奏。
+    pub async fn schedule_run_now(&self, id: &str) -> Result<(), String> {
+        let task = {
+            let g = self.0.schedules.lock().await;
+            g.tasks
+                .iter()
+                .find(|t| t.id == id)
+                .cloned()
+                .ok_or_else(|| format!("没有 id 为 {id} 的任务。"))?
+        };
+        let state = self.clone();
+        tauri::async_runtime::spawn(async move {
+            state.run_schedule(task).await;
+        });
+        Ok(())
+    }
+
+    /// 启动时发现的错过清单。
+    pub async fn schedule_missed(&self) -> Vec<MissedRun> {
+        self.0.schedules.lock().await.missed.clone()
+    }
+
+    /// 用户看过错过提示了（补跑或算了都一样）：清掉，别每次都弹。
+    pub async fn schedule_ack_missed(&self) {
+        self.0.schedules.lock().await.missed.clear();
+    }
+
+    /// 一次调度检查：到期的任务推进 next_run 并逐个开跑。
+    /// 由宿主的 tick 循环（[`crate::schedule::spawn_ticker`]）周期调用。
+    pub async fn schedule_tick(&self) {
+        let now = crate::schedule::now_ms();
+        let due: Vec<crate::schedule::PersistedTask> = {
+            let mut g = self.0.schedules.lock().await;
+            let mut due = Vec::new();
+            for t in g.tasks.iter_mut() {
+                if !t.enabled || t.next_run_ms.is_none_or(|ts| ts > now) {
+                    continue;
+                }
+                due.push(t.clone());
+                // 在**开跑之前**推进 next_run：任务跑几分钟很正常，等它
+                // 跑完再推进的话，下一 tick 会拿同一个到期时刻再跑一遍。
+                match crate::schedule::next_run(&t.repeat, now) {
+                    Some(next) => t.next_run_ms = Some(next),
+                    None => {
+                        t.next_run_ms = None;
+                        t.enabled = false; // 一次性任务：跑这一次就完
+                    }
+                }
+            }
+            if !due.is_empty() {
+                self.persist_schedules(&g);
+            }
+            due
+        };
+        for task in due {
+            let state = self.clone();
+            tauri::async_runtime::spawn(async move {
+                state.run_schedule(task).await;
+            });
+        }
+    }
+
+    /// 跑一个定时任务：定会话（新建或续跑）→ 提交轮子 → 广播开跑。
+    /// 失败走系统通知 —— 到点没跑成而用户毫不知情，任务就白设了。
+    async fn run_schedule(&self, task: crate::schedule::PersistedTask) {
+        tracing::info!(task = %task.id, name = %task.name, "定时任务到点，开跑");
+        match self.run_schedule_inner(&task).await {
+            Ok(session_id) => {
+                self.emit_schedule(ScheduleRun {
+                    task_id: task.id,
+                    name: task.name,
+                    session_id,
+                    phase: ScheduleRunPhase::Started,
+                    error: None,
+                });
+            }
+            Err(msg) => {
+                tracing::warn!(task = %task.id, error = %msg, "定时任务没跑成");
+                self.notify_os("定时任务没跑成", &format!("「{}」：{msg}", task.name));
+                self.emit_schedule(ScheduleRun {
+                    task_id: task.id,
+                    name: task.name,
+                    session_id: String::new(),
+                    phase: ScheduleRunPhase::Done,
+                    error: Some(msg),
+                });
+            }
+        }
+    }
+
+    async fn run_schedule_inner(
+        &self,
+        task: &crate::schedule::PersistedTask,
+    ) -> Result<String, String> {
+        // 定会话。
+        let session_id = match &task.session_id {
+            Some(sid) => {
+                if self.require_session(sid).await.is_err() {
+                    // 续跑目标没了：暂停任务等用户处置，而不是每到点都
+                    // 失败一次 —— 那会变成一个循环报错的闹钟。
+                    let mut g = self.0.schedules.lock().await;
+                    if let Some(t) = g.tasks.iter_mut().find(|t| t.id == task.id) {
+                        t.enabled = false;
+                        self.persist_schedules(&g);
+                    }
+                    return Err("它要续跑的会话已被删除，任务已暂停。".to_owned());
+                }
+                sid.clone()
+            }
+            None => {
+                let info = self
+                    .create_session(&task.root)
+                    .await
+                    .map_err(|e| format!("建不了会话：{e}"))?;
+                // 标题 = 任务名 + 日期。custom_title 一并挡住了"第一句话
+                // 变标题"—— 不然侧栏里全是一模一样的 prompt 开头。
+                let date = crate::schedule::local_text(crate::schedule::now_ms());
+                let date = date.get(5..10).unwrap_or(&date); // "MM-DD"
+                let _ = self
+                    .rename_session(&info.id, &format!("{} · {date}", task.name))
+                    .await;
+                info.id
+            }
+        };
+
+        // 先认领再提交：Done 事件从提交那一刻起就可能到来。
+        {
+            let mut g = self.0.schedules.lock().await;
+            g.running
+                .insert(session_id.clone(), task.id.clone());
+            if let Some(t) = g.tasks.iter_mut().find(|t| t.id == task.id) {
+                t.last_run_ms = Some(crate::schedule::now_ms());
+                t.last_session_id = Some(session_id.clone());
+                self.persist_schedules(&g);
+            }
+        }
+
+        if let Err(e) = self
+            .submit_turn(&session_id, &task.prompt, Vec::new(), Vec::new())
+            .await
+        {
+            self.0.schedules.lock().await.running.remove(&session_id);
+            return Err(format!("轮子没起来：{e}"));
+        }
+        Ok(session_id)
+    }
+
+    /// [`HostNotice::Done`] 的调度侧：这轮结束是不是定时任务跑完了。
+    async fn finish_schedule_run(&self, session_id: &str) {
+        let claimed = {
+            let mut g = self.0.schedules.lock().await;
+            let Some(task_id) = g.running.remove(session_id) else {
+                return;
+            };
+            let name = g
+                .tasks
+                .iter()
+                .find(|t| t.id == task_id)
+                .map(|t| t.name.clone())
+                .unwrap_or_else(|| task_id.clone());
+            (task_id, name)
+        };
+        let (task_id, name) = claimed;
+        tracing::info!(task = %task_id, session = %session_id, "定时任务跑完了");
+        self.notify_os("定时任务完成", &format!("「{name}」跑完了，回来看看结果。"));
+        self.emit_schedule(ScheduleRun {
+            task_id,
+            name,
+            session_id: session_id.to_owned(),
+            phase: ScheduleRunPhase::Done,
+            error: None,
+        });
+    }
+
+    /// 整体重写 schedules.json。调用方必须正拿着 `schedules` 锁 ——
+    /// 快照与写盘同一临界区（和 persist_index 的 index_lock 同一条规矩）。
+    fn persist_schedules(&self, g: &SchedState) {
+        let book = crate::schedule::ScheduleBook {
+            tasks: g.tasks.clone(),
+        };
+        if let Err(e) = crate::schedule::save(&self.0.sessions_dir, &book) {
+            tracing::warn!(error = %e, "任务表没能写盘，重启后定时任务可能回到旧状态");
+        }
+    }
+
+    /// 系统通知。没挂 AppHandle（测试）就跳过；失败只记日志 ——
+    /// 通知是锦上添花，不值得让任务本身报错。
+    fn notify_os(&self, title: &str, body: &str) {
+        let Some(app) = self.0.app.get() else { return };
+        use tauri_plugin_notification::NotificationExt;
+        if let Err(e) = app.notification().builder().title(title).body(body).show() {
+            tracing::debug!(error = %e, "系统通知没发出去");
+        }
+    }
+
+    /// 广播定时任务的运行事件（全局 emit）。低频、无会话归属，不走
+    /// 会话的 Channel —— 前端拿它刷新侧栏和任务面板。
+    fn emit_schedule(&self, run: ScheduleRun) {
+        let Some(app) = self.0.app.get() else { return };
+        use tauri::Emitter;
+        if let Err(e) = app.emit("schedule_run", &run) {
+            tracing::debug!(error = %e, "schedule_run 事件没发出去");
+        }
+    }
+
+    /// 广播"任务表变了"（创建 / 暂停恢复 / 删除）。变更多半来自**模型
+    /// 调工具** —— 没有这个事件，侧栏要等到任务首次运行才看得见它。
+    /// 前端自己操作后也会收到一次，多拉一遍列表无害。
+    fn emit_schedule_changed(&self) {
+        let Some(app) = self.0.app.get() else { return };
+        use tauri::Emitter;
+        if let Err(e) = app.emit("schedule_changed", ()) {
+            tracing::debug!(error = %e, "schedule_changed 事件没发出去");
+        }
+    }
 }
 
 /// 宿主配置的沙箱档位 → 传输档位。
@@ -1606,6 +2078,30 @@ impl crate::kernel::HostCallHandler for HostCalls {
                     None => host_unavailable(
                         "这个构建没有内置浏览器。开发时先跑 scripts/build-browser.sh。",
                     ),
+                }
+            }
+            Req::ScheduleCall { session_id, call } => {
+                use riot_protocol::hostcall::ScheduleCall as SC;
+                match call {
+                    SC::Create { spec } => {
+                        match self.0.schedule_create(session_id.as_str(), spec).await {
+                            Ok(task) => R::Schedule { task },
+                            Err(m) => host_unavailable(m),
+                        }
+                    }
+                    SC::List => R::Schedules {
+                        tasks: self.0.schedule_list().await,
+                    },
+                    SC::SetEnabled { id, enabled } => {
+                        match self.0.schedule_set_enabled(&id, enabled).await {
+                            Ok(task) => R::Schedule { task },
+                            Err(m) => host_unavailable(m),
+                        }
+                    }
+                    SC::Delete { id } => match self.0.schedule_delete(&id).await {
+                        Ok(()) => R::Ok,
+                        Err(m) => host_unavailable(m),
+                    },
                 }
             }
         }
@@ -1912,6 +2408,235 @@ mod tests {
 
         assert!(live.is_dir(), "活着的会话的 profile 不能动");
         assert!(!orphan.exists(), "没人认领的 profile 该收掉");
+    }
+
+    fn after_60min(name: &str, in_this_session: bool) -> ScheduleSpec {
+        ScheduleSpec {
+            name: name.into(),
+            prompt: "到点了，把该做的做了".into(),
+            when: riot_protocol::WhenSpec::After { minutes: 60 },
+            in_this_session,
+        }
+    }
+
+    #[tokio::test]
+    async fn 定时任务_创建列出暂停删除往返() {
+        let state = state().await;
+        let s = state.create_session(&temp_ws("sched")).await.expect("会话");
+
+        let t = state
+            .schedule_create(&s.id, after_60min("晨报", false))
+            .await
+            .expect("创建");
+        assert!(t.enabled);
+        assert!(t.next_run_ms.is_some(), "创建即排定首次运行");
+        assert!(t.session_id.is_none(), "没说续跑就是每次新会话");
+        assert!(t.next_run_local.is_some(), "视图要带人读的本地时间");
+
+        assert_eq!(state.schedule_list().await.len(), 1);
+
+        let paused = state
+            .schedule_set_enabled(&t.id, false)
+            .await
+            .expect("暂停");
+        assert!(!paused.enabled);
+
+        state.schedule_delete(&t.id).await.expect("删除");
+        assert!(state.schedule_list().await.is_empty());
+        assert!(
+            state.schedule_delete(&t.id).await.is_err(),
+            "删不存在的要报错 —— 对模型\"没有这个 id\"比静默成功有用"
+        );
+    }
+
+    #[tokio::test]
+    async fn 定时任务_续跑绑定发起会话() {
+        let state = state().await;
+        let s = state.create_session(&temp_ws("sched-r")).await.expect("会话");
+        let t = state
+            .schedule_create(&s.id, after_60min("下午再扫一次", true))
+            .await
+            .expect("创建");
+        assert_eq!(
+            t.session_id.as_deref(),
+            Some(s.id.as_str()),
+            "in_this_session 的目标就是发起会话"
+        );
+    }
+
+    #[tokio::test]
+    async fn 定时任务_发起会话不存在时拒绝创建() {
+        let state = state().await;
+        let err = state
+            .schedule_create("s_ghost", after_60min("x", false))
+            .await
+            .expect_err("没有发起会话就没有项目根，必须拒绝");
+        assert!(err.contains("会话"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn 定时任务_重启后还在() {
+        let cfg = temp_cfg("sched");
+        let ws = temp_ws("sched-restart");
+        let task_id = {
+            let state = AppState::restore_at(cfg.clone());
+            state.set_config(AppConfig::default()).await;
+            let s = state.create_session(&ws).await.expect("会话");
+            state
+                .schedule_create(&s.id, after_60min("晨报", false))
+                .await
+                .expect("创建")
+                .id
+        };
+
+        let state = AppState::restore_at(cfg);
+        let listed = state.schedule_list().await;
+        assert_eq!(listed.len(), 1, "任务表要从磁盘恢复");
+        assert_eq!(listed[0].id, task_id);
+        assert!(listed[0].enabled);
+    }
+
+    #[tokio::test]
+    async fn 定时任务_编辑改名改时间_已跑完的借改时间复活() {
+        let state = state().await;
+        let s = state.create_session(&temp_ws("sched-u")).await.expect("会话");
+        let t = state
+            .schedule_create(&s.id, after_60min("旧名", false))
+            .await
+            .expect("创建");
+
+        // 模拟一次性任务跑完的状态。
+        {
+            let mut g = state.0.schedules.lock().await;
+            let task = g.tasks.iter_mut().find(|x| x.id == t.id).expect("在表里");
+            task.enabled = false;
+            task.next_run_ms = None;
+        }
+
+        let updated = state
+            .schedule_update(
+                &t.id,
+                riot_protocol::SchedulePatch {
+                    name: Some("新名".into()),
+                    when: Some(riot_protocol::WhenSpec::After { minutes: 30 }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("更新");
+        assert_eq!(updated.name, "新名");
+        assert!(updated.enabled, "改了时间就是想让它跑：已跑完的要复活");
+        assert!(updated.next_run_ms.is_some());
+
+        let err = state
+            .schedule_update(
+                &t.id,
+                riot_protocol::SchedulePatch {
+                    name: Some("   ".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("空名要拒绝");
+        assert!(err.contains("任务名"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn 定时任务_编辑运行目标要校验会话存在() {
+        let state = state().await;
+        let s = state.create_session(&temp_ws("sched-t2")).await.expect("会话");
+        let t = state
+            .schedule_create(&s.id, after_60min("跟进", false))
+            .await
+            .expect("创建");
+
+        let err = state
+            .schedule_update(
+                &t.id,
+                riot_protocol::SchedulePatch {
+                    target: Some(riot_protocol::RunTargetSpec::Session {
+                        id: "s_ghost".into(),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("指到不存在的会话要拒绝");
+        assert!(err.contains("会话"), "{err}");
+
+        let updated = state
+            .schedule_update(
+                &t.id,
+                riot_protocol::SchedulePatch {
+                    target: Some(riot_protocol::RunTargetSpec::Session { id: s.id.clone() }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("指到活会话该成功");
+        assert_eq!(updated.session_id.as_deref(), Some(s.id.as_str()));
+    }
+
+    /// tick 的推进语义：到期任务在**开跑之前**推进 next_run。
+    /// 一次性任务跑这一次就停用 —— 不停的话下一 tick 还会再跑。
+    #[tokio::test]
+    async fn 定时任务_tick把到期的一次性任务停用() {
+        let state = state().await;
+        let s = state.create_session(&temp_ws("sched-t")).await.expect("会话");
+        let t = state
+            .schedule_create(&s.id, after_60min("一次性", false))
+            .await
+            .expect("创建");
+
+        // 把时刻拨到过去，制造"到期"。
+        state
+            .0
+            .schedules
+            .lock()
+            .await
+            .tasks
+            .iter_mut()
+            .find(|x| x.id == t.id)
+            .expect("在表里")
+            .next_run_ms = Some(1);
+
+        state.schedule_tick().await;
+
+        let after = state.schedule_list().await;
+        assert_eq!(after.len(), 1);
+        assert!(!after[0].enabled, "一次性任务到期即停用");
+        assert!(after[0].next_run_ms.is_none());
+        // 真正的执行在后台 spawn（这里没有内核，它会失败并只留日志），
+        // tick 本身的职责 —— 推进任务表 —— 到此已验证。
+    }
+
+    /// 续跑目标被删后任务要自动暂停，而不是每到点都失败一次 ——
+    /// 那会变成一个循环报错的闹钟。
+    #[tokio::test]
+    async fn 定时任务_续跑目标没了就暂停任务() {
+        let state = state().await;
+        let s = state.create_session(&temp_ws("sched-o")).await.expect("会话");
+        let t = state
+            .schedule_create(&s.id, after_60min("跟进", true))
+            .await
+            .expect("创建");
+        state.delete_session(&s.id).await;
+
+        // 直接驱动执行路径（不等 tick 的时钟）。
+        let snapshot = state
+            .0
+            .schedules
+            .lock()
+            .await
+            .tasks
+            .iter()
+            .find(|x| x.id == t.id)
+            .expect("在表里")
+            .clone();
+        state.run_schedule(snapshot).await;
+
+        let after = state.schedule_list().await;
+        assert!(!after[0].enabled, "孤儿任务必须自动暂停");
     }
 
     #[tokio::test]

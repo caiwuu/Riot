@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-schedule-run-now"
+description = "Enables the schedule_run_now command without any pre-configured scope."
+commands.allow = ["schedule_run_now"]
+
+[[permission]]
+identifier = "deny-schedule-run-now"
+description = "Denies the schedule_run_now command without any pre-configured scope."
+commands.deny = ["schedule_run_now"]

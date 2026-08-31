@@ -397,8 +397,14 @@ pub struct Session {
     /// 环境探针（docs/ENV_DESIGN.md）。宿主创建会话后挂上；没挂上就是
     /// "没有感知"，轮次照常跑。
     env: std::sync::OnceLock<Arc<dyn riot_protocol::env::EnvProbe>>,
-    /// 上次注入的环境快照渲染文本 —— 差分判定的指纹。None = 还没注入过
-    /// （新会话 / 重启水合 / 压缩后），下一轮发全量。
+    /// 定时任务调度器（宿主能力）。宿主创建会话后挂上远程代理；
+    /// 没挂上时 Schedule 工具用 `NoSchedule` 明说用不了。
+    schedule: std::sync::OnceLock<Arc<dyn riot_protocol::schedule::ScheduleAccess>>,
+    /// 上次注入的环境快照渲染文本 —— 差分判定的指纹。None = 模型手上
+    /// 没有可信快照（新会话 / 压缩后 / 采样断供已宣告作废），下一轮发全量。
+    /// 重启水合时从 transcript 恢复（见 [`Self::hydrate`]）—— 从 None 起步
+    /// 的话，环境恰好变空会命中"首轮安静跳过"，历史里的旧快照就被
+    /// 「没有新快照 = 没变」的契约反向背书成现状。
     env_seen: Mutex<Option<String>>,
     /// 上次宣告过的上下文用量档位（0/50/70/85）。只升不降，压缩时归零。
     env_band: Mutex<u32>,
@@ -502,6 +508,7 @@ impl Session {
             pending_user: Mutex::new(None),
             terminal: std::sync::OnceLock::new(),
             env: std::sync::OnceLock::new(),
+            schedule: std::sync::OnceLock::new(),
             env_seen: Mutex::new(None),
             env_band: Mutex::new(0),
         }
@@ -549,9 +556,23 @@ impl Session {
             pending_user: Mutex::new(None),
             terminal: std::sync::OnceLock::new(),
             env: std::sync::OnceLock::new(),
+            schedule: std::sync::OnceLock::new(),
             env_seen: Mutex::new(None),
             env_band: Mutex::new(0),
         }
+    }
+
+    /// 挂上定时任务调度器。宿主创建/恢复会话之后调一次。
+    pub fn attach_schedule(&self, access: Arc<dyn riot_protocol::schedule::ScheduleAccess>) {
+        let _ = self.schedule.set(access);
+    }
+
+    /// 这一轮装配给 Schedule 工具的调度能力。
+    fn schedule_access(&self) -> Arc<dyn riot_protocol::schedule::ScheduleAccess> {
+        self.schedule
+            .get()
+            .map(Arc::clone)
+            .unwrap_or_else(|| Arc::new(riot_protocol::schedule::NoSchedule))
     }
 
     /// 挂上终端面板。宿主创建/恢复会话之后调一次。
@@ -593,6 +614,11 @@ impl Session {
                 if parts.live.is_empty() {
                     return;
                 }
+                // 环境指纹随水合恢复：上一个进程注入的快照还躺在活历史里，
+                // 对模型仍然有效（契约：没有新快照就是没变）。指纹必须指向
+                // 它 —— 否则重启后环境变空的那一轮会被"首轮安静跳过"吞掉，
+                // 模型拿着昨天的快照当现状（截图里那次 linux.do 翻车）。
+                *self.env_seen.lock().await = crate::env::last_snapshot_text(&parts.live);
                 // 自愈：老索引可能没存自动标题，从水合出来的历史找回。
                 {
                     let mut auto = self.auto_title.lock().await;
@@ -1077,6 +1103,12 @@ impl Session {
         } else {
             live.truncate(keep - archive_len + 1);
         }
+        // 环境指纹恢复成"截断后模型还看得见的最后一份快照"（不变量同
+        // hydrate）。往两个方向都不能错：截掉的历史带走了快照而指纹还记着
+        // "已发过"，下一轮差分判定"没变化"，模型对着被截的上下文失明；
+        // 反过来简单归零的话，留下的历史里若还有旧快照、下一轮环境恰好
+        // 变空，"首轮安静跳过"会让旧快照被「没有新快照 = 没变」反向背书。
+        let env_seen = crate::env::last_snapshot_text(&live);
         drop(live);
         drop(archived);
 
@@ -1086,10 +1118,7 @@ impl Session {
         *self.live_stream.lock().await = LiveStream::default();
         let _ = self.queue.take_all();
         self.pending_asks.clear().await;
-        // 环境指纹归零：截掉的历史可能带走了最近那份快照，指纹还记着
-        // "已发过"的话，下一轮差分判定"没变化"，模型对着被截的上下文失明。
-        // 多发一份全量最多几十 token，方向和压缩重置一致。
-        *self.env_seen.lock().await = None;
+        *self.env_seen.lock().await = env_seen;
         *self.env_band.lock().await = 0;
         Ok(keep_id)
     }
@@ -1159,16 +1188,16 @@ impl Session {
                 .drain(start..end)
                 .map(|m| m.id().as_str().to_owned())
                 .collect();
+            // 环境指纹恢复成剩余历史里的最后一份快照，理由同 rewind_to_prompt
+            //（不变量同 hydrate：指纹 = 模型还看得见的那份，两个方向都不能错）。
+            let env_seen = crate::env::last_snapshot_text(&live);
             drop(live);
             if let Some(p) = &self.persist {
                 for id in &removed {
                     p.log.append_delete(id);
                 }
             }
-            // 环境指纹归零，理由同 rewind_to_prompt：删掉的轮可能带走了
-            // 最近那份环境快照，指纹还记着"已发过"的话，下一轮差分判定
-            // "没变化"，模型对着被改的上下文失明。
-            *self.env_seen.lock().await = None;
+            *self.env_seen.lock().await = env_seen;
             *self.env_band.lock().await = 0;
             Ok(())
         })
@@ -1268,15 +1297,15 @@ impl Session {
         }
         live.pop();
         let empty = live.is_empty() && self.ui_archive.lock().await.is_empty();
+        // 环境指纹恢复成剩余历史里的最后一份快照，理由同 rewind_to_prompt
+        //（被撤的那条用户消息正是捎带轮首快照的载体，撤回几乎必然动指纹）。
+        let env_seen = crate::env::last_snapshot_text(&live);
         drop(live);
 
         if let Some(p) = &self.persist {
             p.log.append_withdraw(id.as_str());
         }
-        // 环境指纹归零，理由同 rewind_to_prompt：被撤的那条消息可能捎带了
-        // 最近一份环境快照，指纹还记着"已发过"的话，下一轮差分判定
-        // "没变化"，模型对着一段自己从没见过的上下文失明。
-        *self.env_seen.lock().await = None;
+        *self.env_seen.lock().await = env_seen;
         *self.env_band.lock().await = 0;
         Some(empty)
     }
@@ -1361,28 +1390,56 @@ impl Session {
         out
     }
 
-    /// 环境感知的轮首注入（docs/ENV_DESIGN.md §3）：快照差分 + 告警 + 档位。
+    /// 环境感知的轮首注入（docs/ENV_DESIGN.md §3）：时钟行 + 间隔警示 +
+    /// 快照差分 + 告警 + 档位。
     ///
-    /// 三种内容各自独立：快照全文只在渲染结果和上次指纹不同时注入（零变化
-    /// = 零 token）；档位行只在向上越档时说一次；告警由宿主去重，来了就注。
-    /// 采样失败（宿主没装配 / 传输断了）就什么都不注 —— 感知是锦上添花，
-    /// 不该挡住轮次。
-    async fn env_prelude(&self, history_tokens: u32, compact_threshold: u32) -> Vec<UserContent> {
-        let Some(snap) = self.env_probe().sample().await else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
+    /// 时钟行每轮必发：wire 格式里消息不带时间戳，模型对「这轮离上轮隔了
+    /// 多久」零感知（真实翻过车：拿上午的浏览器快照回答下午的提问）。轮首
+    /// 追加只出现在新消息里，缓存前缀（system + 工具 + 旧历史）不动，
+    /// 十几个 token 买断整类时间盲。间隔超过阈值再补一句显式警示。
+    ///
+    /// 其余内容各自独立：快照全文只在渲染结果和上次指纹不同时注入（零变化
+    /// = 只有时钟行）；档位行只在向上越档时说一次；告警由宿主去重，来了就注。
+    /// 采样失败（宿主没装配 / 传输断了）不挡轮次，但**不再沉默**：手里有
+    /// 指纹就宣告旧快照作废，然后清掉指纹 ——「没有新快照就是没变」的契约
+    /// 会把沉默反向背书成"一切照旧"，而清指纹让恢复采样的那一轮必然全量重发。
+    async fn env_prelude(
+        &self,
+        now_ms: u64,
+        tz_offset_minutes: i32,
+        last_msg_ms: Option<u64>,
+        history_tokens: u32,
+        compact_threshold: u32,
+    ) -> Vec<UserContent> {
+        let mut status = vec![crate::env::clock_line(now_ms, tz_offset_minutes)];
+        if let Some(line) =
+            last_msg_ms.and_then(|t| crate::env::gap_line(now_ms.saturating_sub(t)))
+        {
+            status.push(line);
+        }
 
-        let text = crate::env::render(&snap);
-        let mut body: Option<String> = {
-            let mut seen = self.env_seen.lock().await;
-            // 首轮对着空环境不说话：对着空房间描述空房间是噪音。
-            // 记下指纹 —— 之后第一个终端出现时，差分自然触发。
-            let skip = seen.is_none() && snap.is_quiet();
-            let changed = seen.as_deref() != Some(text.as_str());
-            *seen = Some(text.clone());
-            (changed && !skip).then_some(text)
-        };
+        let mut snapshot = None;
+        let mut alerts = Vec::new();
+        match self.env_probe().sample().await {
+            Some(snap) => {
+                let text = crate::env::render(&snap);
+                let mut seen = self.env_seen.lock().await;
+                // 首轮对着空环境不说话：对着空房间描述空房间是噪音。
+                // 记下指纹 —— 之后第一个终端出现时，差分自然触发。
+                let skip = seen.is_none() && snap.is_quiet();
+                let changed = seen.as_deref() != Some(text.as_str());
+                *seen = Some(text.clone());
+                if changed && !skip {
+                    snapshot = Some(text);
+                }
+                alerts = snap.alerts;
+            }
+            None => {
+                if self.env_seen.lock().await.take().is_some() {
+                    status.push(crate::env::STALE_NOTICE.to_owned());
+                }
+            }
+        }
 
         // 自我状态档位（P3）。阈值为 0 说明配置坏了，跳过而不是除零。
         if compact_threshold > 0 {
@@ -1391,29 +1448,26 @@ impl Session {
             let mut prev = self.env_band.lock().await;
             if band > *prev {
                 *prev = band;
-                let line = crate::env::band_line(pct);
-                body = Some(match body {
-                    Some(b) => format!("{b}\n{line}"),
-                    None => line,
-                });
+                status.push(crate::env::band_line(pct));
             }
         }
 
-        if let Some(text) = body {
+        let mut out = vec![UserContent::Attachment(Attachment::Environment {
+            text: status.join("\n"),
+        })];
+        // 快照独立成条，内容逐字节等于指纹 —— 水合恢复（hydrate）靠这一点
+        // 从 transcript 里原样捞回指纹，别把档位线之类的拼进来。
+        if let Some(text) = snapshot {
             out.push(UserContent::Attachment(Attachment::Environment { text }));
         }
         // 条数上限宿主已经守了，这里再夹一次当保险。
-        for a in snap.alerts.iter().take(3) {
+        for a in alerts.iter().take(3) {
             out.push(UserContent::Attachment(Attachment::SystemReminder {
                 text: crate::env::alert_text(a),
             }));
         }
-        if !out.is_empty() {
-            tracing::info!(
-                parts = out.len(),
-                alerts = snap.alerts.len(),
-                "注入环境快照"
-            );
+        if out.len() > 1 {
+            tracing::info!(parts = out.len(), alerts = alerts.len(), "注入环境快照");
         }
         out
     }
@@ -1781,6 +1835,12 @@ impl Session {
                 }),
             },
         )));
+        // 定时任务。永远注册（和浏览器/终端工具同一条惯例）：没挂宿主
+        // 代理时是 NoSchedule，工具明说用不了，而不是从清单里消失 ——
+        // 有条件注册会让工具列表在环境之间抖动，prompt 前缀跟着变。
+        tools.push(Arc::new(riot_tools::tools::schedule::ScheduleTool::new(
+            self.schedule_access(),
+        )));
         let mut names: std::collections::HashSet<String> = tools
             .iter()
             .flat_map(|t| {
@@ -2010,8 +2070,17 @@ impl Session {
             // 环境感知：轮首采样、差分注入（docs/ENV_DESIGN.md）。顺序放在
             // 记忆之后、用户正文之前 —— 身份和约定先于状态，状态先于问题。
             // token 数取压缩之后的历史：档位说的是本轮真实的余量。
+            // 间隔的参照是最后一条带时间戳的消息；老 transcript 可能一条
+            // 都没有（created_at_ms 晚于它们），那就不编间隔，只报时刻。
+            let last_msg_ms = history.iter().rev().find_map(|m| match m {
+                Message::User { meta, .. } | Message::Assistant { meta, .. } => meta.created_at_ms,
+                Message::System { .. } => None,
+            });
             prelude.extend(
                 self.env_prelude(
+                    sent_at_ms,
+                    clock.tz_offset_minutes(),
+                    last_msg_ms,
                     provider.count_tokens(&history),
                     limits.compact_threshold_tokens,
                 )
@@ -4110,11 +4179,16 @@ mod tests {
 
     // ── 环境感知（docs/ENV_DESIGN.md）───────────────────────────────
 
-    /// 按脚本吐快照的探针替身。
-    struct FakeEnv(std::sync::Mutex<Vec<riot_protocol::env::EnvSnapshot>>);
+    /// 按脚本吐快照的探针替身。脚本项为 `None` 表示这一轮采样失败
+    /// （探针断了）；脚本耗尽后也一律失败。
+    struct FakeEnv(std::sync::Mutex<Vec<Option<riot_protocol::env::EnvSnapshot>>>);
 
     impl FakeEnv {
         fn new(snaps: Vec<riot_protocol::env::EnvSnapshot>) -> Arc<Self> {
+            Self::script(snaps.into_iter().map(Some).collect())
+        }
+
+        fn script(snaps: Vec<Option<riot_protocol::env::EnvSnapshot>>) -> Arc<Self> {
             Arc::new(Self(std::sync::Mutex::new(snaps)))
         }
     }
@@ -4123,11 +4197,7 @@ mod tests {
     impl riot_protocol::env::EnvProbe for FakeEnv {
         async fn sample(&self) -> Option<riot_protocol::env::EnvSnapshot> {
             let mut g = self.0.lock().expect("脚本锁");
-            if g.is_empty() {
-                None
-            } else {
-                Some(g.remove(0))
-            }
+            if g.is_empty() { None } else { g.remove(0) }
         }
     }
 
@@ -4164,10 +4234,19 @@ mod tests {
             .collect()
     }
 
-    /// 差分注入的核心不变量：没变化 = 零注入。防的是上下文膨胀 ——
+    /// 只挑快照附件（以快照头开场的那些）。轮首状态行（时钟/间隔/档位）
+    /// 每轮都在，断言"快照发没发"必须把它滤掉。
+    fn snap_texts(parts: &[UserContent]) -> Vec<String> {
+        env_texts(parts)
+            .into_iter()
+            .filter(|t| t.starts_with(crate::env::SNAPSHOT_HEADER))
+            .collect()
+    }
+
+    /// 差分注入的核心不变量：没变化 = 不重发快照。防的是上下文膨胀 ——
     /// 每轮复读一遍环境，长会话里会堆出几十份一样的快照。
     #[tokio::test]
-    async fn 环境快照_变化才注入_不变零注入() {
+    async fn 环境快照_变化才发_不变只剩时钟行() {
         let s = Session::new(SessionId::from_raw("s1"), std::env::temp_dir(), None);
         let a = env_snap(&[(3, "pnpm dev", true)]);
         s.attach_env(FakeEnv::new(vec![
@@ -4177,18 +4256,22 @@ mod tests {
         ]));
 
         // 第一轮：有东西，注入全量。
-        let first = s.env_prelude(0, 100_000).await;
-        assert_eq!(env_texts(&first).len(), 1, "首轮该注入");
-        assert!(env_texts(&first)[0].contains("[3]"), "{first:?}");
+        let first = s.env_prelude(0, 0, None, 0, 100_000).await;
+        assert_eq!(snap_texts(&first).len(), 1, "首轮该注入");
+        assert!(snap_texts(&first)[0].contains("[3]"), "{first:?}");
 
-        // 第二轮：一模一样，零注入。
-        let second = s.env_prelude(0, 100_000).await;
-        assert!(second.is_empty(), "没变化不该注入：{second:?}");
+        // 第二轮：一模一样，快照不重发，只剩轮首状态行。
+        let second = s.env_prelude(0, 0, None, 0, 100_000).await;
+        assert!(
+            snap_texts(&second).is_empty(),
+            "没变化不该重发快照：{second:?}"
+        );
+        assert_eq!(second.len(), 1, "只该剩一条轮首状态行：{second:?}");
 
         // 第三轮：服务退出了（running 翻转），差分触发。
-        let third = s.env_prelude(0, 100_000).await;
-        assert_eq!(env_texts(&third).len(), 1, "状态变了该再注入");
-        assert!(env_texts(&third)[0].contains("已退出"), "{third:?}");
+        let third = s.env_prelude(0, 0, None, 0, 100_000).await;
+        assert_eq!(snap_texts(&third).len(), 1, "状态变了该再注入");
+        assert!(snap_texts(&third)[0].contains("已退出"), "{third:?}");
     }
 
     /// 首轮对着空环境不说话；但从有到无是变化，要说。
@@ -4202,26 +4285,120 @@ mod tests {
         ]));
 
         assert!(
-            s.env_prelude(0, 100_000).await.is_empty(),
+            snap_texts(&s.env_prelude(0, 0, None, 0, 100_000).await).is_empty(),
             "对着空房间描述空房间是噪音"
         );
         assert!(
-            !s.env_prelude(0, 100_000).await.is_empty(),
+            !snap_texts(&s.env_prelude(0, 0, None, 0, 100_000).await).is_empty(),
             "终端出现了该说"
         );
-        let gone = s.env_prelude(0, 100_000).await;
+        let gone = s.env_prelude(0, 0, None, 0, 100_000).await;
         assert!(
-            env_texts(&gone)[0].contains("没有你能看的终端"),
+            snap_texts(&gone)[0].contains("没有你能看的终端"),
             "从有到无也是变化：{gone:?}"
         );
     }
 
-    /// 探针拿不到（宿主没装配）就什么都不注 —— 感知是锦上添花。
+    /// 探针拿不到（宿主没装配）不发快照、不误报作废 —— 从没注入过
+    /// 快照的会话谈不上"过期"。时钟行照发：感知是锦上添花，时间不是。
     #[tokio::test]
-    async fn 环境快照_探针不可用则零注入() {
+    async fn 环境快照_探针不可用_只有时钟行且不误报作废() {
         let s = Session::new(SessionId::from_raw("s1"), std::env::temp_dir(), None);
         // 不 attach：默认 NoEnvProbe。
-        assert!(s.env_prelude(50_000, 100_000).await.is_empty());
+        let parts = s.env_prelude(0, 0, None, 50_000, 100_000).await;
+        assert_eq!(parts.len(), 1, "{parts:?}");
+        assert!(snap_texts(&parts).is_empty());
+        assert!(
+            !env_texts(&parts)[0].contains("采样失败"),
+            "从没有过快照就不该宣告作废：{parts:?}"
+        );
+    }
+
+    /// 时钟行每轮必发：消息在 wire 上不带时间戳，这一行是模型唯一的钟。
+    /// 不做差分 —— "没变化就不发"对时间没有意义。
+    #[tokio::test]
+    async fn 轮首时钟行_每轮都发_按时区渲染() {
+        let s = Session::new(SessionId::from_raw("s1"), std::env::temp_dir(), None);
+        // 2026-08-31T08:37Z，东八区 = 16:37 周一。
+        let monday = 1_788_165_420_000u64;
+        let p1 = s.env_prelude(monday, 480, None, 0, 100_000).await;
+        assert!(
+            env_texts(&p1)[0].contains("2026-08-31（周一）16:37，UTC+8"),
+            "{p1:?}"
+        );
+        // 一分钟后再来一轮，照发新时刻。
+        let p2 = s.env_prelude(monday + 60_000, 480, None, 0, 100_000).await;
+        assert!(env_texts(&p2)[0].contains("16:38"), "{p2:?}");
+    }
+
+    /// 间隔超过阈值要显式警示；正常节奏和没有时间戳的老历史都不说。
+    #[tokio::test]
+    async fn 轮首间隔_大间隔警示_小间隔与无戳沉默() {
+        let s = Session::new(SessionId::from_raw("s1"), std::env::temp_dir(), None);
+        let now = 1_788_165_420_000u64;
+
+        let gapped = s
+            .env_prelude(now, 0, Some(now - 5 * 3_600_000), 0, 100_000)
+            .await;
+        assert!(
+            env_texts(&gapped)[0].contains("已过去约 5 小时"),
+            "{gapped:?}"
+        );
+
+        let recent = s
+            .env_prelude(now, 0, Some(now - 10 * 60_000), 0, 100_000)
+            .await;
+        assert!(
+            !env_texts(&recent)[0].contains("已过去"),
+            "十分钟是正常停顿：{recent:?}"
+        );
+
+        let unstamped = s.env_prelude(now, 0, None, 0, 100_000).await;
+        assert!(
+            !env_texts(&unstamped)[0].contains("已过去"),
+            "老 transcript 没有时间戳，不能编一个间隔出来：{unstamped:?}"
+        );
+    }
+
+    /// 采样失败不再沉默：有指纹就宣告作废（只说一次），恢复后全量重发。
+    /// 否则「没有新快照就是没变」会把探针断供反向背书成"一切照旧"。
+    #[tokio::test]
+    async fn 环境快照_采样失败宣告作废_恢复后全量重发() {
+        let s = Session::new(SessionId::from_raw("s1"), std::env::temp_dir(), None);
+        let a = env_snap(&[(3, "pnpm dev", true)]);
+        s.attach_env(FakeEnv::script(vec![
+            Some(a.clone()),
+            None,
+            None,
+            Some(a.clone()),
+        ]));
+
+        assert_eq!(
+            snap_texts(&s.env_prelude(0, 0, None, 0, 100_000).await).len(),
+            1,
+            "第一轮正常注入"
+        );
+
+        let outage = s.env_prelude(0, 0, None, 0, 100_000).await;
+        assert!(
+            env_texts(&outage)[0].contains("采样失败"),
+            "断供必须宣告旧快照作废：{outage:?}"
+        );
+        assert!(snap_texts(&outage).is_empty());
+
+        let outage2 = s.env_prelude(0, 0, None, 0, 100_000).await;
+        assert!(
+            !env_texts(&outage2)[0].contains("采样失败"),
+            "连续断供只唠叨一次：{outage2:?}"
+        );
+
+        let recovered = s.env_prelude(0, 0, None, 0, 100_000).await;
+        assert_eq!(
+            snap_texts(&recovered).len(),
+            1,
+            "恢复采样后指纹已清，必须全量重发：{recovered:?}"
+        );
+        assert!(snap_texts(&recovered)[0].contains("[3]"), "{recovered:?}");
     }
 
     /// 档位只在向上越档时说一次；压缩重置后允许再说。
@@ -4232,23 +4409,24 @@ mod tests {
         s.attach_env(FakeEnv::new(vec![q(), q(), q(), q(), q()]));
 
         assert!(
-            s.env_prelude(40_000, 100_000).await.is_empty(),
+            !env_texts(&s.env_prelude(0, 0, None, 40_000, 100_000).await)[0].contains("上下文已用"),
             "50% 以下不说话"
         );
-        let at72 = s.env_prelude(72_000, 100_000).await;
+        let at72 = s.env_prelude(0, 0, None, 72_000, 100_000).await;
         assert!(
             env_texts(&at72)[0].contains("72%"),
             "越过 70 档要报实际百分比：{at72:?}"
         );
         assert!(
-            s.env_prelude(73_000, 100_000).await.is_empty(),
+            !env_texts(&s.env_prelude(0, 0, None, 73_000, 100_000).await)[0]
+                .contains("上下文已用"),
             "同档内不重复唠叨"
         );
 
         // 模拟压缩重置（compact_history 里那两行的镜像）。
         *s.env_seen.lock().await = None;
         *s.env_band.lock().await = 0;
-        let after = s.env_prelude(60_000, 100_000).await;
+        let after = s.env_prelude(0, 0, None, 60_000, 100_000).await;
         assert!(
             env_texts(&after)[0].contains("60%"),
             "压缩归零后再次越档要能说：{after:?}"
@@ -4268,11 +4446,11 @@ mod tests {
         });
         s.attach_env(FakeEnv::new(vec![base, alerted]));
 
-        let _ = s.env_prelude(0, 100_000).await;
+        let _ = s.env_prelude(0, 0, None, 0, 100_000).await;
         // 第二轮快照文本没变（alerts 不进指纹），但告警要出来。
-        let second = s.env_prelude(0, 100_000).await;
+        let second = s.env_prelude(0, 0, None, 0, 100_000).await;
         assert!(
-            env_texts(&second).is_empty(),
+            snap_texts(&second).is_empty(),
             "快照没变不该重发：{second:?}"
         );
         let reminders: Vec<&String> = second

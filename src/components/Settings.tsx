@@ -39,6 +39,8 @@ interface Props {
   onClose: () => void;
   /** 当前会话的项目根。Skills 页用它列项目级技能；没有活跃会话时为 null。 */
   activeRoot?: string | null;
+  /** 跟主界面侧栏同一宽度，打开设置时左列不用跳一截。 */
+  navWidth: number;
   appVersion: string;
   update: UpdateInfo | null;
   updateChecking: boolean;
@@ -170,6 +172,7 @@ const ALL_TABS: TabDef[] = NAV.flatMap((g) => g.tabs);
 
 /**
  * 设置整页。盖住主界面，不卸会话和终端 —— 回来还在。
+ * 布局跟主界面同一套左右分栏：左列通顶（返回在侧栏顶上），右列是正文。
  * 各分区的正文在 `settings/` 下一区一文件，这里管标签、离开拦截、保存回执。
  *
  * 所有修改都提交整个 [`AppConfig`] —— 宿主在保存前 resolve 一次，
@@ -185,6 +188,7 @@ export function Settings({
   updateChecking,
   updateError,
   onCheckUpdate,
+  navWidth,
 }: Props) {
   const [tab, setTab] = useState<Tab>("provider");
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
@@ -229,25 +233,24 @@ export function Settings({
   return (
     <>
       <div className="settings-page" role="dialog" aria-modal="true" aria-label="设置">
-        <div
-          className={IS_MAC ? "settings-head pad-traffic" : "settings-head"}
-          data-tauri-drag-region
-        >
-          <button className="settings-back" onClick={requestClose} title="返回应用 (Esc)">
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
-              <path
-                d="M10 3L5 8l5 5"
-                stroke="currentColor"
-                strokeWidth="1.6"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-            返回应用
-          </button>
-        </div>
-
-        <div className="settings-main">
+        <aside className="settings-side" style={{ width: navWidth }}>
+          <div
+            className={IS_MAC ? "settings-head pad-lights" : "settings-head"}
+            data-tauri-drag-region
+          >
+            <button className="settings-back" onClick={requestClose} title="返回应用 (Esc)">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+                <path
+                  d="M10 3L5 8l5 5"
+                  stroke="currentColor"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              返回应用
+            </button>
+          </div>
           <nav className="settings-nav" role="tablist" aria-label="设置分区">
             {NAV.map((g) => (
               <div className="settings-nav-group" key={g.group}>
@@ -269,8 +272,11 @@ export function Settings({
               </div>
             ))}
           </nav>
+        </aside>
 
-          <div className="settings-body">
+        <div className="settings-body">
+          <div className="settings-body-top" data-tauri-drag-region />
+          <div className="settings-scroll">
             <div className="settings-inner">
               {current ? <PaneHead title={current.title} desc={current.desc} /> : null}
               {/* 配置读不懂被回落成默认值时，用户看到的是"我配的东西全没了"。

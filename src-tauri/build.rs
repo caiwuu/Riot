@@ -86,6 +86,13 @@ const COMMANDS: &[&str] = &[
     "slash_expand",
     "hooks_list",
     "search_files",
+    "schedule_list",
+    "schedule_set_enabled",
+    "schedule_update",
+    "schedule_delete",
+    "schedule_run_now",
+    "schedule_missed",
+    "schedule_ack_missed",
 ];
 
 fn main() {

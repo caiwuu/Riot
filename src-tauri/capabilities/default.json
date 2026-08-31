@@ -99,6 +99,13 @@
     "allow-slash-commands",
     "allow-slash-expand",
     "allow-hooks-list",
-    "allow-search-files"
+    "allow-search-files",
+    "allow-schedule-list",
+    "allow-schedule-set-enabled",
+    "allow-schedule-update",
+    "allow-schedule-delete",
+    "allow-schedule-run-now",
+    "allow-schedule-missed",
+    "allow-schedule-ack-missed"
   ]
 }

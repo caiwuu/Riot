@@ -23,6 +23,7 @@ pub mod plan;
 pub mod precondition;
 pub mod preview;
 pub mod read;
+pub mod schedule;
 pub mod search;
 pub mod shrink;
 pub mod skill;
