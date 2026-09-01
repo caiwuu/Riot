@@ -1034,17 +1034,29 @@ html[data-resizing] .slide-panel {
 }
 
 /* hover 画在整行上，把旁边的 + / … 一起罩进去。折叠仍然只绑在
-   .project-toggle 上，点按钮不会折起来。 */
+   .project-toggle 上，点按钮不会折起来。
+   `[约束]` 键盘焦点用 :has(:focus-visible)，不能用 :focus-within——
+   WebView2（Chromium）鼠标点完按钮焦点留在按钮上，:focus-within 会让
+   非叶子行在点完折叠后一直挂着高亮，像多出一个选中态（WKWebView 点击
+   不聚焦按钮，macOS 上看不出来）。:has() 必须单独成条：老 WebKit 不认
+   它时按规范会丢弃整个选择器列表，合写会连 hover 一起丢。 */
 .project-head:hover,
-.project-head:focus-within,
 .project-head.menu-open {
   background: var(--bg-hover);
   color: var(--text);
 }
 
+.project-head:has(:focus-visible) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
 .project-head:hover .chevron,
-.project-head:focus-within .chevron,
 .project-head.menu-open .chevron {
+  color: var(--text-dim);
+}
+
+.project-head:has(:focus-visible) .chevron {
   color: var(--text-dim);
 }
 
@@ -1128,11 +1140,15 @@ html[data-resizing] .slide-panel {
 }
 
 .project-head:hover .row-btn,
-.project-head:focus-within .row-btn,
 .project-head.menu-open .row-btn,
 .thread:hover .row-btn,
-.thread:focus-within .row-btn,
 .thread.menu-open .row-btn {
+  opacity: 1;
+}
+
+/* Tab 走进行内时藏着的键要显形。只认键盘焦点，理由见 .project-head。 */
+.project-head:has(:focus-visible) .row-btn,
+.thread:has(:focus-visible) .row-btn {
   opacity: 1;
 }
 
@@ -1160,8 +1176,11 @@ html[data-resizing] .slide-panel {
 }
 
 .thread:hover,
-.thread:focus-within,
 .thread.menu-open {
+  background: var(--bg-hover);
+}
+
+.thread:has(:focus-visible) {
   background: var(--bg-hover);
 }
 
@@ -7887,9 +7906,13 @@ button.field-slider-state:hover {
 /* hover 画在整行上，把右边的 + 一起罩进去（和 .project-head 同一条
    规矩）。标题本身是 button，会吃到全局 button:hover 的底色 —— 只亮
    文字那截、按钮悬在色块外面，看着像高亮没罩到，所以下面把它压回
-   透明，让整行那层独自负责。 */
-.section-head:hover,
-.section-head:focus-within {
+   透明，让整行那层独自负责。键盘焦点只认 :has(:focus-visible)，
+   理由见 .project-head。 */
+.section-head:hover {
+  background: var(--bg-hover);
+}
+
+.section-head:has(:focus-visible) {
   background: var(--bg-hover);
 }
 
@@ -7897,8 +7920,11 @@ button.field-slider-state:hover {
   background: transparent;
 }
 
-.section-head:hover .row-btn,
-.section-head:focus-within .row-btn {
+.section-head:hover .row-btn {
+  opacity: 1;
+}
+
+.section-head:has(:focus-visible) .row-btn {
   opacity: 1;
 }
 
@@ -8134,8 +8160,12 @@ button.field-slider-state:hover {
 }
 
 .sp-row:hover,
-.sp-row:focus-within,
 .sp-row.menu-open {
+  background: var(--bg-hover);
+}
+
+/* 键盘焦点只认 :has(:focus-visible)，理由见 .project-head。 */
+.sp-row:has(:focus-visible) {
   background: var(--bg-hover);
 }
 
@@ -8153,8 +8183,11 @@ button.field-slider-state:hover {
 }
 
 .sp-row:hover .row-btn,
-.sp-row:focus-within .row-btn,
 .sp-row.menu-open .row-btn {
+  opacity: 1;
+}
+
+.sp-row:has(:focus-visible) .row-btn {
   opacity: 1;
 }
 
