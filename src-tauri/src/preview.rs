@@ -179,8 +179,11 @@ mod tests {
         let roots = vec![a.path().to_path_buf(), b.path().to_path_buf()];
         let got = resolve_in(&roots, "only-in-b.txt").expect("该解析得出来");
         // 比的是 canonicalize 之后的根：macOS 的临时目录是 /var → /private/var
-        // 的软链，拿原始路径比会假红。
-        let b_real = std::fs::canonicalize(b.path()).expect("canonicalize");
+        // 的软链，拿原始路径比会假红。Windows 上还要再剥掉 `\\?\` —— 围栏
+        // 给出的路径是剥过的，两边形式不一致时 starts_with 按组件比较
+        // （VerbatimDisk ≠ Disk）永远不成立。
+        let b_real =
+            crate::fence::strip_verbatim(std::fs::canonicalize(b.path()).expect("canonicalize"));
         assert!(got.starts_with(&b_real), "解析到了 {}", got.display());
     }
 
