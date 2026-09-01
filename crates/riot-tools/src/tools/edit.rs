@@ -102,19 +102,8 @@ impl Tool for Edit {
         let parsed: Input = serde_json::from_value(input.clone())
             .map_err(|e| ValidationError::rejected(schema_hint(&e)))?;
 
-        if parsed.old_string == parsed.new_string {
-            return Err(ValidationError::rejected(
-                "`old_string` 和 `new_string` 完全相同，这次修改没有任何效果。\
-                 请检查是不是漏改了什么。",
-            ));
-        }
-
-        if parsed.old_string.is_empty() {
-            return Err(ValidationError::rejected(
-                "`old_string` 不能为空。要创建新文件请用 Write；\
-                 要在文件末尾追加，请把末尾已有的一段内容作为 `old_string`。",
-            ));
-        }
+        // 先做不碰文件系统的那几项，省掉一次注定要失败的解析和读盘。
+        shape_check(&parsed).map_err(ValidationError::rejected)?;
 
         let resolved = path::resolve(&parsed.path, ctx, true)
             .await
@@ -141,6 +130,10 @@ impl Tool for Edit {
             Ok(p) => p,
             Err(e) => return ToolOutcome::failed(e.for_model()),
         };
+
+        if let Some(msg) = path::detour_risk(&parsed.path, &resolved, &ctx.cwd, false) {
+            return ToolOutcome::failed(msg);
+        }
 
         let state = match ensure_loaded(&resolved, &ctx).await {
             Ok(s) => s,
@@ -227,8 +220,41 @@ impl Tool for Edit {
     }
 }
 
+/// 不碰文件系统就能判掉的两种无效输入。
+///
+/// 单独成函数是因为它有两个调用点，而两处的措辞必须一模一样:
+/// `validate_input`（早退，省掉解析和读盘）和 [`match_count_check`]
+/// （`call()` 路径上的那道，见下）。各写一份迟早漂移。
+fn shape_check(input: &Input) -> Result<(), String> {
+    if input.old_string.is_empty() {
+        return Err("`old_string` 不能为空。要创建新文件请用 Write；\
+                    要在文件末尾追加，请把末尾已有的一段内容作为 `old_string`。"
+            .to_owned());
+    }
+
+    if input.old_string == input.new_string {
+        return Err("`old_string` 和 `new_string` 完全相同，这次修改没有任何效果。\
+                    请检查是不是漏改了什么。"
+            .to_owned());
+    }
+
+    Ok(())
+}
+
 /// 唯一性检查。
+///
+/// `[约束]` 空 `old_string` 必须在这里拦，不能只放在 `validate_input`。
+/// 放过去的后果不是"改错一处"而是整个文件被打烂:`"".matches("")` 等于
+/// 字符数 + 1，大于 1，`replace_all` 于是走放行分支，接着
+/// `content.replace("", new)` 会在**每个字符边界**插一份 new ——
+/// `"abc"` 变成 `"XaXbXcX"`，然后正常落盘、正常返回"已修改"。
+/// 先读后写协议和 `verify_unchanged` 全部通过，用户拿到的是一次"成功"。
+///
+/// 触发它不需要攻击者：模型想在文件末尾追加内容时就会写出
+/// `{"old_string": "", "new_string": "...", "replace_all": true}`。
 fn match_count_check(content: &str, input: &Input) -> Result<(), String> {
+    shape_check(input)?;
+
     let n = content.matches(&input.old_string).count();
 
     if n == 0 {

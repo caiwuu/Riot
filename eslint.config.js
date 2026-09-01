@@ -19,7 +19,22 @@ const BRIDGE_ONLY =
   "绕过这层，前端就无法脱离 Tauri 单独跑起来（调试、组件测试全部失效），mock 也无处下手。";
 
 export default tseslint.config(
-  { ignores: ["dist", "src/bridge/generated.ts", "vendor", "website", "scripts"] },
+  // 非前端源码一律排除。少一条的代价不是"多几条告警"而是这条命令没法用：
+  // `target` 里是 Rust 的构建产物（打包进去的第三方 JS），`pnpm exec eslint .`
+  // 会在那里刨出九千多条错误、跑掉十几秒，真正的告警全被冲走。
+  // `src-tauri` 和 `public` 同理 —— 那边的 JS 不归这套规则管。
+  {
+    ignores: [
+      "dist",
+      "src/bridge/generated.ts",
+      "vendor",
+      "website",
+      "scripts",
+      "target",
+      "src-tauri",
+      "public",
+    ],
+  },
 
   js.configs.recommended,
   ...tseslint.configs.recommended,

@@ -12,6 +12,7 @@ import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 
 import { openInBrowser, openPath } from "../bridge";
+import { useTimedFlag } from "../hooks/useTimedFlag";
 import { joinRoot, looksAbsPath } from "../pathDisplay";
 import { openFilePreview } from "./FilePreview";
 import { MermaidBlock } from "./Mermaid";
@@ -323,7 +324,7 @@ function MdLink({
   children?: React.ReactNode;
 }) {
   const root = useContext(ProjectRootContext);
-  const [err, setErr] = useState(false);
+  const [err, flashErr] = useTimedFlag(false, 2000);
   const label = extractText(children);
   const target = resolveMdLink(href, label, root);
 
@@ -335,10 +336,7 @@ function MdLink({
       openFilePreview(target.value);
       return;
     }
-    openInBrowser(target.value).catch(() => {
-      setErr(true);
-      setTimeout(() => setErr(false), 2000);
-    });
+    openInBrowser(target.value).catch(() => flashErr(true));
   };
 
   return (
@@ -430,8 +428,8 @@ function fileUrlToPath(url: string): string | null {
 
 /** 代码块：语言标签（或代码引用的路径）+ 复制按钮。 */
 function CodeBlock(props: React.HTMLAttributes<HTMLPreElement>) {
-  const [copied, setCopied] = useState<"idle" | "ok" | "fail">("idle");
-  const [refErr, setRefErr] = useState(false);
+  const [copied, flashCopied] = useTimedFlag<"idle" | "ok" | "fail">("idle", 1500);
+  const [refErr, flashRefErr] = useTimedFlag(false, 2000);
   const root = useContext(ProjectRootContext);
 
   const child = props.children as React.ReactElement<{
@@ -456,20 +454,16 @@ function CodeBlock(props: React.HTMLAttributes<HTMLPreElement>) {
     const text = extractText(child?.props?.children);
     // 剪贴板在窗口失焦等情况下会拒绝 —— 失败还报"已复制"等于骗人
     navigator.clipboard.writeText(text).then(
-      () => setCopied("ok"),
-      () => setCopied("fail"),
+      () => flashCopied("ok"),
+      () => flashCopied("fail"),
     );
-    setTimeout(() => setCopied("idle"), 1500);
   };
 
   // 不走 bridge 的 openInDefaultApp —— 它把失败吞掉了（那是给"静默降级"
   // 场景用的），这里要拿到失败才能在界面上说"打不开"。
   const openRef = () => {
     const full = refPath.startsWith("/") || !root ? refPath : `${root}/${refPath}`;
-    openPath(full).catch(() => {
-      setRefErr(true);
-      setTimeout(() => setRefErr(false), 2000);
-    });
+    openPath(full).catch(() => flashRefErr(true));
   };
 
   const lines = refStart === refEnd ? `${refStart}` : `${refStart}-${refEnd}`;

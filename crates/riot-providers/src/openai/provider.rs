@@ -27,7 +27,7 @@ use crate::sse::SseParser;
 use crate::transport::{ByteStream, HttpError, HttpRequest, HttpTransport};
 use crate::watchdog::{DEFAULT_IDLE, with_idle_watchdog};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenAiConfig {
     /// 不带路径，例如 `https://api.deepseek.com`。
     pub base_url: String,
@@ -58,6 +58,26 @@ impl Default for OpenAiConfig {
             retry: RetryPolicy::default(),
             sampling: crate::SamplingParams::default(),
         }
+    }
+}
+
+/// `[约束]` 手写而不是 derive：这个结构体里有明文 API key，而 `Debug`
+/// 只要存在，任何一处 `tracing::debug!(?config)` 就会把密钥写进日志文件 ——
+/// 日志会被用户贴进 issue，密钥就此公开。
+///
+/// 字段有增删时这里要跟着改，代价是记得住的：漏掉一个非密字段只是少打
+/// 一行，而把 `api_key` 加回去需要有人主动写出那个字段名。
+impl std::fmt::Debug for OpenAiConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiConfig")
+            .field("base_url", &self.base_url)
+            .field("api_path", &self.api_path)
+            .field("api_key", &"<redacted>")
+            .field("fallback_model", &self.fallback_model)
+            .field("idle_timeout", &self.idle_timeout)
+            .field("retry", &self.retry)
+            .field("sampling", &self.sampling)
+            .finish()
     }
 }
 
@@ -255,7 +275,21 @@ fn decode_stream(mut bytes: ByteStream) -> impl futures_core::Stream<Item = Prov
         while let Some(chunk) = bytes.next().await {
             match chunk {
                 Ok(bytes) => {
-                    for sse in parser.push(&bytes) {
+                    // 解析器判定流不可信（帧无限长、总量爆表）时必须就地终止：
+                    // 继续读下去就是替对面把内存吃光。
+                    let events = match parser.push(&bytes) {
+                        Ok(evs) => evs,
+                        Err(e) => {
+                            for ev in decoder.finish() {
+                                yield ev;
+                            }
+                            yield ProviderEvent::Error(ProviderError::Transport {
+                                message: e.to_string(),
+                            });
+                            return;
+                        }
+                    };
+                    for sse in events {
                         for ev in decoder.push(&sse) {
                             yield ev;
                         }
@@ -367,6 +401,21 @@ mod giveup_tests {
             map_giveup(GiveUpReason::NotRetryable, &e),
             ProviderError::Transport { .. }
         ));
+    }
+
+    #[test]
+    fn 配置的_debug_不打印密钥() {
+        // 现在没有打印点，所以这不是现实泄漏 —— 但只要 Debug 存在，
+        // 哪天有人加一句 `tracing::debug!(?config)` 就够了，而那行代码
+        // 在 review 里看起来毫无问题。
+        let cfg = OpenAiConfig::deepseek("sk-绝密");
+        let printed = format!("{cfg:?}");
+        assert!(!printed.contains("sk-绝密"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
+        assert!(
+            printed.contains("api.deepseek.com"),
+            "非密字段要照常打出来，否则调试时这个 Debug 没用：{printed}"
+        );
     }
 
     #[test]

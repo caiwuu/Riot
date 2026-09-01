@@ -38,19 +38,55 @@ pub use riot_kernel::packs::{InstalledPack, PackManifest, PackMcpServer, doc_run
 /// MB 的东西提交不进 git(GitHub 单文件上限 100MB)。
 const MANIFEST_URL: &str = "https://raw.githubusercontent.com/caiwuu/riot-pkg/main/packs.json";
 
-/// 清单地址的覆盖开关。
+/// 清单地址的覆盖开关。**只在 debug 构建里生效，而且只认 https。**
 ///
 /// 存在的理由不只是测试:包有几百 MB,发布前必须能拿真的安装流程指着一份
 /// 预发清单跑一遍。没有这个开关的话,验证"下载—校验—解压—自检"这条链路
-/// 就只能靠先把包推上正式地址,推错了所有用户立刻就下到了。
+/// 就只能靠先把包推上正式地址,推错了所有用户立刻就下到了。预发验证走
+/// debug 构建即可。
+///
+/// `[约束]` 发布构建里必须读不到它。宿主启动时会把用户登录 shell 的环境
+/// 整个吸进进程（见 [`crate::gui_env`]，那份黑名单只挡十几个 key），于是
+/// `.zshrc` 里一行 export 就换掉了整个包源 —— 装进来的是几百 MB 会被执行
+/// 的二进制。sha256 校验在这里帮不上忙:哈希值写在被换掉的那份清单里。
 const MANIFEST_URL_ENV: &str = "RIOT_PACKS_MANIFEST_URL";
 
 fn manifest_url() -> String {
-    #[allow(clippy::disallowed_methods)]
-    std::env::var(MANIFEST_URL_ENV)
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| MANIFEST_URL.to_owned())
+    #[cfg(debug_assertions)]
+    if let Some(u) = override_url(std::env::var(MANIFEST_URL_ENV).ok()) {
+        tracing::warn!(url = %u, "能力包清单地址被环境变量覆盖（仅 debug 构建）");
+        return u;
+    }
+    MANIFEST_URL.to_owned()
+}
+
+/// debug 下也要求 https。明文清单在任何一跳上都能被改写，而这份清单决定
+/// 之后从哪儿下、再拿什么哈希去校验 —— 两件事一起被换掉就毫无察觉。
+#[cfg(debug_assertions)]
+fn override_url(raw: Option<String>) -> Option<String> {
+    let raw = raw.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())?;
+    if raw.starts_with("https://") || is_loopback_http(&raw) {
+        return Some(raw);
+    }
+    tracing::warn!(url = %raw, "{MANIFEST_URL_ENV} 不是 https，已忽略");
+    None
+}
+
+/// 回环上的明文放行。`tests/packs_e2e.rs` 拿一个本机 http 服务当预发清单跑
+/// 完整安装链路，给它配 TLS 不值这个复杂度 —— 而回环上没有"中间人"这回事:
+/// 能改这条流量的进程已经在这台机器上了。
+///
+/// `[约束]` 判前缀之后必须看紧跟的那个字符，否则 `http://localhost.evil.com`
+/// 会被当成本机。
+#[cfg(debug_assertions)]
+fn is_loopback_http(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    ["127.0.0.1", "[::1]", "localhost"].iter().any(|host| {
+        rest.strip_prefix(host)
+            .is_some_and(|tail| tail.is_empty() || tail.starts_with([':', '/']))
+    })
 }
 
 /// 内置的能力包目录。目前只有文档一个,但结构留给后来的。
@@ -269,11 +305,21 @@ pub async fn install(
 
     download::fetch(&asset.url, &archive, asset.size, &asset.sha256, &progress).await?;
 
+    // `[约束]` 解压和自检都走 spawn_blocking。两者都是彻头彻尾的同步活:
+    // 几百 MB 的 zstd 解码 + tar 逐条落盘、以及真的把包里的二进制跑起来。
+    // 直接在 async 上下文里调，这几十秒内同一个 runtime 上的所有命令 ——
+    // 发消息、内核 RPC、面板刷新 —— 一起卡住，而用户以为只是在装个包。
+    // 对照 `sandbox_install`。
     progress(PackProgress::Extracting);
-    let root = install::unpack(&archive, &pack_dir(id))?;
+    let (src, dest) = (archive.clone(), pack_dir(id));
+    let root = tokio::task::spawn_blocking(move || install::unpack(&src, &dest))
+        .await
+        .map_err(|e| InstallError::Task(format!("解压任务没跑完：{e}")))??;
 
     progress(PackProgress::SelfCheck);
-    let installed = install::finalize(&root)?;
+    let installed = tokio::task::spawn_blocking(move || install::finalize(&root))
+        .await
+        .map_err(|e| InstallError::Task(format!("自检任务没跑完：{e}")))??;
 
     // 装完就把压缩包删掉。它和解压出来的内容加起来是两份几百 MB,
     // 留着只在"同一版本重装"这一个场景有用,不值这个盘。
@@ -417,6 +463,37 @@ mod tests {
         let asset = &m.packs["doc-runtime"].platforms["darwin-arm64"];
         assert_eq!(asset.size, 123);
         assert_eq!(asset.installed_size, 456);
+    }
+
+    /// 覆盖清单地址等于换掉整个包源，而包里是会被执行的二进制。明文
+    /// 地址在任何一跳上都能被改写，sha256 也救不了 —— 哈希就写在那份
+    /// 被换掉的清单里。
+    ///
+    /// 发布构建里这个开关整个不存在（`#[cfg(debug_assertions)]`），
+    /// 测试跑在 debug 下，只能验到"debug 里也必须是 https"这一半。
+    #[cfg(debug_assertions)]
+    #[test]
+    fn 清单地址的覆盖只认_https() {
+        assert_eq!(
+            override_url(Some("https://pre.example.com/packs.json".into())).as_deref(),
+            Some("https://pre.example.com/packs.json")
+        );
+        // e2e 的本机清单服务器。回环上没有中间人，放行。
+        assert!(override_url(Some("http://127.0.0.1:8931/packs.json".into())).is_some());
+
+        for bad in [
+            "http://evil.example.com/packs.json",
+            // 前缀匹配不看后面那个字符的话，这条会被当成本机放过去。
+            "http://localhost.evil.com/packs.json",
+            "http://127.0.0.1.evil.com/packs.json",
+            "file:///tmp/packs.json",
+            "//evil.example.com/packs.json",
+            "  ",
+            "",
+        ] {
+            assert_eq!(override_url(Some(bad.into())), None, "{bad} 不该被接受");
+        }
+        assert_eq!(override_url(None), None);
     }
 
     #[test]

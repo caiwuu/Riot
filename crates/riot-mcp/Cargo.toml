@@ -29,3 +29,8 @@ windows = { workspace = true }
 [dev-dependencies]
 # FakeVision / MemFs / Null 系列替身，测 McpTool 的图片交付分支。
 riot-tools = { workspace = true, features = ["testing"] }
+# 用**真实的决策链**验证 MCP 工具落在哪一档。只断言 check_permissions
+# 的返回值证明不了最终行为 —— 那条链有七步，工具的 Ask 会不会被后面的
+# 步骤压过、压过它的是谁，全在链里。依赖方向无环（permissions 不依赖
+# mcp），而且只在测试里。
+riot-permissions = { workspace = true }

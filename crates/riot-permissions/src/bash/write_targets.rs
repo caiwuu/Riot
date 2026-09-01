@@ -65,10 +65,16 @@ fn sub_risk(sub: &SubCommand) -> Option<WriteRisk<'_>> {
     // 被当成写 `.git/` 误拦。逐条判才能让只读的那条真的走只读语义。
     let read_only = super::readonly::sub_is_read_only(sub);
 
+    // `[约束]` 引号在这里剥掉,而且只在这里 —— 规则匹配那侧比的是用户写在
+    // 配置里的模式,必须拿原文。少了这一步,`cp payload '.riot/hooks.json'`
+    // 里带引号的字符串和任何一份敏感清单都对不上,加一对引号就是整层绕过。
+    let name = super::ast::unquote(&sub.name);
+    let args: Vec<String> = sub.args.iter().map(|a| super::ast::unquote(a)).collect();
+
     // git 的执行面配置键。只有「设置」才碰执行面 —— `git config core.pager`
     // (只读取值)不改任何东西,和下面的路径扫描一样受 `read_only` 约束。
     if !read_only
-        && let Some(key) = git_exec_config_key(sub)
+        && let Some(key) = git_exec_config_key(&name, &args)
     {
         return Some(WriteRisk {
             kind: SafetyKind::GitInternals,
@@ -80,7 +86,7 @@ fn sub_risk(sub: &SubCommand) -> Option<WriteRisk<'_>> {
         });
     }
 
-    sub.args.iter().find_map(|arg| {
+    args.iter().find_map(|arg| {
         let path = std::path::Path::new(arg);
         let kind = crate::safety::write_target_risk(path, read_only)?;
         Some(WriteRisk {
@@ -123,9 +129,8 @@ const CONFIG_VALUE_FLAGS: &[&str] = &["-f", "--file", "--blob", "-t", "--type", 
 /// 两种写法都要认，它们的效果完全一样：
 /// - `git config core.pager 'sh -c evil'`（写进配置文件，之后一直生效）
 /// - `git -c core.pager='sh -c evil' log`（只影响这一次，但这一次就够了）
-fn git_exec_config_key(sub: &SubCommand) -> Option<&str> {
-    let args = git_args(sub)?;
-    scan_git_config_key(args)
+fn git_exec_config_key<'a>(name: &str, args: &'a [String]) -> Option<&'a str> {
+    scan_git_config_key(git_args(name, args)?)
 }
 
 /// 定位这条子命令里 git 的参数序列 —— 裸调用、绝对路径、被 sudo/env 包着,
@@ -136,17 +141,17 @@ fn git_exec_config_key(sub: &SubCommand) -> Option<&str> {
 /// allow 规则);而这里是安全检查,`sudo git config core.hooksPath` 换来的
 /// 执行权和裸 `git config core.hooksPath` 一模一样,必须一并看见。宁可多认 ——
 /// 认错了也只是多扫几个不含配置键的参数,`scan_git_config_key` 不会误拦。
-fn git_args(sub: &SubCommand) -> Option<&[String]> {
+fn git_args<'a>(name: &str, args: &'a [String]) -> Option<&'a [String]> {
     // `/usr/bin/git` 的 basename 是 `git`。精确等值匹配挡不住绝对路径 ——
     // 那是模型最可能写出的绕过形态。
-    if basename(&sub.name) == "git" {
-        return Some(&sub.args);
+    if basename(name) == "git" {
+        return Some(args);
     }
-    if matches!(basename(&sub.name), "sudo" | "env") {
+    if matches!(basename(name), "sudo" | "env") {
         // sudo/env 的选项、env 的 `FOO=bar` 赋值都跳过,直接找 `git` 那一段。
         // 双重包装 `sudo env git …` 也能一路找到。
-        let pos = sub.args.iter().position(|a| basename(a) == "git")?;
-        return Some(&sub.args[pos + 1..]);
+        let pos = args.iter().position(|a| basename(a) == "git")?;
+        return Some(&args[pos + 1..]);
     }
     None
 }
@@ -237,6 +242,50 @@ mod tests {
         ] {
             assert!(risk(cmd).is_some(), "{cmd} 必须被扫出来");
         }
+    }
+
+    /// 回归：加一对引号曾经能绕过这一整层。
+    ///
+    /// `sub.args` 存的是 AST 原文，`raw_string` / `string` 节点的文本
+    /// **包含引号本身**，于是 `'.riot/hooks.json'` 和任何一份敏感清单都
+    /// 对不上。而引号是 shell 里最自然的写法，模型自己就常这么写 ——
+    /// 不需要攻击者"想到"这个绕过。
+    #[test]
+    fn 引号不能绕过敏感目标扫描() {
+        for (cmd, want) in [
+            ("cp payload '.riot/hooks.json'", SafetyKind::AgentConfig),
+            ("cp evil \"/home/u/.zshrc\"", SafetyKind::ShellRc),
+            ("cp evil /home/u/'.zshrc'", SafetyKind::ShellRc),
+            ("cp evil /home/u/\\.zshrc", SafetyKind::ShellRc),
+            ("cp /work/'.env' /tmp/leak", SafetyKind::Credentials),
+            (
+                "git config 'core.hooksPath' /tmp/evil",
+                SafetyKind::GitInternals,
+            ),
+            ("'git' config core.hooksPath /tmp/evil", SafetyKind::GitInternals),
+        ] {
+            assert_eq!(risk(cmd), Some(want), "{cmd} 被引号绕过了");
+        }
+    }
+
+    #[test]
+    fn ansi_c_引用里的十六进制转义也要还原() {
+        // `$'\x2e'` 就是 `.` —— 把 `.zshrc` 写成这样是躲开字面量清单的
+        // 唯一现实形态
+        assert_eq!(
+            risk("cp evil /home/u/$'\\x2ezshrc'"),
+            Some(SafetyKind::ShellRc)
+        );
+    }
+
+    #[test]
+    fn 大写目标不能绕过命令参数扫描() {
+        // safety::classify_path 折叠大小写之后，这条链在 Bash 这侧也要通
+        assert_eq!(risk("cp evil /home/u/.ZSHRC"), Some(SafetyKind::ShellRc));
+        assert_eq!(
+            risk("cp payload /work/.GIT/hooks/pre-commit"),
+            Some(SafetyKind::GitInternals)
+        );
     }
 
     /// 重定向之外的写法 —— 这些正是 `redirect_target_risk` 看不见的。

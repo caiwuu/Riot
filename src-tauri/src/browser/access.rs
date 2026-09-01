@@ -2111,6 +2111,32 @@ fn displayable(url: &str) -> &str {
     url
 }
 
+/// 地址栏能不能跳到这个地址。
+///
+/// `file://` **在**放行之列。地址栏里输一个本地路径去看一份 HTML 是这个
+/// 面板的既有用法（前端的 `normalize()` 专门为它拼 `file://`），模型侧的
+/// Browser 工具也按设计支持它。
+///
+/// `[取舍]` 拿掉 `file://` 换不来安全。同一个威胁模型 —— webview 里有能
+/// 发 IPC 的注入点 —— 下面，攻击者手上还有 `term_open`（任意 cwd 起登录
+/// shell）加 `term_write`，那是完整的代码执行。挡住读文件的一条支路、
+/// 留着执行任意命令的主路，只是把一个真实功能换成了假的安心感。
+///
+/// 真正没有正当用途的是 `javascript:` 和 `data:`:地址栏里输前者是经典的
+/// 自我 XSS，后者能凭空造一个页面冒充站点。用白名单而不是黑名单，是为了
+/// 让 `chrome://`、`devtools://` 这些将来才出现的 scheme 默认不通。
+pub fn panel_navigable(url: &str) -> bool {
+    // 按前缀比而不是"取 `:` 前面那段"：后者会把 `https:/\/\evil` 这类
+    // 畸形串判成 https，而真正解析它的是 CEF，不是我们。
+    //
+    // 比的是字节。按 `&url[..7]` 切字符串的话，地址栏里打一个中文就会切在
+    // 字符中间 —— 那是一条 panic，不是一次拒绝。
+    let u = url.as_bytes();
+    ["http://", "https://", "file://"]
+        .iter()
+        .any(|p| u.len() > p.len() && u[..p.len()].eq_ignore_ascii_case(p.as_bytes()))
+}
+
 /// 处理不带 id 的 CDP 事件:screencast 帧走画面出口，其余按订阅累积。
 ///
 /// 走到这里的都是**事件**（不带 id）—— 带 id 的响应在 [`super::mod`] 的
@@ -2470,6 +2496,38 @@ mod tests {
         let last = info_at(1, &entries, 2);
         assert!(last.can_back);
         assert!(!last.can_forward, "最后一条不该能前进");
+    }
+
+    #[test]
+    fn 地址栏认_http_https_和本地文件() {
+        assert!(panel_navigable("https://example.com"));
+        assert!(panel_navigable("http://localhost:5173/x"));
+        assert!(panel_navigable("HTTPS://Example.COM"), "协议名大小写不敏感");
+        // 输一个本地路径看 HTML 是这个面板的既有用法，前端的 normalize()
+        // 专门为它拼 file://。拒掉它只会让那两行变成死代码。
+        assert!(panel_navigable("file:///Users/me/page.html"));
+
+        for bad in [
+            // 地址栏里输它就是自我 XSS
+            "javascript:alert(1)",
+            // 凭空造一个页面冒充站点
+            "data:text/html,<script>fetch('//evil')</script>",
+            // 用白名单的理由：这些默认就不通，不用逐个想起来去堵
+            "chrome://net-internals",
+            "devtools://devtools/bundled/x.html",
+            "about:blank",
+            // 协议后面什么都没有，CEF 会怎么补是它的事，不该由这里替它猜。
+            "http://",
+            "https://",
+            "file://",
+            "",
+            // 地址栏里打中文（搜索词、或者粘错东西）。按字节比之前这里是
+            // 一条 panic —— 切在字符中间。
+            "中文搜索词",
+            "ht中tp://x",
+        ] {
+            assert!(!panel_navigable(bad), "{bad} 不该放行");
+        }
     }
 
     /// 起始空白页在地址栏里是空的。

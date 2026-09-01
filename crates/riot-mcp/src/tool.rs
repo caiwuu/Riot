@@ -10,6 +10,10 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use riot_protocol::message::ToolResultContent;
+use riot_protocol::permission::{
+    DecisionReason, PermissionContext, PermissionMode, PermissionResult, PermissionUpdate,
+    RuleDecision, UpdateScope,
+};
 use riot_protocol::tool::{PromptContext, Tool, ToolContext, ToolOutcome, UiPayload};
 use riot_protocol::vision::{DescribeRequest, VisionError};
 
@@ -23,27 +27,107 @@ use crate::wire::ToolDef;
 /// 图按"没能转发"处理，文本部分照常交付。
 const MAX_IMAGE_B64: usize = 2_000_000;
 
+/// 交付给模型的文本上限。
+///
+/// `[约束]` 图片有 [`MAX_IMAGE_B64`] 这道闸，文本一直没有 —— 一个返回
+/// 几百 MB 文本的服务器能同时冲垮内存和上下文预算。
+///
+/// 4 MiB 是刻意放得很宽的：调度层对超过 64 KiB 的文本结果本来就会落盘
+/// （模型拿到路径 + 头尾预览，需要细节再 Read 回来，无损）。所以这道闸
+/// 不该管"结果有点大"，它只管"这个结果大到不正常"—— 正常路径上永远
+/// 碰不到它，碰到就说明对面出了问题。
+const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
+
+/// 工具名的长度上限。两家 API 对工具名都有 `[a-zA-Z0-9_-]` 加长度的
+/// 限制，超了是请求整个 400。
+const MAX_NAME: usize = 64;
+
 /// 对外工具名：`mcp__<server>__<tool>`。
 ///
 /// `[约束]` 权限规则按**全名**匹配（AGENT_DESIGN §8.1 的教训）：光用远端
 /// 名字的话，某个服务器起一个叫 `Write` 的工具就顶了内置 Write 的规则。
-/// 非法字符换成 `_`；总长截到 64 —— 两家 API 对工具名都有
-/// `[a-zA-Z0-9_-]` 加长度的限制，超了是请求整个 400。
+///
+/// `[约束]` 同一个 `(server_id, remote_name)` 永远得到同一个名字，
+/// **不同的对永远得到不同的名字**。后半句是消毒和截断会破坏的那半：
+/// `a.b` 和 `a/b` 消毒后同名，同前缀的长名截断后同名 —— 而"同名"在这里
+/// 的意思是用户对着 A 工具点的"总是允许"顺带把 B 也放行了，没有任何
+/// 提示。所以名字一旦不是原样，就带上一个区分性的哈希后缀。
+///
+/// 哈希用手写的 FNV-1a 而不是 `DefaultHasher`：名字会进用户配置里的
+/// 权限规则，`DefaultHasher` 不保证跨 Rust 版本稳定 —— 升级一次工具链
+/// 就让所有存下来的规则悄悄失配。
 pub fn tool_name(server_id: &str, remote_name: &str) -> String {
-    let sanitize = |s: &str| -> String {
-        s.chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect()
-    };
-    let mut name = format!("mcp__{}__{}", sanitize(server_id), sanitize(remote_name));
-    name.truncate(64);
+    let plain = format!("mcp__{}__{}", sanitize(server_id), sanitize(remote_name));
+
+    // 原样可还原就直接用，保持名字可读（也不动已有的权限规则）。
+    if plain.len() <= MAX_NAME && reversible(server_id) && reversible(remote_name)
+        // 本来就长得像带后缀的名字也要带上真后缀，否则它可能和另一对
+        // 加完后缀的结果撞上。
+        && !looks_suffixed(&plain)
+    {
+        return plain;
+    }
+
+    let suffix = format!("_{:08x}", fingerprint(server_id, remote_name));
+    let mut name = plain;
+    // 消毒后全是 ASCII，按字节截断不会切坏字符。
+    name.truncate(MAX_NAME - suffix.len());
+    name.push_str(&suffix);
     name
+}
+
+fn sanitize(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// 这一段进了名字之后还能还原回来吗。
+///
+/// 除了"消毒没改动过任何字符"，还要求它不含 `__` —— 那是分段符，
+/// 含了它的话 `mcp__a__b__c` 就分不清是 `(a, b__c)` 还是 `(a__b, c)`。
+fn reversible(part: &str) -> bool {
+    part.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        && !part.contains("__")
+}
+
+/// 尾巴长得像 `_` + 8 位十六进制。
+fn looks_suffixed(name: &str) -> bool {
+    let Some(tail) = name.get(name.len().saturating_sub(9)..) else {
+        return false;
+    };
+    tail.len() == 9
+        && tail.starts_with('_')
+        && tail[1..]
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+}
+
+/// FNV-1a（64 位）取低 32 位。选它是因为**实现就在这里**：
+/// 跨版本、跨平台都是同一个数，而这个数会跟着名字进用户的配置文件。
+fn fingerprint(server_id: &str, remote_name: &str) -> u32 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut h = OFFSET;
+    // 中间垫一个不可能出现在 UTF-8 里的字节，否则 ("ab","c") 和
+    // ("a","bc") 是同一串输入。
+    for b in server_id
+        .bytes()
+        .chain(std::iter::once(0xff))
+        .chain(remote_name.bytes())
+    {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(PRIME);
+    }
+    (h >> 32) as u32 ^ (h as u32)
 }
 
 pub struct McpTool {
@@ -52,7 +136,9 @@ pub struct McpTool {
     server_id: String,
     description: String,
     schema: Value,
-    read_only: bool,
+    /// 服务器**自称**只读。名字里带 hint 是刻意的：这是远端说的话，
+    /// 不是我们验证过的事实，用它的地方必须先想清楚"它撒谎会怎样"。
+    read_only_hint: bool,
     destructive: bool,
     client: Arc<Client>,
 }
@@ -66,11 +152,9 @@ impl McpTool {
             server_id: server_id.to_owned(),
             description: def.description.clone().unwrap_or_default(),
             schema: def.input_schema.clone(),
-            // `[约束]` 提示只能收紧不能放宽的方向理解为：没自称只读的
-            // 一律当会写（进权限询问），自称只读的才享受只读待遇。
-            // 提示撒谎的后果是"多问了一次"，反向撒谎的后果是静默写盘。
-            read_only: hints.read_only_hint.unwrap_or(false),
-            // 规范默认 destructiveHint = true（对会写的工具）。
+            read_only_hint: hints.read_only_hint.unwrap_or(false),
+            // 规范默认 destructiveHint = true（对会写的工具）。只进 UI 措辞，
+            // 不参与权限判定。
             destructive: hints.destructive_hint.unwrap_or(true)
                 && !hints.read_only_hint.unwrap_or(false),
             client,
@@ -116,18 +200,88 @@ impl Tool for McpTool {
         format!("调用 {} 的 {}{arg}", self.server_id, self.remote_name)
     }
 
+    /// `[约束]` 永远是 `false`，**不看 `readOnlyHint`**。
+    ///
+    /// 这个方法是权限判据，不是元数据：决策链最后一步（`mode_default`）
+    /// 对只读工具在**每个模式下**（含规划模式）直接放行，不弹窗。让远端
+    /// 的一个 bool 决定它，等于把"要不要问用户"的开关交到第三方手里 ——
+    /// `npx <package>` 是 MCP 服务器的标准形态，包被投毒或作者更新一版，
+    /// 声明只读、实做任意事，全程零确认。
+    ///
+    /// 我们也确实没有能力核实：`McpTool` 不知道远端会碰哪个文件，
+    /// [`Tool::target_path`] 给不出路径，敏感路径安全检查对它整个不生效。
+    /// 真正的把关只能是问用户一次，见 [`Self::check_permissions`]。
     fn is_read_only(&self, _input: &Value) -> bool {
-        self.read_only
+        false
     }
 
-    /// 只有自称只读的才并行。fail-closed：并发跑两个会写的外部工具，
-    /// 顺序问题只能在服务器那边炸。
+    /// 并发判定仍然用远端提示。
+    ///
+    /// `[取舍]` 这里用它是安全的：并发只影响**同批次工具之间的顺序**，
+    /// 而每个工具都已经各自过了权限闸。提示撒谎的后果是两个外部调用
+    /// 交错执行，代价落在服务器自己身上；权限侧撒谎的后果是无声地执行
+    /// 任意操作 —— 两者不是一个量级，所以判据也不该是同一个。
     fn is_concurrency_safe(&self, _input: &Value) -> bool {
-        self.read_only
+        self.read_only_hint
     }
 
     fn is_destructive(&self, _input: &Value) -> bool {
         self.destructive
+    }
+
+    /// 默认问一次用户。
+    ///
+    /// `[约束]` 理由必须是 [`DecisionReason::Consent`]。它的
+    /// `yields_to_bypass()` 为真，语义正是"例行询问，可以被「全部放行」
+    /// 和用户写的 allow 规则压过，但默认要问"—— 这正是我们要的档位：
+    /// 不因为远端自称无害就放行，也不至于让开着 bypass 的用户被反复打断。
+    /// 换成 `Rule` 或 `SafetyCheck` 会让 bypass 对 MCP 整个失效。
+    ///
+    /// `[取舍]` 每个 MCP 工具第一次调用都会多一次确认。弹窗里带
+    /// 「总是允许」建议（会话级整工具 allow 规则），点一次之后这个工具
+    /// 在本次会话里不再问 —— 决策链第 6 步的 allow 规则排在这条询问
+    /// 前面。用不惯的用户还可以把规则写进配置或直接开放行模式。
+    /// 代价是每会话每工具一次点击，换的是"第三方进程不能自己给自己
+    /// 发通行证"。
+    fn check_permissions(&self, _input: &Value, ctx: &PermissionContext) -> PermissionResult {
+        // 规划模式：没自称只读的一律拒，和内置写工具在这个模式下的待遇
+        // 一致。这里不能只发询问 —— 用户进规划模式就是不想让它动手，
+        // 而询问是可以被点"允许"的。
+        //
+        // 自称只读的仍然只是询问（和 WebFetch 对陌生域名的处理同形）：
+        // 提示只能让待遇更严，绝不换来放行。
+        if ctx.mode.get() == PermissionMode::Plan && !self.read_only_hint {
+            return PermissionResult::Deny {
+                message: format!(
+                    "规划模式下不能调用 `{}`：它来自外部 MCP 服务器，\
+                     没有声明只读，无法确认它不会动手。先退出规划模式。",
+                    self.name,
+                ),
+                reason: DecisionReason::Mode {
+                    mode: PermissionMode::Plan,
+                },
+            };
+        }
+
+        PermissionResult::Ask {
+            message: format!(
+                "是否允许调用外部 MCP 服务器「{}」的 {}？\
+                 它跑在本机的独立进程里，能做什么由那个服务器决定。",
+                self.server_id, self.remote_name,
+            ),
+            // 整工具粒度：MCP 工具没有内容维度（`target_path` 给不出路径），
+            // 给不出更细的建议。会话级 —— 写进配置文件是更重的决定，
+            // 由用户在界面上显式选。
+            suggestions: vec![PermissionUpdate::AddRule {
+                tool: self.name.clone(),
+                pattern: None,
+                decision: RuleDecision::Allow,
+                scope: UpdateScope::Session,
+            }],
+            reason: DecisionReason::Consent {
+                what: format!("mcp:{}/{}", self.server_id, self.remote_name),
+            },
+        }
     }
 
     /// MCP 工具参与延迟加载（Claude Code 的判定同样是"MCP 一律延迟"）：
@@ -171,6 +325,17 @@ impl Tool for McpTool {
         // 其它场景图片全进"无法转发"，图文混合时甚至连提示都没有。
         let mut skipped = rendered.skipped;
         let mut notes: Vec<String> = Vec::new();
+
+        // 截断必须说出来。不说的话模型会把半截内容当成完整结果 ——
+        // 比如据此断言"配置里没有这一项"，而它只是被切掉了。
+        if rendered.dropped_text > 0 {
+            notes.push(format!(
+                "结果文本超过 {} MB 上限，尾部 {} MB 已截断。需要完整内容的话，\
+                 换更具体的参数让服务器少返回一些",
+                MAX_TEXT_BYTES / (1024 * 1024),
+                rendered.dropped_text.div_ceil(1024 * 1024),
+            ));
+        }
 
         let prepared = match rendered.image {
             Some((media_type, data)) => match prepare_image(media_type, data, &ctx).await {
@@ -286,6 +451,8 @@ struct Rendered {
     image: Option<(String, String)>,
     /// 没能转发的内容块数。
     skipped: usize,
+    /// 撞上 [`MAX_TEXT_BYTES`] 之后丢掉的字节数。0 = 没截断。
+    dropped_text: usize,
 }
 
 /// 把 MCP 的内容块摊平成文本（+ 至多一张图）。
@@ -293,15 +460,34 @@ struct Rendered {
 /// 逐块按 `type` 认而不是给内容块建 enum：MCP 的块类型还在增加，
 /// enum 会让一个不认识的类型弄失败整个反序列化 —— 这里最多算 skipped。
 fn render_content(blocks: &[Value]) -> Rendered {
-    let mut texts: Vec<&str> = Vec::new();
+    let mut text = String::new();
     let mut image = None;
     let mut skipped = 0usize;
+    let mut dropped_text = 0usize;
+
+    let push_text = |t: &str, text: &mut String, dropped: &mut usize| {
+        let sep = usize::from(!text.is_empty());
+        let room = MAX_TEXT_BYTES.saturating_sub(text.len() + sep);
+        if room == 0 {
+            *dropped += t.len();
+            return;
+        }
+        if sep == 1 {
+            text.push('\n');
+        }
+        if t.len() <= room {
+            text.push_str(t);
+        } else {
+            text.push_str(&t[..floor_boundary(t, room)]);
+            *dropped += t.len() - room;
+        }
+    };
 
     for block in blocks {
         match block.get("type").and_then(Value::as_str) {
             Some("text") => {
                 if let Some(t) = block.get("text").and_then(Value::as_str) {
-                    texts.push(t);
+                    push_text(t, &mut text, &mut dropped_text);
                 }
             }
             Some("image") => {
@@ -318,7 +504,7 @@ fn render_content(blocks: &[Value]) -> Rendered {
             }
             // 内嵌资源里带文本的话捞出来 —— 常见于"读文件"类工具。
             Some("resource") => match block.pointer("/resource/text").and_then(Value::as_str) {
-                Some(t) => texts.push(t),
+                Some(t) => push_text(t, &mut text, &mut dropped_text),
                 None => skipped += 1,
             },
             _ => skipped += 1,
@@ -326,10 +512,20 @@ fn render_content(blocks: &[Value]) -> Rendered {
     }
 
     Rendered {
-        text: texts.join("\n"),
+        text,
         image,
         skipped,
+        dropped_text,
     }
+}
+
+/// `max` 处往前退到最近的字符边界。切在多字节字符中间会 panic。
+fn floor_boundary(s: &str, max: usize) -> usize {
+    let mut end = max.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
 }
 
 enum ImagePrep {
@@ -424,6 +620,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use riot_protocol::id::{SessionId, ToolUseId};
+    use riot_protocol::permission::PermissionRule;
     use riot_protocol::tool::{FileSystem as _, ProgressSink};
     use riot_tools::testing::{FakeVision, FixedClock, NullFileState, NullFs, NullProc};
     use riot_tools::tools::memfs::MemFs;
@@ -435,7 +632,11 @@ mod tests {
     fn 工具名带服务器前缀并消毒() {
         assert_eq!(tool_name("fs", "read_file"), "mcp__fs__read_file");
         // 点、斜杠、空格、中文都不是 API 允许的工具名字符
-        assert_eq!(tool_name("my.server", "a/b c"), "mcp__my_server__a_b_c");
+        assert!(
+            tool_name("my.server", "a/b c").starts_with("mcp__my_server__a_b_c"),
+            "{}",
+            tool_name("my.server", "a/b c")
+        );
         assert!(
             tool_name("文件", "读工具")
                 .chars()
@@ -445,6 +646,225 @@ mod tests {
         // 超长截断到 64 —— 超了整个请求 400
         let long = tool_name("server", &"x".repeat(100));
         assert!(long.len() <= 64, "太长：{}", long.len());
+    }
+
+    #[test]
+    fn 不同的远端工具不会映射到同一个名字() {
+        // 权限规则按全名匹配。两个工具重名的后果是：用户对着 A 点的
+        // "总是允许"顺带把 B 也放行了，而弹窗里从头到尾没提过 B。
+        let pairs = [
+            // 消毒撞名：`.` 和 `/` 都变成 `_`
+            ("srv", "a.b"),
+            ("srv", "a/b"),
+            ("srv", "a b"),
+            // 分段符歧义：`mcp__a__b__c` 是 (a, b__c) 还是 (a__b, c)
+            ("a", "b__c"),
+            ("a__b", "c"),
+            // 截断撞名：同前缀的长名
+            ("srv", &format!("{}_alpha", "x".repeat(80))),
+            ("srv", &format!("{}_beta", "x".repeat(80))),
+        ];
+
+        let mut seen = std::collections::HashMap::new();
+        for (server, tool) in pairs {
+            let name = tool_name(server, tool);
+            assert!(name.len() <= 64, "{name} 太长");
+            assert!(
+                name.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+                "{name} 里有 API 不接受的字符"
+            );
+            if let Some(prev) = seen.insert(name.clone(), (server, tool)) {
+                panic!("{prev:?} 和 {:?} 都叫 {name}", (server, tool));
+            }
+        }
+    }
+
+    #[test]
+    fn 工具名跨进程稳定() {
+        // 名字会进用户配置里的权限规则。换个进程、换个 Rust 版本算出
+        // 不一样的后缀，存下来的规则就静默失配 —— 用户看到的是
+        // "我明明点过总是允许"。这也是不用 DefaultHasher 的原因。
+        assert_eq!(
+            tool_name("my.server", "a/b"),
+            "mcp__my_server__a_b_3ff861bf"
+        );
+    }
+
+    // ── 权限判定 ───────────────────────────────
+
+    fn tool_with_hints(read_only: Option<bool>, client: Arc<Client>) -> McpTool {
+        let def = ToolDef {
+            name: "wipe".into(),
+            description: Some("测试工具".into()),
+            input_schema: serde_json::json!({ "type": "object" }),
+            annotations: read_only.map(|r| crate::wire::ToolAnnotations {
+                read_only_hint: Some(r),
+                destructive_hint: None,
+            }),
+        };
+        McpTool::new("srv", &def, client)
+    }
+
+    fn ctx_in(mode: PermissionMode) -> PermissionContext {
+        PermissionContext {
+            mode: riot_protocol::permission::PermissionModeState(Some(mode)),
+            can_prompt_user: true,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn 自称只读的服务器仍然要过确认() {
+        // 这是本仓库最贵的一课：`readOnlyHint: true` 曾经直接决定
+        // `is_read_only()`，而决策链最后一步对只读工具在每个模式下
+        // 都放行。于是"声明只读、实做任意事"的第三方包全程零确认，
+        // 而用户添加它时只是照着 README 敲了一行 `npx <package>`。
+        let client = client_with_result(serde_json::json!({ "content": [] })).await;
+        let tool = tool_with_hints(Some(true), client);
+        let input = serde_json::json!({});
+
+        assert!(
+            !tool.is_read_only(&input),
+            "远端的一个 bool 不能决定要不要问用户"
+        );
+
+        match tool.check_permissions(&input, &ctx_in(PermissionMode::Default)) {
+            PermissionResult::Ask { reason, .. } => assert!(
+                reason.yields_to_bypass(),
+                "必须是 Consent 那一档：能被「全部放行」压过，但默认要问。\
+                 换成对 bypass 免疫的理由会让放行模式对 MCP 整个失效：{reason:?}"
+            ),
+            other => panic!("默认要问一次：{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn 询问带上总是允许的建议() {
+        // 没有这条建议，用户每一轮都要为同一个工具点一次 —— 那种弹窗
+        // 只会把人训练成无脑点。
+        let client = client_with_result(serde_json::json!({ "content": [] })).await;
+        let tool = tool_with_hints(Some(true), client);
+
+        let PermissionResult::Ask { suggestions, .. } =
+            tool.check_permissions(&serde_json::json!({}), &ctx_in(PermissionMode::Default))
+        else {
+            panic!("默认要问一次");
+        };
+        assert_eq!(
+            suggestions,
+            vec![PermissionUpdate::AddRule {
+                tool: "mcp__srv__wipe".into(),
+                pattern: None,
+                decision: RuleDecision::Allow,
+                scope: UpdateScope::Session,
+            }],
+            "规则按全名匹配，建议里的名字必须就是对外工具名"
+        );
+    }
+
+    #[tokio::test]
+    async fn 规划模式下没自称只读的一律拒() {
+        // 规划模式的语义是"别动手"，而询问是可以被点允许的。
+        // 没声明只读 = 我们无法确认它不动手，按写工具办。
+        let client = client_with_result(serde_json::json!({ "content": [] })).await;
+        let plan = ctx_in(PermissionMode::Plan);
+
+        match tool_with_hints(None, Arc::clone(&client))
+            .check_permissions(&serde_json::json!({}), &plan)
+        {
+            PermissionResult::Deny { .. } => {}
+            other => panic!("规划模式下该拒：{other:?}"),
+        }
+        match tool_with_hints(Some(true), client).check_permissions(&serde_json::json!({}), &plan) {
+            PermissionResult::Ask { .. } => {}
+            other => panic!("自称只读的问一句就行，和 WebFetch 同形：{other:?}"),
+        }
+    }
+
+    /// 过真实决策链，返回落在哪一档。
+    fn verdict(tool: &McpTool, mode: PermissionMode, rules: Vec<PermissionRule>) -> &'static str {
+        let ctx = PermissionContext {
+            mode: riot_protocol::permission::PermissionModeState(Some(mode)),
+            rules: rules.clone(),
+            can_prompt_user: true,
+            ..Default::default()
+        };
+        let out = riot_permissions::decide(
+            tool,
+            &serde_json::json!({}),
+            &ctx,
+            &riot_permissions::RuleSet::new(rules),
+        );
+        match out {
+            PermissionResult::Allow { .. } => "allow",
+            PermissionResult::Ask { .. } => "ask",
+            PermissionResult::Deny { .. } => "deny",
+            PermissionResult::Passthrough => "passthrough",
+        }
+    }
+
+    #[tokio::test]
+    async fn 决策链上外部服务器不能自己给自己发通行证() {
+        // 只断言 check_permissions 的返回值不够：那条链有七步，工具的
+        // Ask 会不会被后面的步骤压过、谁能压过它，得跑真链才知道。
+        let client = client_with_result(serde_json::json!({ "content": [] })).await;
+        let tool = tool_with_hints(Some(true), client);
+
+        assert_eq!(
+            verdict(&tool, PermissionMode::Default, vec![]),
+            "ask",
+            "自称只读也要问 —— 这是整个改动的目的"
+        );
+        assert_eq!(
+            verdict(&tool, PermissionMode::AcceptEdits, vec![]),
+            "ask",
+            "自动接受编辑说的是工作区内的文件编辑，不是外部进程"
+        );
+        assert_eq!(
+            verdict(&tool, PermissionMode::BypassPermissions, vec![]),
+            "allow",
+            "「全部放行」的语义就是替用户回答这类例行询问；\
+             拦住它等于让放行模式对 MCP 失效"
+        );
+
+        // 用户点过「总是允许」之后：会话级整工具 allow 规则，不再问。
+        let remembered = vec![PermissionRule {
+            tool: "mcp__srv__wipe".into(),
+            pattern: None,
+            decision: RuleDecision::Allow,
+            source: riot_protocol::permission::RuleSource::Session,
+        }];
+        assert_eq!(
+            verdict(&tool, PermissionMode::Default, remembered),
+            "allow",
+            "记住选择必须真的生效，否则每一轮都要点一次"
+        );
+
+        // 用户写过 deny 的，任何模式下都不许打开。
+        let denied = vec![PermissionRule {
+            tool: "mcp__srv__wipe".into(),
+            pattern: None,
+            decision: RuleDecision::Deny,
+            source: riot_protocol::permission::RuleSource::User,
+        }];
+        assert_eq!(
+            verdict(&tool, PermissionMode::BypassPermissions, denied),
+            "deny"
+        );
+    }
+
+    #[tokio::test]
+    async fn 并发判定仍然用远端提示() {
+        // 并发只影响同批次工具之间的顺序，每个工具都各自过了权限闸 ——
+        // 提示撒谎的代价落在服务器自己身上，和权限侧不是一个量级。
+        let client = client_with_result(serde_json::json!({ "content": [] })).await;
+        let input = serde_json::json!({});
+        assert!(tool_with_hints(Some(true), Arc::clone(&client)).is_concurrency_safe(&input));
+        assert!(
+            !tool_with_hints(None, client).is_concurrency_safe(&input),
+            "没自称只读的不并行：fail-closed"
+        );
     }
 
     // ── call 的图片交付管线 ────────────────────
@@ -721,6 +1141,49 @@ mod tests {
             panic!("坏数据不该让工具失败：{out:?}");
         };
         assert!(text.contains("无法转发"), "要提示有块没转出去：{text}");
+    }
+
+    #[test]
+    fn 超大文本被截断且告诉模型截断了() {
+        // 图片有 MAX_IMAGE_B64 这道闸，文本一直没有：几百 MB 的结果
+        // 会同时冲垮内存和上下文预算。截了不说更糟 —— 模型会把半截
+        // 内容当成完整结果，据此断言"没有这一项"。
+        let huge = "字".repeat(2 * 1024 * 1024); // 6 MB（每个字 3 字节）
+        let rendered = render_content(&[
+            serde_json::json!({ "type": "text", "text": huge }),
+            serde_json::json!({ "type": "text", "text": "尾巴" }),
+        ]);
+
+        assert!(
+            rendered.text.len() <= MAX_TEXT_BYTES,
+            "超了上限：{} 字节",
+            rendered.text.len()
+        );
+        assert!(rendered.dropped_text > 0, "丢了多少要记下来");
+        assert!(
+            rendered.text.ends_with('字'),
+            "必须切在字符边界上，否则 String 构造直接 panic"
+        );
+    }
+
+    #[tokio::test]
+    async fn 截断的结果带着说明交给模型() {
+        let huge = "x".repeat(MAX_TEXT_BYTES + 4096);
+        let out = call_with(
+            serde_json::json!({ "content": [{ "type": "text", "text": huge }] }),
+            FakeVision::Direct,
+            Arc::new(NullFs),
+        )
+        .await;
+
+        let ToolOutcome::Ok {
+            model_content: ToolResultContent::Text { text },
+            ..
+        } = out
+        else {
+            panic!("超大文本不该让工具失败：{out:?}");
+        };
+        assert!(text.contains("已截断"), "要明说被截断了");
     }
 
     #[tokio::test]

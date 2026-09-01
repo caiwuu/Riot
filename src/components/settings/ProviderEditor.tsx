@@ -10,6 +10,7 @@ import {
   setApiKey,
   testConnection,
 } from "../../bridge";
+import { useTimedFlag } from "../../hooks/useTimedFlag";
 import {
   type SamplingDraft,
   parseSampling,
@@ -76,7 +77,7 @@ export function ProviderEditor({
   const [baseUrl, setBaseUrl] = useState(p.baseUrl);
   const [apiPath, setApiPath] = useState(p.apiPath ?? "");
   const [keyDraft, setKeyDraft] = useState("");
-  const [savedFlash, setSavedFlash] = useState(false);
+  const [savedFlash, flashSaved] = useTimedFlag(false, 2000);
   /** 正在编辑的模型。null = 没开弹窗。 */
   const [editing, setEditing] = useState<ModelConfig | null>(null);
   const [adding, setAdding] = useState(false);
@@ -121,8 +122,7 @@ export function ProviderEditor({
     try {
       onStatus(await setApiKey(p.id, k));
       setKeyDraft("");
-      setSavedFlash(true);
-      setTimeout(() => setSavedFlash(false), 2000);
+      flashSaved(true);
     } catch (e) {
       onError(String(e));
     }

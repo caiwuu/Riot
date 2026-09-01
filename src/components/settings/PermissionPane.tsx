@@ -25,7 +25,10 @@ const MIN_TIMEOUT = 5;
 const MAX_TIMEOUT = 3600;
 const MIN_TURNS = 1;
 const MAX_TURNS = 1000;
-const DEFAULT_TURNS = 48;
+/** 见 Rust 侧 `default_max_turns`。 */
+const DEFAULT_TURNS = 120;
+/** 见 Rust 侧 `default_permission_mode`。 */
+const DEFAULT_MODE: PermissionMode = "bypassPermissions";
 
 const SANDBOX_MODES: { id: SandboxMode; name: string; desc: string; danger?: boolean }[] = [
   {
@@ -80,6 +83,9 @@ const MODES: { id: PermissionMode; name: string; desc: string; danger?: boolean 
 // 安装/卸载入口只在 Windows 出现：macOS 的隔离用系统自带的 sandbox-exec，
 // 没有装卸的生命周期。UA 判断和 main.tsx 的材质门控是同一招。
 const IS_WINDOWS = navigator.userAgent.includes("Windows");
+
+/** 出厂档按平台分，见 Rust 侧 `SandboxMode::default`。 */
+const DEFAULT_SANDBOX: SandboxMode = IS_WINDOWS ? "off" : "workspaceWrite";
 
 /**
  * 「开关说开着」和「这台机器上真的隔离着」之间的差额。
@@ -187,11 +193,11 @@ export function PermissionPane({
   onSaved: () => void;
 }) {
   const [error, setError] = useState("");
-  const current = status.config.defaultMode ?? "default";
+  const current = status.config.defaultMode ?? DEFAULT_MODE;
   // 编辑期间存字符串：绑成 number 的话，用户删到空输入框会立刻变成 0，
   // 而 0 在这里的含义是"每个弹窗瞬间超时"。等失焦再解析并夹紧。
   const [timeout, setTimeout_] = useState(String(status.config.askTimeoutSecs));
-  // 轮数默认 48，老配置里可能没有这个字段（后端有默认，但前端要兜一下）。
+  // 老配置里可能没有这个字段（后端有默认，但前端要兜一下）。
   const [turns, setTurns] = useState(String(status.config.maxTurns ?? DEFAULT_TURNS));
   const [compactAt, setCompactAt] = useState(
     String(status.config.compactThresholdTokens ?? DEFAULT_COMPACT_AT),
@@ -345,7 +351,7 @@ export function PermissionPane({
       .catch((e: unknown) => setError(String(e)));
   };
 
-  const sandbox = status.config.sandbox ?? "workspaceWrite";
+  const sandbox = status.config.sandbox ?? DEFAULT_SANDBOX;
   const pickSandbox = (mode: SandboxMode) => {
     // 关沙箱要确认一次。它和"无人值守"是同一类决定：关掉之后唯一挡在
     // 危险命令前面的就只剩规则判断了，而判断是会错的。

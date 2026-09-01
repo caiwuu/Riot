@@ -107,7 +107,7 @@ fn keep_imported(key: &str) -> bool {
             | "SSH_ASKPASS"
             | "SSH_ASKPASS_REQUIRE"
             | "GIT_TERMINAL_PROMPT"
-            | "RIOT_ASKPASS_SOCK"
+            | "RIOT_ASKPASS_ENDPOINT"
             | "RIOT_ASKPASS_EXE"
             | "RIOT_RESOLVING_ENVIRONMENT"
             | "ELECTRON_RUN_AS_NODE"
@@ -424,6 +424,10 @@ mod tests {
         assert!(keep_imported("LANG"));
         assert!(!keep_imported("PWD"));
         assert!(!keep_imported("GIT_ASKPASS"));
+        // 这一条是安全项：askpass 装不上时（拿不到 exe 路径之类），用户
+        // `.zshrc` 里 export 的会合点会留在环境里，git 的凭据询问就连到
+        // 别人的 socket 上去了。
+        assert!(!keep_imported("RIOT_ASKPASS_ENDPOINT"));
         assert!(!keep_imported("TMPDIR"));
         assert!(!keep_imported("XDG_RUNTIME_DIR"));
     }

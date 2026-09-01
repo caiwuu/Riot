@@ -20,6 +20,7 @@ import {
   editMessage as editMessageBridge,
   getHistory,
   interrupt as interruptSession,
+  isIpcTimeout,
   queueList,
   queueRemove,
   queueTake,
@@ -181,6 +182,32 @@ const BUSY_SILENCE_MS = 12_000;
 const SEND_GRACE_MS = 8_000;
 /** 切到别的 app 不到这么久、事件还在流，不要重订阅（避免把正在流的正文闪掉）。 */
 const AWAY_RESYNC_MS = 30_000;
+/**
+ * 一次"换出口并对历史"最多占住多久。
+ *
+ * 比 bridge 给单条命令的期限短：那边是"这条命令算不算失败"，这里是
+ * "还要不要挡着别人重连"。等待期间发消息的用户被这条挡在乐观气泡
+ * 之前 —— 他打的字既没上屏也没报错，那是最不该出现的一种失败。
+ */
+const ENSURE_LIVE_DEADLINE_MS = 20_000;
+
+/**
+ * 等 `p`，但最多等 `ms`。到点就当它完成了（不抛）—— 调用方要的是
+ * "别再等下去"，不是"报个错"。
+ *
+ * 定时器在 `p` 先落地时清掉：这个函数每次重连都调一次，留着就是一串
+ * 挂到会话关闭的空转。
+ */
+function settleWithin(p: Promise<void>, ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const timer = window.setTimeout(resolve, ms);
+    const done = () => {
+      window.clearTimeout(timer);
+      resolve();
+    };
+    p.then(done, done);
+  });
+}
 
 /**
  * 宿主的历史快照。
@@ -279,19 +306,20 @@ export function useSession(
     onPreviewFile?: (path: string) => void;
   },
 ) {
-  const [state, setStateRaw] = useState<SessionState>(() => touchSession(sessionId) ?? EMPTY_STATE);
+  const [state, setState] = useState<SessionState>(() => touchSession(sessionId) ?? EMPTY_STATE);
   /** 历史快照到过（或缓存里已有）。没到之前不要把长会话画成空招呼页。 */
   const [ready, setReady] = useState(() => sessionCache.has(sessionId));
-  const setState = useCallback<typeof setStateRaw>(
-    (update) => {
-      setStateRaw((prev) => {
-        const next = typeof update === "function" ? update(prev) : update;
-        cacheSession(sessionId, next);
-        return next;
-      });
-    },
-    [sessionId],
-  );
+
+  // 缓存跟着**提交后**的状态走，不写在 updater 里。
+  //
+  // `[约束]` updater 必须是纯函数。React 19 的并发渲染允许重复调用甚至
+  // 整个丢弃一次 updater —— 在里面写外部缓存，等于让一份跨会话存活的
+  // 数据跟着渲染的中间态跑。这里以前那样写没出事，靠的是"每次渲染都从
+  // base state 重放整个队列、最后一次调用的值恰好是对的"，同一个文件在
+  // tool_start 和 send 两处已经为 StrictMode 双跑各留过一个坑。
+  useEffect(() => {
+    cacheSession(sessionId, state);
+  }, [sessionId, state]);
 
   // delta 先攒在 ref，由 rAF 决定何时 setState。逐条 setState 会让 React
   // 在快速流式输出时掉帧。页面不可见时 WebKit 会节流 rAF，那时直接刷 ——
@@ -788,7 +816,7 @@ export function useSession(
       if (ensureInflight) return ensureInflight;
       const catchUp = opts?.catchUp !== false;
       lastHeardAt.current = Date.now();
-      ensureInflight = (async () => {
+      const run = (async () => {
         try {
           sub.unsubscribe();
           sub = subscribeSession(sessionId, listen, onSubscribeError);
@@ -817,11 +845,20 @@ export function useSession(
           restoreQueue();
         } catch {
           // 订阅/历史失败：onSubscribeError 已经报过，这里别再铺一条。
-        } finally {
-          ensureInflight = null;
         }
       })();
-      return ensureInflight;
+      // 这把锁必须自己会开。bridge 已经给每条命令上了期限，但那道保险
+      // 管不了"宿主回了、这里的某个 await 却没往下走"的形态 —— 而锁一旦
+      // 卡住，看门狗、切回前台、窗口聚焦三条重连路径**同时**失效，界面
+      // 从此停在「正在生成」，且不报任何错。宁可放一次重复的重连进来
+      // （重连本身幂等：换出口 + 拉快照），也不能永久上锁。
+      const guarded = settleWithin(run, ENSURE_LIVE_DEADLINE_MS);
+      ensureInflight = guarded;
+      void guarded.then(() => {
+        // 只清自己那一把 —— 期限到时早退的话，后面可能已经换了新的。
+        if (ensureInflight === guarded) ensureInflight = null;
+      });
+      return guarded;
     };
     ensureLiveRef.current = () => ensureLive({ catchUp: true });
 
@@ -888,6 +925,12 @@ export function useSession(
       // 上午聊完、下午再发：Channel 往往已经死了。先换出口并对历史，
       // 否则这一轮的事件（包括 Done）继续丢进没人听的旧通道，界面
       // 永远停在「正在生成」，切走再切回来却能看见完整回复。
+      //
+      // `[约束]` 这一步只能延后发送，不能挡死它。它排在乐观气泡**之前**，
+      // 卡在这里的表现是用户打的字凭空消失 —— 没有气泡、没有排队项、
+      // 也没有报错。ensureLive 自带期限且从不抛（见 settleWithin），
+      // 换出口失败就带着一条可能已经死掉的通道往下走：消息照发，最坏
+      // 情况是这一轮的事件收不到，而那个有看门狗兜。
       if (Date.now() - lastHeardAt.current >= SINK_STALE_MS) {
         await ensureLiveRef.current?.();
       }
@@ -978,7 +1021,7 @@ export function useSession(
           busy: wasBusy,
           items: [
             ...s.items.filter((it) => it.id !== localId),
-            { kind: "error", id: `err-${Date.now()}`, text: humanizeError(e) },
+            { kind: "error", id: `err-${Date.now()}`, text: sendFailureText(e) },
           ],
         }));
         return false;
@@ -1863,10 +1906,30 @@ function applyResolved(s: SessionState, requestId: string, reason: DecisionReaso
 }
 
 /**
+ * 发送失败时摆在对话流里的那一行。
+ *
+ * 宿主超时要和"宿主拒绝"分开说。拒绝是确定的：这条没进队列，原文回到
+ * 输入框，重发就行。超时的结果**不确定** —— 命令可能已经落地、轮子已经
+ * 在跑，只是回执没回来。这时催用户重发，就是在制造两条一模一样的消息。
+ */
+function sendFailureText(e: unknown): string {
+  if (isIpcTimeout(e)) {
+    return (
+      "宿主一直没有回应，这条消息有没有发出去不好说 —— 原文已经放回输入框。" +
+      "先看看这个会话过一会儿有没有自己动起来，再决定要不要重发。"
+    );
+  }
+  return humanizeError(e);
+}
+
+/**
  * 把一串技术错误链翻成一句人话。识别不了的原样保留 —— 编出来的
  * 解释比看不懂的原文更糟。原文压缩在括号里，报 bug 时用得上。
  */
 function humanizeError(e: unknown): string {
+  // 宿主超时要抢在下面那条 timeout 规则前面：那句话说的是"网络或服务方
+  // 没按时响应"，而这一类根本没走到网络 —— 是宿主自己没回话。
+  if (isIpcTimeout(e)) return `${e.message}这一步做没做成不好说，先别急着重试。`;
   const raw = String(e);
   const lower = raw.toLowerCase();
   const known: [RegExp, string][] = [

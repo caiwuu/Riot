@@ -434,9 +434,54 @@ async fn run_one(
         };
     }
 
+    // 落盘（spill_oversized）在 ctx 把 deps 拆走之后还要用这两样。
+    let spill_fs = Arc::clone(&deps.fs);
+    let spill_dir = deps.artifacts_dir.clone();
+
+    let ctx = ToolContext {
+        session_id,
+        tool_use_id: call.id.clone(),
+        cwd: deps.cwd,
+        artifacts_dir: deps.artifacts_dir,
+        cancel: cancel.clone(),
+        progress: ProgressSink::new(call.id.clone(), progress_tx),
+        file_state: deps.file_state,
+        fs: deps.fs,
+        proc: deps.proc,
+        web: deps.web,
+        browser: deps.browser,
+        terminal: deps.terminal,
+        vision: deps.vision,
+        clock: deps.clock,
+    };
+
+    let mut input = call.input;
+
+    // 语义校验（ARCHITECTURE §管线第 4 步）。
+    //
+    // `[约束]` 必须在权限闸**之前**。这一层回答的是"这次调用有没有意义"
+    // （文件在不在、old_string 唯一不唯一），答案是否定时不该惊动用户 ——
+    // 为一个注定失败的调用弹授权窗，等于把用户也拖进模型的错误里。
+    //
+    // 这一步曾经整个是死的:trait 方法在，`gate.rs` 和 `session.rs` 的注释
+    // 都写着"validate_input 会把它拦下"，但生产代码里一个调用点都没有，
+    // 只有测试在调。于是一批不变量只存在于那一层 —— 而所有测试照样是绿的。
+    // 加调用点的时候一并想清楚:这里拦不住的，`call()` 里必须再拦一次。
+    if let Err(e) = tool.validate_input(&input, &ctx).await {
+        return Done {
+            id: call.id,
+            name: call.name,
+            outcome: ToolOutcome::failed(e.to_string()),
+            is_error: true,
+            // 和权限拒绝同理:工具没跑，没有副作用，不该连累同批的兄弟。
+            cascades: false,
+            cascaded: false,
+            hook_feedback: Vec::new(),
+        };
+    }
+
     // 权限闸。放在这里而不是工具内部，是因为拒绝必须**在副作用之前**发生 ——
     // 工具自己检查的话，"检查"和"动手"之间的每一行代码都是可能出错的地方。
-    let mut input = call.input;
     if let Some(g) = &gate {
         match g.check(tool.as_ref(), &input, &call.id, &cancel).await {
             riot_protocol::permission::GateOutcome::Allow { updated_input } => {
@@ -473,27 +518,6 @@ async fn run_one(
             hook_feedback: Vec::new(),
         };
     }
-
-    // 落盘（spill_oversized）在 ctx 把 deps 拆走之后还要用这两样。
-    let spill_fs = Arc::clone(&deps.fs);
-    let spill_dir = deps.artifacts_dir.clone();
-
-    let ctx = ToolContext {
-        session_id,
-        tool_use_id: call.id.clone(),
-        cwd: deps.cwd,
-        artifacts_dir: deps.artifacts_dir,
-        cancel: cancel.clone(),
-        progress: ProgressSink::new(call.id.clone(), progress_tx),
-        file_state: deps.file_state,
-        fs: deps.fs,
-        proc: deps.proc,
-        web: deps.web,
-        browser: deps.browser,
-        terminal: deps.terminal,
-        vision: deps.vision,
-        clock: deps.clock,
-    };
 
     // hook 要看 input，而 execute 拿走了它 —— 只在真装了 hooks 时才付
     // 这份克隆（Write 的 input 可能是整个文件）。
@@ -1203,6 +1227,70 @@ mod tests {
         assert_eq!(pairs.len(), 2, "panic 的那个也要有结果");
         assert!(pairs[0].1.contains("Boom"));
         assert_eq!(pairs[1].0, "b", "兄弟不受影响");
+    }
+
+    /// 回归：`validate_input` 整个管线阶段曾经是死的。
+    ///
+    /// trait 方法在，`docs/ARCHITECTURE.md` 把它写成管线第 4 步，
+    /// `gate.rs` 和 `session.rs` 三处注释都在依赖"validate_input 会把它
+    /// 拦下"，但生产代码里一个调用点都没有 —— 只有测试在调。于是一批
+    /// 安全和正确性不变量只存在于那一层，而所有测试照样是绿的。
+    ///
+    /// 这个测试盯的就是"有没有调用点"，所以它必须走完整的 `run`，
+    /// 不能直接调 `tool.validate_input`（那正是老测试的做法）。
+    #[tokio::test(start_paused = true)]
+    async fn 校验失败的调用不执行也不弹窗() {
+        struct Picky {
+            ran: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl Tool for Picky {
+            fn name(&self) -> &'static str {
+                "Picky"
+            }
+            fn input_schema(&self) -> schemars::Schema {
+                schemars::json_schema!({ "type": "object" })
+            }
+            fn prompt(&self, _: &PromptContext) -> String {
+                "picky".into()
+            }
+            fn describe(&self, _: &serde_json::Value) -> String {
+                "picky".into()
+            }
+            async fn validate_input(
+                &self,
+                _: &serde_json::Value,
+                _: &ToolContext,
+            ) -> Result<(), riot_protocol::tool::ValidationError> {
+                Err(riot_protocol::tool::ValidationError::rejected(
+                    "old_string 不能为空",
+                ))
+            }
+            async fn call(&self, _: serde_json::Value, _: ToolContext) -> ToolOutcome {
+                self.ran.fetch_add(1, Ordering::SeqCst);
+                ToolOutcome::ok_text("跑了")
+            }
+        }
+
+        let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let s = scheduler(vec![Arc::new(Picky {
+            ran: Arc::clone(&ran),
+        }) as Arc<dyn Tool>]);
+
+        let events = run(&s, vec![call("a", "Picky")]).await;
+        let pairs = result_pairs(outcome(&events));
+
+        assert_eq!(pairs.len(), 1);
+        assert!(
+            pairs[0].1.contains("old_string 不能为空"),
+            "校验理由要原样交给模型，它才知道改什么：{}",
+            pairs[0].1
+        );
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "校验没过就不该执行 —— 否则这一层等于不存在"
+        );
     }
 
     #[tokio::test(start_paused = true)]

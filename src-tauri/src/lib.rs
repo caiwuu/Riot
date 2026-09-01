@@ -27,6 +27,7 @@ pub mod kernel;
 pub mod packs;
 pub mod pasteboard;
 pub mod persist;
+pub mod preview;
 pub mod schedule;
 pub mod state;
 pub mod term;
@@ -686,7 +687,8 @@ async fn browser_close(state: tauri::State<'_, AppState>, session_id: String) ->
     Ok(())
 }
 
-/// 地址栏跳转。用户自己输的，不问权限。
+/// 地址栏跳转。用户自己输的，不问权限 —— 但 scheme 要过白名单，
+/// 理由见 [`browser::access::panel_navigable`]。
 #[tauri::command]
 async fn browser_navigate(
     state: tauri::State<'_, AppState>,
@@ -694,6 +696,13 @@ async fn browser_navigate(
     url: String,
 ) -> HostResult<()> {
     use riot_protocol::browser::BrowserAccess as _;
+    if !browser::access::panel_navigable(&url) {
+        return Err(HostError::Browser(
+            riot_protocol::browser::BrowserUnavailable(
+                "内置浏览器只能打开 http / https 地址，或者 file:// 开头的本地文件。".into(),
+            ),
+        ));
+    }
     let b = state.panel_browser(&session_id).await?;
     b.navigate(&url).await.map_err(HostError::Browser)
 }
@@ -958,22 +967,32 @@ async fn term_busy(terms: tauri::State<'_, term::Terminals>, id: u32) -> HostRes
 /// 给拖进来的图和"选图片"按钮用。前端拿不到磁盘内容:webview 的
 /// `File` 对象只有拖放数据里那份，而 Tauri 的拖放事件给的是**路径**。
 ///
+/// `[约束]` 路径必须先过 [`preview::resolve`]。它和下面那条是 webview
+/// 手上仅有的两条读文件原语，谁绕过围栏谁就是那个漏洞。
+///
 /// `[约束]` 必须限大小。一张手机拍的照片十几 MB，读进来再 base64 变二十
 /// 多 MB，光是 IPC 那一跳就能让界面卡住一两秒 —— 而它最终还是会被服务方
 /// 的单图上限拒掉。在这里拦住，用户立刻知道是哪张图的问题。
 #[tauri::command]
-async fn read_image(path: String) -> HostResult<content::ImageOutput> {
-    content::read_image(&path)
+async fn read_image(
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> HostResult<content::ImageOutput> {
+    let path = preview::resolve(&state, &path)
+        .await
+        .map_err(HostError::Provider)?;
+    content::read_image(&path.display().to_string())
         .await
         .map_err(HostError::Provider)
 }
 
 /// 文件预览一次能读进来的上限。
 ///
-/// 预览是在 webview 里渲染的：字节要过一次 IPC、再在 JS 侧解析成
-/// DOM / canvas，太大的文件两头都扛不住。超限让用户走系统应用打开，
-/// 那条路是流式的。
-const MAX_PREVIEW_FILE: u64 = 128 * 1024 * 1024;
+/// 预览是在 webview 里渲染的：整块字节先在宿主进程里攒一份 Vec、过一次
+/// IPC、再在 JS 侧解析成 DOM / canvas —— 同一份内容同时占着宿主和 webview
+/// 两份内存。上限定在这里是为了不让"点开一个大文件"变成低内存机器上的
+/// OOM。超限让用户走系统应用打开，那条路是流式的。
+const MAX_PREVIEW_FILE: u64 = 32 * 1024 * 1024;
 
 /// 读一个文件的原始字节，给应用内预览（Office / PDF / 图片等）用。
 ///
@@ -981,9 +1000,15 @@ const MAX_PREVIEW_FILE: u64 = 128 * 1024 * 1024;
 /// JSON 也不做 base64，几十 MB 的文档不会因为编码把界面卡住。
 ///
 /// 只在用户点击界面上已展示的路径时调用，语义与 `read_image` 一致：
-/// 读的是用户自己机器上、自己点开的文件。
+/// 读的是用户自己机器上、自己点开的文件。范围见 [`preview`]。
 #[tauri::command]
-async fn read_file_bytes(path: String) -> HostResult<tauri::ipc::Response> {
+async fn read_file_bytes(
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> HostResult<tauri::ipc::Response> {
+    let path = preview::resolve(&state, &path)
+        .await
+        .map_err(HostError::Provider)?;
     let meta = tokio::fs::metadata(&path)
         .await
         .map_err(|e| HostError::Provider(format!("读不到文件：{e}")))?;
@@ -1145,14 +1170,61 @@ async fn list_models(
     models::list_models(p).await.map_err(HostError::Provider)
 }
 
+/// 没人设变量时的日志级别。
+const DEFAULT_LOG: &str = "riot=debug,warn";
+
+/// 日志级别从哪个环境变量读。
+///
+/// `[约束]` 对外那一个是 `RIOT_LOG`。代码注释和排查指引里写的都是它 ——
+/// 比如 `browser::mod` 里那句"打开 `RIOT_LOG=debug` 就能看到 CEF 的日志"，
+/// 而那句话出现的位置恰恰是"浏览器出问题时这边完全是黑的"。真正读
+/// `RUST_LOG` 的话，照着注释设完变量什么都不会多出来，排查的人会以为
+/// 日志本身就没打。`RUST_LOG` 留作回退：Rust 生态里的人手会先按它。
+fn log_filter(riot_log: Option<String>, rust_log: Option<String>) -> String {
+    // 空值当没设过。`RIOT_LOG= pnpm tauri dev` 这种写法很常见（想临时关掉
+    // 上一次的设置），落到过滤器里会变成"什么都不打"。
+    let set = |v: Option<String>| v.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
+    set(riot_log)
+        .or_else(|| set(rust_log))
+        .unwrap_or_else(|| DEFAULT_LOG.to_owned())
+}
+
+/// 把 panic 写进 tracing。
+///
+/// 默认钩子只往 stderr 打，而打包后的 `.app` 从 Dock 启动时没有任何人看得到
+/// stderr —— 命令里 panic 的现场就这么没了，用户看到的只是"点了没反应"。
+/// 退出清理那条路更糟:钩子跑在新线程里，`join().ok()` 会把 panic 咽掉，
+/// `state.shutdown()` 整段不执行（内核的四步关闭序列一步都没走），而日志里
+/// 一个字都不留。
+///
+/// 默认钩子仍然照调:日志被 `RIOT_LOG` 关小时，stderr 那份是最后的兜底。
+fn install_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!(
+            panic = %info,
+            backtrace = %std::backtrace::Backtrace::force_capture(),
+            "线程 panic"
+        );
+        default(info);
+    }));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let directives = log_filter(
+        std::env::var("RIOT_LOG").ok(),
+        std::env::var("RUST_LOG").ok(),
+    );
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "riot=debug,warn".into()),
+            tracing_subscriber::EnvFilter::try_new(&directives)
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG)),
         )
         .init();
+    // 装在 tracing 起来之后、任何业务代码之前 —— 这中间 panic 的话就只有
+    // stderr 那一份了。
+    install_panic_hook();
 
     // Dock / 访达启动的 .app 继承不到终端环境。必须在 restore 和任何子进程
     // 之前补上（set_var 不是线程安全的）：先吸入登录 shell 的 PATH /
@@ -1345,14 +1417,45 @@ pub fn run() {
                 // 「尽力而为」，真正的保障是 supervisor 里的 Job Object / 进程组。
                 let state = app.state::<AppState>().inner().clone();
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Builder::new_current_thread()
+                    // runtime 建不出来就没得清理了，但不能 panic:下面的
+                    // `join().ok()` 会把它咽掉，外面看到的是"退出时什么都
+                    // 没发生"，而内核可能留下一棵孤儿进程树。
+                    match tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
-                        .expect("退出清理的 runtime");
-                    rt.block_on(state.shutdown());
+                    {
+                        Ok(rt) => rt.block_on(state.shutdown()),
+                        Err(e) => tracing::error!(
+                            error = %e,
+                            "退出清理的 runtime 起不来，内核可能留下孤儿进程"
+                        ),
+                    }
                 })
                 .join()
                 .ok();
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 排查指引里写的是 `RIOT_LOG`（`browser::mod` 那句"打开
+    /// `RIOT_LOG=debug` 就能看到"），实现却只读 `RUST_LOG` —— 照着注释
+    /// 设完变量一行日志都不会多，而那正是浏览器出问题时唯一的线索来源。
+    #[test]
+    fn 日志级别以_riot_log_为准_rust_log_兜底() {
+        assert_eq!(
+            log_filter(Some("debug".into()), Some("trace".into())),
+            "debug",
+            "两个都设了要听 RIOT_LOG 的"
+        );
+        assert_eq!(log_filter(Some("riot=trace".into()), None), "riot=trace");
+        assert_eq!(log_filter(None, Some("info".into())), "info");
+        assert_eq!(log_filter(None, None), DEFAULT_LOG);
+        // 空值当没设:`RIOT_LOG= pnpm tauri dev` 这种写法不该把日志全关掉。
+        assert_eq!(log_filter(Some("  ".into()), None), DEFAULT_LOG);
+        assert_eq!(log_filter(Some(String::new()), Some("info".into())), "info");
+    }
 }

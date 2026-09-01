@@ -691,8 +691,15 @@ pub struct AppConfig {
     /// 最近打开过的项目目录，最近的在前。
     #[serde(default)]
     pub projects: Vec<String>,
-    /// 新会话的默认权限模式。None = 每次询问。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// 新会话的默认权限模式。缺字段走 [`default_permission_mode`]。
+    ///
+    /// `[约束]` `None` 不是"每次询问"，是"这份配置里没这一项" —— 落到
+    /// [`default_permission_mode`]。别在读到 `None` 时就地兜一个字面量，
+    /// 两处兜法不一样的话，同一份配置在不同代码路径下会给出不同的默认。
+    #[serde(
+        default = "default_permission_mode_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub default_mode: Option<riot_protocol::permission::PermissionMode>,
     /// 权限弹窗等多久算超时（秒）。超时按拒绝处理。
     ///
@@ -748,9 +755,9 @@ pub struct AppConfig {
     pub subagent_model: String,
     /// 命令的 OS 级隔离。
     ///
-    /// 默认开。这不只是安全设置 —— 决策链里"沙箱内自动放行"那一档
-    /// （`bash::decide`）要它开着才成立，关掉之后每个非只读命令又回到
-    /// "要么弹窗、要么全部放行"的二选一。
+    /// 默认档按平台分，见 [`SandboxMode::default`]。这不只是安全设置 ——
+    /// 决策链里"沙箱内自动放行"那一档（`bash::decide`）要它开着才成立，
+    /// 关掉之后每个非只读命令又回到"要么弹窗、要么全部放行"的二选一。
     ///
     /// 平台不支持时自动降级成不隔离，`sandboxed` 也跟着回 false ——
     /// 见 [`riot_runtime::SandboxPolicy::activate`]。
@@ -766,16 +773,37 @@ pub struct AppConfig {
 }
 
 /// 命令隔离的强度。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SandboxMode {
     /// 读全开、写限于工作区和构建缓存、联网照常。
-    #[default]
     WorkspaceWrite,
     /// 同上，另外掐掉网络。`npm install` 之类会失败，换取"数据出不去"。
     WorkspaceWriteNoNet,
     /// 不隔离。只剩策略层拦着。
     Off,
+}
+
+/// 默认档按平台分：macOS 隔离，Windows 不隔离。
+///
+/// 两边的隔离**不是同一种东西**，所以出厂档也不该是同一个：
+/// - macOS 用系统自带的 sandbox-exec，装好应用就能用，开着几乎不要成本。
+/// - Windows 那套要先跑一次提权安装（建一个低权限账户，再摘掉它自带的
+///   联网限制，见 `riot_runtime::sandbox_win`）。没装的时候档位开着也
+///   激活不了：命令照常裸跑，而设置页写着"隔离"——「以为隔离着、其实
+///   没有」比诚实地默认不隔离更糟，那正是 `SandboxReality` 那一整块
+///   存在的理由。装过的人在设置里把它打开，从那一刻起才是真的。
+///
+/// 其余平台跟 macOS 走：没有实现的平台会在激活时自动降级成不隔离
+/// （见 [`riot_runtime::SandboxPolicy::activate`]），档位留着不亏。
+impl Default for SandboxMode {
+    fn default() -> Self {
+        if cfg!(windows) {
+            Self::Off
+        } else {
+            Self::WorkspaceWrite
+        }
+    }
 }
 
 impl SandboxMode {
@@ -817,16 +845,40 @@ pub const fn default_ask_timeout_secs() -> u32 {
     60
 }
 
-/// 主动压缩的默认阈值：100k token。
+/// 主动压缩的默认阈值：300k token。
 ///
-/// 给**没填窗口**的模型兜底。128k 窗口减去输出预留（~16k）和总结本身要占的
-/// 空间，再留一点余量 —— 也就是把 [`compact_threshold_for_window`] 对着 128k
-/// 手算了一遍。填了窗口的模型不看这个数（见 [`ResolvedModel::compact_threshold`]）。
+/// 给**没填窗口**的模型兜底，也就是把 [`compact_threshold_for_window`] 对着
+/// 现在的主流窗口手算了一遍。填了窗口的模型不看这个数
+/// （见 [`ResolvedModel::compact_threshold`]）。
 ///
-/// 窗口更大的模型晚点压也无妨（压缩是省钱不是保命，保命有 413 兜底）；
-/// 窗口更小的模型需要用户填窗口，或在设置里调低这个默认值。
+/// 猜高和猜低的代价不对等，所以往高了猜：猜高只是晚压几轮，真顶穿了还有
+/// 413 反应式压缩兜底；猜低是**每个会话都被无谓地砍一次历史** —— 压缩会
+/// 吞掉旧的工具结果，那是不可逆的信息损失，而且每压一次要多付一次模型调用。
+/// 窗口小的模型该做的是在「设置 → 服务方 → 模型」里填窗口（填了就按窗口
+/// 算，这个数不参与），或者在设置里把它调低。
 pub const fn default_compact_threshold_tokens() -> u32 {
-    100_000
+    300_000
+}
+
+/// 新会话的默认权限模式：全部放行。
+///
+/// `[约束]` 是 `BypassPermissions` 而不是 `Unattended`。两者的差别是那层
+/// 分层免疫：放行模式仍然守着 SSH 密钥、shell 启动脚本、hooks 这些"写下去
+/// 就等于交出持久执行权"的目标（见 `PermissionMode` 各档的说明），无人值守
+/// 连它们一起交出去。默认值只能取前者 —— 后者是用户明确要挂机时自己选的。
+///
+/// 取放行而不是逐条询问，是因为逐条询问的实际结局不是"更安全"：一轮任务里
+/// 的绝大多数询问是 `cargo check`、`ls`、读一个文件，点到第二十次的人已经
+/// 在无脑点了，而无脑点的人在真正危险的那一次也会点。真正的边界交给它下面
+/// 两层：命令隔离（[`SandboxMode`]，macOS 默认开着）和对放行免疫的安全检查。
+pub const fn default_permission_mode() -> riot_protocol::permission::PermissionMode {
+    riot_protocol::permission::PermissionMode::BypassPermissions
+}
+
+/// [`AppConfig::default_mode`] 的 serde 默认。字段是 `Option` 只为了让
+/// "配置里没写"和"写了某一档"在类型上分得开，缺省仍然落到上面那一档。
+fn default_permission_mode_opt() -> Option<riot_protocol::permission::PermissionMode> {
+    Some(default_permission_mode())
 }
 
 /// 单次回复要留出的空间上限。
@@ -860,13 +912,18 @@ pub fn compact_threshold_for_window(window: u32, max_output: Option<u32>) -> u32
         .clamp(MIN_COMPACT_THRESHOLD, MAX_COMPACT_THRESHOLD)
 }
 
-/// 单轮默认最多 48 次往返。
+/// 单轮默认最多 120 次往返。
 ///
-/// 够一次中等复杂的任务（改代码 + 跑测试 + 修，或一串浏览器操作）在一句话
-/// 里跑完，又不至于让一个跑飞的循环烧太久才被兜住。多步的浏览器/渗透任务
-/// 常会吃满，用户可以在设置里调高。
+/// 够一次真正成规模的任务（跨几十个文件的改动 + 反复跑测试，或一整串浏览器
+/// 操作）在一句话里跑完。以前是 48，而 48 的问题不是"兜不住跑飞的循环"，是
+/// **它兜住的多半是正常任务**：到顶就停下等用户说"继续"，人不在场时整条
+/// 任务就停在那儿，在场时也只是白点一次 —— 两种情况下这个上限都没有拦住
+/// 任何坏事，只是把活干到一半掐了。
+///
+/// 真正跑飞的循环靠别的兜：上限仍在（1000 是硬顶），而且 120 步之内模型
+/// 烧掉的钱还在可接受范围。用户可以在设置里两头调。
 pub const fn default_max_turns() -> u32 {
-    48
+    120
 }
 
 impl Default for AppConfig {
@@ -887,7 +944,7 @@ impl Default for AppConfig {
             active_model: String::new(),
             sampling: Sampling::default(),
             projects: Vec::new(),
-            default_mode: None,
+            default_mode: default_permission_mode_opt(),
             ask_timeout_secs: default_ask_timeout_secs(),
             max_turns: default_max_turns(),
             web: WebConfig::default(),
@@ -1547,7 +1604,8 @@ fn migrate(old: LegacyConfig) -> AppConfig {
             ..Default::default()
         },
         projects: old.projects,
-        default_mode: old.default_mode,
+        // 老格式里没写过这一项的，跟新装的走同一档；写过的照搬。
+        default_mode: old.default_mode.or_else(default_permission_mode_opt),
         ask_timeout_secs: default_ask_timeout_secs(),
         max_turns: default_max_turns(),
         // 老格式里没有联网配置，用默认值（抓取开、搜索开、空地址走内置）。
@@ -1972,8 +2030,8 @@ mod tests {
     }
 
     #[test]
-    fn max_turns_默认_48_且越界会被夹回() {
-        assert_eq!(default_max_turns(), 48);
+    fn max_turns_默认_120_且越界会被夹回() {
+        assert_eq!(default_max_turns(), 120);
         // 手改 config.json 把它写成 0 或天文数字，normalize 要夹回区间。
         let zero = normalize(AppConfig {
             max_turns: 0,
@@ -1992,9 +2050,63 @@ mod tests {
 
     #[test]
     fn 老配置缺_max_turns_用默认() {
-        // 升级上来的配置没有这个字段，要按默认 48 读，而不是 0。
+        // 升级上来的配置没有这个字段，要按默认 120 读，而不是 0。
         let json = r#"{"providers":[],"activeProvider":"","activeModel":""}"#;
-        assert_eq!(parse(json).max_turns, 48);
+        assert_eq!(parse(json).max_turns, 120);
+    }
+
+    /// 出厂阈值要留在可用区间里 —— [`normalize`] 会夹，夹完还等于自己，
+    /// 才说明这个数是真的生效了而不是被悄悄改掉。
+    #[test]
+    fn 压缩阈值默认_300k_且不被_normalize_改掉() {
+        assert_eq!(default_compact_threshold_tokens(), 300_000);
+        let json = r#"{"providers":[],"activeProvider":"","activeModel":""}"#;
+        assert_eq!(parse(json).compact_threshold_tokens, 300_000);
+    }
+
+    /// 缺字段和出厂配置必须落到同一档，否则"新装"和"升级上来"两条路
+    /// 会给出不同的默认权限 —— 而这个差别在界面上完全看不出来。
+    #[test]
+    fn 新会话默认权限是全部放行() {
+        use riot_protocol::permission::PermissionMode;
+        assert_eq!(
+            default_permission_mode(),
+            PermissionMode::BypassPermissions,
+            "默认只能到放行这一档，不能是连安全检查都关掉的无人值守"
+        );
+        assert_eq!(
+            AppConfig::default().default_mode,
+            Some(PermissionMode::BypassPermissions)
+        );
+        let json = r#"{"providers":[],"activeProvider":"","activeModel":""}"#;
+        assert_eq!(
+            parse(json).default_mode,
+            Some(PermissionMode::BypassPermissions),
+            "升级上来的配置没写过这一项，要跟新装的走同一档"
+        );
+        // 写过的照读，别被默认盖掉。
+        let picked = r#"{"providers":[],"activeProvider":"","activeModel":"",
+            "defaultMode":"plan"}"#;
+        assert_eq!(parse(picked).default_mode, Some(PermissionMode::Plan));
+    }
+
+    /// 两个平台的隔离不是同一种东西（Windows 那套要先提权装一次），
+    /// 出厂档因此也不同。见 [`SandboxMode::default`]。
+    #[test]
+    fn 沙箱出厂档按平台分() {
+        let want = if cfg!(windows) {
+            SandboxMode::Off
+        } else {
+            SandboxMode::WorkspaceWrite
+        };
+        assert_eq!(SandboxMode::default(), want);
+        assert_eq!(AppConfig::default().sandbox, want);
+        let json = r#"{"providers":[],"activeProvider":"","activeModel":""}"#;
+        assert_eq!(parse(json).sandbox, want, "缺字段要落到平台出厂档");
+        // 用户选过的档任何平台都照读 —— 平台默认只在缺字段时说话。
+        let picked = r#"{"providers":[],"activeProvider":"","activeModel":"",
+            "sandbox":"workspaceWriteNoNet"}"#;
+        assert_eq!(parse(picked).sandbox, SandboxMode::WorkspaceWriteNoNet);
     }
 
     #[test]

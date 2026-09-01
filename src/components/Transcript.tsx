@@ -28,6 +28,7 @@ import {
 import type { PermissionAsk, PermissionResponse } from "../bridge";
 import { useImeGuard } from "../hooks/useImeGuard";
 import type { Item, TextItem } from "../hooks/useSession";
+import { useTimedFlag } from "../hooks/useTimedFlag";
 import {
   caretToEnd,
   handleChipKey,
@@ -99,6 +100,9 @@ function wheelNeedsHijack(start: EventTarget | null, box: HTMLElement, deltaY: n
   return false;
 }
 
+/** 敲字停下多久才真去扫 DOM。见 FindBar 里那个防抖 effect。 */
+const FIND_QUIET_MS = 80;
+
 /**
  * 会话内查找（⌘F）。
  *
@@ -106,6 +110,10 @@ function wheelNeedsHijack(start: EventTarget | null, box: HTMLElement, deltaY: n
  * React 管理的 DOM 里塞 <mark> —— 塞了的话下一次渲染要么被抹掉、
  * 要么把 React 的 diff 弄糊涂。旧 WebView 没有这个 API 时退化成
  * 只滚动定位、不上色。
+ *
+ * 命中是一批 Range，只在敲字时扫一遍。它们**会**失效：流式输出还在往
+ * 对话流里追加，React 换掉哪个文本节点，落在上面的 Range 就成了野的 ——
+ * 由 `step` 在用之前滤掉（重扫一遍太贵，见那里的说明）。
  */
 function FindBar({
   box,
@@ -124,76 +132,106 @@ function FindBar({
 
   const highlights = (CSS as unknown as { highlights?: Map<string, unknown> }).highlights;
 
-  const clear = () => {
+  // 这几个都要进下面那个 effect 的依赖，所以必须是稳定引用 —— 每次渲染
+  // 新建一个函数的话，effect 每渲染一次就重跑一次，防抖等于没做。
+  const clear = useCallback(() => {
     highlights?.delete("riot-find");
     highlights?.delete("riot-find-cur");
-  };
+  }, [highlights]);
 
-  /** 全量重扫。对话流不重排 DOM 的话 Range 一直有效，扫一次够用。 */
-  const scan = (q: string): Range[] => {
-    const root = box.current;
-    if (!root || !q) return [];
-    const needle = q.toLowerCase();
-    const ranges: Range[] = [];
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-      const text = node.textContent ?? "";
-      const hay = text.toLowerCase();
-      let at = hay.indexOf(needle);
-      while (at !== -1) {
-        const r = document.createRange();
-        r.setStart(node, at);
-        r.setEnd(node, at + needle.length);
-        ranges.push(r);
-        at = hay.indexOf(needle, at + needle.length);
+  /** 全量重扫。 */
+  const scan = useCallback(
+    (q: string): Range[] => {
+      const root = box.current;
+      if (!root || !q) return [];
+      const needle = q.toLowerCase();
+      const ranges: Range[] = [];
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const text = node.textContent ?? "";
+        const hay = text.toLowerCase();
+        let at = hay.indexOf(needle);
+        while (at !== -1) {
+          const r = document.createRange();
+          r.setStart(node, at);
+          r.setEnd(node, at + needle.length);
+          ranges.push(r);
+          at = hay.indexOf(needle, at + needle.length);
+        }
       }
-    }
-    return ranges;
-  };
+      return ranges;
+    },
+    [box],
+  );
 
-  const paint = (ranges: Range[], current: number) => {
-    if (!highlights) return;
-    const H = (window as unknown as { Highlight?: new (...r: Range[]) => unknown }).Highlight;
-    if (!H) return;
-    clear();
-    if (ranges.length) {
-      highlights.set("riot-find", new H(...ranges));
-      const c = ranges[current];
-      if (c) highlights.set("riot-find-cur", new H(c));
-    }
-  };
+  const paint = useCallback(
+    (ranges: Range[], current: number) => {
+      if (!highlights) return;
+      const H = (window as unknown as { Highlight?: new (...r: Range[]) => unknown }).Highlight;
+      if (!H) return;
+      clear();
+      if (ranges.length) {
+        highlights.set("riot-find", new H(...ranges));
+        const c = ranges[current];
+        if (c) highlights.set("riot-find-cur", new H(c));
+      }
+    },
+    [clear, highlights],
+  );
 
-  const jump = (ranges: Range[], i: number) => {
+  const jump = useCallback((ranges: Range[], i: number) => {
     const r = ranges[i];
     if (!r) return;
     const el = r.startContainer.parentElement;
     el?.scrollIntoView({ block: "center" });
-  };
+  }, []);
 
-  const run = (q: string) => {
-    setQuery(q);
-    const ranges = scan(q);
-    hitsRef.current = ranges;
-    setTotal(ranges.length);
-    setCur(0);
-    paint(ranges, 0);
-    jump(ranges, 0);
-  };
+  // 防抖之后再扫。scan 要 walk 一遍整个 `.transcript` 的文本节点（长会话
+  // 是几万个），而输入是逐字来的 —— 同步扫等于每敲一个字全量遍历一次
+  // DOM，而这条主线程同时还在出流式输出。范式同 Composer 的 `@` 补全。
+  useEffect(() => {
+    if (!query) {
+      hitsRef.current = [];
+      setTotal(0);
+      setCur(0);
+      clear();
+      return;
+    }
+    const t = window.setTimeout(() => {
+      const ranges = scan(query);
+      hitsRef.current = ranges;
+      setTotal(ranges.length);
+      setCur(0);
+      paint(ranges, 0);
+      jump(ranges, 0);
+    }, FIND_QUIET_MS);
+    return () => window.clearTimeout(t);
+  }, [query, scan, paint, jump, clear]);
 
   const step = (dir: 1 | -1) => {
-    const ranges = hitsRef.current;
-    if (!ranges.length) return;
-    const next = (cur + dir + ranges.length) % ranges.length;
+    // 先把死掉的命中滤掉。查找条开着的时候流式输出仍在往 DOM 里追加，
+    // 正在流的那段 Markdown 每帧都要重新 parse —— 落在被换掉的节点上的
+    // Range 已经脱离文档，高亮画不出来、scrollIntoView 也一声不响地
+    // 什么都不做，而计数还照旧显示，看起来就是"点下一个没反应"。
+    const alive = hitsRef.current.filter((r) => r.startContainer.isConnected);
+    if (alive.length !== hitsRef.current.length) {
+      hitsRef.current = alive;
+      setTotal(alive.length);
+    }
+    if (!alive.length) {
+      clear();
+      return;
+    }
+    // 滤完之后 cur 可能已经越界（后面的命中先没的）。
+    const from = Math.min(cur, alive.length - 1);
+    const next = (from + dir + alive.length) % alive.length;
     setCur(next);
-    paint(ranges, next);
-    jump(ranges, next);
+    paint(alive, next);
+    jump(alive, next);
   };
 
   // 关闭（含卸载）时清掉高亮，别在页面上留一堆黄块。
-  // clear 不能进依赖：它是每次渲染新建的函数，进去之后每渲染一次就跑一遍
-  // cleanup —— 也就是每敲一个字都把刚画上的高亮擦掉。
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => clear, []);
+  useEffect(() => clear, [clear]);
 
   return (
     <div className="find-wrap">
@@ -203,7 +241,7 @@ function FindBar({
           autoFocus
           value={query}
           placeholder="在会话中查找"
-          onChange={(e) => run(e.target.value)}
+          onChange={(e) => setQuery(e.target.value)}
           onCompositionStart={ime.onCompositionStart}
           onCompositionEnd={ime.onCompositionEnd}
           onKeyDown={(e) => {
@@ -923,7 +961,7 @@ function MsgActions({
   /** 编辑/删除此刻可用（空闲）。 */
   mutateEnabled?: boolean;
 }) {
-  const [copied, setCopied] = useState(false);
+  const [copied, flashCopied] = useTimedFlag(false, 1500);
   return (
     <div className="msg-actions">
       <button
@@ -933,8 +971,7 @@ function MsgActions({
         aria-label={copied ? "已复制" : "复制原文"}
         onClick={() => {
           void navigator.clipboard.writeText(text);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1500);
+          flashCopied(true);
         }}
       >
         {copied ? <CheckIcon /> : <CopyIcon />}

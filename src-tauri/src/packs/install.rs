@@ -29,6 +29,10 @@ pub enum InstallError {
     Layout(String),
     #[error("能力包装好了但跑不起来：{0}")]
     SelfCheck(String),
+    /// 解压 / 自检那个 blocking 任务本身没能跑完（panic 或 runtime 正在关）。
+    /// 和"包坏了"分开，不然用户会去重下一个没问题的包。
+    #[error("{0}")]
+    Task(String),
 }
 
 impl serde::Serialize for InstallError {
@@ -93,19 +97,39 @@ fn extract_into(archive: &Path, staging: &Path) -> Result<(), InstallError> {
         .map_err(|e| InstallError::Io("读能力包条目".into(), e))?
     {
         let mut entry = entry.map_err(|e| InstallError::Io("读能力包条目".into(), e))?;
-        let is_apple_double = entry
-            .path()
-            .map(|p| {
-                p.file_name()
-                    .is_some_and(|n| n.to_string_lossy().starts_with("._"))
-            })
-            .unwrap_or(false);
+        let path = entry.path().map(|p| p.into_owned()).ok();
+        let is_apple_double = path.as_ref().is_some_and(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("._"))
+        });
         if is_apple_double {
             continue;
         }
-        entry
+        let mode = entry.header().mode().unwrap_or(0);
+        let is_file = entry.header().entry_type().is_file();
+        let unpacked = entry
             .unpack_in(staging)
             .map_err(|e| InstallError::Io("解压能力包".into(), e))?;
+
+        #[cfg(unix)]
+        if unpacked && is_file && mode & 0o6000 != 0 {
+            // setuid / setgid 位一律掩掉。归档里的这两位会被原样保留（可执行
+            // 位必须保留，见上面），于是"下载一个包"就变成了"在用户机器上放
+            // 一个 setuid 程序"—— 归档是远端来的，包体内容变了签名不会变。
+            // 掉的只是这两位，rwx 照旧。
+            if let Some(p) = path.as_ref() {
+                use std::os::unix::fs::PermissionsExt as _;
+                let target = staging.join(p);
+                let safe = std::fs::Permissions::from_mode(mode & 0o777);
+                if let Err(e) = std::fs::set_permissions(&target, safe) {
+                    return Err(InstallError::Io("收掉 setuid 位".into(), e));
+                }
+                tracing::warn!(path = %target.display(), mode = format!("{mode:o}"),
+                    "能力包里带 setuid/setgid 位，已掩掉");
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = (unpacked, is_file, mode);
     }
     Ok(())
 }
@@ -423,6 +447,47 @@ mod tests {
         let dest = tmp.path().join("doc-runtime");
         swap_in(&staging, &dest).expect("切换");
         assert!(dest.join("pack.json").exists(), "外层目录应该照样被剥掉");
+    }
+
+    /// 归档里的 setuid 位不能落到用户盘上。
+    ///
+    /// 可执行位必须保留（不然 bin 里的 shim 全跑不了），而 tar 的
+    /// `set_preserve_permissions` 是一刀切的 —— setuid / setgid 会跟着一起
+    /// 进来。包体是从远端下的，"装一个能力包"不该顺带在用户机器上放一个
+    /// setuid 程序。
+    #[cfg(unix)]
+    #[test]
+    fn setuid_位不会跟着解压落地() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("临时目录");
+        let archive = tmp.path().join("a.tar.zst");
+        {
+            let f = std::fs::File::create(&archive).expect("建压缩文件");
+            let enc = zstd::stream::write::Encoder::new(f, 1).expect("建编码器");
+            let mut b = tar::Builder::new(enc);
+            let mut h = tar::Header::new_gnu();
+            h.set_size(3);
+            h.set_mode(0o4755);
+            h.set_cksum();
+            b.append_data(&mut h, "pack/bin/evil", &b"#!\n"[..])
+                .expect("写 setuid 条目");
+            b.into_inner()
+                .expect("收尾 tar")
+                .finish()
+                .expect("收尾 zstd");
+        }
+
+        let staging = tmp.path().join("staging");
+        std::fs::create_dir_all(&staging).expect("建目录");
+        extract_into(&archive, &staging).expect("解压");
+
+        let mode = std::fs::metadata(staging.join("pack/bin/evil"))
+            .expect("读元信息")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o6000, 0, "setuid/setgid 必须被掩掉，mode={mode:o}");
+        assert!(mode & 0o111 != 0, "可执行位不能跟着一起掉，mode={mode:o}");
     }
 
     #[test]

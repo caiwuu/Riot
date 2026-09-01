@@ -115,6 +115,10 @@ impl Tool for Write {
             Err(e) => return ToolOutcome::failed(e.for_model()),
         };
 
+        if let Some(msg) = path::detour_risk(&parsed.path, &resolved, &ctx.cwd, false) {
+            return ToolOutcome::failed(msg);
+        }
+
         let existing = ctx.fs.metadata(&resolved).await.ok();
         let created = existing.is_none();
 

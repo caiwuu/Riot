@@ -1446,6 +1446,15 @@ html[data-resizing] .slide-panel {
      面板贴在底部当一条状态带。 */
   flex-direction: column;
   min-height: 0;
+  /* 这一列必须自带不透明底 —— 和 .main 同一个理由（见 [data-vibrancy] 那
+     一组）：磨砂平台上 html / body 的背景是让开的，谁不铺底谁就漏出系统
+     材质，在深色 UI 里是一片灰白。
+     里面每个面板（浏览器 / 改动 / 预览 / 空状态）各自铺了一层 --bg，平时
+     看不出缺这一条；但收起动画那 300ms 它们一个都不在：wb.open 一翻 false
+     activeKind 立刻变 null 把面板卸掉（浏览器要停帧流），空状态又被故意
+     压着不显（见 App 的 emptyShown）。于是标签栏以下整块透出材质，跟着
+     抽屉一路滑出去。 */
+  background: var(--bg);
 }
 
 /* ── 工作台标签栏（抽屉顶部）────────────────── */

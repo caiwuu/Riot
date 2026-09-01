@@ -113,6 +113,32 @@ struct AskSpec {
     reason: DecisionReason,
 }
 
+/// 判危竞速的结果。
+///
+/// 有 [`RaceOutcome::Answered`] 这一支，是因为竞速会**消费**应答通道:
+/// oneshot 的值取出来就没了,而 tokio 的 `Receiver` 在取空之后再 poll 是
+/// panic。所以"用户先答了"不能表达成"继续等" —— 那个答案必须由这里带
+/// 回调用方,由它直接兑现。
+pub(crate) enum RaceOutcome {
+    /// 分类器判它安全，自动放行。
+    Classified(DecisionReason),
+    /// 用户在竞速期间答了，答案在这里。
+    Answered(PermissionResponse),
+    /// 应答通道断了（发送端已经走了），没有人会再回答。
+    Disconnected,
+    /// 竞速没有结论，照常等用户。
+    Pending,
+}
+
+impl RaceOutcome {
+    fn from_recv(r: Result<PermissionResponse, oneshot::error::RecvError>) -> Self {
+        match r {
+            Ok(resp) => Self::Answered(resp),
+            Err(_) => Self::Disconnected,
+        }
+    }
+}
+
 /// 宿主侧的权限闸。
 ///
 /// 决策链算出 allow/ask/deny，这里负责 ask 那一支 —— 弹窗、等待、超时。
@@ -427,76 +453,106 @@ impl HostGate {
         //
         // Auto 模式下弹窗和判危并行跑，先有结果的算（见 classify_race）。
         tokio::pin!(rx);
-        if let Some(verdict) = self
+        let answer = match self
             .classify_race(tool, input, &reason, &mut rx, cancel)
             .await
         {
-            self.pending.forget(&request_id).await;
-            // 告诉界面这个弹窗作废了，理由是分类器 —— 不发的话它挂在那里，
-            // 用户点"允许"毫无反应（操作早就放行并跑完了）。
-            self.resolved(&request_id, verdict);
-            return GateOutcome::Allow {
-                updated_input: None,
-            };
-        }
-
-        let answer = tokio::select! {
-            r = tokio::time::timeout(timeout, &mut rx) => r,
-            _ = cancel.cancelled() => {
+            RaceOutcome::Classified(verdict) => {
                 self.pending.forget(&request_id).await;
-                self.resolved(&request_id, DecisionReason::UserChoice { remembered: false });
-                return GateOutcome::Deny { message: "用户已中断，本次操作未执行".into() };
+                // 告诉界面这个弹窗作废了，理由是分类器 —— 不发的话它挂在
+                // 那里，用户点"允许"毫无反应（操作早就放行并跑完了）。
+                self.resolved(&request_id, verdict);
+                return GateOutcome::Allow {
+                    updated_input: None,
+                };
+            }
+
+            // `[约束]` 用户的答案已经从通道里取出来了，这里必须直接消费它。
+            //
+            // 回归：这一支曾经和 Pending 一样返回"继续等"，于是下面又对同一个
+            // receiver `timeout(&mut rx)` poll 了一次 —— 而 oneshot 取空之后
+            // 再 poll 是 `panic!("called after complete")`，不是返回 Err。
+            // 触发条件很日常:Auto 模式 + Bash 这类实现了 classifier_input 的
+            // 工具 + 用户在判危模型返回之前点了"允许"。那一 panic 会让整轮
+            // 连 Done 都发不出去，会话永久卡在"忙"。
+            RaceOutcome::Answered(resp) => resp,
+
+            RaceOutcome::Disconnected => {
+                return GateOutcome::Deny {
+                    message: "授权请求没有得到回应，本次操作未执行".into(),
+                };
+            }
+
+            RaceOutcome::Pending => {
+                let waited = tokio::select! {
+                    r = tokio::time::timeout(timeout, &mut rx) => r,
+                    _ = cancel.cancelled() => {
+                        self.pending.forget(&request_id).await;
+                        self.resolved(&request_id, DecisionReason::UserChoice { remembered: false });
+                        return GateOutcome::Deny { message: "用户已中断，本次操作未执行".into() };
+                    }
+                };
+
+                match waited {
+                    Ok(Ok(resp)) => resp,
+                    Ok(Err(_)) => {
+                        return GateOutcome::Deny {
+                            message: "授权请求没有得到回应，本次操作未执行".into(),
+                        };
+                    }
+                    Err(_) => {
+                        self.pending.forget(&request_id).await;
+                        // 告诉界面这个弹窗已经作废。不发的话它会一直挂在那里，
+                        // 用户点"允许"也不会有任何反应 —— 操作早就被拒绝了。
+                        self.resolved(&request_id, DecisionReason::Timeout);
+                        // `[约束]` 超时按拒绝处理。见 crate::session 里
+                        // ASK_TIMEOUT_RANGE 的注释。
+                        //
+                        // 提问的超时不能劝模型"重新提出"：没人在场时重新提问的
+                        // 结局还是超时，一来一回就成了每分钟一轮的提问循环。和
+                        // 工具自己的空选择失败同一个口径 —— 讲清取舍，停下来等人。
+                        let message = if tool.name() == "AskUserQuestion" {
+                            format!(
+                                "等了 {} 秒没有人回答。不要立刻重新提问，也不要自己替用户挑一个 —— \
+                                 用普通回复把这个决定和各选项的取舍讲清楚，然后停下来等他说。",
+                                timeout.as_secs()
+                            )
+                        } else {
+                            format!(
+                                "等待授权超过 {} 秒，本次操作未执行。如果仍然需要，请重新提出。",
+                                timeout.as_secs()
+                            )
+                        };
+                        return GateOutcome::Deny { message };
+                    }
+                }
             }
         };
 
         match answer {
-            Ok(Ok(PermissionResponse::Allow { remember, choice })) => {
+            PermissionResponse::Allow { remember, choice } => {
                 self.remember(remember).await;
                 GateOutcome::Allow {
                     updated_input: inject_choice(input, choice),
                 }
             }
-            Ok(Ok(PermissionResponse::Deny { message })) => GateOutcome::Deny {
+            PermissionResponse::Deny { message } => GateOutcome::Deny {
                 message: match message.as_deref().map(str::trim) {
                     Some(m) if !m.is_empty() => format!("用户拒绝了这次操作：{m}"),
                     _ => "用户拒绝了这次操作。换一种方式，或者问清楚再动手。".to_owned(),
                 },
             },
-            Ok(Err(_)) => GateOutcome::Deny {
-                message: "授权请求没有得到回应，本次操作未执行".into(),
-            },
-            Err(_) => {
-                self.pending.forget(&request_id).await;
-                // 告诉界面这个弹窗已经作废。不发的话它会一直挂在那里，
-                // 用户点"允许"也不会有任何反应 —— 操作早就被拒绝了。
-                self.resolved(&request_id, DecisionReason::Timeout);
-                // `[约束]` 超时按拒绝处理。见 crate::session 里
-                // ASK_TIMEOUT_RANGE 的注释。
-                //
-                // 提问的超时不能劝模型"重新提出"：没人在场时重新提问的结局
-                // 还是超时，一来一回就成了每分钟一轮的提问循环。和工具自己
-                // 的空选择失败同一个口径 —— 讲清取舍，停下来等人。
-                let message = if tool.name() == "AskUserQuestion" {
-                    format!(
-                        "等了 {} 秒没有人回答。不要立刻重新提问，也不要自己替用户挑一个 —— \
-                         用普通回复把这个决定和各选项的取舍讲清楚，然后停下来等他说。",
-                        timeout.as_secs()
-                    )
-                } else {
-                    format!(
-                        "等待授权超过 {} 秒，本次操作未执行。如果仍然需要，请重新提出。",
-                        timeout.as_secs()
-                    )
-                };
-                GateOutcome::Deny { message }
-            }
         }
     }
 
     /// Auto 模式：判危与弹窗竞速。
     ///
-    /// 返回 `Some(reason)` = 分类器判它安全，自动放行；`None` = 继续等用户
-    /// （不是 Auto 模式、这类询问不许它判、判不准、或者用户先答了）。
+    /// `[约束]` 竞速期间从 `rx` 里取出来的答案必须由 [`RaceOutcome::Answered`]
+    /// 交回调用方。丢掉它（哪怕只是 `_ = &mut *rx`）会留下两个坑:调用方
+    /// 会再 poll 一次已经取空的 oneshot —— 那是 panic 不是 Err；就算不
+    /// panic，用户明明点了"允许"，最后收到的也是"没有得到回应"。
+    ///
+    /// 三道闸都不满足时返回 [`RaceOutcome::Pending`]，调用方照常等用户。
     ///
     /// # 三道闸
     ///
@@ -521,31 +577,33 @@ impl HostGate {
         reason: &DecisionReason,
         rx: &mut std::pin::Pin<&mut oneshot::Receiver<PermissionResponse>>,
         cancel: &CancellationToken,
-    ) -> Option<DecisionReason> {
+    ) -> RaceOutcome {
         if *self.mode_live.lock().await != PermissionMode::Auto {
-            return None;
+            return RaceOutcome::Pending;
         }
         // 这一行是安全边界。改成 `true` 会让 Auto 模式能自动放行写 SSH
         // 密钥和 shell 启动脚本 —— 而全套测试里只有守着它的那几个会红。
         if !reason.yields_to_bypass() {
-            return None;
+            return RaceOutcome::Pending;
         }
-        let what = tool.classifier_input(input)?;
+        let Some(what) = tool.classifier_input(input) else {
+            return RaceOutcome::Pending;
+        };
 
         let verdict = tokio::select! {
             v = self.classifier.judge(tool.name(), &what) => v,
-            // 用户先答了：判危白跑，让下面的正常流程去收他的答案。
-            _ = &mut *rx => return None,
-            _ = cancel.cancelled() => return None,
+            // 用户先答了：判危白跑，把他的答案原样交回去。
+            r = &mut *rx => return RaceOutcome::from_recv(r),
+            _ = cancel.cancelled() => return RaceOutcome::Pending,
         };
 
         let SafetyVerdict::Safe { confidence } = verdict else {
-            return None;
+            return RaceOutcome::Pending;
         };
 
         // 宽限期。用户在这段时间里答了就算他的。
         tokio::select! {
-            _ = &mut *rx => return None,
+            r = &mut *rx => return RaceOutcome::from_recv(r),
             _ = tokio::time::sleep(CLASSIFY_GRACE) => {}
         }
 
@@ -554,7 +612,7 @@ impl HostGate {
             confidence,
             "判危通过，自动放行（Auto 模式）"
         );
-        Some(DecisionReason::Classifier { confidence })
+        RaceOutcome::Classified(DecisionReason::Classifier { confidence })
     }
 
     /// 通知界面某个权限请求已经作废。发送失败无所谓 —— 那说明界面已经断开。

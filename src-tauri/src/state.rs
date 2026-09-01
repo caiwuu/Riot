@@ -487,11 +487,13 @@ impl AppState {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
+        // 配置里没写这一项时走同一个出厂档 —— 不在这儿兜一个字面量，
+        // 那会和 config.rs 的默认分叉（见 `AppConfig::default_mode`）。
         let mode = self
             .config()
             .await
             .default_mode
-            .unwrap_or(PermissionMode::Default);
+            .unwrap_or_else(crate::config::default_permission_mode);
         if let Some(b) = make_browser(&self.0.config_path, id.as_str()) {
             self.0
                 .browsers
@@ -2281,31 +2283,28 @@ mod tests {
         let state = state().await;
         let ws = temp_ws("mode");
         let s = state.create_session(&ws).await.expect("建会话");
-        assert_eq!(s.mode, PermissionMode::Default);
+        assert_eq!(s.mode, crate::config::default_permission_mode());
 
         state
-            .set_mode(&s.id, PermissionMode::BypassPermissions)
+            .set_mode(&s.id, PermissionMode::Plan)
             .await
             .expect("切模式");
 
         let listed = state.list_sessions().await;
         let it = listed.iter().find(|i| i.id == s.id).expect("在列表里");
-        assert_eq!(
-            it.mode,
-            PermissionMode::BypassPermissions,
-            "列表必须报告宿主的真实模式"
-        );
+        assert_eq!(it.mode, PermissionMode::Plan, "列表必须报告宿主的真实模式");
     }
 
     #[tokio::test]
     async fn 各会话的权限模式互不影响() {
-        // 模式是会话级的。一个会话开了放行，不该把别的会话也带下水。
+        // 模式是会话级的。一个会话切了档，不该把别的会话也带下水。
+        // 切的那一档要和出厂档不同，否则这条断言恒真、什么都没测到。
         let state = state().await;
         let a = state.create_session(&temp_ws("m-a")).await.expect("a");
         let b = state.create_session(&temp_ws("m-b")).await.expect("b");
 
         state
-            .set_mode(&a.id, PermissionMode::BypassPermissions)
+            .set_mode(&a.id, PermissionMode::Default)
             .await
             .expect("切 a");
 
@@ -2317,8 +2316,8 @@ mod tests {
                 .map(|i| i.mode)
                 .expect("在列表里")
         };
-        assert_eq!(mode_of(&a.id), PermissionMode::BypassPermissions);
-        assert_eq!(mode_of(&b.id), PermissionMode::Default);
+        assert_eq!(mode_of(&a.id), PermissionMode::Default);
+        assert_eq!(mode_of(&b.id), crate::config::default_permission_mode());
     }
 
     #[tokio::test]

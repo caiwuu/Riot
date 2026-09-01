@@ -1329,9 +1329,28 @@ impl Session {
         // 水合在 running 置位之后：并发的第二轮已经被挡在排队那条路上，
         // 这里的加载不会和另一轮的写历史交错。
         self.hydrate().await;
-        let result = self
-            .run_inner(input, model, caps, sink.clone(), cancel, limits)
-            .await;
+
+        // `[约束]` 下面的清理必须无条件发生，`run_inner` panic 也不例外。
+        //
+        // 整轮跑在 `submit` 的 `tokio::spawn` 里，而 panic 是 unwind ——
+        // 它只杀掉这个 task。清理被跳过的后果不是"这一轮失败"，而是
+        // **会话永久卡死**:`running` 永远是 `Some`，`Done` 永远不发，
+        // 此后发消息、重新生成、`/compact`、上下文编辑全被"正在跑一轮"
+        // 拒掉，界面一直转圈；`interrupt()` 还会返回 true（令牌还在），
+        // 让前端以为中断成功了。
+        //
+        // 用 catch_unwind 而不是 Drop guard:清理要 await 两把锁，
+        // 而 Drop 里没法 await。
+        let inner = std::panic::AssertUnwindSafe(
+            self.run_inner(input, model, caps, sink.clone(), cancel, limits),
+        );
+        let result = match futures::FutureExt::catch_unwind(inner).await {
+            Ok(r) => r,
+            Err(_) => {
+                tracing::error!("轮次 panic，已收束成一次失败");
+                Err("内部错误，这一轮没有完成。可以重试，或者换一种说法。".to_owned())
+            }
+        };
 
         // 残留插话：这一轮被中断/出错，没走到内核的 drain 点。宿主侧
         // 静默清掉 —— 前端的排队面板留着这些条目，由它决定接力重发
@@ -2989,8 +3008,8 @@ mod tests {
         }
     }
 
-    /// 跑一次竞速。`_tx` 要留着 —— 提前 drop 的话 rx 立刻出错返回，
-    /// 会被当成"用户已经答了"，测的就不是判危了。
+    /// 跑一次竞速，只关心"分类器放没放行"。`_tx` 要留着 —— 提前 drop 的话
+    /// rx 立刻出错返回，会被当成通道已断，测的就不是判危了。
     async fn race(
         gate: &HostGate,
         tool: &dyn Tool,
@@ -2999,8 +3018,62 @@ mod tests {
     ) -> Option<DecisionReason> {
         let (_tx, rx) = oneshot::channel();
         tokio::pin!(rx);
-        gate.classify_race(tool, input, reason, &mut rx, &CancellationToken::new())
+        match gate
+            .classify_race(tool, input, reason, &mut rx, &CancellationToken::new())
             .await
+        {
+            crate::gate::RaceOutcome::Classified(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// 回归：Auto 模式下用户抢答曾经让整轮 panic。
+    ///
+    /// 竞速的 `tokio::select!` 用 `_ = &mut *rx` **消费**掉了 oneshot 的值，
+    /// 然后返回"继续等"，于是 `ask` 又对同一个 receiver poll 了一次 ——
+    /// 而 tokio 的 oneshot 取空之后再 poll 是 `panic!("called after
+    /// complete")`，不是返回 Err。触发条件很日常：Auto 模式 + 实现了
+    /// `classifier_input` 的工具（Bash / WebFetch / 浏览器 evaluate 都有）
+    /// + 用户在判危模型返回之前（约一秒的窗口）点了"允许"。
+    ///
+    /// 那一 panic 跑在轮次的 spawn 里，只杀掉这个 task：`running` 永远留着，
+    /// `Done` 永远不发，会话此后永久卡在"忙"。
+    #[tokio::test]
+    async fn 用户抢在判危之前回答不会丢掉答案() {
+        let s = Session::new(SessionId::from_raw("s1"), std::env::temp_dir(), None);
+        let gate = gate_auto(&s).await;
+        let bash = tool_named("Bash");
+        let input = serde_json::json!({ "command": "ls" });
+
+        let (tx, rx) = oneshot::channel();
+        tokio::pin!(rx);
+        // 判危还没跑完，用户先点了"允许"
+        tx.send(PermissionResponse::Allow {
+            remember: Vec::new(),
+            choice: Vec::new(),
+        })
+        .expect("接收端还在");
+
+        let out = gate
+            .classify_race(
+                bash.as_ref(),
+                &input,
+                &DecisionReason::Unverifiable {
+                    what: "Bash".into(),
+                },
+                &mut rx,
+                &CancellationToken::new(),
+            )
+            .await;
+
+        assert!(
+            matches!(
+                out,
+                crate::gate::RaceOutcome::Answered(PermissionResponse::Allow { .. })
+            ),
+            "用户的答案必须原样交回调用方 —— 丢掉它，轻则用户点了允许却收到\
+             『没有得到回应』，重则调用方再 poll 一次已经取空的 oneshot 而 panic"
+        );
     }
 
     /// **Auto 模式的安全边界。**

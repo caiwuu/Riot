@@ -19,6 +19,7 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 
 import { openPath, readFileBytes, revealInFinder } from "../bridge";
+import { useTimedFlag } from "../hooks/useTimedFlag";
 import { basename, looksAbsPath, parentOf, tildify } from "../pathDisplay";
 // CodeView 组件本身很小可以直接进主 bundle；大头 highlight.js
 // 在它内部按需加载。
@@ -193,13 +194,10 @@ export function FilePreviewPanel({
   /** 激活的工作台标签是不是预览。不是的话整个面板 display:none 保活。 */
   visible: boolean;
 }) {
-  const [openErr, setOpenErr] = useState(false);
+  const [openErr, flashOpenErr] = useTimedFlag(false, 2000);
 
   const sysOpen = () => {
-    openPath(active).catch(() => {
-      setOpenErr(true);
-      setTimeout(() => setOpenErr(false), 2000);
-    });
+    openPath(active).catch(() => flashOpenErr(true));
   };
 
   return (
@@ -250,13 +248,10 @@ function PreviewBody({ path, visible }: { path: string; visible: boolean }) {
   const [buf, setBuf] = useState<ArrayBuffer | null>(null);
   const [err, setErr] = useState<string | null>(null);
   /** 错误态"系统应用打开"的失败提示。 */
-  const [openErr, setOpenErr] = useState(false);
+  const [openErr, flashOpenErr] = useTimedFlag(false, 2000);
 
   const sysOpen = () => {
-    openPath(path).catch(() => {
-      setOpenErr(true);
-      setTimeout(() => setOpenErr(false), 2000);
-    });
+    openPath(path).catch(() => flashOpenErr(true));
   };
 
   useEffect(() => {

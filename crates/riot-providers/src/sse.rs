@@ -15,7 +15,41 @@
 //! （几十 KB，切成几百个 chunk）就能让这一层吃掉可观的 CPU。
 //! `scanned` 字段记住上次扫到哪，新数据只扫一遍。
 //!
+//! # 两道大小闸
+//!
+//! 缓冲区只在遇到空行时才 drain，所以「一直发、不发空行」就是一条通往
+//! OOM 的直路，而且看起来完全像一次正常的长回答。上限超了要**报错终止**，
+//! 不能静默截断：截断会把半截 JSON 交给解码器，模型收到的是一个语法坏掉
+//! 的工具参数 —— 那比一条明确的错误难查得多。
+//!
 //! 见 ARCHITECTURE.md §11.3
+
+/// 单个事件（两个空行之间）的上限。
+///
+/// 正常帧是几百字节；把它放到 8 MiB 是为了容下那些"整条响应塞进一帧"
+/// 的网关（不流式的中转常这么干），同时仍然是个硬闸。
+const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
+/// 一条流累计能推进来多少字节。
+///
+/// `[取舍]` 帧上限拦不住"一直发合法小帧"——那种流每帧都能被消费，
+/// 涨的是解码器里累积的文本，同样通往 OOM，而 idle 看门狗看的是
+/// 事件间隔，数据不断就永远不触发。
+///
+/// 128 MiB 对真实回答有约十倍余量：Anthropic 每个 token 一帧、每帧
+/// 一百多字节，128k token 的满额输出也就十几 MB。
+const MAX_STREAM_BYTES: usize = 128 * 1024 * 1024;
+
+/// 流被判定为异常，必须终止。
+///
+/// 是错误而不是"截断后继续"：见模块文档。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SseError {
+    #[error("单个 SSE 事件超过 {limit} 字节还没结束，中止响应")]
+    FrameTooLarge { limit: usize },
+    #[error("响应流累计超过 {limit} 字节还没结束，中止响应")]
+    StreamTooLarge { limit: usize },
+}
 
 /// 一个 SSE 事件。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -39,6 +73,11 @@ pub struct SseParser {
     scanned: usize,
     /// 上一个 chunk 末尾那个没收完的 UTF-8 字符。
     pending: Vec<u8>,
+    /// 这条流累计吃进了多少字节。
+    total: usize,
+    /// 撞过上限。撞了之后一直报同一个错，不再攒新数据 ——
+    /// 调用方漏判返回值时，至少内存不会继续涨。
+    failed: Option<SseError>,
 }
 
 impl SseParser {
@@ -55,9 +94,40 @@ impl SseParser {
     /// 早先这里收的是 `&str`，把重组责任推给了 transport 层。那是错的：
     /// 每个 HTTP 客户端实现都得重做一遍，漏掉的那个会产生 `看��了` 这种
     /// 乱码，而且它不报错、不崩溃，只是内容悄悄坏掉。
-    pub fn push(&mut self, chunk: &[u8]) -> Vec<SseEvent> {
+    ///
+    /// 返回 `Err` 表示流已经不可信（见两道大小闸），调用方必须终止它。
+    pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<SseEvent>, SseError> {
+        if let Some(e) = &self.failed {
+            return Err(e.clone());
+        }
+
+        self.total = self.total.saturating_add(chunk.len());
+        if self.total > MAX_STREAM_BYTES {
+            return Err(self.fail(SseError::StreamTooLarge {
+                limit: MAX_STREAM_BYTES,
+            }));
+        }
+
         let text = self.decode_utf8(chunk);
-        self.push_str(&text)
+        let events = self.push_str(&text);
+
+        // drain 之后 buf 里剩的就是当前这个还没收完的帧。
+        if self.buf.len() > MAX_FRAME_BYTES {
+            return Err(self.fail(SseError::FrameTooLarge {
+                limit: MAX_FRAME_BYTES,
+            }));
+        }
+        Ok(events)
+    }
+
+    /// 记下失败并把攒着的数据放掉。
+    fn fail(&mut self, e: SseError) -> SseError {
+        self.buf.clear();
+        self.buf.shrink_to_fit();
+        self.scanned = 0;
+        self.pending.clear();
+        self.failed = Some(e.clone());
+        e
     }
 
     /// 把字节流还原成文本，把切断的字符攒到下一次。
@@ -231,10 +301,18 @@ mod tests {
         }
     }
 
+    /// 正常输入喂进去，顺手断言没撞上大小闸。
+    fn feed(p: &mut SseParser, bytes: &[u8]) -> Vec<SseEvent> {
+        p.push(bytes).expect("正常输入不该触发大小闸")
+    }
+
     #[test]
     fn 基本分帧() {
         let mut p = SseParser::new();
-        let out = p.push(b"event: ping\ndata: {}\n\nevent: done\ndata: []\n\n");
+        let out = feed(
+            &mut p,
+            b"event: ping\ndata: {}\n\nevent: done\ndata: []\n\n",
+        );
         assert_eq!(out, vec![ev("ping", "{}"), ev("done", "[]")]);
     }
 
@@ -245,7 +323,7 @@ mod tests {
         let mut p = SseParser::new();
         let mut out = Vec::new();
         for ch in input.chars() {
-            out.extend(p.push(ch.to_string().as_bytes()));
+            out.extend(feed(&mut p, ch.to_string().as_bytes()));
         }
         assert_eq!(out, vec![ev("a", "1"), ev("b", "2")]);
     }
@@ -253,9 +331,9 @@ mod tests {
     #[test]
     fn 分隔符被切断也认得() {
         let mut p = SseParser::new();
-        assert!(p.push(b"event: a\ndata: 1\r").is_empty());
-        assert!(p.push(b"\n\r").is_empty());
-        let out = p.push(b"\n");
+        assert!(feed(&mut p, b"event: a\ndata: 1\r").is_empty());
+        assert!(feed(&mut p, b"\n\r").is_empty());
+        let out = feed(&mut p, b"\n");
         assert_eq!(out, vec![ev("a", "1")], "CRLF 分隔符跨了三个 chunk");
     }
 
@@ -263,14 +341,14 @@ mod tests {
     fn 混用换行符() {
         // 代理重写响应时经常只规范化一半
         let mut p = SseParser::new();
-        let out = p.push(b"event: a\r\ndata: 1\n\r\n");
+        let out = feed(&mut p, b"event: a\r\ndata: 1\n\r\n");
         assert_eq!(out, vec![ev("a", "1")]);
     }
 
     #[test]
     fn 注释行被忽略() {
         let mut p = SseParser::new();
-        let out = p.push(b": keep-alive\n\nevent: a\ndata: 1\n\n");
+        let out = feed(&mut p, b": keep-alive\n\nevent: a\ndata: 1\n\n");
         assert_eq!(
             out,
             vec![ev("a", "1")],
@@ -281,14 +359,14 @@ mod tests {
     #[test]
     fn 多行_data_用换行连接() {
         let mut p = SseParser::new();
-        let out = p.push(b"data: line1\ndata: line2\n\n");
+        let out = feed(&mut p, b"data: line1\ndata: line2\n\n");
         assert_eq!(out[0].data, "line1\nline2");
     }
 
     #[test]
     fn 没有空格的冒号也认() {
         let mut p = SseParser::new();
-        let out = p.push(b"event:a\ndata:1\n\n");
+        let out = feed(&mut p, b"event:a\ndata:1\n\n");
         assert_eq!(out, vec![ev("a", "1")]);
     }
 
@@ -297,14 +375,14 @@ mod tests {
         // 真实网关经常在最后一帧后直接断开。丢掉它 = 丢掉 message_stop，
         // 上层会以为流被截断。
         let mut p = SseParser::new();
-        assert!(p.push(b"event: message_stop\ndata: {}").is_empty());
+        assert!(feed(&mut p, b"event: message_stop\ndata: {}").is_empty());
         assert_eq!(p.finish(), Some(ev("message_stop", "{}")));
     }
 
     #[test]
     fn finish_对干净的流返回_none() {
         let mut p = SseParser::new();
-        p.push(b"event: a\ndata: 1\n\n");
+        feed(&mut p, b"event: a\ndata: 1\n\n");
         assert_eq!(p.finish(), None);
     }
 
@@ -317,7 +395,7 @@ mod tests {
         let mut p = SseParser::new();
         let mut out = Vec::new();
         for b in input {
-            out.extend(p.push(&[*b]));
+            out.extend(feed(&mut p, &[*b]));
         }
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].data, "你好世界");
@@ -329,8 +407,8 @@ mod tests {
         // "完" 是 3 字节，在它中间切开
         let cut = 6 + 1;
         let mut p = SseParser::new();
-        assert!(p.push(&full[..cut]).is_empty());
-        let out = p.push(&full[cut..]);
+        assert!(feed(&mut p, &full[..cut]).is_empty());
+        let out = feed(&mut p, &full[cut..]);
         assert_eq!(out[0].data, "完");
     }
 
@@ -341,7 +419,7 @@ mod tests {
         bytes.push(0xFF); // 非法
         bytes.extend_from_slice("cd\n\n".as_bytes());
 
-        let out = p.push(&bytes);
+        let out = feed(&mut p, &bytes);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].data, "ab\u{FFFD}cd", "一个坏字节不该让整条响应作废");
     }
@@ -349,11 +427,11 @@ mod tests {
     #[test]
     fn 结尾挂着半个字符时不静默吞掉() {
         let mut p = SseParser::new();
-        p.push("data: 完".as_bytes());
+        feed(&mut p, "data: 完".as_bytes());
         // 只喂 "完" 的前两个字节
         let mut p2 = SseParser::new();
         let partial = "data: 完".as_bytes();
-        p2.push(&partial[..partial.len() - 1]);
+        feed(&mut p2, &partial[..partial.len() - 1]);
         let ev = p2.finish().expect("要吐出来");
         assert!(
             ev.data.contains('\u{FFFD}'),
@@ -368,7 +446,7 @@ mod tests {
         // 这比测耗时稳定 —— 耗时断言在 CI 上会随机失败。
         let mut p = SseParser::new();
         for i in 0..1000 {
-            p.push(format!("event: e\ndata: {i}\n\n").as_bytes());
+            feed(&mut p, format!("event: e\ndata: {i}\n\n").as_bytes());
             assert!(
                 p.buf.is_empty(),
                 "完整帧消费后缓冲区应该清空，否则后续扫描是 O(n²)"
@@ -380,15 +458,85 @@ mod tests {
     fn 超长单帧只扫描一次尾部() {
         // 一个 50KB 的 tool_use 参数被切成 500 个 chunk 的情形。
         let mut p = SseParser::new();
-        p.push(b"event: x\ndata: ");
+        feed(&mut p, b"event: x\ndata: ");
         for _ in 0..500 {
-            let out = p.push("a".repeat(100).as_bytes());
+            let out = feed(&mut p, "a".repeat(100).as_bytes());
             assert!(out.is_empty());
             // scanned 必须跟着 buf 走，否则下一次 push 会从头重扫
             assert_eq!(p.scanned, p.buf.len());
         }
-        let out = p.push(b"\n\n");
+        let out = feed(&mut p, b"\n\n");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].data.len(), 50_000);
+    }
+
+    #[test]
+    fn 不发空行的流被帧上限拦住() {
+        // 服务端只要一直发不含空行的数据，缓冲区就永远不 drain ——
+        // 内存无限涨到 OOM，而这期间看起来完全像一次正常的长回答。
+        let mut p = SseParser::new();
+        feed(&mut p, b"data: ");
+
+        let mb = "x".repeat(1024 * 1024);
+        let err = loop {
+            match p.push(mb.as_bytes()) {
+                Ok(events) => assert!(events.is_empty(), "没有空行就不该有事件"),
+                Err(e) => break e,
+            }
+            assert!(
+                p.buf.len() <= MAX_FRAME_BYTES,
+                "缓冲区已经越过上限还没报错：{} 字节",
+                p.buf.len()
+            );
+        };
+        assert_eq!(
+            err,
+            SseError::FrameTooLarge {
+                limit: MAX_FRAME_BYTES
+            }
+        );
+        assert!(p.buf.is_empty(), "报错之后要把攒的数据放掉");
+        assert_eq!(
+            p.push(b"data: 1\n\n"),
+            Err(SseError::FrameTooLarge {
+                limit: MAX_FRAME_BYTES
+            }),
+            "撞过闸之后不能又开始攒数据 —— 调用方漏判返回值时这是最后一道防线"
+        );
+    }
+
+    #[test]
+    fn 无限长的合法流被总量上限拦住() {
+        // 帧上限拦不住"一直发合法小帧"：每帧都被消费掉，涨的是解码器
+        // 里累积的文本，而 idle 看门狗看的是事件间隔，数据不断就不触发。
+        let mut p = SseParser::new();
+        let frame = format!("data: {}\n\n", "y".repeat(1024 * 1024 - 10));
+        let err = loop {
+            if let Err(e) = p.push(frame.as_bytes()) {
+                break e;
+            }
+            assert!(
+                p.total <= MAX_STREAM_BYTES,
+                "总量已经越过上限还没报错：{} 字节",
+                p.total
+            );
+        };
+        assert_eq!(
+            err,
+            SseError::StreamTooLarge {
+                limit: MAX_STREAM_BYTES
+            }
+        );
+    }
+
+    #[test]
+    fn 一帧装下整条响应的网关不被误伤() {
+        // 不流式的中转会把整条响应塞进一个 data 帧。这类帧可以到几 MB，
+        // 上限压太低会把它们全判成攻击。
+        let mut p = SseParser::new();
+        let body = "z".repeat(4 * 1024 * 1024);
+        let out = feed(&mut p, format!("data: {body}\n\n").as_bytes());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].data.len(), body.len());
     }
 }

@@ -7,7 +7,7 @@
  * 这里只放 Composer 组件本身。
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 import {
   clipboardPaths,
@@ -350,6 +350,8 @@ export function Composer({
   const [mode, setMode] = useState<PermissionMode>(
     () => modeCache.get(sessionId) ?? initialMode,
   );
+  /** 第几次切模式。失败回滚要靠它认出"这是过期的那次"，见 applyMode。 */
+  const modeSeq = useRef(0);
 
   // 宿主主动切换（批准计划时用户选的执行档）→ 界面跟上。
   // 回写 setPermissionMode 是为了把模式落进会话索引（幂等 —— 宿主
@@ -679,6 +681,28 @@ export function Composer({
 
   const fileMatches = mentionQuery === undefined ? [] : fileHits;
   const fpick = Math.min(filePick, Math.max(fileMatches.length - 1, 0));
+
+  /**
+   * 此刻开着哪个补全菜单。两个不会同时开：`/` 要求整条草稿就是命令，
+   * `@` 认的是光标处那一段。
+   */
+  const menuKind = matches.length > 0 ? "slash" : fileMatches.length > 0 ? "file" : null;
+  /** 键盘高亮落在第几条。读屏靠 aria-activedescendant 跟着它走。 */
+  const menuPick = menuKind === "slash" ? pick : fpick;
+  /**
+   * 菜单和选项的 id。
+   *
+   * 必须按实例取（`useId`）而不是写死一个常量：KEEP_CHATS 同时保活着
+   * 四个 Composer，写死的话 DOM 里就有四个同 id 的 listbox，
+   * aria-activedescendant 指过去落在哪一个全看运气。
+   */
+  const uid = useId().replace(/[^a-zA-Z0-9]/g, "");
+  const menuId = `composer-menu-${uid}`;
+  const optionId = (i: number) => `${menuId}-o${i}`;
+  /** 输入框的可及名。`data-placeholder` 只是 CSS 伪元素，读屏取不到。 */
+  const placeholder = busy
+    ? "它正在做事…此刻发送会排队，当前任务完成后自动发出"
+    : "描述一个任务，或问点什么";
 
   /** 选中一个文件：把光标处的 `@查询` 换成一个块，就地插在句子里。 */
   const chooseFile = (p: string) => {
@@ -1025,11 +1049,17 @@ export function Composer({
 
   const applyMode = (m: PermissionMode) => {
     const prev = mode;
+    const seq = ++modeSeq.current;
     setMode(m);
     modeCache.set(sessionId, m);
     // 失败必须回滚到宿主的真实值。这里显示的是"它会不会问我"，
     // 显示成放行而实际在问只是啰嗦，反过来则是用户以为有人把关。
     setPermissionMode(sessionId, m).catch(() => {
+      // 只认最后一次点击的结果。快速点 A→B→C 时，B 的失败可能晚于 C 的
+      // 成功到达 —— 照单回滚的话界面退回 A，而宿主上是 C，正好落在
+      // 上面说的"用户以为有人把关"那一侧。过期的失败静默丢掉：界面停在
+      // C 至少和最后一次意图一致，真错了下一条 mode_changed 事件会纠正。
+      if (seq !== modeSeq.current) return;
       setMode(prev);
       modeCache.set(sessionId, prev);
     });
@@ -1095,12 +1125,19 @@ export function Composer({
 
       {queued.length > 0 ? <QueuePanel queued={queued} onEdit={(id) => void editQueued(id)} onSendNow={onQueueSendNow} onDelete={onQueueDelete} /> : null}
 
+      {/* 菜单是 listbox、条目是 option：键盘操作（↑↓/Tab/Enter/Esc）本来就
+          做全了，缺的只是让读屏知道"这是一组候选、当前落在第几条" ——
+          没有这层语义，屏幕上高亮在动，读屏那边一片安静。焦点始终在
+          编辑区，所以当前项靠它的 aria-activedescendant 指过来。 */}
       {matches.length > 0 ? (
-        <div className="slash-menu">
+        <div className="slash-menu" role="listbox" id={menuId} aria-label="斜杠命令">
           {matches.map((c, i) => (
             <button
               type="button"
               key={c.name}
+              id={optionId(i)}
+              role="option"
+              aria-selected={i === pick}
               className={i === pick ? "slash-item active" : "slash-item"}
               // mousedown 而不是 click：click 之前 textarea 先失焦，
               // 焦点一跑菜单就关了，点击落空。
@@ -1123,12 +1160,17 @@ export function Composer({
         </div>
       ) : null}
 
+      {/* 和上面那个菜单共用一个 id：两者互斥（这个分支要求 matches 为空），
+          同一时刻只有一个在 DOM 里。 */}
       {fileMatches.length > 0 && matches.length === 0 ? (
-        <div className="slash-menu">
+        <div className="slash-menu" role="listbox" id={menuId} aria-label="文件引用">
           {fileMatches.map((p, i) => (
             <button
               type="button"
               key={p}
+              id={optionId(i)}
+              role="option"
+              aria-selected={i === fpick}
               className={i === fpick ? "slash-item active" : "slash-item"}
               onMouseDown={(e) => {
                 e.preventDefault();
@@ -1191,9 +1233,11 @@ export function Composer({
           suppressContentEditableWarning
           role="textbox"
           aria-multiline="true"
-          data-placeholder={
-            busy ? "它正在做事…此刻发送会排队，当前任务完成后自动发出" : "描述一个任务，或问点什么"
-          }
+          aria-label={placeholder}
+          data-placeholder={placeholder}
+          aria-expanded={menuKind !== null}
+          aria-controls={menuKind ? menuId : undefined}
+          aria-activedescendant={menuKind ? optionId(menuPick) : undefined}
           onInput={sync}
           // 光标挪动也要重算 `@查询` —— 用户可能把光标移回句子中间的
           // 一个半截 @ 上继续挑文件。
@@ -1250,9 +1294,8 @@ export function Composer({
               return;
             }
 
-            // 补全菜单开着时，方向键和 Tab/Enter 归它用。两个菜单不会
-            // 同时开：`/` 要求整条草稿就是命令，`@` 认的是末尾那一段。
-            const menu = matches.length > 0 ? "slash" : fileMatches.length > 0 ? "file" : null;
+            // 补全菜单开着时，方向键和 Tab/Enter 归它用。
+            const menu = menuKind;
             if (menu && !e.nativeEvent.isComposing && !imeRef.current) {
               const len = menu === "slash" ? matches.length : fileMatches.length;
               const move = menu === "slash" ? setSlashPick : setFilePick;

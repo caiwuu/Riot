@@ -117,8 +117,16 @@ pub fn decide(policy: &RetryPolicy, ctx: &FailureContext<'_>, jitter_seed: u64) 
 
     // 4. 等多久。服务端给了 Retry-After 就听它的 —— 本地退避算的是
     //    「我猜多久能好」，服务端知道的是「实际多久能好」。
+    //
+    //    `[约束]` 但必须封在 `policy.cap` 以内。`cap` 的语义是"任何一次
+    //    等待的上限"，服务端的建议不是例外：每次都回 `Retry-After: 300`
+    //    的网关（恶意的，或者只是配错了）能让 10 次重试变成近 50 分钟的
+    //    静默停滞，用户全程只看到转圈，而日志里没有任何异常。
+    //
+    //    `[取舍]` 比服务端要求的更早重试可能再吃一次 429。可以接受：
+    //    多一个请求是有界的代价，而把"停多久"的决定权交给对面是无界的。
     let delay = match ctx.retry_after_secs {
-        Some(secs) => Duration::from_secs(secs.min(policy.cap.as_secs().max(secs.min(300)))),
+        Some(secs) => Duration::from_secs(secs).min(policy.cap),
         None => backoff(policy, ctx.attempt, jitter_seed),
     };
 
@@ -374,6 +382,29 @@ mod tests {
                 after: Duration::from_secs(5)
             },
             "服务端知道实际多久能好，本地退避只是在猜"
+        );
+    }
+
+    #[test]
+    fn 恶意的_retry_after_不会让重试静默停滞() {
+        // 早先的表达式化简下来是"≤300 秒一律照服务端说的等"，cap 事实上
+        // 没起作用：每次回 300 秒的网关配上默认 10 次重试，就是近 50 分钟
+        // 的干等，而用户只看到转圈。
+        let p = RetryPolicy::default();
+        let mut c = ctx(429);
+        c.retry_after_secs = Some(300);
+
+        assert_eq!(
+            decide(&p, &c, 0),
+            RetryDecision::Retry { after: p.cap },
+            "服务端的建议也要封在 cap 以内 —— 停多久不能由对面说了算"
+        );
+
+        // 累计等待必须有界：cap × max_attempts，而不是对面随口给的数字。
+        let worst = p.cap * p.max_attempts;
+        assert!(
+            worst <= Duration::from_secs(600),
+            "最坏情况仍然要在用户等得住的量级：{worst:?}"
         );
     }
 

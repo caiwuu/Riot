@@ -735,6 +735,35 @@ fn 多个工具调用按_index_保序() {
 }
 
 #[test]
+fn 恶意_index_不触发巨额分配() {
+    // 按服务端给的 index 扩容的话，这一帧要的是一万亿个元素：
+    // capacity overflow 是 panic，分配失败是 abort —— 后者不可捕获，
+    // 整个应用直接消失，用户看到的是窗口没了。
+    let mut d = StreamDecoder::new();
+    d.push(&sse(r#"{"id":"c1","choices":[{"delta":{"tool_calls":[
+        {"index":1000000000000,"id":"call_evil","function":{"name":"Evil","arguments":"{}"}},
+        {"index":0,"id":"call_a","function":{"name":"A","arguments":"{}"}}]}}]}"#));
+
+    match &d.finish()[0] {
+        ProviderEvent::Message(Message::Assistant { content, .. }) => {
+            let names: Vec<_> = content
+                .iter()
+                .filter_map(|c| match c {
+                    AssistantContent::ToolUse { name, .. } => Some(name.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                names,
+                vec!["A"],
+                "坏帧丢弃，同一帧里编号正常的工具照常解出来"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn 无参工具的空参数当成空对象() {
     let mut d = StreamDecoder::new();
     d.push(&sse(

@@ -30,6 +30,17 @@ use riot_protocol::provider::{ProviderError, ProviderEvent};
 use super::wire::{WireBlockStart, WireDelta, WireEvent, WireUsage};
 use crate::sse::SseEvent;
 
+/// 一条消息里最多认多少个内容块。
+///
+/// `[约束]` 这是内存闸门，不是协议限制。`index` 由服务端说了算，而
+/// `blocks.resize_with(index + 1, …)` 会照单全收：一个 `"index": 1e12`
+/// 的 `content_block_start` 就是一次上千亿元素的分配 —— capacity overflow
+/// 直接 panic，分配失败则是 abort，后者连 catch_unwind 都拦不住。
+///
+/// 1024 远高于真实块数（一条消息里几十个块已经算多），超限的帧当坏帧
+/// 丢弃，同一条流里编号正常的块照常解码。
+const MAX_BLOCKS: usize = 1024;
+
 /// 一个内容块的累加状态。
 #[derive(Debug, Clone)]
 enum BlockAccumulator {
@@ -112,6 +123,10 @@ impl StreamDecoder {
                 index,
                 content_block,
             } => {
+                if index >= MAX_BLOCKS {
+                    tracing::warn!(index, "内容块 index 超出上限，丢弃这一帧");
+                    return Vec::new();
+                }
                 let acc = match content_block {
                     WireBlockStart::Text { text } => BlockAccumulator::Text { text },
                     WireBlockStart::Thinking { thinking } => BlockAccumulator::Thinking {
@@ -800,6 +815,35 @@ mod tests {
 
         let out = d.push(&sse(r#"{"type":"message_stop"}"#));
         assert!(!out.is_empty(), "后续事件仍要正常处理");
+    }
+
+    #[test]
+    fn 恶意_index_不触发巨额分配() {
+        // 服务端说 index 是多少就 resize 到多少的话，这一帧要的是
+        // 一万亿个元素：capacity overflow 是 panic，分配失败是 abort，
+        // 后者不可捕获 —— 整个应用直接消失，用户看到的是窗口没了。
+        let events = run(&[
+            START,
+            r#"{"type":"content_block_start","index":1000000000000,
+                "content_block":{"type":"text","text":"x"}}"#,
+            r#"{"type":"content_block_delta","index":1000000000000,
+                "delta":{"type":"text_delta","text":"y"}}"#,
+            // 正常编号的块必须照常解出来
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"好"}}"#,
+            r#"{"type":"message_stop"}"#,
+        ]);
+
+        match final_message(&events) {
+            Message::Assistant { content, .. } => {
+                assert_eq!(
+                    content,
+                    &vec![AssistantContent::Text { text: "好".into() }],
+                    "坏帧丢弃，同一条流里编号正常的块照常解码"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

@@ -165,6 +165,12 @@ impl Tool for Read {
             Err(e) => return ToolOutcome::failed(e.for_model()),
         };
 
+        // 读也要过：凭证类是"读到即泄露"，一个指向 `~/.ssh/id_rsa` 的
+        // 链接同样能把私钥送进对话历史。
+        if let Some(msg) = path::detour_risk(&parsed.path, &resolved, &ctx.cwd, true) {
+            return ToolOutcome::failed(msg);
+        }
+
         let meta = match ctx.fs.metadata(&resolved).await {
             Ok(m) => m,
             Err(e) => return ToolOutcome::failed(io_hint(&parsed.path, &e)),

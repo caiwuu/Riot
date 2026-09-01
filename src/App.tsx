@@ -188,10 +188,91 @@ function isMissingProjectError(e: unknown): boolean {
   return s.startsWith("项目目录不存在：") || s.includes("无法解析路径");
 }
 
+/* ── 会话列表的相等判定 ─────────────────────── */
+
+function samplingEq(a: SessionInfo["sampling"], b: SessionInfo["sampling"]): boolean {
+  return (
+    a.temperature === b.temperature &&
+    a.topP === b.topP &&
+    a.topK === b.topK &&
+    a.maxOutputTokens === b.maxOutputTokens
+  );
+}
+
+function thinkingEq(a: SessionInfo["thinking"], b: SessionInfo["thinking"]): boolean {
+  if (a.mode !== b.mode) return false;
+  // fixed 之外的几档没有别的字段，mode 相同就是相同。
+  return (a.mode === "fixed" ? a.level : null) === (b.mode === "fixed" ? b.level : null);
+}
+
+/**
+ * 两条会话在界面看得见的层面上是不是同一份。
+ *
+ * `[约束]` 字段增删要跟着 `SessionInfo` 走。漏比一个字段的表现是"改了
+ * 设置侧栏不更新"，而不是报错 —— 所以宁可多比一个也别漏。
+ */
+function sessionEq(a: SessionInfo, b: SessionInfo): boolean {
+  return (
+    a.id === b.id &&
+    a.root === b.root &&
+    a.title === b.title &&
+    a.seq === b.seq &&
+    a.mode === b.mode &&
+    a.pythonVenv === b.pythonVenv &&
+    a.systemPrompt === b.systemPrompt &&
+    a.busy === b.busy &&
+    thinkingEq(a.thinking, b.thinking) &&
+    samplingEq(a.sampling, b.sampling)
+  );
+}
+
+function sessionListEq(a: SessionInfo[], b: SessionInfo[]): boolean {
+  return (
+    a.length === b.length &&
+    a.every((s, i) => {
+      const o = b[i];
+      return o !== undefined && sessionEq(s, o);
+    })
+  );
+}
+
+/** 两个字符串集合装的是不是同一批东西。 */
+function sameSet(a: Set<string>, b: Set<string>): boolean {
+  return a.size === b.size && [...a].every((x) => b.has(x));
+}
+
+/** patch 里的每个字段是不是都已经是这个值了。 */
+function patchApplied(cur: SessionInfo, patch: Partial<SessionInfo>): boolean {
+  return (Object.keys(patch) as (keyof SessionInfo)[]).every((k) => cur[k] === patch[k]);
+}
+
 export function App() {
   const [config, setConfig] = useState<ConfigStatus | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  /**
+   * 会话列表的"此刻"那一份。
+   *
+   * 右键菜单存进 `menu` 之后会一直挂在屏幕上，它里面的删除动作执行时，
+   * 建菜单那次渲染的闭包早就过期了 —— 期间 5 秒轮询和定时任务都在换
+   * 整份列表。列表本身的修改一律走函数式更新；这个 ref 只给那些"要拿
+   * 列表算点别的"（切哪个会话、哪些要清缓存）的地方读。
+   */
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
+  /**
+   * 覆盖整份会话列表（拉全量的那几条路共用）。
+   *
+   * `[约束]` 内容没变就不换引用。`listSessions` 每次都产出全新的数组和
+   * 全新的元素对象，而忙碌时每 5 秒就拉一次 —— 不比一遍的话，每一拍都
+   * 会重跑探测 effect（一次 probeDirs、解绑重绑 visibilitychange/focus）、
+   * 换掉 `activeSession` 的对象身份、连带全局快捷键监听重绑，最后整棵树
+   * 重渲染一次。这些全和流式输出的每帧 setState 挤同一条主线程。
+   * 范式同 useBrowserPanel 的 panelEq。
+   */
+  const applySessions = useCallback((next: SessionInfo[]) => {
+    setSessions((prev) => (sessionListEq(prev, next) ? prev : next));
+  }, []);
   const [active, setActive] = useState<string | null>(null);
   /** 每个会话最近一次真开聊的时刻。侧栏同项目里按它倒序。 */
   const [recency, setRecency] = useState(loadRecency);
@@ -541,17 +622,35 @@ export function App() {
     return () => window.removeEventListener("click", onClick);
   }, []);
 
+  /**
+   * 要探测的目录。会话在这里只贡献一个 `root`，其余字段与探测无关 ——
+   * 挂在整个 `sessions` 上的话，忙碌时每 5 秒一次的 busy 翻转都会让下面
+   * 那个 effect 整个重跑：一次 probeDirs，外加解绑重绑两个窗口事件。
+   *
+   * 先算成一个字符串键、再从键还原数组：内容一样时数组的引用就不动。
+   * 分隔符用 NUL —— 路径里不可能有它。
+   */
+  const rootsKey = useMemo(
+    () => [...new Set([...(projectList ?? []), ...sessions.map((s) => s.root)])].join("\u0000"),
+    [projectList, sessions],
+  );
+  const probeRoots = useMemo(() => (rootsKey ? rootsKey.split("\u0000") : []), [rootsKey]);
+
   // 项目列表不会因为用户在访达里删了文件夹而自己更新。启动和窗口
   // 回到前台时探一次，侧栏才能把失效项标出来，而不必等点「新会话」才知道。
   useEffect(() => {
-    const roots = [...new Set([...(projectList ?? []), ...sessions.map((s) => s.root)])];
-    if (roots.length === 0) {
-      setMissing(new Set());
+    if (probeRoots.length === 0) {
+      setMissing((prev) => (prev.size === 0 ? prev : new Set()));
       return;
     }
     const scan = () => {
-      probeDirs(roots)
-        .then((gone) => setMissing(new Set(gone)))
+      probeDirs(probeRoots)
+        .then((gone) => {
+          // 结果几乎永远不变（目录被删是罕见事件）。每次都换一个新 Set
+          // 的话，光是切回窗口就会让整棵树重渲染一遍。
+          const next = new Set(gone);
+          setMissing((prev) => (sameSet(prev, next) ? prev : next));
+        })
         .catch(() => {});
     };
     scan();
@@ -564,7 +663,7 @@ export function App() {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", scan);
     };
-  }, [projectList, sessions]);
+  }, [probeRoots]);
 
   useLayoutEffect(() => {
     if (!active) return;
@@ -669,7 +768,14 @@ export function App() {
   /** 会话设置提交成功后回写列表。listSessions 只在启动时拉一次，
    *  不回写的话，弹窗关掉再打开显示的就是旧值。 */
   const patchSession = useCallback((id: string, patch: Partial<SessionInfo>) => {
-    setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+    setSessions((prev) => {
+      const cur = prev.find((s) => s.id === id);
+      // 值原本就是这个就不换引用。Chat 挂载时会把当时的 busy 原样报一次，
+      // 而 KEEP_CHATS 保活着四个 —— 每次都产出新列表的话，切一次会话就是
+      // 几次整树白重渲染。
+      if (!cur || patchApplied(cur, patch)) return prev;
+      return prev.map((s) => (s.id === id ? { ...s, ...patch } : s));
+    });
   }, []);
 
   /**
@@ -708,7 +814,7 @@ export function App() {
     const offRuns = subscribeScheduleRuns(() => {
       reloadSchedules();
       listSessions()
-        .then(setSessions)
+        .then(applySessions)
         .catch(() => {});
     });
     const offChanges = subscribeScheduleChanges(reloadSchedules);
@@ -716,7 +822,7 @@ export function App() {
       offRuns();
       offChanges();
     };
-  }, [reloadSchedules]);
+  }, [reloadSchedules, applySessions]);
 
   /**
    * 处理掉一条错过记录（补跑或忽略）。全部处理完才告诉宿主清空 ——
@@ -738,11 +844,11 @@ export function App() {
     if (!anyBusy) return;
     const t = setInterval(() => {
       listSessions()
-        .then(setSessions)
+        .then(applySessions)
         .catch(() => {});
     }, 5000);
     return () => clearInterval(t);
-  }, [anyBusy]);
+  }, [anyBusy, applySessions]);
 
   // 会话刚开跑（含后台定时任务）顶到该项目最前。启动那次 busy 快照
   // 不当作一次新的聊天 —— 否则每次打开 App 列表都会被正在跑的会话打乱。
@@ -891,16 +997,23 @@ export function App() {
     await deleteSession(id);
     dropSessionWorkbench(id);
     setKept((prev) => prev.filter((x) => x !== id));
-    const victim = sessions.find((s) => s.id === id);
-    const next = sessions.filter((s) => s.id !== id);
-    setSessions(next);
-    if (active === id) {
-      // 优先切到同项目最近的会话；没有就全局最近；再没有就回欢迎页
-      const sibling = victim
-        ? [...next].reverse().find((s) => s.root === victim.root)
-        : undefined;
-      setActive((sibling ?? next[next.length - 1])?.id ?? null);
-    }
+    // `[约束]` 必须函数式更新。菜单是存进 `menu` state 之后一直挂在屏幕上
+    // 的，从弹出到点「删除」之间，5 秒轮询和定时任务都可能换上一份新列表 ——
+    // 拿建菜单那次渲染的快照去覆盖，等于把这期间新建的会话（比如后台
+    // 定时任务刚开的那个）整条抹掉，侧栏凭空少一项。
+    setSessions((prev) => prev.filter((s) => s.id !== id));
+    // 切哪个会话也要读最新的列表，同样的理由。优先同项目最近的，
+    // 没有就全局最近，再没有就回欢迎页。
+    const live = sessionsRef.current;
+    const victim = live.find((s) => s.id === id);
+    const rest = live.filter((s) => s.id !== id);
+    const sibling = victim
+      ? [...rest].reverse().find((s) => s.root === victim.root)
+      : undefined;
+    const fallback = (sibling ?? rest[rest.length - 1])?.id ?? null;
+    // 删的不是正看着的那个就别动焦点 —— `active` 同样可能在菜单挂着的
+    // 期间被用户换过。
+    setActive((cur) => (cur === id ? fallback : cur));
   };
 
   const doRename = async (id: string, title: string) => {
@@ -909,7 +1022,7 @@ export function App() {
       await renameSession(id, title);
       // 空标题会回退到"第一条消息"，那个值只有宿主知道 —— 重新拉列表
       // 而不是本地猜
-      setSessions(await listSessions());
+      applySessions(await listSessions());
     } catch (e) {
       setBootError(String(e));
     }
@@ -917,17 +1030,18 @@ export function App() {
 
   const doRemoveProject = async (root: string) => {
     const closed = await removeProject(root);
-    const gone = new Set([
-      ...closed,
-      ...sessions.filter((s) => s.root === root).map((s) => s.id),
-    ]);
+    const dead = (s: SessionInfo) => s.root === root || closed.includes(s.id);
+    // 读最新那份列表，不是建菜单那次渲染的快照（理由见 doDeleteSession）。
+    // 中间隔着 await，所以是个函数：用一次算一次。
+    const deadIds = () =>
+      new Set([...closed, ...sessionsRef.current.filter(dead).map((s) => s.id)]);
+    const gone = deadIds();
     for (const id of gone) {
       dropSessionWorkbench(id);
     }
     setKept((prev) => prev.filter((id) => !gone.has(id)));
     setConfig(await getConfig());
-    const next = sessions.filter((s) => s.root !== root && !closed.includes(s.id));
-    setSessions(next);
+    setSessions((prev) => prev.filter((s) => !dead(s)));
     setMissing((prev) => {
       if (!prev.has(root)) return prev;
       const n = new Set(prev);
@@ -935,10 +1049,11 @@ export function App() {
       return n;
     });
     if (goneRoot === root) setGoneRoot(null);
-    const activeGone =
-      active !== null &&
-      (closed.includes(active) || sessions.find((s) => s.id === active)?.root === root);
-    if (activeGone) setActive(next[next.length - 1]?.id ?? null);
+    // 上面那次 await 之后列表可能又变了，这里重新读一次。
+    const rest = sessionsRef.current.filter((s) => !dead(s));
+    const fallback = rest[rest.length - 1]?.id ?? null;
+    const removed = deadIds();
+    setActive((cur) => (cur !== null && removed.has(cur) ? fallback : cur));
   };
 
   /**
@@ -1739,17 +1854,23 @@ function Chat({
   const busyRef = useRef(onBusy);
   busyRef.current = onBusy;
   // 跳过挂载那次：挂载时的 busy 是历史快照，不是一次"变化"。
+  //
+  // `[约束]` onTurnEnd 也归这个 ref 守。它是"一轮跑完了"的通知，而挂载
+  // 时的 `busy=false` 只是"这个会话现在闲着" —— 不守的话，KEEP_CHATS
+  // 保活四个 Chat，切一次会话就连发几次 setChangesRev，Git 改动面板
+  // 跟着做几次无谓的全量比对。
   const sawBusy = useRef(false);
   useEffect(() => {
-    if (!busy) turnEndRef.current?.();
     busyRef.current?.(busy);
     if (busy) {
       sawBusy.current = true;
-    } else if (sawBusy.current && !document.hasFocus()) {
-      // 长任务跑完而窗口在后台：发一条系统通知，不然就错过了。
-      // 窗口在前台时不发 —— 用户正看着呢。
-      notifyTurnDone();
+      return;
     }
+    if (!sawBusy.current) return;
+    turnEndRef.current?.();
+    // 长任务跑完而窗口在后台：发一条系统通知，不然就错过了。
+    // 窗口在前台时不发 —— 用户正看着呢。
+    if (!document.hasFocus()) notifyTurnDone();
   }, [busy]);
   const empty =
     session.items.length === 0 &&

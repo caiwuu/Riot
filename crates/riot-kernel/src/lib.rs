@@ -185,7 +185,18 @@ async fn handle_line(line: &str, manager: &manager::SessionManager) -> Option<St
         Err(e) => {
             // 没有 id 就没法配对应答,只能丢。宿主发的一定是合法 JSON,
             // 走到这里说明传输被截断或有人手工塞了脏数据。
-            tracing::warn!(error = %e, raw = %line, "收到非法 JSON,已忽略");
+            //
+            // `[约束]` 不能把原文打出来。`turn.submit` 的 params 里是
+            // `TurnConfig`，它带着明文 `ModelEndpoint.api_key` —— 而最容易
+            // 走到这一支的恰恰是超长请求被截断，超长请求又恰恰是带图片的
+            // `turn.submit`。内核日志走 stderr，宿主会接进自己的 tracing
+            // 并可能落盘。只记长度和开头，够定位"是不是被截断了"。
+            tracing::warn!(
+                error = %e,
+                bytes = line.len(),
+                head = %line.chars().take(48).collect::<String>(),
+                "收到非法 JSON,已忽略"
+            );
             return None;
         }
     };

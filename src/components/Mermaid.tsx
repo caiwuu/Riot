@@ -1,6 +1,7 @@
 import { useEffect, useId, useState } from "react";
 import { createPortal } from "react-dom";
 
+import { useTimedFlag } from "../hooks/useTimedFlag";
 import { useEscLayer } from "./Modal";
 
 /**
@@ -73,7 +74,7 @@ export function MermaidBlock({ source }: { source: string }) {
   // 首个渲染结果落地前既不显示源码也不显示空白 —— mermaid 库首次加载
   // 要一两秒，这期间闪现源码再切成图，对话流会跳一下。
   const [settled, setSettled] = useState(false);
-  const [copied, setCopied] = useState<"idle" | "ok" | "fail">("idle");
+  const [copied, flashCopied] = useTimedFlag<"idle" | "ok" | "fail">("idle", 1500);
   const [viewer, setViewer] = useState(false);
 
   useEffect(() => {
@@ -112,10 +113,9 @@ export function MermaidBlock({ source }: { source: string }) {
 
   const copySrc = () => {
     navigator.clipboard.writeText(source).then(
-      () => setCopied("ok"),
-      () => setCopied("fail"),
+      () => flashCopied("ok"),
+      () => flashCopied("fail"),
     );
-    window.setTimeout(() => setCopied("idle"), 1500);
   };
 
   if (svg) {

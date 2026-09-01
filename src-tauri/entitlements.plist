@@ -9,16 +9,24 @@
   要能启动用户装的 Node/Python 工具链，就还得加 allow-jit 和
   allow-unsigned-executable-memory。
 
-  构建后验证：
+  同样不需要的三条（删过一次，别再加回来）：
+
+  - allow-dyld-environment-variables 和 disable-library-validation。宿主和
+    内核都不加载第三方 dylib，也不靠 DYLD_* 找库（浏览器子进程是独立的
+    .app，走自己的签名）。这两条一起声明，恰好凑齐绕过 hardened runtime
+    往进程里注入 dylib 的全部条件，而注入进来的代码继承的是 Riot 已经拿到
+    的 TCC 授权 —— 文件访问、自动化，用户当初是为了让 agent 干活才点的。
+  - inherit。它只在 app-sandbox 打开时才有意义（让子进程继承沙箱），而这个
+    应用没有开沙箱：agent 要读写用户任意工作区，沙箱是关着的。留着不产生
+    任何效果，只会让人误以为子进程被沙箱管着。
+
+  空的 dict 是刻意的：hardened runtime 由 bundle 配置打开，entitlement 一条
+  都不需要。
+
+  构建后验证（主二进制、随包内核、以及嵌在 Resources 里的浏览器 .app 各查一遍）：
     codesign -dv --entitlements - "target/release/bundle/macos/Riot.app/Contents/MacOS/Riot"
 -->
 <plist version="1.0">
 <dict>
-    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
-    <true/>
-    <key>com.apple.security.cs.disable-library-validation</key>
-    <true/>
-    <key>com.apple.security.inherit</key>
-    <true/>
 </dict>
 </plist>

@@ -20,7 +20,7 @@ const COMPACT_BUFFER = 13_000;
 export const MIN_COMPACT_THRESHOLD = 8_000;
 export const MAX_COMPACT_THRESHOLD = 1_000_000;
 /** 没填窗口的模型走这个数。见 Rust 侧 `default_compact_threshold_tokens`。 */
-export const DEFAULT_COMPACT_THRESHOLD = 100_000;
+export const DEFAULT_COMPACT_THRESHOLD = 300_000;
 
 /** 见 Rust 侧 `MIN_CONTEXT_WINDOW` / `MAX_CONTEXT_WINDOW`。 */
 export const MIN_CONTEXT_WINDOW = 8_000;

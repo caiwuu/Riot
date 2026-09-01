@@ -14,14 +14,30 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use crate::lines;
 use crate::wire::{
     self, CallToolResult, Incoming, InitializeResult, ListToolsResult, Outgoing, OutgoingError,
     OutgoingResponse, RpcError, ToolDef,
 };
+
+/// 单条 JSON-RPC 帧的上限。
+///
+/// `[约束]` 这是内存闸门。服务器进程是第三方的，一条永不换行的输出流
+/// 就能把宿主吃到 OOM，而表象只是"应用越来越慢然后被系统杀掉"。
+///
+/// 16 MiB 是给图片留的余量：工具结果里的图片是 base64，交付上限
+/// （`tool::MAX_IMAGE_B64`，2 MB）之上还要容下"先收下来再判超限"的那一份。
+const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
+/// 一个服务器最多认多少个工具。
+///
+/// 512 远高于真实规模（大型服务器几十个工具已经算多），它拦的是
+/// "一页塞几十万条"这种明显不正常的清单。
+const MAX_TOOLS: usize = 512;
 
 /// 各阶段的等待上限。
 ///
@@ -140,10 +156,15 @@ impl Client {
                 // EOF 或读错误退出循环：连接结束。挂着的请求全部立刻失败 ——
                 // 让它们等到超时的话，用户看到的是工具卡片转满十分钟。
                 loop {
-                    buf.clear();
-                    match reader.read_until(b'\n', &mut buf).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => {
+                    match lines::read_line_capped(&mut reader, &mut buf, MAX_FRAME_BYTES).await {
+                        lines::ReadLine::Eof => break,
+                        lines::ReadLine::TooLong => {
+                            tracing::warn!(
+                                limit = MAX_FRAME_BYTES,
+                                "MCP 服务器发来一行超过上限的数据，已丢弃"
+                            );
+                        }
+                        lines::ReadLine::Line => {
                             let line = String::from_utf8_lossy(&buf);
                             route_line(&line, &pending, &list_changed, &out).await;
                         }
@@ -216,6 +237,20 @@ impl Client {
             let page: ListToolsResult = serde_json::from_value(raw)
                 .map_err(|e| ClientError::Protocol(format!("tools/list 响应：{e}")))?;
             tools.extend(page.tools);
+
+            // `[约束]` 页数上限拦不住"一页塞几十万条"。每条都带描述和
+            // schema，而这些还要进工具注册表 —— 不设条数上限的话，一个
+            // 服务器就能把宿主的内存和上下文预算一起吃掉。
+            if tools.len() >= MAX_TOOLS {
+                tracing::warn!(
+                    limit = MAX_TOOLS,
+                    got = tools.len(),
+                    "MCP 服务器声明的工具数超过上限，只取前面这些"
+                );
+                tools.truncate(MAX_TOOLS);
+                return Ok(tools);
+            }
+
             match page.next_cursor {
                 Some(c) if !c.is_empty() => cursor = Some(c),
                 _ => return Ok(tools),

@@ -172,29 +172,76 @@ impl McpHub {
     }
 
     /// 当前可用工具的快照（本轮用）。断开的服务器自然不在里面。
+    ///
+    /// `[约束]` 刷新清单要走网络（`tools/list`，30 秒超时），这段
+    /// **不能持锁**——无论是 `servers` 还是某个服务器的 `state`。
+    /// 早先是整段持 `servers` 锁的：一个挂起的服务器就把整个 hub 按住
+    /// 半分钟，`statuses()` / `reconcile()` 全排队，设置页表现为整体卡死，
+    /// 而唯一的线索只指向某一个服务器。
     pub async fn tools(&self) -> Vec<Arc<dyn Tool>> {
-        let map = self.servers.lock().await;
+        // 1. 锁内只取句柄快照。
+        let handles: Vec<(String, Arc<Mutex<ServerState>>)> = {
+            let map = self.servers.lock().await;
+            map.iter()
+                .map(|(id, h)| (id.clone(), Arc::clone(&h.state)))
+                .collect()
+        };
+
         let mut out: Vec<Arc<dyn Tool>> = Vec::new();
-        for (id, h) in map.iter() {
-            let mut st = h.state.lock().await;
-            let ServerState::Ready { client, tools, .. } = &mut *st else {
+        let mut names: HashMap<String, String> = HashMap::new();
+
+        for (id, state) in handles {
+            // 2. 锁内只读出客户端和当前清单，立刻放锁。
+            let Some((client, mut tools, stale)) = ({
+                let st = state.lock().await;
+                match &*st {
+                    ServerState::Ready { client, tools, .. } if client.is_alive() => Some((
+                        Arc::clone(client),
+                        tools.clone(),
+                        client.take_list_changed(),
+                    )),
+                    _ => None,
+                }
+            }) else {
                 continue;
             };
-            if !client.is_alive() {
-                continue;
-            }
-            // 服务器说清单变了就重拉一次。失败不致命 —— 用旧清单，
-            // 调到已下线的工具时服务器会报错，模型能看懂并换路。
-            if client.take_list_changed() {
+
+            // 3. 锁外刷新。失败不致命 —— 用旧清单，调到已下线的工具时
+            //    服务器会报错，模型能看懂并换路。
+            if stale {
                 match client.list_tools().await {
-                    Ok(fresh) => *tools = fresh,
+                    Ok(fresh) => {
+                        tools = fresh;
+                        // 4. 写回去。这期间服务器可能已经停了，所以要
+                        //    重新确认它还是 Ready 才写。被 reconcile 整个
+                        //    换掉的情况天然安全：那会换上一个新的状态对象，
+                        //    我们手上这个已经没人看了。
+                        if let ServerState::Ready { tools: slot, .. } = &mut *state.lock().await {
+                            *slot = tools.clone();
+                        }
+                    }
                     Err(e) => {
                         tracing::warn!(server = %id, error = %e, "工具清单刷新失败，沿用旧清单")
                     }
                 }
             }
-            for def in tools.iter() {
-                out.push(Arc::new(McpTool::new(id, def, Arc::clone(client))));
+
+            for def in &tools {
+                let name = crate::tool::tool_name(&id, &def.name);
+                // 重名的不注册。名字是权限规则的匹配键，两个工具共用一个
+                // 名字意味着用户对着其中一个点的"总是允许"顺带放行了另一个。
+                if let Some(prev) = names.get(&name) {
+                    tracing::warn!(
+                        tool = %name,
+                        server = %id,
+                        remote = %def.name,
+                        first = %prev,
+                        "对外工具名重复，后来的这个不注册"
+                    );
+                    continue;
+                }
+                names.insert(name, format!("{id}/{}", def.name));
+                out.push(Arc::new(McpTool::new(&id, def, Arc::clone(&client))));
             }
         }
         out
@@ -302,7 +349,173 @@ async fn shutdown_handle(h: Handle) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use serde_json::{Value, json};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
     use super::*;
+
+    fn tool_def(name: &str) -> ToolDef {
+        ToolDef {
+            name: name.into(),
+            description: None,
+            input_schema: json!({ "type": "object" }),
+            annotations: None,
+        }
+    }
+
+    /// 一个占位的进程句柄。
+    ///
+    /// `ServerState::Ready` 要拿着真实的子进程句柄（移除服务器时要杀整组），
+    /// 所以枢纽这一层的测试绕不开起一个进程。用立刻退出的 `echo`：
+    /// 句柄有效就够了，测的是锁，不是进程。
+    fn dummy_child() -> Box<dyn process_wrap::tokio::ChildWrapper> {
+        let mut cmd = tokio::process::Command::new("echo");
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        process_wrap::tokio::CommandWrap::from(cmd)
+            .spawn()
+            .expect("echo 在测试机器上总有")
+    }
+
+    /// 直接塞一个已就绪的服务器进枢纽，跳过 spawn + 握手。
+    async fn insert_ready(hub: &McpHub, id: &str, client: Arc<Client>, tools: Vec<ToolDef>) {
+        let spec = ServerSpec {
+            id: id.to_owned(),
+            command: "echo".into(),
+            args: vec![],
+            env: vec![],
+        };
+        hub.servers.lock().await.insert(
+            id.to_owned(),
+            Handle {
+                spec,
+                state: Arc::new(Mutex::new(ServerState::Ready {
+                    client,
+                    child: dummy_child(),
+                    server_name: "fake 0".into(),
+                    tools,
+                })),
+                cancel: CancellationToken::new(),
+            },
+        );
+    }
+
+    /// 假服务器：答 initialize 和**第一次** tools/list（回应之前先发一条
+    /// "清单变了"通知），之后的 tools/list 挂着不回，并把"收到了"从
+    /// `stalled` 通道说出来。
+    ///
+    /// 通知排在响应**前面**是为了不靠 sleep 同步：读循环顺序处理，
+    /// 第一次 `list_tools()` 返回时通知一定已经生效。
+    async fn hanging_client(stalled: tokio::sync::mpsc::UnboundedSender<()>) -> Arc<Client> {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (server_read, mut server_write) = tokio::io::split(server_io);
+
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(server_read).lines();
+            let mut listed = false;
+            while let Ok(Some(line)) = lines.next_line().await {
+                let msg: Value = match serde_json::from_str(&line) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                let Some(id) = msg.get("id").cloned() else {
+                    continue;
+                };
+                let reply = match msg.get("method").and_then(Value::as_str) {
+                    Some("initialize") => json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": {
+                            "protocolVersion": "2025-06-18",
+                            "serverInfo": { "name": "fake", "version": "0" },
+                            "capabilities": {}
+                        }
+                    }),
+                    Some("tools/list") if !listed => {
+                        listed = true;
+                        let notice = json!({
+                            "jsonrpc": "2.0", "method": "notifications/tools/list_changed"
+                        });
+                        let _ = server_write
+                            .write_all(format!("{notice}\n").as_bytes())
+                            .await;
+                        json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": [] } })
+                    }
+                    // 第二次开始装死 —— 真实世界里就是服务器卡住了。
+                    Some("tools/list") => {
+                        let _ = stalled.send(());
+                        continue;
+                    }
+                    _ => continue,
+                };
+                let _ = server_write
+                    .write_all(format!("{reply}\n").as_bytes())
+                    .await;
+            }
+        });
+
+        let (r, w) = tokio::io::split(client_io);
+        let (c, _) = Client::connect(r, w, Timeouts::default())
+            .await
+            .expect("握手");
+        c
+    }
+
+    #[tokio::test]
+    async fn 卡住的服务器不拖住整个枢纽() {
+        // 早先 tools() 全程持着 servers 锁，刷新清单又是一次网络往返
+        // （30 秒超时）。一个挂起的服务器把锁按住半分钟，statuses() 和
+        // reconcile() 全排队 —— 设置页表现为整体卡死，而线索只指向
+        // 某一个服务器。
+        let (tx, mut stalled) = tokio::sync::mpsc::unbounded_channel();
+        let client = hanging_client(tx).await;
+
+        // 走一次正常的 list_tools：假服务器在回应之前先发了"清单变了"，
+        // 于是接下来的 tools() 必定走刷新那条路 —— 也就是网络往返那条路。
+        client.list_tools().await.expect("第一次照常");
+
+        let hub = Arc::new(McpHub::new());
+        insert_ready(&hub, "slow", client, vec![tool_def("t")]).await;
+
+        let hub2 = Arc::clone(&hub);
+        let refreshing = tokio::spawn(async move { hub2.tools().await });
+
+        // 等到假服务器确认"刷新请求已经到了、我不回"，此刻 tools()
+        // 正卡在网络等待上。
+        stalled.recv().await.expect("刷新请求应该发出去了");
+
+        tokio::time::timeout(Duration::from_secs(2), hub.statuses())
+            .await
+            .expect("statuses 被卡住的服务器按住了 —— 设置页会整体转圈");
+        tokio::time::timeout(Duration::from_secs(2), hub.reconcile(vec![]))
+            .await
+            .expect("reconcile 被卡住的服务器按住了");
+
+        refreshing.abort();
+    }
+
+    #[tokio::test]
+    async fn 重名的工具只注册一个() {
+        // 名字是权限规则的匹配键。两个工具共用一个名字意味着用户对着
+        // 其中一个点的"总是允许"顺带放行了另一个，而弹窗里没提过它。
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let client = hanging_client(tx).await;
+
+        let hub = McpHub::new();
+        insert_ready(
+            &hub,
+            "srv",
+            client,
+            vec![tool_def("dup"), tool_def("dup"), tool_def("other")],
+        )
+        .await;
+
+        let names: Vec<String> = hub.tools().await.iter().map(|t| t.name().into()).collect();
+        assert_eq!(names, vec!["mcp__srv__dup", "mcp__srv__other"]);
+    }
 
     #[test]
     fn 找不到命令时把_path_问题说清楚() {

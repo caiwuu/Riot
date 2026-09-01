@@ -454,17 +454,118 @@ fn discards_output(redirect: tree_sitter::Node, src: &[u8]) -> bool {
 fn redirect_target_risk(redirect: tree_sitter::Node, src: &[u8]) -> Option<SafetyKind> {
     let mut cur = redirect.walk();
     for c in redirect.children(&mut cur) {
-        if c.kind() != "word" {
+        // `[约束]` 引号形态一个都不能漏。只认 `word` 的话
+        // `echo evil >> '~/.zshrc'` 会从 SensitiveRedirect（对放行免疫）
+        // 退化成普通 Redirect（可被压过）—— 加一对引号就是一条整层绕过,
+        // 而引号是 shell 里最自然的写法,模型自己就常这么写。
+        if !matches!(
+            c.kind(),
+            "word" | "raw_string" | "string" | "concatenation" | "ansi_c_string"
+        ) {
             continue;
         }
-        let raw = c.utf8_text(src).ok()?;
+        let Ok(raw) = c.utf8_text(src) else {
+            continue;
+        };
         // `~` 不展开也能判 —— is_shell_rc 之类看的是最后一段文件名。
         // 重定向就是写,`read_only = false`。
-        if let Some(k) = crate::safety::write_target_risk(std::path::Path::new(raw), false) {
+        let literal = unquote(raw);
+        if let Some(k) = crate::safety::write_target_risk(std::path::Path::new(&literal), false) {
             return Some(k);
         }
     }
     None
+}
+
+/// 剥掉 shell 引号，还原参数的字面值。
+///
+/// `[约束]` 安全扫描**必须**用这个函数的结果,规则匹配**必须不用** ——
+/// 两者要的东西相反。规则匹配比的是用户写在配置里的模式,那是原文;
+/// 安全扫描要判的是"这条命令实际会碰哪个文件",而 `cp payload
+/// '.riot/hooks.json'` 里带引号的原文和任何一份敏感清单都对不上。
+/// 少了这一步,给路径加一对引号就是整层绕过。
+///
+/// 只处理**字面量**引号,不做任何展开:`$VAR`、`$(...)`、`<(...)` 在进到
+/// 这里之前已经被 [`Analysis::TooComplex`] 拦掉了（见 `ALLOWED_NAMED`）,
+/// 所以走到这里的参数一定是纯字面的,逐字符还原就是准确的。
+///
+/// `$'...'` 里的 `\xHH` 也要解 —— 那是把 `.zshrc` 写成 `$'\x2ezshrc'`
+/// 的唯一现实形态,不解等于给绕过留一扇小门。
+pub(super) fn unquote(arg: &str) -> String {
+    let mut out = String::with_capacity(arg.len());
+    let mut it = arg.chars().peekable();
+
+    while let Some(c) = it.next() {
+        match c {
+            // 单引号内没有任何转义，整段原样取
+            '\'' => out.extend(it.by_ref().take_while(|&c| c != '\'')),
+            '"' => {
+                while let Some(c) = it.next() {
+                    match c {
+                        '"' => break,
+                        // 双引号内反斜杠只对这几个字符有转义作用，
+                        // 其余场合它就是一个普通反斜杠
+                        '\\' => match it.peek() {
+                            Some(&n @ ('$' | '`' | '"' | '\\' | '\n')) => {
+                                it.next();
+                                out.push(n);
+                            }
+                            _ => out.push('\\'),
+                        },
+                        other => out.push(other),
+                    }
+                }
+            }
+            '\\' => {
+                if let Some(n) = it.next() {
+                    out.push(n);
+                }
+            }
+            // ANSI-C 引用 `$'...'`。`$` 后面不是引号时它只是个普通字符 ——
+            // 真正的变量展开是 `expansion` 节点，早被拦下了。
+            '$' if it.peek() == Some(&'\'') => {
+                it.next();
+                push_ansi_c(&mut it, &mut out);
+            }
+            other => out.push(other),
+        }
+    }
+
+    out
+}
+
+/// `$'...'` 的转义解码。只解和路径伪装相关的那几种。
+fn push_ansi_c(it: &mut std::iter::Peekable<std::str::Chars<'_>>, out: &mut String) {
+    while let Some(c) = it.next() {
+        match c {
+            '\'' => break,
+            '\\' => match it.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => out.push('\r'),
+                Some('x') => {
+                    let mut hex = String::new();
+                    while hex.len() < 2 && it.peek().is_some_and(char::is_ascii_hexdigit) {
+                        if let Some(h) = it.next() {
+                            hex.push(h);
+                        }
+                    }
+                    match u8::from_str_radix(&hex, 16) {
+                        Ok(b) => out.push(char::from(b)),
+                        // 解不出来就把原文放回去，宁可让清单多看一段字符串，
+                        // 也不要静默吞掉一段可能是路径的内容
+                        Err(_) => {
+                            out.push_str("\\x");
+                            out.push_str(&hex);
+                        }
+                    }
+                }
+                Some(other) => out.push(other),
+                None => break,
+            },
+            other => out.push(other),
+        }
+    }
 }
 
 fn classify(kind: &str) -> ComplexReason {

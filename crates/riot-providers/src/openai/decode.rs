@@ -15,6 +15,17 @@ use riot_protocol::provider::{ProviderError, ProviderEvent};
 use super::wire::{WireChunk, WireUsage};
 use crate::sse::SseEvent;
 
+/// 一条响应里最多认多少个并行工具调用。
+///
+/// `[约束]` 这是内存闸门，不是协议限制。`index` 由服务端说了算，而
+/// `tools.resize(index + 1, None)` 会照单全收：一个 `"index": 1e12`
+/// 的帧就是一次上千亿元素的分配 —— capacity overflow 直接 panic，
+/// 分配失败则是 abort，后者连 catch_unwind 都拦不住，整个应用消失。
+///
+/// 1024 远高于真实并行度（模型一轮吐几十个 tool_call 已经算多），
+/// 超限的帧当坏帧丢弃，不影响同一条流里编号正常的工具。
+const MAX_TOOL_CALLS: usize = 1024;
+
 #[derive(Debug, Default, Clone)]
 struct ToolAcc {
     id: String,
@@ -122,6 +133,10 @@ impl StreamDecoder {
             }
 
             for tc in choice.delta.tool_calls.unwrap_or_default() {
+                if tc.index >= MAX_TOOL_CALLS {
+                    tracing::warn!(index = tc.index, "工具调用 index 超出上限，丢弃这一帧");
+                    continue;
+                }
                 if self.tools.len() <= tc.index {
                     self.tools.resize(tc.index + 1, None);
                 }

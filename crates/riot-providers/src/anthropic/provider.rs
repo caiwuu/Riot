@@ -52,6 +52,26 @@ pub struct AnthropicConfig {
     pub sampling: crate::SamplingParams,
 }
 
+/// `[约束]` 手写而不是 derive：这个结构体里有明文 API key，而 `Debug`
+/// 只要存在，任何一处 `tracing::debug!(?config)` 就会把密钥写进日志文件 ——
+/// 日志会被用户贴进 issue，密钥就此公开。两侧配置的口径必须一致，
+/// 否则"这边能打那边不能打"迟早被人当成 bug 修成 derive。
+impl std::fmt::Debug for AnthropicConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnthropicConfig")
+            .field("base_url", &self.base_url)
+            .field("api_path", &self.api_path)
+            .field("api_key", &"<redacted>")
+            .field("api_version", &self.api_version)
+            .field("fallback_model", &self.fallback_model)
+            .field("idle_timeout", &self.idle_timeout)
+            .field("retry", &self.retry)
+            .field("is_subscription", &self.is_subscription)
+            .field("sampling", &self.sampling)
+            .finish()
+    }
+}
+
 impl Default for AnthropicConfig {
     fn default() -> Self {
         Self {
@@ -273,7 +293,21 @@ fn decode_stream(
         while let Some(chunk) = bytes.next().await {
             match chunk {
                 Ok(bytes) => {
-                    for sse in parser.push(&bytes) {
+                    // 解析器判定流不可信（帧无限长、总量爆表）时必须就地终止：
+                    // 继续读下去就是替对面把内存吃光。
+                    let events = match parser.push(&bytes) {
+                        Ok(evs) => evs,
+                        Err(e) => {
+                            for ev in decoder.finish() {
+                                yield ev;
+                            }
+                            yield ProviderEvent::Error(ProviderError::Transport {
+                                message: e.to_string(),
+                            });
+                            return;
+                        }
+                    };
+                    for sse in events {
                         for ev in decoder.push(&sse) {
                             yield ev;
                         }
@@ -636,6 +670,24 @@ mod tests {
 
         assert_eq!(t.call_count(), 0);
         assert!(events.is_empty(), "取消不产生错误事件，主循环自己会发 Done");
+    }
+
+    #[test]
+    fn 配置的_debug_不打印密钥() {
+        // 现在没有打印点，所以这不是现实泄漏 —— 但只要 Debug 存在，
+        // 哪天有人加一句 `tracing::debug!(?config)` 就够了，而那行代码
+        // 在 review 里看起来毫无问题。
+        let cfg = AnthropicConfig {
+            api_key: "sk-ant-绝密".into(),
+            ..Default::default()
+        };
+        let printed = format!("{cfg:?}");
+        assert!(!printed.contains("sk-ant-绝密"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
+        assert!(
+            printed.contains("api.anthropic.com"),
+            "非密字段要照常打出来，否则调试时这个 Debug 没用：{printed}"
+        );
     }
 
     #[tokio::test(start_paused = true)]

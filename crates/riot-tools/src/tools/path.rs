@@ -147,3 +147,106 @@ async fn resolve_parent(absolute: &Path, ctx: &ToolContext) -> Result<Option<Pat
 pub fn display_relative(path: &Path, cwd: &Path) -> String {
     path.strip_prefix(cwd).unwrap_or(path).display().to_string()
 }
+
+/// 解析之后，这条路径是不是"换了个人"。
+///
+/// `[约束]` 每一个会落盘或读取内容的工具，在真正动手之前都要过这一道。
+///
+/// 权限层判定用的是模型给的**原始字符串**（走
+/// [`riot_protocol::tool::Tool::target_path`]），而真正读写用的是
+/// `canonicalize` 之后的路径 —— 中间隔着一个符号链接。工作区里一个名叫
+/// `docs/notes.md` 的链接指向 `~/.ssh/authorized_keys`：
+/// [`riot_permissions::safety`] 看到的是 `docs/notes.md`（无风险），
+/// acceptEdits 下自动放行，落盘落在 `authorized_keys` 上。默认模式也不
+/// 安全 —— 弹窗上显示的是 `docs/notes.md`，用户批准的路径和实际写入的
+/// 路径不是同一个。而链接的来源不需要是本地攻击者:git 能把符号链接提交
+/// 进仓库，clone 一个别人的仓库就够了。
+///
+/// 这里只拦"解析之后才变敏感"的情形。原始路径本来就敏感时不管 ——
+/// 那条已经在权限层被看见、被问过了，再拦一次就是把用户刚给的授权作废。
+///
+/// 收敛成**失败**而不是询问，是因为这里已经在 `call()` 里、过了闸，
+/// 没有再问一次的通道。给模型的话要指向出路:用真实路径重来一次，
+/// 那样用户在弹窗里看到的就是他实际要批准的东西。
+pub fn detour_risk(raw: &str, resolved: &Path, cwd: &Path, read_only: bool) -> Option<String> {
+    use riot_permissions::safety::write_target_risk;
+
+    let given = Path::new(raw);
+    let literal = if given.is_absolute() {
+        given.to_path_buf()
+    } else {
+        cwd.join(given)
+    };
+
+    // 字面路径本身就敏感 —— 权限层已经看见了，这里不重复拦。
+    if write_target_risk(&literal, read_only).is_some() {
+        return None;
+    }
+
+    let kind = write_target_risk(resolved, read_only)?;
+    Some(format!(
+        "{raw} 解析之后指向 {}，而这是一个敏感目标（{}）。\
+         授权是按你给的那个路径做的，和实际会被改动的文件不是同一个，\
+         所以这次调用没有执行。如果确实要动它，请直接用真实路径重新调用。",
+        resolved.display(),
+        riot_permissions::safety::describe(kind, resolved)
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn detour(raw: &str, resolved: &str) -> Option<String> {
+        detour_risk(raw, Path::new(resolved), Path::new("/work"), false)
+    }
+
+    #[test]
+    fn 解析后才变敏感的路径被拦下() {
+        // git 能把符号链接提交进仓库 —— clone 一个别人的仓库就够了。
+        // acceptEdits 下这次写入会自动放行，而 safety 只看到 notes.md。
+        let msg = detour("docs/notes.md", "/Users/u/.ssh/authorized_keys")
+            .expect("链接指向 SSH 目录，必须拦");
+        assert!(
+            msg.contains("authorized_keys"),
+            "要把真实目标说出来，否则模型不知道发生了什么：{msg}"
+        );
+    }
+
+    #[test]
+    fn 字面上就敏感的路径不重复拦() {
+        // 这条已经在权限层被看见、被问过了。再拦一次等于把用户刚给的
+        // 授权作废 —— 用户点了"允许"，工具却报错。
+        assert_eq!(detour("/Users/u/.zshrc", "/Users/u/.zshrc"), None);
+        assert_eq!(detour(".git/hooks/pre-commit", "/work/.git/hooks/pre-commit"), None);
+    }
+
+    #[test]
+    fn 普通文件的解析结果不误伤() {
+        // 每次 Write 都会过这一道，误报一次就是一次莫名其妙的失败
+        assert_eq!(detour("src/main.rs", "/work/src/main.rs"), None);
+        assert_eq!(detour("../sibling/a.rs", "/sibling/a.rs"), None);
+    }
+
+    #[test]
+    fn 相对路径按_cwd_判字面形态() {
+        // 相对路径不先拼 cwd 的话，`.zshrc`（工作区内的普通文件）会和
+        // 解析出来的 `/Users/u/.zshrc` 一样敏感，于是判成"本来就敏感"
+        // 而放过真正的绕道
+        let msg = detour("notes", "/Users/u/.zshrc").expect("解析后指向 shell rc");
+        assert!(msg.contains(".zshrc"), "{msg}");
+    }
+
+    #[test]
+    fn 读路径上凭证同样要拦() {
+        // 凭证是"读到即泄露"，一个指向私钥的链接能把它送进对话历史
+        let msg = detour_risk(
+            "docs/readme.md",
+            Path::new("/Users/u/.ssh/id_rsa"),
+            Path::new("/work"),
+            true,
+        )
+        .expect("读也要拦");
+        assert!(msg.contains("id_rsa"), "{msg}");
+    }
+}

@@ -18,6 +18,7 @@
 
 pub mod client;
 pub mod hub;
+mod lines;
 mod stdio;
 pub mod tool;
 pub mod wire;

@@ -93,6 +93,9 @@ export function TerminalPanel({
       // 排着队的 fit 必须撤掉：安静期里关标签的话，它会打在已经
       // dispose 的 term 上。
       window.clearTimeout(inst.fitTimer);
+      // 先立标记再 dispose：下面那句 termClose 要等宿主处理完才会停止
+      // 推送，这中间到达的 data 事件全靠这个标记挡住（见 onEvent）。
+      inst.disposed = true;
       inst.term.dispose();
       // shell 自己退出（exit/崩溃）时宿主已经收过尸，再发 close 只是
       // 对一个不存在的 id 的无操作 —— 但没必要发。
@@ -345,6 +348,7 @@ export function TerminalPanel({
       pending: [],
       ro: new ResizeObserver(() => scheduleFit(inst)),
       fitTimer: 0,
+      disposed: false,
     };
     instances.current.set(tab.uid, inst);
 
@@ -387,6 +391,10 @@ export function TerminalPanel({
     // 两条都到时"已退出"那行别写两遍。
     let sawExit = false;
     const onEvent = (ev: TermEvent) => {
+      // `[约束]` 这一句不能省。Channel 的解绑要等宿主处理完 termClose，
+      // 关标签到真正停推之间还会来几条 data —— 往 dispose 过的 xterm 写
+      // 会抛，而这里是 Channel 回调，外面没有任何人接这个异常。
+      if (inst.disposed) return;
       if (ev.kind === "data") {
         term.write(b64ToBytes(ev.data));
         return;
@@ -417,6 +425,8 @@ export function TerminalPanel({
       termAttach(id, onEvent)
         .then(() => void termResize(id, term.cols, term.rows).catch(() => {}))
         .catch((e: unknown) => {
+          // 等待期间标签可能已经关了，同 onEvent 的理由。
+          if (inst.disposed) return;
           term.write(
             `\r\n\x1b[31m接不上这个终端。它对应的服务可能已经退出了，可以关掉这个标签。（${String(e)}）\x1b[0m\r\n`,
           );
@@ -444,6 +454,7 @@ export function TerminalPanel({
         void termResize(id, term.cols, term.rows).catch(() => {});
       })
       .catch((e: unknown) => {
+        if (inst.disposed) return;
         term.write(
           `\r\n\x1b[31m终端没能启动，可以关掉这个标签再开一个试试。（${String(e)}）\x1b[0m\r\n`,
         );
@@ -664,6 +675,13 @@ interface Inst {
   ro: ResizeObserver;
   /** scheduleFit 的安静期计时器。0 = 没有排着队的 fit。 */
   fitTimer: number;
+  /**
+   * `term` 已经 dispose，别再往它写东西。
+   *
+   * 光靠 `instances` 里有没有这条记录判断不住：宿主还在往这个 Channel
+   * 推数据，而 onEvent 闭包持有的是 term 本身，不查 Map。
+   */
+  disposed: boolean;
 }
 
 /**
@@ -694,6 +712,7 @@ function scheduleFit(inst: Inst) {
  * 终端缩成 1 列 —— 切回来之前的所有输出都按 1 列折行，historial 全花。
  */
 function safeFit(inst: Inst) {
+  if (inst.disposed) return;
   const dims = inst.fit.proposeDimensions();
   if (dims && dims.cols > 2 && dims.rows > 1) inst.fit.fit();
 }

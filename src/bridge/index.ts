@@ -10,7 +10,7 @@
  * 只配前者的话，逃逸会从动态那半漏过去（曾漏进过一处系统通知）。
  */
 
-import { Channel, invoke } from "@tauri-apps/api/core";
+import { Channel, type InvokeArgs, invoke as tauriInvoke } from "@tauri-apps/api/core";
 
 import type {
   AgentEvent,
@@ -49,6 +49,97 @@ export type {
   ScheduledTask,
   WhenSpec,
 };
+
+/* ── IPC 期限 ───────────────────────────────── */
+
+/**
+ * 宿主没按时回话。
+ *
+ * 单独一个类型而不是裸 `Error`：调用方要能分开处理"宿主说不行"和
+ * "宿主一声不吭" —— 前者的文案由宿主给（已经是给人看的话），后者
+ * 得由前端自己解释，且多半还要提示"这一步的结果不明，可以重试"。
+ */
+export class IpcTimeoutError extends Error {
+  /** 超时的那条命令名。排查时唯一有用的线索，别丢。 */
+  readonly command: string;
+  readonly timeoutMs: number;
+
+  constructor(command: string, timeoutMs: number) {
+    super(`宿主没有响应：${command} 超过 ${Math.round(timeoutMs / 1000)} 秒没有返回。`);
+    this.name = "IpcTimeoutError";
+    this.command = command;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/** 这个错误是不是"宿主没回"。catch 到的是 unknown，收在这里判。 */
+export function isIpcTimeout(e: unknown): e is IpcTimeoutError {
+  return e instanceof IpcTimeoutError;
+}
+
+/**
+ * 只碰宿主内存或本地小文件的命令。正常都在毫秒级，15 秒是给
+ * 冷启动、磁盘忙、机器在换页留的余量，不是期望值。
+ */
+const T_FAST = 15_000;
+/** 要起进程、走网络、翻整个仓库的命令。 */
+const T_SLOW = 60_000;
+/** 真会跑很久的（内核拿模型做一次摘要）。仍然给期限，理由见 `invoke`。 */
+const T_MODEL = 600_000;
+/**
+ * 不设期限：这些命令**本来就**在等用户点系统对话框（UAC、授权框），
+ * 或者在下载几十上百兆。给它们设期限等于让"用户去倒了杯咖啡"变成
+ * 一条错误提示，而后台那件事还在跑。
+ */
+const NO_DEADLINE = null;
+
+/**
+ * 带期限的 `invoke`。
+ *
+ * `[约束]` bridge 里的每一条命令都必须走这里 —— 名字故意盖住
+ * `@tauri-apps/api` 那个原版（它以 `tauriInvoke` 引入），新加的调用
+ * 照着周围写就自动有期限，不会悄悄漏一条裸 `invoke` 出去。
+ *
+ * 为什么必须有期限：Tauri 的 `invoke` 在宿主那头没有回话时**永远不会
+ * settle**（内核卡死、命令被 ACL 静默丢掉、宿主任务 panic 在了没人接的
+ * 地方）。一个永不 settle 的 promise 意味着调用方的 `finally` 永远不跑，
+ * 而这类失败一声不响：最贵的一处是 `useSession` 的 `ensureInflight` ——
+ * 那把锁卡住之后，看门狗、切回前台、窗口聚焦三条重连路径同时失效，
+ * 界面从此停在「正在生成」，没有任何错误可看。
+ *
+ * 超时不代表宿主没在做那件事，只代表"前端不再等下去了" —— 所以拿到
+ * 这个错误时不能默认"那件事没发生"，见 `useSession` 的 sendFailureText。
+ *
+ * 定时器必须在 settle 时清掉：这些命令里有每秒一次的轮询（browser_state）
+ * 和每帧一次的输入（browser_input），留一串挂着的定时器，页面在后台
+ * 被节流时会攒成一批一起烧。
+ */
+function invoke<T>(
+  command: string,
+  args?: InvokeArgs,
+  timeoutMs: number | null = T_FAST,
+): Promise<T> {
+  const call = tauriInvoke<T>(command, args);
+  if (timeoutMs === null) return call;
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(
+      () => reject(new IpcTimeoutError(command, timeoutMs)),
+      timeoutMs,
+    );
+    call.then(
+      (v) => {
+        window.clearTimeout(timer);
+        resolve(v);
+      },
+      (e: unknown) => {
+        window.clearTimeout(timer);
+        // 原样往外抛。宿主的错误多半是一句给人看的中文，包进 Error
+        // 之后调用方的 `String(e)` 会平白多出 "Error: " 前缀。
+        reject(e);
+      },
+    );
+  });
+}
 
 /** 服务方协议。决定请求格式、认证头和哪些采样参数可发送。
  * 生成类型的别名，不是第二份定义 —— 手写一份的话，Rust 侧加变体时
@@ -190,7 +281,7 @@ export interface AppConfig {
   activeModel: string;
   /** 最近打开过的项目目录，最近的在前。 */
   projects: string[];
-  /** 新会话的默认权限模式。 */
+  /** 新会话的默认权限模式。缺字段走宿主的出厂档（`default_permission_mode`）。 */
   defaultMode?: PermissionMode | null;
   /** 权限弹窗等多久算超时（秒）。超时按拒绝处理，宿主侧夹在 5–3600。 */
   askTimeoutSecs: number;
@@ -222,7 +313,10 @@ export interface AppConfig {
    *
    * 不只是安全设置：权限决策链里"沙箱内自动放行"那一档要它开着才成立，
    * 关掉之后每个非只读命令又回到"要么弹窗、要么全部放行"的二选一。
-   * 目前只有 macOS 能真正生效，其他平台自动降级成不隔离。
+   *
+   * 出厂档按平台分（见宿主的 `SandboxMode::default`）：macOS 用系统自带的
+   * sandbox-exec，装好就能用，默认隔离；Windows 那套要先提权装一次，没装
+   * 的时候开着也激活不了，默认不隔离。没有实现的平台激活时自动降级。
    */
   sandbox: SandboxMode;
   /**
@@ -346,12 +440,15 @@ export function sendTurn(
   /** 输入框里选中的文件引用（那些块），项目内相对路径。 */
   refs: string[] = [],
 ): Promise<string | null> {
-  return invoke<string | null>("send_turn", { sessionId, text, images, refs });
+  // 宽期限：这条要等宿主把会话历史水合起来（长会话是一次磁盘读 + 反
+  // 序列化）。超时会被上层当成"没发出去"，而这条命令误判的代价最大 ——
+  // 宁可多等，也不能让一条已经进了队列的消息在界面上显示成失败。
+  return invoke<string | null>("send_turn", { sessionId, text, images, refs }, T_SLOW);
 }
 
 /** 丢掉这条助手回复及其后的一切，从它前面那条用户消息再跑一轮。 */
 export function regenerateTurn(sessionId: string, messageId: string): Promise<void> {
-  return invoke("regenerate_turn", { sessionId, messageId });
+  return invoke("regenerate_turn", { sessionId, messageId }, T_SLOW);
 }
 
 /**
@@ -437,7 +534,9 @@ export function slashExpand(
 
 /** 手动压缩会话历史（`/compact`）。完成时走事件流的 compacted。 */
 export function compactSession(sessionId: string): Promise<void> {
-  return invoke("session_compact", { sessionId });
+  // 这条在内核里是一次真实的模型调用（给整段历史做摘要），几十秒到
+  // 几分钟都正常。期限只用来兜"内核彻底不回话"。
+  return invoke("session_compact", { sessionId }, T_MODEL);
 }
 
 /** 排队面板的一条插话摘要。images 是图片张数（全量 base64 回传太重）。 */
@@ -478,11 +577,12 @@ export function readImage(path: string): Promise<ImageInput & { name: string }> 
  * 读一个文件的原始字节，给应用内预览用。
  *
  * 宿主走 Tauri 的二进制通道返回（不经 JSON / base64），这里拿到的就是
- * ArrayBuffer。超过宿主的预览上限（128 MB）或读不到时 reject，调用方
- * 把错误文案摆出来并给"用系统应用打开"的退路。
+ * ArrayBuffer。超过宿主的预览上限（32 MB）、落在预览围栏之外、或读不到时
+ * reject，调用方把错误文案摆出来并给"用系统应用打开"的退路。
  */
 export function readFileBytes(path: string): Promise<ArrayBuffer> {
-  return invoke<ArrayBuffer>("read_file_bytes", { path });
+  // 上限 32 MB，从慢盘（外置、网络卷）读满这个量要好几秒。
+  return invoke<ArrayBuffer>("read_file_bytes", { path }, T_SLOW);
 }
 
 /**
@@ -535,9 +635,11 @@ export function sessionChanges(sessionId: string): Promise<FileChange[]> {
  * 会话视角的净改动看上面的 `sessionChanges`。
  */
 export function sessionGitChanges(sessionId: string, base?: string): Promise<GitChanges> {
+  // 大仓库上这是一次全量 diff，冷缓存时以秒计。
   return invoke<GitChanges>(
     "session_git_changes",
     base ? { sessionId, base } : { sessionId },
+    T_SLOW,
   );
 }
 
@@ -604,7 +706,8 @@ export interface UpdateInfo {
 }
 
 export function checkUpdate(): Promise<UpdateInfo> {
-  return invoke<UpdateInfo>("check_update");
+  // 走网络（GitHub Release）。
+  return invoke<UpdateInfo>("check_update", undefined, T_SLOW);
 }
 
 export function getConfig(): Promise<ConfigStatus> {
@@ -612,7 +715,8 @@ export function getConfig(): Promise<ConfigStatus> {
 }
 
 export function setConfig(config: AppConfig): Promise<ConfigStatus> {
-  return invoke<ConfigStatus>("set_config", { config });
+  // 保存会顺带把 MCP 服务器按新配置重建（起进程 + 一次握手）。
+  return invoke<ConfigStatus>("set_config", { config }, T_SLOW);
 }
 
 /** 保存某个 provider 的 API key（宿主写进 0600 的 auth.json）。空字符串删除。 */
@@ -622,7 +726,8 @@ export function setApiKey(providerId: string, key: string): Promise<ConfigStatus
 
 /** 拉取某个 provider 的可用模型列表（GET /v1/models）。 */
 export function listModels(providerId: string): Promise<string[]> {
-  return invoke<string[]>("list_models", { providerId });
+  // 走网络。
+  return invoke<string[]>("list_models", { providerId }, T_SLOW);
 }
 
 /* ── MCP 与 Skills ─────────────────────────── */
@@ -646,7 +751,8 @@ export function mcpStatus(): Promise<McpServerStatus[]> {
 
 /** 手动重连一个 MCP 服务器。 */
 export function mcpRestart(serverId: string): Promise<void> {
-  return invoke("mcp_restart", { serverId });
+  // 起进程 + 握手，`npx`/`uvx` 第一次还要下包。
+  return invoke("mcp_restart", { serverId }, T_SLOW);
 }
 
 /** 当前 MCP 服务器的标准 JSON（`{"mcpServers": {...}}`，各家 README 的通用格式）。 */
@@ -659,7 +765,8 @@ export function mcpExportJson(): Promise<string> {
  * 支持 Claude Desktop / Cursor / Cline / VS Code 的形状。
  */
 export function mcpImportJson(raw: string): Promise<ConfigStatus> {
-  return invoke<ConfigStatus>("mcp_import_json", { raw });
+  // 同 setConfig：导入之后这批服务器会被重建。
+  return invoke<ConfigStatus>("mcp_import_json", { raw }, T_SLOW);
 }
 
 /** 一个技能（或一个解析失败的 SKILL.md，带原因）。 */
@@ -706,7 +813,8 @@ export interface SandboxStatus {
 
 /** 探一次沙箱的真实可用性。只查不改，随时可调。 */
 export function sandboxStatus(): Promise<SandboxStatus> {
-  return invoke<SandboxStatus>("sandbox_status");
+  // 探测要起一次辅助进程。
+  return invoke<SandboxStatus>("sandbox_status", undefined, T_SLOW);
 }
 
 /**
@@ -718,7 +826,8 @@ export function sandboxStatus(): Promise<SandboxStatus> {
  * 慢，而且慢在等用户点对话框 —— 没有超时，取消会以一条给人看的话 reject。
  */
 export function sandboxInstall(): Promise<void> {
-  return invoke("sandbox_install");
+  // 不设期限：全程都在等用户点那两个系统权限确认框。
+  return invoke("sandbox_install", undefined, NO_DEADLINE);
 }
 
 /**
@@ -727,7 +836,8 @@ export function sandboxInstall(): Promise<void> {
  * 和安装一样慢在等用户点对话框；取消会以一条给人看的话 reject。
  */
 export function sandboxUninstall(): Promise<void> {
-  return invoke("sandbox_uninstall");
+  // 同 sandboxInstall：等的是用户点 UAC。
+  return invoke("sandbox_uninstall", undefined, NO_DEADLINE);
 }
 
 /** 一个可下载的能力包。 */
@@ -759,7 +869,8 @@ export type PackProgress =
 
 /** 能力包清单：装了什么、有什么可装。 */
 export function packsStatus(): Promise<PackStatus[]> {
-  return invoke<PackStatus[]>("packs_status");
+  // 要拉远端清单（拉不到时宿主自己收成 manifestError，不 reject）。
+  return invoke<PackStatus[]>("packs_status", undefined, T_SLOW);
 }
 
 /** 下载并安装一个能力包。装完即可用，不需要重启。 */
@@ -769,12 +880,15 @@ export function packsInstall(
 ): Promise<void> {
   const channel = new Channel<PackProgress>();
   channel.onmessage = onProgress;
-  return invoke("packs_install", { id, onProgress: channel });
+  // 不设期限：几十上百兆的下载 + 解压 + 自检，慢网上十几分钟都可能。
+  // 进度有自己的通道，卡没卡从进度条上看得出来，不需要期限来兜。
+  return invoke("packs_install", { id, onProgress: channel }, NO_DEADLINE);
 }
 
 /** 卸载一个能力包，连带摘掉它注册的 MCP 服务器。 */
 export function packsUninstall(id: string): Promise<void> {
-  return invoke("packs_uninstall", { id });
+  // 删几万个小文件，机械盘上不快。
+  return invoke("packs_uninstall", { id }, T_SLOW);
 }
 
 /** 登记一个项目目录（验证并规范化），返回 canonical 根。不创建会话。 */
@@ -829,12 +943,14 @@ export interface HistorySnapshot {
 }
 
 export function getHistory(sessionId: string): Promise<HistorySnapshot> {
-  return invoke<HistorySnapshot>("get_history", { sessionId });
+  // 首次访问要把 transcript 从盘上水合起来，长会话是一次大反序列化。
+  return invoke<HistorySnapshot>("get_history", { sessionId }, T_SLOW);
 }
 
 /** 删除会话（正在跑的轮子会被中断）。幂等。 */
 export function deleteSession(sessionId: string): Promise<void> {
-  return invoke("delete_session", { sessionId });
+  // 要等正在跑的那一轮真正收尾（内核补齐悬空的 tool_result）。
+  return invoke("delete_session", { sessionId }, T_SLOW);
 }
 
 /** 重命名会话。空标题清除手动名，回退到第一条消息。 */
@@ -847,7 +963,8 @@ export function renameSession(sessionId: string, title: string): Promise<void> {
  * 返回被关闭的会话 id。
  */
 export function removeProject(root: string): Promise<string[]> {
-  return invoke<string[]>("remove_project", { root });
+  // 连带关掉这个项目下的每个会话，同 deleteSession 的理由。
+  return invoke<string[]>("remove_project", { root }, T_SLOW);
 }
 
 /* ── 内置浏览器面板 ─────────────────────────── */
@@ -934,7 +1051,12 @@ export function openBrowser(
       data: new Uint8Array(buf, 8),
     });
   };
-  const ready = invoke<PanelState>("browser_open", { sessionId, onFrame: channel }).then(
+  // 宽期限：第一次开要拉起整个浏览器进程。
+  const ready = invoke<PanelState>(
+    "browser_open",
+    { sessionId, onFrame: channel },
+    T_SLOW,
+  ).then(
     (s) => {
       if (active) onReady?.(s);
     },
@@ -955,16 +1077,17 @@ export function closeBrowser(sessionId: string): Promise<void> {
 }
 
 export function browserNavigate(sessionId: string, url: string): Promise<void> {
-  return invoke("browser_navigate", { sessionId, url });
+  // 下面三条都要等页面加载完，慢站点上几十秒是常态。
+  return invoke("browser_navigate", { sessionId, url }, T_SLOW);
 }
 
 /** 在历史里走一步：-1 后退，+1 前进。返回当前页走完之后的状态。 */
 export function browserHistory(sessionId: string, delta: number): Promise<TabInfo> {
-  return invoke<TabInfo>("browser_history", { sessionId, delta });
+  return invoke<TabInfo>("browser_history", { sessionId, delta }, T_SLOW);
 }
 
 export function browserReload(sessionId: string): Promise<void> {
-  return invoke("browser_reload", { sessionId });
+  return invoke("browser_reload", { sessionId }, T_SLOW);
 }
 
 /** 标签栏 + 工具栏的状态。页面自己跳转时只能靠问，没有通知。 */
@@ -1358,10 +1481,12 @@ export async function pickDirectory(defaultPath?: string): Promise<string | null
  * 设置页传"正在编辑的那个"。成功返回一句人话；失败时错误信息里已带原因。
  */
 export function testConnection(providerId?: string, model?: string): Promise<string> {
-  return invoke<string>("test_connection", {
-    providerId: providerId ?? null,
-    model: model ?? null,
-  });
+  // 真发一次请求，走网络。
+  return invoke<string>(
+    "test_connection",
+    { providerId: providerId ?? null, model: model ?? null },
+    T_SLOW,
+  );
 }
 
 /**
@@ -1371,7 +1496,8 @@ export function testConnection(providerId?: string, model?: string): Promise<str
  * 而那正是最容易配错的一处。
  */
 export function testSearchBackend(baseUrl: string): Promise<string> {
-  return invoke<string>("test_search_backend", { baseUrl });
+  // 同 testConnection：走网络。
+  return invoke<string>("test_search_backend", { baseUrl }, T_SLOW);
 }
 
 /**
