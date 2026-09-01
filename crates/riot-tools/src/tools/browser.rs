@@ -6,6 +6,18 @@
 //! 真正干活的在宿主（[`riot_protocol::browser::BrowserAccess`]），这一层
 //! 只做三件事:参数校验、权限判定、把结果整形成给模型的样子。
 //!
+//! # 这一组工具都不弹面板
+//!
+//! `[约束]` 用户看不到这里发生的事，除非模型显式调
+//! [`ShowBrowser`](super::preview::ShowBrowser)。前端一度按 `Browser` 这个
+//! 名字前缀猜"该把抽屉弹出来"，结果 [`BrowserSecrets`]、[`BrowserFuzz`] 这类
+//! 纯后台分析在抢用户的屏幕，连明说"不切走用户当前看的那一页"的
+//! [`BrowserReadTab`] 也在抢。判断归模型 —— 只有它知道这一步是"给你看"
+//! 还是"我自己查"。
+//!
+//! 唯一的例外是 [`BrowserHandoff`]:它请用户**在面板里亲自操作**（登录、
+//! 验证码），面板不出来的话那张卡是在让人对着看不见的东西动手。
+//!
 //! # 权限:和 WebFetch 共用同一份域名同意
 //!
 //! `[约束]` 导航用的内容键 http(s) 是 `domain:<host>`，**和 WebFetch 完全一致**。
@@ -74,7 +86,10 @@ impl Tool for BrowserNavigate {
          BrowserConsole 看报错，用 BrowserClick / BrowserType 操作页面。\
          适合验证自己刚改完的前端。\
          `url` 必须带协议；本地开发服务器用 `http://localhost:端口/...`，不要改成 https。\
-         本地 HTML / 静态页用 `file:///绝对路径`，也可以直接给本机绝对路径。"
+         本地 HTML / 静态页用 `file:///绝对路径`，也可以直接给本机绝对路径。\
+         \n\n\
+         用户**看不到**你在浏览器里干的事:这一组工具都不会把浏览器面板弹到\
+         他面前。想让他看这一页，导航完再调一次 ShowBrowser。"
             .to_owned()
     }
 

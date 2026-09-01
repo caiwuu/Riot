@@ -9,7 +9,7 @@
 import { useContext } from "react";
 
 import { type ChipSeg, chipAttrs, chipClass } from "../lib/chips";
-import { joinRoot, looksAbsPath } from "../pathDisplay";
+import { isDirRef, joinRoot, looksAbsPath } from "../pathDisplay";
 import { openFilePreview } from "./FilePreview";
 import { ProjectRootContext } from "./Markdown";
 
@@ -49,7 +49,8 @@ export function FileChip({ path, preview = false }: { path: string; preview?: bo
   // 引用块记的是项目内相对路径，预览要拼成绝对的。
   const root = useContext(ProjectRootContext);
   const seg: ChipSeg = { kind: "ref", value: path };
-  if (!preview) return <Chip seg={seg} />;
+  // 目录没有单文件内容可预览，点开只会落到"打不开"。
+  if (!preview || isDirRef(path)) return <Chip seg={seg} />;
   const full = looksAbsPath(path) ? path : joinRoot(root, path);
   return <Chip seg={seg} title={`预览 ${path}`} onClick={() => openFilePreview(full)} />;
 }

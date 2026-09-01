@@ -792,6 +792,17 @@ export function probeDirs(paths: string[]): Promise<string[]> {
   return invoke<string[]>("probe_dirs", { paths });
 }
 
+/**
+ * 哪些路径现在是目录。引用块靠它决定画文件夹图标。
+ *
+ * 复用 `probe_dirs`（它本就是 `!is_dir` 的过滤），不另开命令。
+ */
+export async function existingDirs(paths: string[]): Promise<Set<string>> {
+  if (paths.length === 0) return new Set();
+  const notDir = new Set(await probeDirs(paths));
+  return new Set(paths.filter((p) => !notDir.has(p)));
+}
+
 /** 所有活着的会话。启动或刷新后用它对齐侧边栏。 */
 export function listSessions(): Promise<SessionInfo[]> {
   return invoke<SessionInfo[]>("list_sessions");

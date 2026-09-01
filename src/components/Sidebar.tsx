@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { SessionInfo } from "../bridge";
+import { useImeGuard } from "../hooks/useImeGuard";
 import { basename } from "../pathDisplay";
 import { Chevron } from "./Chevron";
 import {
@@ -242,6 +243,8 @@ function ProjectGroup(
     recency,
   } = props;
   const name = basename(root) || root;
+  // 同一时刻只有一行在改名，一个 guard 够用。
+  const ime = useImeGuard();
   // 刚聊过的在上面；并列时退回创建序。
   const ordered = [...sessions].sort((a, b) => {
     const ra = recency[a.id] ?? 0;
@@ -312,7 +315,11 @@ function ProjectGroup(
                 defaultValue={s.title ?? ""}
                 autoFocus
                 onFocus={(e) => e.currentTarget.select()}
+                onCompositionStart={ime.onCompositionStart}
+                onCompositionEnd={ime.onCompositionEnd}
                 onKeyDown={(e) => {
+                  // 组字中的回车确认候选词、Esc 取消候选，都不该动这次改名。
+                  if (ime.isComposing(e)) return;
                   if (e.key === "Enter") onRenameSubmit(s.id, e.currentTarget.value);
                   if (e.key === "Escape") onRenameCancel();
                 }}

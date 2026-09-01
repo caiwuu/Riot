@@ -175,6 +175,9 @@ export function summarize(t: Tool): string {
       return short(str("path") || str("file_path"));
     case "Grep":
       return `${str("pattern")}${str("path") ? ` 在 ${short(str("path"))}` : ""}`;
+    // 不带参数。不写这条会落到 default，摘要行是空的。
+    case "ShowBrowser":
+      return "打开浏览器面板";
     case "BrowserNavigate":
       return short(str("url"), 80);
     case "BrowserClick": {

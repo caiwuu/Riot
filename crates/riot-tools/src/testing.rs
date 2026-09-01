@@ -521,6 +521,9 @@ pub fn test_scheduler_with_fs(
 pub struct FakeBrowser {
     /// 截图返回的 base64。
     pub shot: String,
+    /// [`riot_protocol::browser::BrowserAccess::current_url`] 的应答。
+    /// 空串 = 没起来/一页都没有，和真实实现一致。
+    pub url: String,
     /// 交互（click/type/key/scroll）的应答。
     /// `None` = 报"不可用"；`Some(Err(msg))` = Target 错误（编号失效那类）。
     pub interact: Option<Result<String, String>>,
@@ -584,7 +587,7 @@ impl riot_protocol::browser::BrowserAccess for FakeBrowser {
         ))
     }
     async fn current_url(&self) -> String {
-        String::new()
+        self.url.clone()
     }
     async fn click(
         &self,

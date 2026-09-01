@@ -14,7 +14,7 @@
 //! Composer 的编辑器机械（光标、退格、方向键）和 Transcript 的渲染都不用动
 //! —— 它们只认 `data-chip`，不认具体是哪一种。
 
-import { basename } from "../pathDisplay";
+import { basename, isDirRef } from "../pathDisplay";
 import type { Seg } from "./promptText";
 
 /** 块的种类。`text` 之外的每种 `Seg` 都是一种块。 */
@@ -96,6 +96,9 @@ export interface ChipAttrs {
 /**
  * `value` 之外还要存的那一份，没有就是 null。
  *
+ * 引用块：目录路径以 `/` 结尾（见 `isDirRef`），这里落成 `dir` 给 CSS
+ * 换文件夹图标。回读不靠这份 —— 路径本身已经带着约定。
+ *
  * 元素块存完整描述：`data-label` 是**截断过**的显示文本，拿它回读会把描述
  * 永久截短 —— 发给模型的 `【…】` 标记也就跟着短了。
  *
@@ -105,6 +108,9 @@ export interface ChipAttrs {
 function chipExtra(seg: ChipSeg): string | null {
   switch (seg.kind) {
     case "ref":
+      // 目录块用 `data-extra="dir"` 换图标（见 styles.css 的 `.chip-ref`）。
+      // 认不认目录看路径是不是以 `/` 结尾，约定见 `isDirRef`。
+      return isDirRef(seg.value) ? "dir" : null;
     case "cmd":
       return null;
     case "elem":

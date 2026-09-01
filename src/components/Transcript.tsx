@@ -26,6 +26,7 @@ import {
 } from "react";
 
 import type { PermissionAsk, PermissionResponse } from "../bridge";
+import { useImeGuard } from "../hooks/useImeGuard";
 import type { Item, TextItem } from "../hooks/useSession";
 import {
   caretToEnd,
@@ -119,6 +120,7 @@ function FindBar({
   const hitsRef = useRef<Range[]>([]);
   const [total, setTotal] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const ime = useImeGuard();
 
   const highlights = (CSS as unknown as { highlights?: Map<string, unknown> }).highlights;
 
@@ -202,7 +204,12 @@ function FindBar({
           value={query}
           placeholder="在会话中查找"
           onChange={(e) => run(e.target.value)}
+          onCompositionStart={ime.onCompositionStart}
+          onCompositionEnd={ime.onCompositionEnd}
           onKeyDown={(e) => {
+            // 组字中的回车是确认候选、Esc 是收候选列表 —— 都不该动查找条，
+            // 尤其 Esc：那会把整个查找关掉，用户只是想撤掉一个选词框。
+            if (ime.isComposing(e)) return;
             if (e.key === "Enter") {
               e.preventDefault();
               step(e.shiftKey ? -1 : 1);
@@ -669,9 +676,13 @@ export function Transcript({
         )}
 
         {thinking && !liveFold ? <ThinkingBlock text={thinking} live /> : null}
+        {/* animated：正在流的这一条里，新长出来的块逐个淡入 —— token
+            是成撮到的，不淡的话是一坨一坨往外蹦。落定成 Row 之后就是
+            普通历史消息，不再带这个开关（见 styles.css 的
+            .md[data-md-animated]）。 */}
         {streaming ? (
           <div className="msg assistant">
-            <Markdown text={streaming} />
+            <Markdown text={streaming} animated />
           </div>
         ) : null}
         {/* 计划边写边显示，批准卡到手后再换成带按钮的那张。 */}

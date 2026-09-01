@@ -15,6 +15,7 @@ import {
   type ConfigStatus,
   decodePickFromComposer,
   decodePlainFromComposer,
+  existingDirs,
   hasActiveKey,
   type ImageInput,
   type PermissionMode,
@@ -46,6 +47,7 @@ import {
   fmtTokens,
 } from "../lib/contextWindow";
 import { type ChipSeg, isChipSeg } from "../lib/chips";
+import { asDirRef } from "../pathDisplay";
 import {
   caretToEnd,
   dropQueryAtCaret,
@@ -919,6 +921,8 @@ export function Composer({
     // 非图片文件走和 `@` 一样的引用块：都是"用户点名了这个文件"，
     // 没道理一个变成块、另一个变成一串裸路径。项目内的收成相对路径，
     // 块上只显示文件名，长路径不会把输入框撑变形。
+    // 目录路径补上结尾 `/`：图标、发出去的 `@路径/`、气泡回读都靠它
+    // 和文件区分（见 `isDirRef`），否则粘贴一个文件夹也会画成文件图标。
     if (files.length) {
       const el = ref.current;
       if (el) {
@@ -929,10 +933,15 @@ export function Composer({
         const inside =
           sel && sel.rangeCount > 0 && el.contains(sel.getRangeAt(0).startContainer);
         if (!inside) caretToEnd(el);
+        const dirs = await existingDirs(files).catch(() => new Set<string>());
         for (const p of files) {
           // 两种分隔符都认:Windows 上拖进来的是 `C:\proj\a.md`。
           const inWs = p.startsWith(`${workspace}/`) || p.startsWith(`${workspace}\\`);
-          insertChipAtCaret(el, { kind: "ref", value: inWs ? p.slice(workspace.length + 1) : p });
+          const value = inWs ? p.slice(workspace.length + 1) : p;
+          insertChipAtCaret(el, {
+            kind: "ref",
+            value: dirs.has(p) ? asDirRef(value) : value,
+          });
         }
         sync();
       }

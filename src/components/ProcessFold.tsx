@@ -116,7 +116,8 @@ function foldSummary(items: FoldItem[]): string {
         web++;
         break;
       default:
-        if (it.name.startsWith("Browser")) browser++;
+        // ShowBrowser 名字上没有 Browser 前缀，但它就是浏览器那一路的一步。
+        if (it.name.startsWith("Browser") || it.name === "ShowBrowser") browser++;
         else other++;
     }
   }
@@ -340,7 +341,8 @@ export function ThinkingBlock({ text, live }: { text: string; live?: boolean }) 
       </button>
       <SmoothFold open={open}>
         <div className="think-body">
-          <Markdown text={text} breaks />
+          {/* 展开着看直播的思考同样按块淡入，和正文一个待遇。 */}
+          <Markdown text={text} breaks animated={!!live} />
         </div>
       </SmoothFold>
     </div>

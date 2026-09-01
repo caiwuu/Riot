@@ -92,6 +92,31 @@
   --scrollbar-thumb: #ffffff12;
   --scrollbar-thumb-hover: #ffffff22;
 
+  /* 动效表：全应用的时长和缓动只从这里取。
+   *
+   * 之前是十档散落的字面量（0.05 / 0.1 / 0.12 / 0.14 / 0.15 / 0.2 /
+   * 0.22 / 0.24 / 0.25 / 0.3）配四种缓动，同一次交互里两个属性用不同
+   * 节奏是常事 —— 那正是"看着不够顺"的来源，跟曲线好不好看无关。
+   *
+   * 三档就够：反馈 / 揭示 / 布局。拿不准用 --dur-2。 */
+  --dur-1: 0.12s; /* 即时反馈：hover、按下、focus 环 */
+  --dur-2: 0.18s; /* 小块揭示：淡入淡出、图标翻转、开关 */
+  /* 布局位移：面板开合、折叠展开。位移大，需要的时间也长 —— 同一条
+     曲线下 240ms 收得偏急，Codex 桌面端这一档也是 300ms。
+     `[约束]` 改这个值要连着两处 JS 超时一起改，它们都在等这段过渡
+     结束：SlidePanel 的 SLIDE_MS（延迟卸载）、SmoothFold 的
+     transitionend 兜底。短了的话内容会在动画播完之前被拆掉。 */
+  --dur-3: 0.3s;
+
+  /* 减速为主：UI 反馈要"立刻出发、轻轻落地"。默认 ease 是慢起步，
+     用在反馈上天然发糊。 */
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+  /* 布局位移专用：出场果断、收尾更长，位移大时比 --ease-out 稳。 */
+  --ease-panel: cubic-bezier(0.25, 0.8, 0.3, 1);
+  /* 内容淡入。头快尾慢的反向曲线 —— 字立刻可读，最后一点透明度慢慢
+     补齐，不会有"闪一下"的台阶感。数值抄自 Codex 的流式淡入。 */
+  --ease-fade: cubic-bezier(0.37, 0.55, 0.86, 0.88);
+
   /* 层级表：全应用的 z-index 只从这里取。右键菜单在弹窗之上 ——
      弹窗里也能点出右键菜单，反过来不成立。 */
   --z-panel: 20; /* 面板内浮层：拖缝、回到底部、查找条 */
@@ -183,9 +208,11 @@ html[data-vibrancy='mac'] *::-webkit-scrollbar {
   pointer-events: none;
   opacity: 0;
   z-index: calc(var(--z-modal) + 1);
-  transition: opacity 0.22s ease;
+  transition: opacity var(--dur-3) var(--ease-out);
 }
 
+/* 出现要快、消失要慢，所以这里故意不用时长表里的档：滚动条得在滚起来
+   的第一帧就跟上（50ms 已经接近"立刻"），淡出慢一点才不会一停手就消失。 */
 .riot-osb.show {
   opacity: 1;
   transition-duration: 0.05s;
@@ -235,7 +262,7 @@ html[data-vibrancy] .main {
    打架；太实就只是一块灰。65% 下背后是隐约可辨的形状和明暗，侧栏
    自己的色调还认得出。 */
 html[data-vibrancy] .sidebar {
-  background: color-mix(in srgb, var(--bg-nav) 30%, transparent);
+  background: color-mix(in srgb, var(--bg-nav) 50%, transparent);
   /* hover / 选中也得让材质透过去：实心灰会在磨砂上抠出一块不透明的
      补丁，材质的色相进不来。白透明叠在任何底上都是「抬一档」。 */
   --bg-nav-hover: #ffffff0d;
@@ -260,9 +287,14 @@ button {
   color: var(--text);
   border-radius: 8px;
   padding: 6px 14px;
+  /* `color` 必须在里面。少了它的话，同时改底色和字色的 hover
+     （侧栏项、工具栏钮、消息操作键 —— 全应用大半的键都是这样）
+     会一半淡入一半瞬切，同一个元素上两种节奏。那正是"看着廉价"
+     的来源，跟曲线选得好不好没关系。 */
   transition:
-    background 0.12s,
-    border-color 0.12s;
+    background var(--dur-1) var(--ease-out),
+    border-color var(--dur-1) var(--ease-out),
+    color var(--dur-1) var(--ease-out);
 }
 
 button:hover:not(:disabled) {
@@ -426,20 +458,91 @@ pre {
   flex-direction: column;
 }
 
-/* 右侧 / 底栏：内层贴外缘。壳收的是靠主区的那一边，窗口角上的
-   开关不会先被裁掉。 */
+/* 内层贴壳的哪一边。壳只改尺寸不改位置，所以这一个选择决定了收起时
+ * 看到的是"整块被推出去"还是"原地被啃掉"。
+ *
+ * 规则：**内层要贴在壳收缩时会动的那条边上**。贴住不动的那条边，内层
+ * 就原地不动、只是被裁；而它旁边的主区左/上缘是在移动的，两样东西速度
+ * 不一致，观感立刻变成"主区盖过去"而不是"面板让开"。
+ *
+ * 四个面板都按这条规则来，所以只有侧栏用 `end`：
+ * - 侧栏：左缘钉在窗口左边，动的是右缘 → `end`，整条往左推出去。
+ * - 右侧抽屉 / 任务详情：右缘钉在窗口右边，动的是左缘 → 默认 `start`，
+ *   整块往右推出去。
+ * - 底部终端：下缘钉在窗口底，动的是上缘 → 默认 `start`，往下滑出去。
+ *   （这里还有第二个理由：`end` 在纵轴上是"从顶上裁"，而终端的标签栏和
+ *   输出都在上半截，收到一半就被吃光，剩一块和对话区同色的空矩形在缩，
+ *   看起来像凭空消失。）
+ *
+ * `[约束]` 右列走 `start` 有一个代价：标签栏跟着往右滑，而窗口右上角
+ * 那组分栏开关是钉在 .shell 上的绝对定位、全程不动，滑动中标签会从它们
+ * 底下过。靠开关自己的渐变底接住（见 .win-controls.docked::before）——
+ * 没有那块底的话标签和图标会直接叠在一起糊成一团，改这两处要一起看。 */
 .slide-panel.end {
   justify-content: flex-end;
 }
 
-/* transition 只在开合瞬间在场（.animating），拖宽时没有 —— 否则宽度
-   追着鼠标发飘。曲线偏 ease-out：面板出场要果断，收尾要轻。 */
-.slide-panel.animating.ax {
-  transition: width 0.24s cubic-bezier(0.25, 0.8, 0.3, 1);
+/* 过渡**常挂**，只在尺寸被连续改写的场合摘掉（见下一条）。
+ *
+ * `[约束]` 早先是反过来的：平时不挂，开合那一拍才用 JS 加 `.animating`。
+ * 代价是每次开合都得先写 class、再 `void offsetWidth` 强制一次全文档
+ * 布局 —— 规范要求 transition 在尺寸变化**之前**就已经在计算样式里，
+ * 同一次 commit 里既加 class 又改尺寸不产生过渡。常挂之后这一步整个
+ * 不需要，SlidePanel 也不用再为此多一次 paint 前的同步重渲染。
+ * （Codex 桌面端同款：`.panel-animated [data-panel]` 常挂过渡，
+ * `.panel-dragging` 时才 `transition: none`。） */
+.slide-panel.ax {
+  transition: width var(--dur-3) var(--ease-panel);
 }
 
-.slide-panel.animating.ay {
-  transition: height 0.24s cubic-bezier(0.25, 0.8, 0.3, 1);
+.slide-panel.ay {
+  transition: height var(--dur-3) var(--ease-panel);
+}
+
+/* 右列（工作台抽屉 / 任务详情）和主区之间的分隔线。
+ *
+ * 早先这条线是右列每个面板各画一份 border-left（标签栏、空状态、
+ * 浏览器、预览、改动、渗透条、任务详情，七处），竖着叠成一条通高的
+ * 线。收到壳上有三个好处：一条边界只有一份定义，七份各自对齐才不
+ * 露缝的隐患没了；不占布局，面板内容宽度不再被吃掉 1px；哪个面板
+ * 在场都不影响这条线在不在。
+ *
+ * （这七份 border 当初还有一个更急的毛病：那时右列是 anchor=end，
+ * 内层贴窗口右缘、从左边被裁，画在内层左缘的线整段动画都在裁剪区外，
+ * 最后一帧才整条蹦出来。右列改成 start 之后内层左缘和壳左缘重合，
+ * 那个症状本身已经不在了 —— 但上面三条理由仍然成立。）
+ *
+ * 用绝对定位的伪元素，不用 border 也不用 inset 阴影：
+ * - border 会占布局，面板内容宽度跟着变；
+ * - inset 阴影画在元素自己的背景之上、**子内容之下**，而抽屉里每个
+ *   面板都是实底（--bg），会把它整个盖住 —— 试过，一根都看不见。
+ * 伪元素带 z-index 才压得住那些实底。壳收到 0 时 padding box 也是 0，
+ * overflow:hidden 把它裁干净，不用再写一条隐藏规则。 */
+.slide-panel.rail {
+  position: relative;
+}
+
+.slide-panel.rail::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border);
+  z-index: 1;
+  pointer-events: none;
+}
+
+/* 尺寸被连续改写时摘掉，否则面板边缘追着指针/窗口边跑：
+   - 拖分隔线：宽度每帧跟着指针写一次；
+   - 拖窗口：App 的 fit() 每次 resize 都 clamp 右侧面板宽度（见那处
+     注释），慢一拍的话面板右缘会被 .shell 的 overflow 裁掉。
+   两个开关都已经在 DOM 上了（Resizer 自己挂 .dragging，窗口那个由
+   App 在 resize 时打在 html 上），CSS 直接读，不用再走一轮 React。 */
+.shell:has(.rz.dragging) .slide-panel,
+html[data-resizing] .slide-panel {
+  transition: none;
 }
 
 .slide-panel-inner {
@@ -454,8 +557,8 @@ pre {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .slide-panel.animating.ax,
-  .slide-panel.animating.ay,
+  .slide-panel.ax,
+  .slide-panel.ay,
   .tb-traffic,
   .tb-win-slot {
     transition: none;
@@ -509,8 +612,8 @@ pre {
   /* 收起时吃掉 .topbar 的 gap，否则 0 宽占位仍会在标题前留 6px。 */
   margin-right: -6px;
   transition:
-    width 0.24s cubic-bezier(0.25, 0.8, 0.3, 1),
-    margin-right 0.24s cubic-bezier(0.25, 0.8, 0.3, 1);
+    width var(--dur-3) var(--ease-panel),
+    margin-right var(--dur-3) var(--ease-panel);
 }
 
 .tb-traffic.show {
@@ -628,12 +731,37 @@ pre {
   gap: 2px;
 }
 
+/* 右缘贴到 0、留白改用 padding：这一组要一直盖到窗口边，才接得住从
+   底下滑过去的东西（见 ::before）。按钮的视觉位置不变，仍是离边 10px。 */
 .win-controls.docked {
   position: absolute;
   top: 0;
-  right: 10px;
+  right: 0;
+  padding-right: 10px;
+  padding-left: 24px;
   height: 44px;
   z-index: var(--z-panel);
+}
+
+/* 一块和面板同色的底，左侧渐隐。
+ *
+ * 右侧抽屉是"推出"式开合（内层贴壳的左缘，跟着一起走，见
+ * .slide-panel.end 的说明），而这一组开关是钉死在窗口角上的、全程不动
+ * —— 动画里抽屉的标签栏会从它们底下滑过去。没有这块底的话，标签和
+ * 图标直接叠在一起糊成一团；有了它，标签是"没入"而不是被压住，读起来
+ * 就是内容在固定工具栏下面滚过。
+ *
+ * `[约束]` 底要让开最后 1px：顶栏（.topbar）有下边线，实心底盖上去会
+ * 把那条线在这一段抠掉一个缺口 —— 只在抽屉收起时露出来，很难查。
+ * 静止时开关坐在各自预留的空槽里（顶栏的 .tb-win-slot / 标签栏的右
+ * 内边距），底下什么都没有，这块底和背景同色，看不出来。 */
+.win-controls.docked::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 1px 0;
+  background: linear-gradient(to right, transparent, var(--bg) 24px);
+  z-index: -1;
+  pointer-events: none;
 }
 
 /* 6px 呼吸 + 两枚 28px 钮 + 2px 缝。抽屉收起时顶栏才让位；开合跟
@@ -641,7 +769,7 @@ pre {
 .tb-win-slot {
   flex-shrink: 0;
   width: 0;
-  transition: width 0.24s cubic-bezier(0.25, 0.8, 0.3, 1);
+  transition: width var(--dur-3) var(--ease-panel);
 }
 
 .tb-win-slot.show {
@@ -681,7 +809,7 @@ pre {
   position: absolute;
   background: transparent;
   /* 延迟一拍再亮，鼠标扫过时不闪 */
-  transition: background 0.1s 0.15s;
+  transition: background var(--dur-1) var(--ease-out) 0.15s;
 }
 
 .rz-x::after {
@@ -698,9 +826,12 @@ pre {
   width: 100%;
 }
 
-.rz:hover::after,
-.rz.dragging::after {
-  background: var(--accent);
+/* 中性白透明，不用 --accent。那个色的语义是"选中 / 主操作"，而这条线只是
+   "这里能拖"的提示 —— 一条饱和蓝横贯整个窗口高度，比它要提示的那件事响得多。
+   白透明还顺带压住了两侧的底色差：侧栏在 macOS 上是半透的（底下是系统材质），
+   实心灰会在那半边糊成一条突兀的硬边。 */
+.rz:hover::after {
+  background: #ffffff1a;
 }
 
 .booting {
@@ -765,6 +896,17 @@ pre {
   flex-direction: column;
   padding: 0 10px 10px;
   user-select: none;
+  /* 宽度是内联定值，壳（.slide-panel）的宽度动画不该让里面重排一遍。
+     布局引擎自己看不出这一点 —— 父级几何一变就把子树标脏往下走。
+     containment 把这里划成布局根，动画的每一帧省掉整份会话列表。
+
+     `[约束]` 只有确认子树里没有 position: fixed / absolute 后代才能加：
+     任何一档 containment 都会把这个元素变成它们的包含块。侧栏的弹层
+     （右键菜单在 App 层、下拉和提示都 createPortal 到 body）都不在这
+     棵子树里，所以安全。同样的理由**不能**把这条挂到 .slide-panel-inner
+     上一次性覆盖四个面板：终端里的 ConfirmDialog、Git 面板里的
+     FieldSelect 触发钮都住在壳内。 */
+  contain: layout;
 }
 
 /* 侧栏顶栏：跟主区 .topbar 同高，两边才对得齐。开关靠右，贴着自己
@@ -838,7 +980,7 @@ pre {
   /* clip 只裁切，不是滚动容器。hidden 会截住滚轮（再叠
      overscroll-behavior:none 就交不到外层对话流）。 */
   overflow: clip;
-  transition: grid-template-rows 0.2s ease;
+  transition: grid-template-rows var(--dur-3) var(--ease-panel);
 }
 
 .smooth-fold.open {
@@ -868,7 +1010,7 @@ pre {
 .think-head .chevron,
 .fold-head .chevron,
 .tool-head .chevron {
-  transition: transform 0.2s ease;
+  transition: transform var(--dur-2) var(--ease-out);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -967,7 +1109,12 @@ pre {
   color: var(--text-faint);
   border-radius: 6px;
   opacity: 0;
-  transition: opacity 0.1s;
+  /* 这条会整个盖掉基础 button 的那份（类选择器更具体），所以底色和
+     字色要在这里补回来 —— 只写 opacity 的话它自己的 hover 是硬切的。 */
+  transition:
+    opacity var(--dur-1) var(--ease-out),
+    background var(--dur-1) var(--ease-out),
+    color var(--dur-1) var(--ease-out);
   flex-shrink: 0;
   display: grid;
   place-items: center;
@@ -992,6 +1139,16 @@ pre {
 .row-btn:hover {
   background: var(--bg-hover);
   color: var(--text);
+}
+
+/* 会话行、项目行、分组标题行都是 div，吃不到基础 button 那条过渡。
+   它们是鼠标扫过最多的一片区域，硬切最显眼。 */
+.thread,
+.project-head,
+.section-head {
+  transition:
+    background var(--dur-1) var(--ease-out),
+    color var(--dur-1) var(--ease-out);
 }
 
 .thread {
@@ -1260,6 +1417,21 @@ pre {
   visibility: hidden;
   pointer-events: none;
   z-index: 0;
+  /* `visibility: hidden` 只是不画，**布局照做**。保活着的会话最多 4 棵
+     （App 的 KEEP_CHATS），侧栏 240ms 的开合动画里 .main 每帧变宽，
+     等于每帧排四份对话流而用户只看得见一份。content-visibility 让
+     浏览器整棵跳过 —— 盒子还在（inset:0 撑着，尺寸不靠内容），里面
+     不排不画。
+
+     选它而不是 display:none：规范要求 content-visibility 保留渲染状态
+     （滚动位置在内），而 display:none 会把状态连同 DOM 布局一起丢掉。
+
+     `[约束]` 正式包的 WKWebView 一改这类容器状态就可能把 scrollTop
+     清零并冒一次假 scroll（见 Transcript.tsx 顶部 transcriptView 的
+     注释，那里说的是 visibility / position，这是同一类）。防线已经
+     铺好：!armed 时不写位置缓存、切回来 restoreView 二次 rAF 补写。
+     改动这一条之后要在**打包版**上验一遍「翻到半截切走再切回」。 */
+  content-visibility: hidden;
 }
 
 /* 右侧抽屉：全高一列，和主区平级（Codex 同款）。宽度由内联样式给
@@ -1295,7 +1467,6 @@ pre {
      瞬间横向跳一下 —— 看起来像点歪了。左边可以不同：那是标签的起点。 */
   /* 右边让给钉死的窗口开关（10px 边距 + 64px 槽），标签不要钻到下面。 */
   padding: 0 74px 0 8px;
-  border-left: 1px solid var(--border);
   /* 不画下边线（Codex 同款）：顶栏那条横线到抽屉这一列就该停住。以前
      画它是为了和浏览器面板自带的那排页面标签分界，而页面标签早已提到
      这条栏上来了 —— 下面各面板自己的头部行都带边线，不缺这一条；标签
@@ -1431,7 +1602,6 @@ pre {
   justify-content: center;
   gap: 10px;
   padding: 24px;
-  border-left: 1px solid var(--border);
   background: var(--bg);
   overflow-y: auto;
 }
@@ -1482,7 +1652,6 @@ pre {
   max-height: 30%;
   overflow-y: auto;
   border-top: 1px solid var(--border);
-  border-left: 1px solid var(--border);
   background: var(--bg);
   padding: 6px 8px;
   font-size: 12px;
@@ -1551,7 +1720,6 @@ pre {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  border-left: 1px solid var(--border);
   background: var(--bg);
 }
 
@@ -2507,7 +2675,7 @@ pre {
   flex-shrink: 0;
   color: var(--text-faint);
   transform-origin: center;
-  transition: transform 0.12s;
+  transition: transform var(--dur-1) var(--ease-out);
 }
 
 .chevron.open {
@@ -2694,6 +2862,11 @@ pre {
   background: rgba(90, 141, 214, 0.12);
   border: 1px solid rgba(90, 141, 214, 0.35);
   --chip-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.3' stroke-linejoin='round'%3E%3Cpath d='M9 1.8H4.5a1 1 0 0 0-1 1v10.4a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1V5.3L9 1.8z'/%3E%3Cpath d='M8.9 2v3.4h3.4'/%3E%3C/svg%3E");
+}
+
+/* 目录引用：`data-extra="dir"` 由路径结尾 `/` 推导（见 chips.ts）。 */
+.chip-ref[data-extra='dir'] {
+  --chip-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.3' stroke-linejoin='round'%3E%3Cpath d='M1.5 4a1 1 0 011-1h3l1.5 1.5h6a1 1 0 011 1V12a1 1 0 01-1 1h-11a1 1 0 01-1-1V4z'/%3E%3C/svg%3E");
 }
 
 .chip-cmd {
@@ -2891,25 +3064,30 @@ pre {
   color: var(--text);
 }
 
-/* 全屏最浅的一块，靠底色差自己浮起来。代价是两样东西会溶进新底色，
-   所以就地各抬一档：hover 反馈（图标键、pill、停止键都走 --bg-hover），
-   以及 pill 的轮廓（--border 对 #2b2b2b 只差 5 级，等于没有）。
-   pill 的 hover 因此和常态描边同色 —— 反馈由抬亮的底色承担。 */
+/* 全屏最浅的一块，靠底色差自己浮起来 —— 所以**不画描边**。底色已经
+   把它和正文区分开了，再套一圈线只是重复一遍同一件事。
+
+   代价是两样东西会溶进这块新底色，就地各抬一档：hover 反馈（图标键、
+   pill、停止键都走 --bg-hover），以及 pill 的轮廓（--border 对 #2b2b2b
+   只差 5 级，等于没有）。--border 的覆盖因此要留着，虽然框自己不用它 ——
+   吃这个变量的是里面那排 pill。pill 的 hover 于是和常态描边同色，
+   反馈由抬亮的底色承担。 */
 .composer {
   background: var(--bg-input);
   --bg-hover: var(--bg-input-hover);
   --border: var(--border-strong);
-  border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: 20px;
   padding: 10px 12px 8px;
-  transition: border-color 0.12s;
+  /* 拖拽高亮走 inset 阴影（见 .composer.dragging）—— 没有常驻边框可
+     变色了，而阴影不占布局，亮起来不会把里面的内容顶一下。 */
+  transition: box-shadow var(--dur-1) var(--ease-out);
   min-width: 0;
 }
 
 /* 拖着文件悬在窗口上。输入框自己也亮一下 —— 遮罩说"能接住"，这一下
    说的是"接住之后东西落在哪"。 */
 .composer.dragging {
-  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
   background: var(--bg-active);
 }
 
@@ -3489,7 +3667,6 @@ pre {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border-left: 1px solid var(--border);
   background: var(--bg);
 }
 
@@ -4535,7 +4712,7 @@ button.ta-resize-grip:hover:not(:disabled),
   color: var(--text-dim);
   /* 状态流转（待办→进行中→完成）的颜色渐变。面板是就地更新的，
      没有过渡的话状态切换是一次生硬的跳变。 */
-  transition: color 0.25s ease;
+  transition: color var(--dur-3) var(--ease-out);
 }
 
 .todo-mark {
@@ -4543,7 +4720,7 @@ button.ta-resize-grip:hover:not(:disabled),
   display: inline-block; /* transform（勾选动画）对纯 inline 元素无效 */
   width: 14px;
   text-align: center;
-  transition: color 0.25s ease;
+  transition: color var(--dur-3) var(--ease-out);
 }
 
 .todo-item.completed .todo-mark {
@@ -4566,7 +4743,7 @@ button.ta-resize-grip:hover:not(:disabled),
 .todo-text {
   min-width: 0;
   overflow-wrap: anywhere;
-  transition: color 0.25s ease;
+  transition: color var(--dur-3) var(--ease-out);
 }
 
 /* ── 常驻任务面板（输入框上方，就地更新）──────
@@ -4925,7 +5102,7 @@ button.ta-resize-grip:hover:not(:disabled),
 .pack-bar-fill {
   height: 100%;
   background: var(--accent, #0a84ff);
-  transition: width 0.2s ease;
+  transition: width var(--dur-3) var(--ease-out);
 }
 
 .pack-actions {
@@ -5073,8 +5250,8 @@ button.ta-resize-grip:hover:not(:disabled),
   background: var(--bg-hover);
   border: 1px solid var(--border-strong);
   transition:
-    background 0.14s,
-    border-color 0.14s;
+    background var(--dur-1) var(--ease-out),
+    border-color var(--dur-1) var(--ease-out);
 }
 
 .toggle-track.on {
@@ -5091,8 +5268,8 @@ button.ta-resize-grip:hover:not(:disabled),
   border-radius: 50%;
   background: var(--text-dim);
   transition:
-    transform 0.14s,
-    background 0.14s;
+    transform var(--dur-1) var(--ease-out),
+    background var(--dur-1) var(--ease-out);
 }
 
 .toggle-track.on .toggle-knob {
@@ -6072,6 +6249,53 @@ button.field-slider-state:hover {
   line-height: 1.7;
 }
 
+/* ── 流式正文的块级淡入 ─────────────────────
+ *
+ * token 是一小撮一小撮到的（服务方分片 + useSession 的 rAF 合批），
+ * 直接画出来就是一坨一坨往外蹦。让每个**新长出来**的块自己淡进来，
+ * 那一蹦被摊成一段渐变，观感从"抽搐"变成"长出来"。学 Codex 桌面端，
+ * 它那条规则挂在 `[data-markdown-animated]` 上，同一个门。
+ *
+ * 全靠 React 的 DOM 复用定义"新"，一行 JS 都不用写：往末尾段落追加
+ * 文字不会换掉它的 DOM 节点，动画不重播；真正新增的块才是新节点，
+ * 才从 opacity:0 起步。`forwards` 让播完的块停在 1 上。
+ *
+ * 已知的小瑕疵：块类型在解析中途变身时（`- ` 从段落变成列表、表格
+ * 补上分隔行、`===` 把上一行变成标题）旧节点被换掉，会再淡一次。
+ * 这几种变身都发生在那个块几乎还没有内容的时候，看到的是"落定"而
+ * 不是闪烁，所以不额外花代价去记身份。
+ *
+ * `[约束]` 只在 [data-md-animated] 下生效，而它只挂在正在流的那一条
+ * 上（见 Markdown 的 animated）。挂给历史消息的话，切会话、懒水合
+ * 落地、⌘F 全量水合都会让整屏重播一遍。
+ */
+@keyframes md-fade-in {
+  to {
+    opacity: 1;
+  }
+}
+
+.md[data-md-animated] > *,
+.md[data-md-animated] :is(li, tr) {
+  opacity: 0;
+  animation: md-fade-in var(--dur-2) var(--ease-fade) forwards;
+}
+
+/* 列表和表格的**容器**不淡，交给行。两层叠着淡会把行先压暗一拍；
+   而且容器只创建一次，之后追加的行才是该动的那个。 */
+.md[data-md-animated] > :is(ul, ol, table) {
+  opacity: 1;
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .md[data-md-animated] > *,
+  .md[data-md-animated] :is(li, tr) {
+    opacity: 1;
+    animation: none;
+  }
+}
+
 .md > :first-child {
   margin-top: 0;
 }
@@ -6348,7 +6572,7 @@ button.field-slider-state:hover {
   margin-top: 4px;
   margin-left: -4px;
   opacity: 0;
-  transition: opacity 0.12s;
+  transition: opacity var(--dur-1) var(--ease-out);
 }
 
 .msg.assistant:hover .msg-actions,
@@ -6733,7 +6957,7 @@ button.field-slider-state:hover {
 
 .ctx-ring-fill {
   stroke: currentColor;
-  transition: stroke-dashoffset 0.3s ease;
+  transition: stroke-dashoffset var(--dur-3) var(--ease-out);
 }
 
 /* 两道坎和内核的环境档位对齐（70 / 85），界面变色时模型也正好收到提示。 */
@@ -6799,7 +7023,7 @@ button.field-slider-state:hover {
   height: 100%;
   border-radius: 2px;
   background: var(--text-dim);
-  transition: width 0.3s ease;
+  transition: width var(--dur-3) var(--ease-out);
 }
 
 .ctx-bar-fill.warn {
@@ -6848,10 +7072,31 @@ button.field-slider-state:hover {
 
 /* 窄列（开抽屉或窗口本身窄）按对话列宽度收，不看窗口 ——
    容器挂在 .chat-col 上，避免挂在输入框上裁掉向上弹出的菜单。
-   服务方和模型藏掉：剩下 + / 权限 / 发送，一行放得下。 */
-@container chat (max-width: 560px) {
+   服务方和模型藏掉：剩下 + / 权限 / 发送，一行放得下。
+
+   `[约束]` 这一组只准收**横向**。查询问的是"这一列有多宽"，纵向间距
+   跟它没有关系。早先这里连着把 .composer-dock 的下内边距（18→12）和
+   .composer 的上下内边距（共 4px）一起收了，后果有两个：
+   - 同一个输入框在宽列上离底边 18px、窄列上 12px，换台显示器就变样；
+   - 列宽跨过 560 的那一帧，输入框上边缘硬跳 10px。而侧栏开合正好会
+     跨过这个阈值 —— 240ms 的平滑滑动中间插一帧硬跳，就是"侧栏一开
+     输入框弹一下"。
+   横向的变化（内边距收窄、两个 pill 收起）留着：那是这条查询的本职，
+   而且发生在一次横向动画里，不会把输入框在纵向上挪位置。 */
+/* 横向留白收窄。阈值 768 = 内容上限 720 + 两侧各 24。
+ *
+ * 对话流、输入框、招呼页三块都是"720px 上限 + auto 边距居中"，列宽
+ * ≥768 时内边距根本不起作用 —— 富余全被 auto 边距吃掉。所以切换点卡在
+ * 768 这一刻正好是"内边距刚要开始约束内容"的临界，切换前后内容宽度
+ * 都是 720，肉眼零变化，再往窄走才是连续收窄。
+ *
+ * `[约束]` 不能挪回 560（早先和下面那条合在一起）。560 落在内边距已经
+ * 在约束内容的区间里，跨过去那一帧内容宽度一次变 24px、整屏文字重新
+ * 折行 —— 而侧栏 / 抽屉开合正好会扫过这个宽度，300ms 的平滑滑动中间
+ * 插一帧重排。 */
+@container chat (max-width: 768px) {
   .composer-dock {
-    padding: 8px 12px 12px;
+    padding-inline: 16px;
   }
 
   .transcript {
@@ -6861,11 +7106,20 @@ button.field-slider-state:hover {
   .hero {
     width: min(720px, calc(100% - 24px));
   }
+}
 
-  .composer {
-    padding: 8px 8px 6px;
-  }
+/* 真正的窄列：工具栏一行塞不下服务方和模型，藏掉，剩下 + / 权限 / 发送。
+   容器挂在 .chat-col 上，避免挂在输入框上裁掉向上弹出的菜单。
 
+   display 是离散的，插值不了 —— 但这一条不改盒子尺寸：两个 pill 在 flex
+   里让出横向空间，其余项左对齐不动、发送键 margin-left:auto 仍贴右，行高
+   也不变（量过）。所以是"两个 pill 消失"，不是布局跳动。
+
+   `[约束]` 输入框自己的内边距**不要**跟着收。早先这里还有一条
+   `.composer { padding-inline: 8px }`，省下的 8px 对工具栏能不能塞下
+   毫无影响（塞得下是靠藏 pill），代价却是跨阈值时输入框里的文字重新
+   折行 —— 又一处白给的跳动。 */
+@container chat (max-width: 560px) {
   .composer-picks {
     display: none;
   }
@@ -6914,7 +7168,6 @@ button.field-slider-state:hover {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border-left: 1px solid var(--border);
   background: var(--bg);
 }
 
@@ -7442,7 +7695,7 @@ button.field-slider-state:hover {
   color: var(--text-faint);
   /* 常驻会压住图的右上角，hover / 键盘聚焦才出现 */
   opacity: 0;
-  transition: opacity 0.12s;
+  transition: opacity var(--dur-1) var(--ease-out);
 }
 
 .md-mermaid-wrap:hover .md-mermaid-copy,
@@ -8004,7 +8257,6 @@ button.field-slider-state:hover {
   flex-shrink: 1;
   min-width: 240px;
   overflow-y: auto;
-  border-left: 1px solid var(--border);
   padding: 14px 16px 24px;
   display: flex;
   flex-direction: column;

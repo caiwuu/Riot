@@ -90,6 +90,9 @@ export function TerminalPanel({
     const inst = instances.current.get(uid);
     if (inst) {
       inst.ro.disconnect();
+      // 排着队的 fit 必须撤掉：安静期里关标签的话，它会打在已经
+      // dispose 的 term 上。
+      window.clearTimeout(inst.fitTimer);
       inst.term.dispose();
       // shell 自己退出（exit/崩溃）时宿主已经收过尸，再发 close 只是
       // 对一个不存在的 id 的无操作 —— 但没必要发。
@@ -283,15 +286,20 @@ export function TerminalPanel({
     }
   }, [state.active, state.tabs, sessionId]);
 
-  // 显示/切标签/改高度之后重新量尺寸。display:none 期间 xterm 量不到
-  // 自己，切回来那一拍必须补一次 fit，否则列数还是上次的。
+  // 显示/切标签之后立刻重新量尺寸。display:none 期间 xterm 量不到自己，
+  // 切回来那一拍必须补一次 fit，否则列数还是上次的 —— 这一拍要即时，
+  // 不能走 scheduleFit 的安静期，慢 80ms 是看得见的错位。
+  //
+  // 高度变化不在这里：`.term-slot` 跟着面板尺寸走，拖分隔线时 ResizeObserver
+  // 自己会响，而那条路是防抖的（见 FIT_QUIET_MS）。把 height 挂进依赖等于
+  // 绕过防抖，每帧一次全量 fit。
   useEffect(() => {
     if (!visible || !state.active) return;
     const inst = instances.current.get(state.active);
     if (!inst) return;
     const raf = requestAnimationFrame(() => safeFit(inst));
     return () => cancelAnimationFrame(raf);
-  }, [visible, state.active, height]);
+  }, [visible, state.active]);
 
   // 聚焦只跟"打开面板/切标签"走，不跟高度走 —— 用户在输入框打字时
   // 拖终端分隔线，焦点不该被抢过来。
@@ -335,7 +343,8 @@ export function TerminalPanel({
       fit,
       hostId: null,
       pending: [],
-      ro: new ResizeObserver(() => safeFit(inst)),
+      ro: new ResizeObserver(() => scheduleFit(inst)),
+      fitTimer: 0,
     };
     instances.current.set(tab.uid, inst);
 
@@ -653,6 +662,31 @@ interface Inst {
   /** PTY 落地前攒下的键盘输入。 */
   pending: string[];
   ro: ResizeObserver;
+  /** scheduleFit 的安静期计时器。0 = 没有排着队的 fit。 */
+  fitTimer: number;
+}
+
+/**
+ * 尺寸稳定多久之后才真的 fit。
+ *
+ * `[约束]` 不能跟着 ResizeObserver 每帧 fit。侧栏 240ms 的开合动画里
+ * `.main` 每帧变宽，终端容器跟着变，而一次 fit 是「按新宽度重排整个
+ * 5000 行回滚缓冲」外加一次 termResize IPC（宿主 ioctl TIOCSWINSZ、
+ * 给 shell 发 SIGWINCH）—— 十几帧连着做，动画整个卡住。拖分隔线同理。
+ *
+ * 代价是变形期间画面按旧列数停一拍。取舍和 BrowserPanel 的
+ * RESIZE_QUIET_MS 一样，值更小：终端慢半拍看得出来，而它的一帧比
+ * 浏览器视口便宜。
+ */
+const FIT_QUIET_MS = 80;
+
+/** 安静期结束再 fit。连续变形（开合动画、拖分隔线）只在停下时做一次。 */
+function scheduleFit(inst: Inst) {
+  window.clearTimeout(inst.fitTimer);
+  inst.fitTimer = window.setTimeout(() => {
+    inst.fitTimer = 0;
+    safeFit(inst);
+  }, FIT_QUIET_MS);
 }
 
 /**

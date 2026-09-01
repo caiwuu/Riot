@@ -246,14 +246,6 @@ export function App() {
    *  需要一个"当前文件"定住各 body 的 display —— 用它，免得隐藏的
    *  面板里乱切一通（渲染器会白做适配）。 */
   const lastPreview = useRef<string | null>(null);
-  /**
-   * 用户主动关过 / 切走过浏览器标签的会话。模型在这些会话里再用浏览器
-   * 工具，标签不再自动抢到前台 —— 用户已经表过态，每次工具调用都夺回
-   * 焦点等于反复跟他抢屏幕。主动回到浏览器标签视为又想看了，从集合里
-   * 移除、恢复自动弹出。存会话 id 而不是一个布尔：别的会话的浏览器
-   * 活动不该被这个会话连坐。
-   */
-  const browserDismissed = useRef(new Set<string>());
   const [showTerm, setShowTerm] = useState(false);
   const [showSessionCfg, setShowSessionCfg] = useState(false);
   /** 递增一次，改动面板重新比对一次。轮次结束时推一下。 */
@@ -283,6 +275,14 @@ export function App() {
   const rightDrawerOpen = Boolean(active && wb.open && !scheduleDetailOpen);
   /** 抽屉还在画面上（含收起动画）。内容要留着，否则是空壳在滑。 */
   const drawerPresent = usePresence(rightDrawerOpen);
+  /** 收起动画那 300ms 里，空状态定格在收起前的样子。关掉最后一个标签是
+   *  「标签清空」和「抽屉收起」同一拍发生，照 wb.tabs 直接判的话，"添加
+   *  面板"那张菜单会在抽屉往外滑的途中冒出来亮一下 —— 用户刚关完东西，
+   *  看到的却是一张新菜单飘走。抽屉 keepMounted，SlidePanel 的"最后一帧"
+   *  兜不到这里（那条路只在 children 为 null 时走），所以自己记一个。 */
+  const emptyShown = useRef(false);
+  if (rightDrawerOpen) emptyShown.current = wb.tabs.length === 0;
+  const showWorkbenchEmpty = rightDrawerOpen ? wb.tabs.length === 0 : emptyShown.current;
   /** 壳真正开始改宽度的那一拍。窗口开关跟这个走：跟收起动画对齐
    *  坐回顶栏，设置钮才不会先被主区拽到窗口右缘、再被开关挤回来。 */
   const [drawerVisual, setDrawerVisual] = useState(false);
@@ -308,9 +308,27 @@ export function App() {
         Math.min(w, SCHED_DETAIL.max, rightPanelMax(side, SCHED_DETAIL.min)),
       );
     };
+    // 拖窗口期间把面板的开合过渡摘掉。过渡现在是常挂的（见 styles.css
+    // 的 .slide-panel），而这里每来一个 resize 就 clamp 一次宽度 ——
+    // 挂着过渡的话面板右缘追不上窗口边，会被 .shell 的 overflow 裁掉。
+    // 走 DOM 属性而不是 React state：这只是给 CSS 看的开关，没必要为它
+    // 在拖窗口的每一帧重渲染整棵树。
+    let quiet = 0;
+    const onResize = () => {
+      document.documentElement.dataset.resizing = "";
+      window.clearTimeout(quiet);
+      quiet = window.setTimeout(() => {
+        delete document.documentElement.dataset.resizing;
+      }, 120);
+      fit();
+    };
     fit();
-    window.addEventListener("resize", fit);
-    return () => window.removeEventListener("resize", fit);
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      window.clearTimeout(quiet);
+      delete document.documentElement.dataset.resizing;
+    };
   }, [sidebarOpen, sidebarW]);
 
   const toggleSidebar = useCallback(() => {
@@ -383,8 +401,8 @@ export function App() {
         ? lastPreview.current
         : (previewPaths[previewPaths.length - 1] ?? null);
 
-  /** 打开（或激活）一个标签，抽屉随之展开。不碰 browserDismissed ——
-   *  这是"程序把标签带上来"的中性入口；带表态的用户操作走 activateTab。 */
+  /** 打开（或激活）一个标签，抽屉随之展开。用户点标签、快捷键、"+"菜单，
+   *  以及模型用起浏览器/预览工具，都走这一条。 */
   const openTab = useCallback((tab: WorkbenchTab) => {
     setWb((prev) => {
       const id = tabId(tab);
@@ -397,36 +415,12 @@ export function App() {
     });
   }, []);
 
-  /**
-   * 用户主动把某个标签带到前台（点标签、空状态、快捷键、"+"菜单）。
-   *
-   * 从正看着的浏览器切走是"现在不看浏览器"的表态 —— 记进
-   * browserDismissed，模型的浏览器活动此后不再抢回焦点；主动回到
-   * 浏览器则恢复自动弹出。
-   */
-  const activateTab = useCallback(
-    (tab: WorkbenchTab) => {
-      if (activeSession) {
-        if (activeKind === "browser" && tab.kind !== "browser") {
-          browserDismissed.current.add(activeSession.id);
-        }
-        if (tab.kind === "browser") {
-          browserDismissed.current.delete(activeSession.id);
-        }
-      }
-      openTab(tab);
-    },
-    [activeSession, activeKind, openTab],
-  );
-
   /** 关一个标签。关的是激活的就让右邻顶上（没有则左邻，浏览器同款）；
-   *  一个不剩就留在空状态（那里本身是"添加面板"的菜单，Codex 同款）。
-   *  关浏览器标签同样是表态，此后不自动弹。 */
+   *  关掉最后一个连抽屉一起收 —— 空状态是"添加面板"的菜单，而刚关完最后
+   *  一个标签的人是想腾地方，不是想再加一个，把半个屏幕留给一张没人要的
+   *  菜单还得再点一次关。想要那张菜单，顶栏开关展开就有。 */
   const closeTab = useCallback(
     (id: string) => {
-      if (id === "browser" && activeSession) {
-        browserDismissed.current.add(activeSession.id);
-      }
       const idx = wb.tabs.findIndex((t) => tabId(t) === id);
       if (idx < 0) return;
       const tabs = wb.tabs.filter((t) => tabId(t) !== id);
@@ -435,19 +429,15 @@ export function App() {
         const neighbor = tabs[Math.min(idx, tabs.length - 1)];
         active = neighbor ? tabId(neighbor) : null;
       }
-      setWb({ tabs, active, open: wb.open });
+      setWb({ tabs, active, open: tabs.length > 0 && wb.open });
     },
-    [wb, activeSession],
+    [wb],
   );
 
-  /** 收起抽屉（标签保留，激活项记着，再展开回到原处）。正看着浏览器
-   *  时收起也是"不看了"的表态。 */
+  /** 收起抽屉（标签保留，激活项记着，再展开回到原处）。 */
   const collapseDrawer = useCallback(() => {
-    if (activeKind === "browser" && activeSession) {
-      browserDismissed.current.add(activeSession.id);
-    }
     setWb((prev) => ({ ...prev, open: false }));
-  }, [activeKind, activeSession]);
+  }, []);
 
   /** 展开抽屉。标签组原样回来；一个标签都没有就是空状态（添加面板的菜单）。 */
   const openDrawer = useCallback(() => {
@@ -464,7 +454,7 @@ export function App() {
 
   /** 点了标签栏上的某个浏览器页面：把浏览器带到前台并切到那一页。 */
   const selectBrowserPage = (pageId: number) => {
-    activateTab({ kind: "browser" });
+    openTab({ kind: "browser" });
     if (activeSession) {
       void browserSelectTab(activeSession.id, pageId)
         .then(applyBrowserPanel)
@@ -826,7 +816,7 @@ export function App() {
           e.preventDefault();
           if (!activeSession) return;
           if (activeKind === "browser") collapseDrawer();
-          else activateTab({ kind: "browser" });
+          else openTab({ kind: "browser" });
           return;
         case "g":
           // ⌘⇧G Git 改动。不带 shift 的 ⌘G 留给"查找下一个"这类惯例。
@@ -834,7 +824,7 @@ export function App() {
           e.preventDefault();
           if (!activeSession) return;
           if (activeKind === "changes") collapseDrawer();
-          else activateTab({ kind: "changes" });
+          else openTab({ kind: "changes" });
           return;
         case "p":
           // ⌘P 打开文件进预览。必须拦下 —— webview 的默认行为是打印。
@@ -871,7 +861,7 @@ export function App() {
     toggleSidebar,
     wb,
     activeKind,
-    activateTab,
+    openTab,
     collapseDrawer,
     pickAndPreview,
     closeTab,
@@ -1152,7 +1142,7 @@ export function App() {
             // 已经开着就再开一页（浏览器"+"的直觉）；还没开就先开起来，
             // 第一页宿主自己建。
             const had = wb.tabs.some((t) => t.kind === "browser");
-            activateTab({ kind: "browser" });
+            openTab({ kind: "browser" });
             if (had && browserPages.tabs.length > 0 && activeSession) {
               void browserNewTab(activeSession.id)
                 .then(applyBrowserPanel)
@@ -1160,7 +1150,7 @@ export function App() {
             }
           },
         },
-        { label: "Git 改动", action: () => activateTab({ kind: "changes" }) },
+        { label: "Git 改动", action: () => openTab({ kind: "changes" }) },
         { label: "打开文件…", action: pickAndPreview },
       ],
     });
@@ -1212,7 +1202,19 @@ export function App() {
   return (
     <ProjectRootContext.Provider value={activeSession?.root ?? ""}>
     <div className="shell" data-fullscreen={fullscreen ? "" : undefined}>
-      <SlidePanel axis="x" open={sidebarOpen} size={sidebarW} keepMounted onVisualOpen={setSidebarVisual}>
+      {/* anchor=end：内层贴壳的**右**缘。侧栏的左缘钉死在窗口左边，
+          收起时动的是右缘 —— 内层跟着右缘走，整条侧栏才是被主区往左
+          推出屏幕；贴左缘的话它原地不动、只是被从右往左啃掉，而主区
+          左缘在移动，两样东西速度不一致，看起来就成了"主区盖上去"。
+          详见 styles.css 的 .slide-panel.end。 */}
+      <SlidePanel
+        axis="x"
+        anchor="end"
+        open={sidebarOpen}
+        size={sidebarW}
+        keepMounted
+        onVisualOpen={setSidebarVisual}
+      >
           <Sidebar
             width={sidebarW}
             projects={projects}
@@ -1277,7 +1279,7 @@ export function App() {
             sessionCfgOpen={showSessionCfg}
             sessionCfgEnabled={activeSession !== null}
             onToggleSessionCfg={() => setShowSessionCfg((v) => !v)}
-            onOpenBrowser={() => activateTab({ kind: "browser" })}
+            onOpenBrowser={() => openTab({ kind: "browser" })}
             reserveControls={!drawerVisual}
           />
         )}
@@ -1360,7 +1362,6 @@ export function App() {
                       onSessionEmptied={onSessionEmptied}
                       onAgentBrowser={() => {
                         if (!visible) return;
-                        if (browserDismissed.current.has(s.id)) return;
                         openTab({ kind: "browser" });
                       }}
                       onAgentPreview={(p) => {
@@ -1423,8 +1424,15 @@ export function App() {
         ) : null}
         {/* 常驻挂载（keepMounted）：收起只是壳收到 0，shell 和回滚缓冲
             都留着。visible 用 termPresent —— 收起动画那一拍里内容还得
-            显示着，不然是内容先消失、空壳再收起。 */}
-        <SlidePanel axis="y" anchor="end" open={showTerm} size={termH} keepMounted>
+            显示着，不然是内容先消失、空壳再收起。
+
+            anchor 用默认的 start（内层贴壳顶）：底栏的下缘钉在窗口底，
+            收起时动的是上缘，内层贴住上缘才会整块随壳往下滑出窗口。
+            规则和取舍见 styles.css 的 .slide-panel.end。
+            `[约束]` 这里**不能**用 end。那是"从顶上裁"，而终端的标签栏和
+            输出全在上半截：收到一半时它们已经被吃光，剩下一块和对话区
+            同色的空矩形在缩，看起来就是"直接消失"而不是收起来了。 */}
+        <SlidePanel axis="y" open={showTerm} size={termH} keepMounted>
           <TerminalPanel
             visible={termPresent}
             height={termH}
@@ -1475,7 +1483,13 @@ export function App() {
           }}
         />
       ) : null}
-      <SlidePanel axis="x" anchor="end" open={selSchedule !== null} size={schedDetailW} keepMounted>
+      <SlidePanel
+        axis="x"
+        className="rail"
+        open={selSchedule !== null}
+        size={schedDetailW}
+        keepMounted
+      >
         {selSchedule ? (
           <ScheduleDetail
             key={selSchedule.id}
@@ -1520,9 +1534,13 @@ export function App() {
           }}
         />
       ) : null}
+      {/* anchor 用默认的 start：右列的右缘钉死在窗口右边，收起时动的是
+          左缘 —— 内层跟着左缘走，整块才是被主区往右推出去（和侧栏对称）。
+          代价是标签栏会从窗口角上那组分栏开关底下滑过，靠开关的渐变底
+          接住，见 styles.css 的 .win-controls.docked::before。 */}
       <SlidePanel
         axis="x"
-        anchor="end"
+        className="rail"
         open={rightDrawerOpen}
         size={drawerW}
         keepMounted
@@ -1538,7 +1556,7 @@ export function App() {
               pages={browserPages}
               onSelect={(id) => {
                 const t = wb.tabs.find((x) => tabId(x) === id);
-                if (t) activateTab(t);
+                if (t) openTab(t);
               }}
               onClose={closeTab}
               onSelectPage={selectBrowserPage}
@@ -1547,10 +1565,10 @@ export function App() {
             />
             {/* 空状态即"添加面板"菜单（Codex 同款）。只列侧边标签；
                 终端停靠在底部，入口在窗口开关那一组里。 */}
-            {wb.tabs.length === 0 ? (
+            {showWorkbenchEmpty ? (
               <WorkbenchEmpty
-                onChanges={() => activateTab({ kind: "changes" })}
-                onBrowser={() => activateTab({ kind: "browser" })}
+                onChanges={() => openTab({ kind: "changes" })}
+                onBrowser={() => openTab({ kind: "browser" })}
                 onOpenFile={pickAndPreview}
               />
             ) : null}
@@ -1690,7 +1708,8 @@ function Chat({
   onFirstMessage: (sessionId: string, text: string) => void;
   /** 撤回把会话清空了。侧栏那句自动标题该跟着撤。 */
   onSessionEmptied?: (sessionId: string) => void;
-  /** 模型调用浏览器工具时打开右侧抽屉，让用户看见同一页。 */
+  /** 模型明说要给用户看浏览器时（ShowBrowser / BrowserHandoff）打开右侧
+   *  抽屉。其余 Browser* 工具是它自己在查，不弹 —— 见 useSession。 */
   onAgentBrowser?: () => void;
   /** 模型的 PreviewFile 工具成功后，把文件在预览面板展示给用户。
    *  路径是模型传的原文，可能是相对路径 —— 由外层按会话根目录解析。 */

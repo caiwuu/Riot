@@ -210,13 +210,22 @@ function walk(node: MdNode, visit: (n: MdNode) => void) {
 export const Markdown = memo(function Markdown({
   text,
   breaks = false,
+  animated = false,
 }: {
   text: string;
   /** 段内单换行照原样断行。见 [`remarkSoftBreaks`]，只有思考过程要。 */
   breaks?: boolean;
+  /**
+   * 这段正文**正在流**：新长出来的块逐个淡入（样式见 styles.css 的
+   * `.md[data-md-animated]`）。
+   *
+   * `[约束]` 只给正在流的那一条开。历史消息也开的话，切会话、懒水合
+   * 落地、⌘F 全量水合都会让整屏重播一遍淡入。
+   */
+  animated?: boolean;
 }) {
   return (
-    <div className="md">
+    <div className="md" {...(animated ? { "data-md-animated": "" } : {})}>
       <ReactMarkdown
         remarkPlugins={
           breaks

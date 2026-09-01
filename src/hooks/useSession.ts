@@ -262,8 +262,13 @@ export function useSession(
   sessionId: string,
   opts?: {
     /**
-     * 模型开始用内置浏览器时通知界面把抽屉打开。
-     * 历史回放不会走这条 —— 只在实时 `tool_use` 上触发。
+     * 把浏览器面板打开给用户看。
+     *
+     * `[约束]` 只有模型**明说**要给用户看时才走这条：`ShowBrowser`，以及
+     * 请用户在面板里亲自操作的 `BrowserHandoff`。别的 `Browser*` 工具一律
+     * 不弹 —— 早先按名字前缀猜，结果抓包、扫描这类纯后台分析也在抢屏幕。
+     *
+     * 历史回放不会走这条 —— 只在实时事件上触发。
      */
     onBrowserOpen?: () => void;
     /**
@@ -315,6 +320,9 @@ export function useSession(
    *  预览 —— 在调用时就开的话，同一批里"先 Write 再 Preview"会抢在文件
    *  落盘之前打开一个报错的标签；失败的调用（文件不存在）则根本不该开。 */
   const pendingPreviews = useRef(new Map<string, string>());
+  /** 等结果的 ShowBrowser 调用。同 pendingPreviews 的理由：浏览器里一页
+   *  都没有时这个工具会失败，那时弹出来的是一个空面板。 */
+  const pendingShowBrowser = useRef(new Set<string>());
 
   // 排队面板的权威镜像放 ref 而不是只放 state：事件回调（注入匹配、
   // Done 后接力）跑在 React 渲染周期之外，读 state 拿到的是一拍之前的
@@ -500,14 +508,15 @@ export function useSession(
         case "message": {
           flush();
           if (event.role === "assistant") {
-            let browserSeen = false;
             for (const c of event.content) {
               if (c.type !== "tool_use") continue;
-              if (c.name.startsWith("Browser")) {
-                if (!browserSeen) {
-                  browserSeen = true;
-                  onBrowserOpenRef.current?.();
-                }
+              if (c.name === "ShowBrowser") {
+                pendingShowBrowser.current.add(c.id);
+              } else if (c.name === "BrowserHandoff") {
+                // 唯一在**调用时**就弹的工具。它请用户在面板里亲自做一件事
+                // （登录、过验证码），而它的结果要等他做完才回来 —— 等结果
+                // 再弹，等于让他先对着一个看不见的页面动手。
+                onBrowserOpenRef.current?.();
               } else if (c.name === "PreviewFile") {
                 const p = (c.input as { path?: unknown } | null)?.path;
                 if (typeof p === "string" && p.trim()) {
@@ -516,15 +525,19 @@ export function useSession(
               }
             }
           }
-          // PreviewFile 的成功结果到了 —— 这时文件已经被内核确认存在，
-          // 开出来的标签不会是一页报错。
+          // 成功的结果到了才开面板 —— 这时内核已经确认过文件真的存在、
+          // 浏览器里真的有一页，开出来的不会是报错标签或空面板。
           if (event.role === "user") {
             for (const c of event.content) {
               if (c.type !== "tool_result") continue;
               const p = pendingPreviews.current.get(c.tool_use_id);
-              if (p === undefined) continue;
-              pendingPreviews.current.delete(c.tool_use_id);
-              if (!c.is_error) onPreviewFileRef.current?.(p);
+              if (p !== undefined) {
+                pendingPreviews.current.delete(c.tool_use_id);
+                if (!c.is_error) onPreviewFileRef.current?.(p);
+              }
+              if (pendingShowBrowser.current.delete(c.tool_use_id) && !c.is_error) {
+                onBrowserOpenRef.current?.();
+              }
             }
           }
           // 排队的插话被内核注入了 —— 面板条目转成对话气泡。先按 id 配

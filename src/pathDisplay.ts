@@ -19,6 +19,21 @@ export function looksAbsPath(s: string): boolean {
   return s.startsWith("/") || s.startsWith("\\\\") || /^[A-Za-z]:[\\/]/.test(s);
 }
 
+/**
+ * 引用块认目录的办法：路径以分隔符结尾。
+ *
+ * 图标、发出去的 `@路径/`、气泡回读都走这一份约定 —— 不另开字段，
+ * 免得输入框、正文、历史三条路各记各的，迟早对不上。
+ */
+export function isDirRef(path: string): boolean {
+  return /[\\/]$/.test(path);
+}
+
+/** 给目录路径补上结尾 `/`（已有分隔符的原样）。块上的短名仍走 basename。 */
+export function asDirRef(path: string): string {
+  return isDirRef(path) ? path : `${path.replace(/[\\/]+$/, "")}/`;
+}
+
 /** 相对路径拼到项目根上，分隔符跟着根走。已是绝对路径的调用方自己先判。 */
 export function joinRoot(root: string, rel: string): string {
   const cleaned = rel.replace(/^\.[\\/]+/, "");

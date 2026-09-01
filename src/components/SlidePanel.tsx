@@ -6,14 +6,16 @@
  *   xterm 也不会在动画中反复 fit。
  * - 关闭后拖一拍再卸载（退出动画要看得见）；期间渲染最后一帧的内容 ——
  *   调用方在关闭时往往已经拿不出内容了（详情面板的任务被取消选中）。
- * - transition 只在开合瞬间挂上、动画走完就摘 —— 拖宽调的是同一个
- *   width，常挂 transition 会让宽度追着鼠标发飘。
+ * - transition 挂在 CSS 里、常驻，拖动时由 `.rz.dragging` / `[data-resizing]`
+ *   摘掉（见 styles.css 的 .slide-panel）。所以这里只管尺寸，不碰 class、
+ *   不强制重排 —— 尺寸在哪一拍变，过渡就在哪一拍起。
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
-/** 动画时长。壳的 transition 和延迟卸载共用，改要一起改。 */
-const SLIDE_MS = 240;
+/** 壳的过渡时长。必须和 styles.css 的 `--dur-3` 一致 —— 短了的话
+ *  内容会在收起动画播完之前就被卸掉，看到的是空壳在滑。 */
+const SLIDE_MS = 300;
 
 /** open 翻 false 后再撑一拍（给退出动画留时间）。 */
 export function usePresence(open: boolean, ms: number = SLIDE_MS + 40): boolean {
@@ -49,41 +51,26 @@ export function SlidePanel({
   /** 关死后也不卸载内容（终端要保住 xterm 的回滚缓冲），只把壳收到 0。 */
   keepMounted?: boolean;
   className?: string;
-  /** 壳真正开始改尺寸的那一拍。顶栏红绿灯让位必须跟这一拍对齐，
-   *  跟 `open` 对齐会先挤到右边（侧栏还在，让位已经加上）。 */
+  /** 壳改尺寸的那一拍。顶栏红绿灯让位跟着它走，两边同一帧起步、
+   *  同一条曲线，中间不会有"侧栏还在、让位已经加上"的错帧。 */
   onVisualOpen?: (open: boolean) => void;
   children: React.ReactNode;
 }) {
   const present = usePresence(open);
-  /** 展开的目标状态。初值 = open：启动时就开着的面板不播入场动画。 */
-  const [shown, setShown] = useState(open);
-  /** 开合瞬间才挂 transition，走完摘掉（拖宽不能有）。 */
-  const [animating, setAnimating] = useState(false);
-  const first = useRef(true);
-  const shellRef = useRef<HTMLDivElement>(null);
   const onVisualOpenRef = useRef(onVisualOpen);
   onVisualOpenRef.current = onVisualOpen;
   const last = useRef(children);
   if (open && children != null) last.current = children;
 
+  // 壳的尺寸和 `open` 同一拍变（下面直接读 open），所以这一拍就是"真正
+  // 开始改尺寸"的那一拍 —— 顶栏让位跟着它走才不会先挤到一边再弹回来。
+  // layout effect 里通知：调用方的重渲染仍在 paint 之前，画面上同帧。
+  //
+  // 挂载时也会通知一次。调用方的初值本来就等于 open（见 App 的
+  // sidebarVisual / drawerVisual），同值 setState 被 React 挡掉，
+  // 所以不用像早先那样专门留一个 first ref 去跳过首次。
   useLayoutEffect(() => {
-    if (first.current) {
-      first.current = false;
-      return;
-    }
-    const el = shellRef.current;
-    // `[约束]` transition 必须已经在计算样式里，下一拍的宽/高才会过渡。
-    // 同一次 commit 里既加 .animating 又改 width，按规范这次变化不产生
-    // 过渡，面板瞬跳。先写 class、强制重排，再让 React 改尺寸。
-    if (el) {
-      el.classList.add("animating");
-      void el.offsetWidth;
-    }
-    setAnimating(true);
-    setShown(open);
     onVisualOpenRef.current?.(open);
-    const anim = window.setTimeout(() => setAnimating(false), SLIDE_MS + 40);
-    return () => window.clearTimeout(anim);
   }, [open]);
 
   if (!present && !keepMounted) return null;
@@ -92,13 +79,13 @@ export function SlidePanel({
     "slide-panel",
     axis === "x" ? "ax" : "ay",
     anchor === "end" ? "end" : "",
-    animating ? "animating" : "",
     className ?? "",
   ]
     .filter(Boolean)
     .join(" ");
-  const shellStyle =
-    axis === "x" ? { width: shown ? size : 0 } : { height: shown ? size : 0 };
+  // 直接读 open，不再经一层 state 延后一拍。新挂载的元素没有"变化前"的
+  // 值，不会播过渡 —— 启动时就开着的面板照旧安静地在那儿。
+  const shellStyle = axis === "x" ? { width: open ? size : 0 } : { height: open ? size : 0 };
   const innerStyle = axis === "x" ? { width: size } : { height: size };
   // 有现场 children 就用（侧栏 / 终端 keepMounted 一直有）。
   // 父级已经卸掉内容时（抽屉、任务详情关了），退出动画用最后一帧。
@@ -106,7 +93,7 @@ export function SlidePanel({
   const body = live ? children : present ? last.current : null;
 
   return (
-    <div ref={shellRef} className={cls} style={shellStyle}>
+    <div className={cls} style={shellStyle}>
       <div className="slide-panel-inner" style={innerStyle}>
         {body}
       </div>

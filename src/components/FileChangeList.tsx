@@ -214,6 +214,20 @@ function fullTitle(c: FileChange): string {
 }
 
 /**
+ * 行宽稳定多久之后才重新判断目录显不显示。
+ *
+ * `[约束]` 不能跟着 ResizeObserver 每帧算。判断必须先摘掉 `.tight`
+ * 再 `offsetWidth` 强制一次同步布局才量得到可用宽度 —— `.change-path`
+ * 是 `flex: 0 1 auto` 的内容宽盒子，收窄之后量到的是文件名宽度而不是
+ * 行里还剩多少地方，不摘就再也长不回来。一次改动列表几十行，每行每帧
+ * 一次强制布局，侧栏开合动画和拖分隔线全被拖住。
+ *
+ * 行宽只在连续变形（开合动画、拖分隔线、拉窗口）时变，而目录显不显示
+ * 是纯装饰 —— 停下来之后再定，没人看得出晚了这一拍。
+ */
+const REFIT_QUIET_MS = 80;
+
+/**
  * 够宽就目录+文件名；行被挤窄时整段目录拿掉，只留文件名。
  * 半截 `src/fea…` 既认不出目录、又占着文件名的位置，不如干脆不画。
  */
@@ -240,10 +254,18 @@ function ChangePath({
       const need = (dirEl?.scrollWidth ?? 0) + (nameEl?.scrollWidth ?? 0);
       if (need > el.clientWidth + 1) el.classList.add("tight");
     };
-    const ro = new ResizeObserver(fit);
+    let timer = 0;
+    const ro = new ResizeObserver(() => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(fit, REFIT_QUIET_MS);
+    });
     ro.observe(row ?? el);
+    // 首次同步定一次：挂载那一拍走防抖的话，目录会先出现再被抽掉。
     fit();
-    return () => ro.disconnect();
+    return () => {
+      window.clearTimeout(timer);
+      ro.disconnect();
+    };
   }, [dir, name]);
 
   return (

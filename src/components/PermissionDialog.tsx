@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { PermissionAsk, PermissionMode, PermissionResponse } from "../bridge";
+import { useImeGuard } from "../hooks/useImeGuard";
 import { Markdown } from "./Markdown";
 import { useEscLayer } from "./Modal";
 
@@ -132,6 +133,7 @@ export function AskChoiceCard({
   const [otherOn, setOtherOn] = useState(false);
   const [other, setOther] = useState("");
   const [answered, setAnswered] = useState(false);
+  const ime = useImeGuard();
 
   if (!q) return null;
 
@@ -195,8 +197,11 @@ export function AskChoiceCard({
           className="plan-feedback"
           value={other}
           onChange={(e) => setOther(e.target.value)}
+          onCompositionStart={ime.onCompositionStart}
+          onCompositionEnd={ime.onCompositionEnd}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
+            // 组字中的回车是确认候选词，不是提交。
+            if (e.key === "Enter" && !e.shiftKey && !ime.isComposing(e)) {
               e.preventDefault();
               if (canSubmit) submit(q.allow_multiple ? picked : [], true);
             }
