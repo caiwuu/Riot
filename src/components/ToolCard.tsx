@@ -3,9 +3,12 @@ import { createPortal } from "react-dom";
 
 import { readImage } from "../bridge";
 import type { Item } from "../hooks/useSession";
+import { type SubAgent, type SubItem, subRunningTool, subToolCount } from "../lib/subagent";
 import { Chevron } from "./Chevron";
+import { Markdown } from "./Markdown";
 import { useEscLayer } from "./Modal";
 import { SmoothFold } from "./SmoothFold";
+import { ThinkingBlock } from "./ThinkingBlock";
 
 type Tool = Extract<Item, { kind: "tool" }>;
 
@@ -53,11 +56,18 @@ export const ToolCard = memo(function ToolCard({
   // 对话流里的每次调用只是历史快照 —— 都展开的话，一个十步任务会在
   // 对话里铺十张几乎相同的清单。摘要行说清"几之几、正在干什么"，
   // 点开看的是"那一刻清单长什么样"。
+  //
+  // Task **跑着的时候**展开、跑完收起：子任务一跑几十秒到几分钟，用户
+  // 这段时间想看的就是子 agent 在干什么（任务书、每一步、正在写的话）；
+  // 跑完之后它是过程不是结论 —— 要点由主模型转述，原始报告点开就有。
+  // 用户手动开合过就听用户的（userToggle 优先）。
+  const isTask = tool.name === "Task";
   const open =
     userToggle ??
     (Boolean(tool.resultImage || tool.resultImagePath) ||
       tool.name === "Edit" ||
-      tool.name === "Write");
+      tool.name === "Write" ||
+      (isTask && tool.status === "running"));
   const detail = hasDetail(tool);
   const summary = summarize(tool);
 
@@ -97,6 +107,9 @@ export const ToolCard = memo(function ToolCard({
       <span className="tool-summary" title={summary}>
         {summary}
       </span>
+      {/* 子任务的步数常驻头部；收着的时候再带上此刻在跑的工具 ——
+          用户把卡收起来了也该看得出它没停。 */}
+      {isTask && tool.sub ? <span className="tool-meta">{taskMeta(tool.sub, open)}</span> : null}
     </>
   );
 
@@ -248,8 +261,19 @@ function clip(s: string, max: number): string {
   return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
 }
 
+/** 卡片头上子任务的进度短语：`7 步`，收着且在跑时是 `7 步 · Grep`。 */
+function taskMeta(sub: SubAgent, open: boolean): string {
+  const steps = `${subToolCount(sub)} 步`;
+  if (open || sub.done) return steps;
+  const now = subRunningTool(sub);
+  return now ? `${steps} · ${now.name}` : steps;
+}
+
 /** 有没有值得展开的内容。只读字段，不建 React 树。 */
 function hasDetail(t: Tool): boolean {
+  // 子任务从 tool_start 那一刻起就有东西可看：任务书边写边显示，
+  // 子 agent 一开跑过程就进来了。
+  if (t.name === "Task") return true;
   if (t.name === "TodoWrite") return todosOf(t).length > 0;
   if (t.resultImage || t.resultImagePath) return true;
   if (t.output.length > 0) return true;
@@ -268,6 +292,9 @@ function hasDetail(t: Tool): boolean {
 function renderDetail(t: Tool): React.ReactNode {
   const i = t.input as Record<string, unknown>;
   const str = (k: string) => (typeof i?.[k] === "string" ? (i[k] as string) : "");
+
+  // 子任务：任务书 + 子 agent 的嵌套时间线。见 TaskDetail。
+  if (t.name === "Task") return <TaskDetail tool={t} />;
 
   // 任务清单：从 tool_use 的输入渲染（清单在输入里；结果只是一句固定
   // 确认，显示它反而是噪音）。
@@ -366,6 +393,132 @@ function renderDetail(t: Tool): React.ReactNode {
   }
 
   return parts.length ? parts : null;
+}
+
+/**
+ * 子任务卡片的展开内容（学 Cursor 的子 agent 视图）：
+ *
+ * 1. **任务书** —— 主模型交给子 agent 的完整 prompt。子 agent 看不到本
+ *    对话，这段文字就是它知道的全部；用户不看它就没法判断"结论离谱是
+ *    子 agent 笨还是任务交代错了"。参数还在流的时候它一行行长出来。
+ * 2. **过程** —— 子 agent 的嵌套时间线：思考、说的话、每次工具调用
+ *    （同一套 ToolCard，Edit 有 diff、Bash 有实时输出）、正在流的半截
+ *    消息。数据来自内核套在 Progress 里上转的子事件流（lib/subagent）。
+ * 3. **结果** —— 只在出错、或没有时间线（切回会话后从历史重建，进度不
+ *    进历史）时显示：正常跑完的报告已经作为时间线最后一段正文画过了，
+ *    再贴一遍就是同一份文字出现两次。
+ */
+function TaskDetail({ tool }: { tool: Tool }) {
+  const i = tool.input as Record<string, unknown>;
+  const prompt = typeof i?.prompt === "string" ? i.prompt : "";
+  const sub = tool.sub;
+  const running = tool.status === "running";
+  const hasReport = sub?.items.some((it) => it.kind === "assistant") ?? false;
+  const showResult = !running && !!tool.result && (tool.status === "error" || !hasReport);
+
+  return (
+    <>
+      {prompt ? (
+        <section className="task-section">
+          <div className="task-label">任务书</div>
+          <pre className="task-prompt">{prompt}</pre>
+        </section>
+      ) : null}
+      {sub ? <SubTimeline sub={sub} running={running} /> : null}
+      {showResult ? <pre className="tool-body">{tool.result}</pre> : null}
+    </>
+  );
+}
+
+/**
+ * 子 agent 的过程。落定条目按到达顺序，直播中的那条消息接在尾部
+ * （思考 → 正文 → 刚开始的工具，模型就是按这个顺序吐的）。什么都没在
+ * 流、也没有工具在跑的间隙 —— 模型在准备下一步 —— 给一个转圈，否则
+ * 这几秒和卡死没有区别。
+ */
+function SubTimeline({ sub, running }: { sub: SubAgent; running: boolean }) {
+  const live = sub.live;
+  const liveThinking = live?.thinking ?? "";
+  const liveText = live?.text ?? "";
+  const liveTools = live?.tools ?? [];
+  const waiting =
+    running &&
+    !sub.done &&
+    !liveThinking &&
+    !liveText &&
+    liveTools.length === 0 &&
+    subRunningTool(sub) === null;
+  const tokens = sub.usage.input + sub.usage.output;
+
+  return (
+    <section className="task-section">
+      <div className="task-label">
+        过程
+        {sub.model ? <span className="task-meta">{sub.model}</span> : null}
+        {sub.turns > 0 ? <span className="task-meta">第 {sub.turns} 轮</span> : null}
+      </div>
+      <div className="task-timeline">
+        {sub.items.map((it) => (
+          <SubRow key={it.id} item={it} />
+        ))}
+        {liveThinking ? <ThinkingBlock text={liveThinking} live /> : null}
+        {liveText ? (
+          <div className="task-text">
+            <Markdown text={liveText} />
+          </div>
+        ) : null}
+        {liveTools.map((t) => (
+          <ToolCard key={t.id} tool={t} eager />
+        ))}
+        {waiting ? (
+          <div className="task-wait" role="status">
+            <span className="tool-icon tool-icon-spin" aria-hidden>
+              ◐
+            </span>
+            等模型回应…
+          </div>
+        ) : null}
+      </div>
+      {sub.done ? (
+        <div className="task-footer">
+          {[
+            sub.model,
+            tokens > 0 ? `${fmtTokens(tokens)} tokens` : "",
+            `${subToolCount(sub)} 次工具调用`,
+            sub.turns > 0 ? `${sub.turns} 轮` : "",
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function SubRow({ item }: { item: SubItem }) {
+  switch (item.kind) {
+    case "thinking":
+      return <ThinkingBlock text={item.text} />;
+    case "assistant":
+      return (
+        <div className="task-text">
+          <Markdown text={item.text} />
+        </div>
+      );
+    case "tool":
+      // 同一套卡片，嵌套一层：Edit 照样有 diff、Bash 照样有实时输出。
+      // 子 agent 的注册表里没有 Task，不会再往里套。
+      return <ToolCard tool={item} eager />;
+    case "error":
+      return <div className="msg error task-note">{item.text}</div>;
+    case "notice":
+      return <div className="msg notice task-note">{item.text}</div>;
+  }
+}
+
+/** 12345 → 12.3k。脚注里的数字不需要精确到个位。 */
+function fmtTokens(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }
 
 /**

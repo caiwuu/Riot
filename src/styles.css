@@ -6906,6 +6906,140 @@ button.field-slider-state:hover {
   color: var(--danger);
 }
 
+/* ── 子任务卡片（Task） ─────────────────────── */
+
+/* 头部右侧的进度短语（"7 步 · Grep"）。和 fold-count 同一族的淡小字，
+   等宽数字免得步数每跳一下整行抖。 */
+.tool-meta {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 展开区里的一段：任务书 / 过程。每段一条顶线分隔，标题是小号大写风格
+   的淡字 —— 这是卡片里的二级结构，不能比卡片头还响。 */
+.task-section {
+  border-top: 1px solid var(--border);
+  padding: 8px 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.task-label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+
+.task-meta {
+  font-weight: 400;
+  letter-spacing: 0;
+  font-family: var(--mono);
+  opacity: 0.85;
+}
+
+/* 任务书是主模型写给子 agent 的一段话：用正文字体、稍小稍淡；限高
+   带滚 —— 一份细致的任务书能有二三十行，铺开会把过程推到屏幕外。 */
+.task-prompt {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bg-side);
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 嵌套时间线：左侧一道竖线把子 agent 的过程括起来（和过程组的展开体
+   同一个视觉语言），条目之间留小间距。 */
+.task-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-left: 4px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+  min-width: 0;
+}
+
+/* 里面的工具卡去掉边框、压扁 —— 外面已经有一张卡在包着，再套一层
+   边框就是盒子里的盒子。hover 才浮出底色，看得出是可点的。 */
+.task-timeline .tool {
+  border: none;
+  border-radius: 6px;
+}
+
+.task-timeline .tool-head {
+  padding: 3px 6px;
+}
+
+.task-timeline .tool-head:hover {
+  background: var(--bg-hover);
+}
+
+.task-timeline .tool-body,
+.task-timeline .tool-shot-wrap {
+  border-top: none;
+  border-radius: 6px;
+  max-height: 240px;
+}
+
+.task-timeline .tool-detail {
+  padding: 0 6px 4px;
+}
+
+/* 子 agent 说的话：比主回答小一号、淡一档 —— 它是过程里的自言自语
+   和给委托方的汇报，不是对用户的回答。 */
+.task-text {
+  font-size: 13px;
+  color: var(--text-dim);
+  padding: 2px 6px;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.task-text .md p {
+  line-height: 1.6;
+}
+
+/* 模型在准备下一步、什么都没在流的间隙。转圈复用工具卡的。 */
+.task-wait {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+/* 时间线里的告知 / 出错行，比对话流里的同款紧一点。 */
+.task-note {
+  font-size: 12px;
+  padding: 6px 10px;
+}
+
+/* 跑完后的脚注：模型、用量、步数。 */
+.task-footer {
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--text-faint);
+  padding: 2px 6px 0;
+}
+
 /* ── 会话改动一览（右侧抽屉） ────────────────── */
 
 .changes-panel {

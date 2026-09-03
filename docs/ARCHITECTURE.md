@@ -1662,6 +1662,8 @@ WebView → React  rAF 批量 setState                ← 防 React 被压垮
 
 `[约束]` 中间那层的合批必须做。UI 每帧只能渲染一次,逐条过 IPC 是纯浪费。这一步的收益比换传输方式还明显。
 
+`[约束]` 子 agent 的增量也走这层。Task 工具把子 agent 的整条事件流套在 `Progress { Nested }` 里上转(界面据此在 Task 卡片里画子时间线:任务书、每个工具调用、正在流的半截消息),其中的 Delta 和主 agent 的一样是逐 token 的——合帧器按"目标 + 套在哪个 Task 里"为键合并,吐出去时套回原来的壳。绕过这层的话,一个子 agent 写报告就是每秒几十条 IPC,三个并行就是上百条。
+
 ```rust
 // 宿主侧:攒 token,按帧发
 let mut tick = interval(Duration::from_millis(16));

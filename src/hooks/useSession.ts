@@ -1,12 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import type {
-  AgentError,
-  DecisionReason,
-  MessageMeta,
-  ToolResultContent,
-  Usage,
-} from "../bridge/generated";
+import type { AgentError, DecisionReason, MessageMeta, Usage } from "../bridge/generated";
 import {
   type AgentEvent,
   type HistorySnapshot,
@@ -30,6 +24,14 @@ import {
   subscribeWindowFocus,
 } from "../bridge";
 import { extractTopLevelStringField, extractTopLevelStringFields } from "../lib/partialJson";
+import {
+  type SubAgent,
+  type ToolItemBase,
+  emptySub,
+  finalizeSub,
+  reduceSub,
+  resultView,
+} from "../lib/subagent";
 
 /**
  * 界面上的一条内容。
@@ -49,25 +51,12 @@ export type Item =
   /** `stopped` = 用户按停止截断的半截回答（内核定稿的，见 finalize_partial）。 */
   | { kind: "assistant"; id: string; text: string; stopped?: boolean; at?: number }
   | { kind: "thinking"; id: string; text: string }
-  | {
-      kind: "tool";
-      id: string;
-      name: string;
-      input: unknown;
-      status: "running" | "ok" | "error";
-      result?: string;
-      /**
-       * 结果里的图片（截图、读图），data URL。这是消息里自带的**压缩图**
-       * （给模型的那份），先显示它，原图到了再换。
-       */
-      resultImage?: string;
-      /**
-       * 原图的磁盘路径（截图落盘的文件、或被读的图片本身）。
-       * 界面优先按它加载原图 —— 压缩图看布局够，看文字不行。
-       */
-      resultImagePath?: string;
-      output: string[];
-    }
+  /**
+   * 工具调用。形状在 lib/subagent 里定义（子 agent 的嵌套时间线复用它），
+   * 这里多一个 `sub`：Task 工具跑起来的子 agent 过程。只有实时路径有 ——
+   * 进度不进历史，切回会话后重建的卡片没有它，只剩任务书和结果。
+   */
+  | (ToolItemBase & { sub?: SubAgent })
   | { kind: "error"; id: string; text: string }
   /** 中性告知（不是出错）：到达轮数上限之类，只是提示"该歇口气了"。 */
   | { kind: "notice"; id: string; text: string }
@@ -297,6 +286,12 @@ export function useSession(
   /** 工具进度行也要合批：`cargo build` 一秒能吐几百行，逐条 setState
    *  等于逐行重渲染整棵树。走和 delta 同一个 rAF 出口。 */
   const pendingProgress = useRef<{ id: string; text: string }[]>([]);
+  /**
+   * 子 agent 的嵌套事件（Task 卡片里的子时间线）。同样合批；帧内按到达
+   * 顺序逐条折进各自的卡片 —— 顺序就是语义（tool_start 先于参数，消息
+   * 先于结果），不能像正文那样按种类归堆。
+   */
+  const pendingNested = useRef<{ id: string; event: AgentEvent }[]>([]);
   const toolJsonById = useRef(new Map<string, string>());
   /**
    * 工具卡片出现时就地落定的流式内容。
@@ -354,11 +349,13 @@ export function useSession(
       const k = pendingThinking.current;
       const chunks = pendingToolJson.current;
       const lines = pendingProgress.current;
-      if (!t && !k && chunks.length === 0 && lines.length === 0) return;
+      const nested = pendingNested.current;
+      if (!t && !k && chunks.length === 0 && lines.length === 0 && nested.length === 0) return;
       pendingText.current = "";
       pendingThinking.current = "";
       pendingToolJson.current = [];
       pendingProgress.current = [];
+      pendingNested.current = [];
 
       let plan: string | undefined;
       // 工具参数边流边填进卡片：id → 此刻已经到齐的那些字段。
@@ -377,6 +374,7 @@ export function useSession(
         let items = s.items;
         if (partial.size) items = fillToolInput(items, partial);
         if (lines.length) items = appendToolOutput(items, lines);
+        if (nested.length) items = applyNested(items, nested);
         return {
           ...s,
           streaming: s.streaming + t,
@@ -567,6 +565,10 @@ export function useSession(
               id: event.tool_use_id,
               text: event.payload.text,
             });
+            schedule();
+          } else if (event.payload.kind === "nested") {
+            // 子 agent 的过程：整条流套在 Task 那次调用的进度里上来。
+            pendingNested.current.push({ id: event.tool_use_id, event: event.payload.event });
             schedule();
           }
           break;
@@ -1181,11 +1183,7 @@ export function useSession(
         streaming: "",
         thinking: "",
         streamingPlan: null,
-        items: s.items.map((it) =>
-          it.kind === "tool" && it.status === "running"
-            ? { ...it, status: "error" as const, result: "未完成" }
-            : it,
-        ),
+        items: finalizeIdleItems(s.items, "未完成"),
       }));
     });
   }, [sessionId, setState]);
@@ -1435,18 +1433,34 @@ function liveDeltasOf(events: AgentEvent[]): { text: string; thinking: string } 
   return { text, thinking };
 }
 
-/** 历史没有进度行，把界面上还在跑的那张卡的输出接回去。 */
+/**
+ * 历史没有进度行，把界面上还在跑的那张卡的输出接回去。
+ *
+ * 子 agent 的过程（Task 卡片的 `sub`）同理，而且**已落定的**卡也要带：
+ * 进度不进历史，快照一盖，刚跑完的子任务就只剩一段结果文本了。带回来
+ * 时顺手收尾 —— 卡片都落定了，子时间线里不该还有转圈的。
+ */
 function mergeLiveTools(fromHist: Item[], current: Item[]): Item[] {
+  type Tool = Extract<Item, { kind: "tool" }>;
+  const prevById = new Map<string, Tool>();
+  for (const c of current) {
+    if (c.kind === "tool" && (c.status === "running" || c.sub)) prevById.set(c.id, c);
+  }
+  if (prevById.size === 0) return fromHist;
   return fromHist.map((it) => {
-    if (it.kind !== "tool" || it.status !== "running") return it;
-    const prev = current.find((c) => c.kind === "tool" && c.id === it.id);
-    if (!prev || prev.kind !== "tool") return it;
+    if (it.kind !== "tool") return it;
+    const prev = prevById.get(it.id);
+    if (!prev) return it;
+    if (it.status !== "running") {
+      return prev.sub ? { ...it, sub: finalizeSub(prev.sub) } : it;
+    }
     return {
       ...it,
       output: prev.output.length > 0 ? prev.output : it.output,
       input: hasToolInput(it.input) ? it.input : prev.input,
       ...(prev.resultImage ? { resultImage: prev.resultImage } : {}),
       ...(prev.resultImagePath ? { resultImagePath: prev.resultImagePath } : {}),
+      ...(prev.sub ? { sub: prev.sub } : {}),
     };
   });
 }
@@ -1484,14 +1498,54 @@ function trimAfterUserPrompt(items: Item[], assistantItemId: string): Item[] {
   return items.slice(0, ast);
 }
 
+/**
+ * 把还在转圈的工具卡片标成没完成。
+ *
+ * Task 卡片里的子时间线一并收尾：子 agent 自己的 Done 一般已经到过，
+ * 没到（宿主换出口的间隙丢了）就由这里兜住，不让卡片里的子工具永远转。
+ */
 function finalizeIdleItems(items: Item[], result: string): Item[] {
   let hit = false;
   const out = items.map((it) => {
-    if (it.kind !== "tool" || it.status !== "running") return it;
+    if (it.kind !== "tool") return it;
+    if (it.status !== "running") {
+      // 卡片本身落定了但子时间线还挂着（子 agent 的 Done 丢在了通道里）。
+      if (it.sub && !it.sub.done) {
+        hit = true;
+        return { ...it, sub: finalizeSub(it.sub) };
+      }
+      return it;
+    }
     hit = true;
-    return { ...it, status: "error" as const, result: it.result ?? result };
+    return {
+      ...it,
+      status: "error" as const,
+      result: it.result ?? result,
+      ...(it.sub ? { sub: finalizeSub(it.sub) } : {}),
+    };
   });
   return hit ? out : items;
+}
+
+/**
+ * 把一帧里攒下的子 agent 事件折进各自的 Task 卡片。
+ *
+ * 按到达顺序逐条折 —— 顺序就是语义。找不到父卡片的丢掉：那是 tool_start
+ * 还没到（或已经被历史覆盖）的进度，没有归宿，和 appendToolOutput 同理。
+ * 全都没命中时保持引用不变（memo 才挡得住）。
+ */
+function applyNested(items: Item[], batch: { id: string; event: AgentEvent }[]): Item[] {
+  let out = items;
+  for (const { id, event } of batch) {
+    const i = findLast(out, (it) => it.kind === "tool" && it.id === id);
+    if (i < 0) continue;
+    const t = out[i] as Extract<Item, { kind: "tool" }>;
+    const sub = reduceSub(t.sub ?? emptySub(), event);
+    if (sub === t.sub) continue;
+    if (out === items) out = [...items];
+    out[i] = { ...t, sub };
+  }
+  return out;
 }
 
 /**
@@ -1687,7 +1741,12 @@ function applyMessage(s: SessionState, event: Extract<AgentEvent, { type: "messa
         };
         if (at >= 0) {
           const prev = items[at] as Extract<Item, { kind: "tool" }>;
-          items[at] = { ...card, status: prev.status, output: prev.output };
+          items[at] = {
+            ...card,
+            status: prev.status,
+            output: prev.output,
+            ...(prev.sub ? { sub: prev.sub } : {}),
+          };
         } else {
           items.push(card);
         }
@@ -1741,16 +1800,9 @@ function appendToolOutput(items: Item[], lines: { id: string; text: string }[]):
 }
 
 function applyDone(s: SessionState, event: Extract<AgentEvent, { type: "done" }>): SessionState {
-  const items = [...s.items];
-
   // 收尾时把还挂着 running 的工具卡片改掉。否则界面上会永远转圈，
   // 而后台其实什么都没在跑了。
-  for (let i = 0; i < items.length; i++) {
-    const it = items[i];
-    if (it && it.kind === "tool" && it.status === "running") {
-      items[i] = { ...it, status: "error", result: "未完成" };
-    }
-  }
+  const items = [...finalizeIdleItems(s.items, "未完成")];
 
   const r = event.reason;
   if (r.reason === "error") {
@@ -1892,42 +1944,6 @@ function describeError(e: AgentError): string {
       return `内部错误：${e.message}`;
     default:
       return "未知错误";
-  }
-}
-
-/**
- * 工具结果 → 界面上显示什么。
- *
- * 图片类结果（截图、读图）显示图片本身。described_image 的 text 是写给
- * 模型的转述（带着"当作亲眼所见"之类的内部指示），**不能**摆到界面上 ——
- * 用户该看到的是那张图。marked_image 的 text 则是和图同属一个结果的
- * 正文（编号清单、MCP 结果的文本部分），图文都给用户看。
- *
- * `image` 是消息里的压缩图（data URL），`imagePath` 是落盘原图的路径。
- * 两个都给：压缩图立刻能显示，原图由组件按路径异步加载后替换。
- */
-function resultView(c: ToolResultContent): { text?: string; image?: string; imagePath?: string } {
-  switch (c.type) {
-    case "text":
-      return { text: c.text };
-    case "spilled":
-      return { text: `结果过大（${c.total_bytes} 字节），已写入 ${c.path}\n\n${c.preview}` };
-    case "cleared":
-      return { text: "（历史结果已清理）" };
-    case "marked_image":
-      return {
-        text: c.text,
-        image: `data:${c.media_type};base64,${c.data}`,
-        ...(c.path ? { imagePath: c.path } : {}),
-      };
-    case "image":
-    case "described_image":
-      return {
-        image: `data:${c.media_type};base64,${c.data}`,
-        ...(c.path ? { imagePath: c.path } : {}),
-      };
-    default:
-      return {};
   }
 }
 

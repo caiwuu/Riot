@@ -27,6 +27,7 @@ import {
 
 import type { PermissionAsk, PermissionResponse } from "../bridge";
 import type { Item, TextItem } from "../hooks/useSession";
+import { subRunningTool } from "../lib/subagent";
 import {
   caretToEnd,
   handleChipKey,
@@ -614,11 +615,14 @@ export function Transcript({
   }, [items, streaming, thinking, streamingPlan, planAsk?.requestId, choiceAsk?.requestId, busy]);
 
   // 还在转圈的工具。底部状态行靠它说清此刻在等谁 —— 一次 build 跑两
-  // 分钟的时候，"生成中"是句废话。
+  // 分钟的时候，"生成中"是句废话。等的是子任务时再往里指一层：
+  // "Task › Grep" 比 "Task" 多说了子 agent 此刻卡在哪一步。
   const runningTool = useMemo(() => {
     for (let i = items.length - 1; i >= 0; i--) {
       const it = items[i];
-      if (it && it.kind === "tool" && it.status === "running") return it.name;
+      if (!it || it.kind !== "tool" || it.status !== "running") continue;
+      const inner = it.sub ? subRunningTool(it.sub) : null;
+      return inner ? `${it.name} › ${inner.name}` : it.name;
     }
     return null;
   }, [items]);
