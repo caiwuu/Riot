@@ -687,7 +687,7 @@ interface Inst {
 /**
  * 尺寸稳定多久之后才真的 fit。
  *
- * `[约束]` 不能跟着 ResizeObserver 每帧 fit。侧栏 240ms 的开合动画里
+ * `[约束]` 不能跟着 ResizeObserver 每帧 fit。侧栏 500ms 的开合动画里
  * `.main` 每帧变宽，终端容器跟着变，而一次 fit 是「按新宽度重排整个
  * 5000 行回滚缓冲」外加一次 termResize IPC（宿主 ioctl TIOCSWINSZ、
  * 给 shell 发 SIGWINCH）—— 十几帧连着做，动画整个卡住。拖分隔线同理。

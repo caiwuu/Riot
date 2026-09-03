@@ -101,18 +101,38 @@
    * 三档就够：反馈 / 揭示 / 布局。拿不准用 --dur-2。 */
   --dur-1: 0.12s; /* 即时反馈：hover、按下、focus 环 */
   --dur-2: 0.18s; /* 小块揭示：淡入淡出、图标翻转、开关 */
-  /* 布局位移：面板开合、折叠展开。位移大，需要的时间也长 —— 同一条
-     曲线下 240ms 收得偏急，Codex 桌面端这一档也是 300ms。
-     `[约束]` 改这个值要连着两处 JS 超时一起改，它们都在等这段过渡
-     结束：SlidePanel 的 SLIDE_MS（延迟卸载）、SmoothFold 的
-     transitionend 兜底。短了的话内容会在动画播完之前被拆掉。 */
+  /* 布局位移：折叠展开。位移大，需要的时间也长 —— 同一条曲线下 240ms
+     收得偏急，Codex 桌面端的揭示档也是 300ms。
+     `[约束]` 改这个值要连着 SmoothFold 的 transitionend 兜底
+     （FOLD_FALLBACK_MS）一起改，它在等这段过渡结束。短了的话内容会在
+     动画播完之前被拆掉。 */
   --dur-3: 0.3s;
+  /* 面板开合（侧栏 / 抽屉 / 终端）：全应用位移最大的一档，和下面的
+     --ease-panel 配套。500ms 读起来并不慢 —— 那条曲线的位移前中段密、
+     尾段疏，250ms 就走完 92%，剩下的是"落稳"而不是"还在走"。
+     `[约束]` 改这个值要连着 SlidePanel 的 SLIDE_MS（延迟卸载）一起改。 */
+  --dur-panel: 0.45s;
 
   /* 减速为主：UI 反馈要"立刻出发、轻轻落地"。默认 ease 是慢起步，
      用在反馈上天然发糊。 */
   --ease-out: cubic-bezier(0, 0, 0.2, 1);
-  /* 布局位移专用：出场果断、收尾更长，位移大时比 --ease-out 稳。 */
-  --ease-panel: cubic-bezier(0.25, 0.8, 0.3, 1);
+  /* 折叠展开：出场果断、收尾更长，位移大时比 --ease-out 稳。 */
+  --ease-fold: cubic-bezier(0.25, 0.8, 0.3, 1);
+  /* 面板开合：阻尼比 0.9 的弹簧阶跃响应拟合成的 bezier（最大偏差
+     2.4%，全落在尾段）。
+     早先这一档和 --ease-fold 共用一条，问题是那条极度前倾：头 100ms
+     就走完 80% 的距离，剩下 20% 拖满 200ms —— 280px 的侧栏就是最后
+     56px 磨了 200ms，读起来像"冲出去然后卡住"。这条匀得多：100ms 走
+     48%、250ms 走 92%。
+     数值对齐 Codex 桌面端的 { type: 'spring', duration: .5, bounce: .1 }。
+     它那个 bounce 0.1 换算成阻尼比 0.9，峰值过冲只有 0.15% —— 也就是说
+     那一档的"顺"不来自回弹，纯粹是时长加速度分布。所以这里取不过冲的
+     单调拟合：允许过冲的版本要 y2=1.13，在面板**宽度**上会真的弹出 3px。
+     `[约束]` 用 bezier 而不是 linear() 烘真弹簧曲线。linear() 是分段
+     线性，20 段的位置误差和这条差不多（1.3%）但速度是台阶状的；更要紧
+     的是它不被支持时 var() 代入失败，会让整条 transition 简写回落到
+     初始值（transition-duration 变 0s）—— 动画不是退化，是整个没了。 */
+  --ease-panel: cubic-bezier(0.34, 0.5, 0.06, 1);
   /* 内容淡入。头快尾慢的反向曲线 —— 字立刻可读，最后一点透明度慢慢
      补齐，不会有"闪一下"的台阶感。数值抄自 Codex 的流式淡入。 */
   --ease-fade: cubic-bezier(0.37, 0.55, 0.86, 0.88);
@@ -492,11 +512,11 @@ pre {
  * （Codex 桌面端同款：`.panel-animated [data-panel]` 常挂过渡，
  * `.panel-dragging` 时才 `transition: none`。） */
 .slide-panel.ax {
-  transition: width var(--dur-3) var(--ease-panel);
+  transition: width var(--dur-panel) var(--ease-panel);
 }
 
 .slide-panel.ay {
-  transition: height var(--dur-3) var(--ease-panel);
+  transition: height var(--dur-panel) var(--ease-panel);
 }
 
 /* 右列（工作台抽屉 / 任务详情）和主区之间的分隔线。
@@ -551,6 +571,27 @@ html[data-resizing] .slide-panel {
   min-width: 0;
   min-height: 0;
 }
+
+/* `[约束]` 不要给面板内容加淡出（opacity 过渡）。试过，在 macOS 上是
+   "先黑一下、再开始收"。
+ *
+ * 想做的事：Codex 桌面端的侧栏把 opacity 绑在和宽度同一个 0→1 进度上
+ * （外层 motion.aside 动 width，内层 motion.div 动 width + opacity），
+ * 内容跟着淡出，把壳 overflow 的那道硬裁边藏住。
+ *
+ * 为什么这里不成立：这棵子树底下是**透明的窗口**。侧栏要透出系统材质，
+ * 整页背景就得让开（见 html[data-vibrancy]：html / body 都是
+ * transparent，只有 .main 自己补不透明底）。而 opacity 一旦不是 1，
+ * WebKit 就把那棵子树提升成独立合成层 —— 新层底下没有可混合的背景，
+ * 合成出来是黑的，观感就是动画起步那一帧整块黑一下。
+ *
+ * 这和 <details> 那条是同一类：Codex 是 Electron，那层淡出压在不透明的
+ * Chromium 表面上；Riot 的侧栏是刻意透到 NSVisualEffectView 的。技术
+ * 本身没问题，是宿主前提不同。
+ *
+ * 真要再试，得先解决"淡出层之下有什么"这个问题（比如把不透明底移到
+ * 动画宽度的那一层去），并且**在打包版 + 有材质的窗口上**验 —— dev 的
+ * WebView 合成路径和正式包不一样，这个症状可能只在其中一边出现。 */
 
 .slide-panel.ay .slide-panel-inner {
   flex-direction: column;
@@ -612,8 +653,8 @@ html[data-resizing] .slide-panel {
   /* 收起时吃掉 .topbar 的 gap，否则 0 宽占位仍会在标题前留 6px。 */
   margin-right: -6px;
   transition:
-    width var(--dur-3) var(--ease-panel),
-    margin-right var(--dur-3) var(--ease-panel);
+    width var(--dur-panel) var(--ease-panel),
+    margin-right var(--dur-panel) var(--ease-panel);
 }
 
 .tb-traffic.show {
@@ -769,7 +810,7 @@ html[data-resizing] .slide-panel {
 .tb-win-slot {
   flex-shrink: 0;
   width: 0;
-  transition: width var(--dur-3) var(--ease-panel);
+  transition: width var(--dur-panel) var(--ease-panel);
 }
 
 .tb-win-slot.show {
@@ -980,7 +1021,7 @@ html[data-resizing] .slide-panel {
   /* clip 只裁切，不是滚动容器。hidden 会截住滚轮（再叠
      overscroll-behavior:none 就交不到外层对话流）。 */
   overflow: clip;
-  transition: grid-template-rows var(--dur-3) var(--ease-panel);
+  transition: grid-template-rows var(--dur-3) var(--ease-fold);
 }
 
 .smooth-fold.open {
@@ -1437,7 +1478,7 @@ html[data-resizing] .slide-panel {
   pointer-events: none;
   z-index: 0;
   /* `visibility: hidden` 只是不画，**布局照做**。保活着的会话最多 4 棵
-     （App 的 KEEP_CHATS），侧栏 240ms 的开合动画里 .main 每帧变宽，
+     （App 的 KEEP_CHATS），侧栏 500ms 的开合动画里 .main 每帧变宽，
      等于每帧排四份对话流而用户只看得见一份。content-visibility 让
      浏览器整棵跳过 —— 盒子还在（inset:0 撑着，尺寸不靠内容），里面
      不排不画。
@@ -1468,11 +1509,10 @@ html[data-resizing] .slide-panel {
   /* 这一列必须自带不透明底 —— 和 .main 同一个理由（见 [data-vibrancy] 那
      一组）：磨砂平台上 html / body 的背景是让开的，谁不铺底谁就漏出系统
      材质，在深色 UI 里是一片灰白。
-     里面每个面板（浏览器 / 改动 / 预览 / 空状态）各自铺了一层 --bg，平时
-     看不出缺这一条；但收起动画那 300ms 它们一个都不在：wb.open 一翻 false
-     activeKind 立刻变 null 把面板卸掉（浏览器要停帧流），空状态又被故意
-     压着不显（见 App 的 emptyShown）。于是标签栏以下整块透出材质，跟着
-     抽屉一路滑出去。 */
+     里面每个面板（浏览器 / 改动 / 预览 / 空状态）各自铺了一层 --bg，所以
+     平时看不出缺这一条。留着是兜底：收起动画期间面板由 App 的 shownKind
+     撑住不卸（那里记着为什么不能用 activeKind），但空状态是被故意压着
+     不显的（见 emptyShown），标签一个不剩时那半秒仍然没人铺底。 */
   background: var(--bg);
 }
 
@@ -2425,20 +2465,48 @@ html[data-resizing] .slide-panel {
   flex-shrink: 0;
 }
 
-/* 长会话的渲染预算：离屏的行跳过排版和绘制（浏览器原生"虚拟化"）。
-   和 LazyMarkdown 的懒解析、Row 的 memo 是同一件事的三层 ——
-   解析、VDOM、排版绘制各管一段。选它而不是窗口化列表库（virtuoso 类）:
-   贴底跟随/位置恢复/橡皮筋处理那套滚动逻辑是按真实 DOM 高度调校的，
-   窗口化会把它整个推倒重来，收益却只多在"DOM 节点数"这一项上。
+/* 一轮问答。**渲染预算的落点就在这一层**，不在每个块上。
 
-   contain-intrinsic-size 的 auto 关键字：渲染过一次的行记住真实高度，
-   没渲染过的按 60px 估 —— 估偏了 scrollHeight 会抖，但倒排容器保持
+   离屏的轮跳过排版和绘制（浏览器原生"虚拟化"）。和 LazyMarkdown 的
+   懒解析、Row 的 memo 是同一件事的三层 —— 解析、VDOM、排版绘制各管
+   一段。选它而不是窗口化列表库（virtuoso 类）：贴底跟随/位置恢复/
+   橡皮筋处理那套滚动逻辑是按真实 DOM 高度调校的，窗口化会把它整个
+   推倒重来，收益却只多在"DOM 节点数"这一项上。
+
+   `[约束]` 粒度必须是**轮**，不能退回每块一份。content-visibility
+   跳过的是元素的*内容*，元素盒子本身仍是 .thread-col 的 flex 项，
+   每帧都要参与列布局、要做"是否接近视口"的判定、还要维护
+   contain-intrinsic-size:auto 要求的"上次记住的尺寸" —— 这笔记账是
+   按 content-visibility 元素**个数**算的，不是按 DOM 节点数算的。
+   于是每块一份时它随会话长度线性增长：侧栏 500ms 的开合动画里
+   .main 每帧变宽、整棵子树重排，实测每帧的 style+layout 从 150 块的
+   0.07ms 涨到 3000 块的 1.41ms（一帧预算只有 8.3ms）。按轮包一层之后
+   元素数少一个量级，曲线基本压平。
+   （完全不用这条的话同一组数字是 0.8ms / 26ms —— 所以这个优化是承重的，
+   只是粒度要选对。Codex 桌面端同款：它把 content-visibility 挂在
+   `[data-virtualized-turn-content]` 上，一轮一份，估高 240px。）
+
+   contain-intrinsic-size 的 auto 关键字：渲染过一次的轮记住真实高度，
+   没渲染过的按 240px 估 —— 估偏了 scrollHeight 会抖，但倒排容器保持
    "距底距离"，上方估高落地不再撼动视口；贴底由倒排原生保证 +
    pinBottom 归零残差，恢复位置有二次 rAF 补写兜着。
-   不支持的 WebView（Safari 18 之前）按普通渲染，只是不省。 */
-.thread-col > * {
+   不支持的 WebView（Safari 18 之前）按普通渲染，只是不省。
+
+   gap 和 .thread-col 同值：轮内块间距和轮间距都是 14px，包这一层
+   不改变任何视觉间距。 */
+.turn {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
   content-visibility: auto;
-  contain-intrinsic-size: auto 60px;
+  contain-intrinsic-size: auto 240px;
+}
+
+/* 正在生成的那一轮不省渲染：内容每帧在长，"上次记住的尺寸"一直在失效，
+   而它本来就在视口里 —— 跳过判定只会白付一轮轮重新测量。生成结束后
+   属性摘掉，它变回普通历史轮。 */
+.turn[data-live] {
+  content-visibility: visible;
 }
 
 .msg {
@@ -3092,6 +3160,423 @@ html[data-resizing] .slide-panel {
   color: var(--text);
 }
 
+/* ── 后台任务面板：复用排队面板的壳（同一格、同一类问题），行内多几列。 ── */
+.task-panel-head {
+  display: flex;
+  align-items: center;
+}
+
+.task-panel-head .queue-head {
+  flex: 1;
+}
+
+.task-panel-dismiss {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.task-panel-dismiss:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.task-dot {
+  flex-shrink: 0;
+  width: 12px;
+  text-align: center;
+  font-family: var(--mono);
+  color: var(--text-faint);
+}
+
+.task-row-running .task-dot {
+  color: var(--warn);
+}
+
+.task-row-completed .task-dot {
+  color: var(--ok);
+}
+
+.task-row-failed .task-dot {
+  color: var(--danger-soft);
+}
+
+.task-row-completed,
+.task-row-failed,
+.task-row-cancelled {
+  color: var(--text-faint);
+}
+
+.task-kind {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-faint);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+
+.task-title {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+
+.task-row-running .task-title {
+  color: var(--text);
+}
+
+/* 活动直播：一行，右端贴最新的字，和 fold-peek 同一个视觉。 */
+.task-activity {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.task-meta {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+/* 停止键常驻：它是用户唯一能停掉后台任务的地方，藏起来等于没有。 */
+.task-actions {
+  opacity: 1;
+}
+
+.task-actions button:hover {
+  color: var(--danger-soft);
+}
+
+/* ── 完成通知卡片：对话流里的一行头 + 可展开的汇报。既不是用户说的
+   也不是模型说的，视觉上介于 notice 和过程组之间：虚线框、左侧状态色条。 ── */
+.task-notice {
+  align-self: stretch;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: var(--bg-card, rgba(127, 127, 127, 0.08));
+  font-size: 13px;
+}
+
+/* 状态用头部的一枚小图标说，不画色条 —— 色条在一排虚线卡里太跳。 */
+.task-notice-icon {
+  flex: none;
+  width: 12px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.task-notice-icon-completed {
+  color: var(--ok);
+}
+
+.task-notice-icon-failed {
+  color: var(--danger-soft);
+}
+
+.task-notice-icon-cancelled {
+  color: var(--text-faint);
+}
+
+.task-notice-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 8px 12px 8px 8px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.task-notice-head:hover {
+  color: var(--text);
+}
+
+.task-notice-label {
+  flex: none;
+  color: var(--text-faint);
+}
+
+.task-notice-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.task-notice-id {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.task-notice-body {
+  padding: 0 14px 12px 14px;
+  color: var(--text-dim);
+  word-break: break-word;
+}
+
+.task-notice-body .md h1,
+.task-notice-body .md h2,
+.task-notice-body .md h3,
+.task-notice-body .md h4 {
+  font-size: 1em;
+  margin: 0.9em 0 0.35em;
+}
+
+/* ── Task 卡片（照 Cursor 的子 agent 行）：标题 · 模型 一行，动作一行，
+   整张卡是打开子 agent 会话的入口。 ── */
+.tool-task .task-card-head {
+  cursor: pointer;
+}
+
+.tool-task .task-card-head:disabled {
+  cursor: default;
+}
+
+.task-card-title {
+  flex: none;
+  color: var(--text);
+  font-weight: 500;
+}
+
+.task-card-model {
+  flex: none;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.task-card-tags {
+  flex: 1;
+  min-width: 0;
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.task-card-go {
+  flex: none;
+  color: var(--text-faint);
+  font-size: 16px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity var(--dur-2) var(--ease-out);
+}
+
+.tool-task:hover .task-card-go,
+.tool-task:focus-within .task-card-go {
+  opacity: 1;
+}
+
+.task-card-activity {
+  /* 和头部图标之后的文字对齐：图标 12px + 间距。 */
+  padding: 0 10px 6px 30px;
+  color: var(--text-faint);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-running .task-card-activity {
+  color: var(--text-dim);
+}
+
+/* 通用的"打开子 agent 会话"链接样式：面板标题、通知卡 id。 */
+.task-link {
+  border: none;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.task-link:hover {
+  color: var(--text);
+  text-decoration: underline;
+  text-decoration-color: var(--text-faint);
+  text-underline-offset: 3px;
+}
+
+/* 回答里的 `agent:` 链接：像一枚小标签，前面带分叉记号。 */
+.md .md-agent-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  border-radius: 6px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  text-decoration: none;
+  color: var(--text);
+  font-size: 0.92em;
+  line-height: 1.5;
+  vertical-align: baseline;
+}
+
+.md .md-agent-link:hover {
+  background: var(--bg-hover);
+  text-decoration: none;
+}
+
+.md-agent-icon {
+  color: var(--text-faint);
+  font-size: 0.9em;
+}
+
+/* ── 子 agent 会话面板（右侧抽屉标签） ── */
+.subagent-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.subagent-empty {
+  padding: 24px 16px;
+  color: var(--text-faint);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.subagent-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.subagent-head .task-dot {
+  margin-top: 3px;
+  width: 14px;
+  font-size: 13px;
+}
+
+.subagent-head-running .task-dot {
+  color: var(--warn);
+}
+
+.subagent-head-completed .task-dot {
+  color: var(--ok);
+}
+
+.subagent-head-failed .task-dot {
+  color: var(--danger-soft);
+}
+
+.subagent-head-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.subagent-head-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-head-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.subagent-head-id {
+  margin-left: auto;
+  font-family: var(--mono);
+  opacity: 0.7;
+}
+
+.subagent-stop {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  border-radius: 999px;
+  padding: 3px 10px 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.subagent-stop:hover {
+  color: var(--danger-soft);
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+}
+
+.subagent-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 12px 14px 20px;
+}
+
+/* 任务书：主 agent 交给它的话，摆在最上面当题目。 */
+.subagent-prompt {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+}
+
+.subagent-prompt-label {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-bottom: 4px;
+}
+
+.subagent-prompt-text {
+  font-size: 13px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.6;
+}
+
+/* 条目排法和主对话的 .thread-col 一致，但不限宽、不居中 —— 抽屉本来就窄。 */
+.subagent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 13px;
+}
+
 /* 全屏最浅的一块，靠底色差自己浮起来 —— 所以**不画描边**。底色已经
    把它和正文区分开了，再套一圈线只是重复一遍同一件事。
 
@@ -3112,8 +3597,9 @@ html[data-resizing] .slide-panel {
   min-width: 0;
 }
 
-/* 拖着文件悬在窗口上。输入框自己也亮一下 —— 遮罩说"能接住"，这一下
-   说的是"接住之后东西落在哪"。 */
+/* 拖着文件悬在窗口上（系统拖放），或从文件树拖过来的那一项正压在输入框
+   上。前者遮罩说"能接住"、这一下说的是"接住之后东西落在哪"；后者没有
+   遮罩，这一下就是全部的落点反馈。 */
 .composer.dragging {
   box-shadow: inset 0 0 0 1px var(--accent);
   background: var(--bg-active);
@@ -3143,6 +3629,45 @@ html[data-resizing] .slide-panel {
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
   font-size: 13px;
   color: var(--text);
+}
+
+/* 从文件树拖一个文件到输入框（应用内那套 pointer 拖拽，原因见
+   lib/fileDrag）。跟着指针走的是抓住那一行的克隆件。 */
+.file-drag-ghost {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: var(--z-drop);
+  /* 命中测试要穿过拖影看到底下的落点，它自己绝不能吃鼠标。 */
+  pointer-events: none;
+  max-width: 260px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+/* 拖起来之后输入框先亮一层浅的"往这儿放"。没有这一下，用户不知道整个
+   窗口里只有那一块接得住 —— 指针进来才亮的话，得先猜对才看得见提示。
+   指针真进来了走上面那条 .dragging，所以这里避开它。 */
+body.file-dragging .composer:not(.dragging) {
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+/* 抓着东西时整窗一个光标、且哪儿都不许起选区。两条都得逐元素压过去：
+   光标是因为树行写着 default、输入框是 text，一路拖过去它自己变来变去，
+   看着像拖拽已经断了；选区是因为 WebKit 会在指针扫过的地方接着延伸
+   （起点那一下由 lib/fileDrag 拦 selectstart 挡掉，这条管后半程）。 */
+body.file-dragging,
+body.file-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
+body.file-dragging.file-drop-hot,
+body.file-dragging.file-drop-hot * {
+  cursor: copy !important;
 }
 
 /* 待发的附件条。缩略图排在输入框上方。 */
@@ -3219,24 +3744,29 @@ html[data-resizing] .slide-panel {
 }
 
 .msg-images img {
-  max-width: 220px;
-  max-height: 160px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
+  width: 100%;
+  height: 100%;
+  /* 和输入框的附件缩略图同一套裁法：定宽方块 + cover。原图比例各异，
+     按比例摆出来一排高低不齐，回显只是为了"认出发的是哪张"。 */
+  object-fit: cover;
   display: block;
 }
 
-/* 图片外面包了放大按钮：抹掉按钮壳，hover 微亮提示可点。 */
+/* 图片外面包了放大按钮：抹掉按钮壳，hover 微亮提示可点。
+   尺寸和边框挪到按钮上，才好让里面的 img 撑满这个方块。 */
 .msg-image-btn {
+  width: 54px;
+  height: 54px;
   padding: 0;
-  border: none;
-  background: none;
+  border: 1px solid var(--border);
   border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg);
   cursor: zoom-in;
 }
 
 .msg-image-btn:hover:not(:disabled) {
-  background: none;
+  background: var(--bg);
   filter: brightness(1.08);
 }
 
@@ -3689,6 +4219,9 @@ html[data-resizing] .slide-panel {
 /* ── 文件预览（右侧抽屉） ────────────────────── */
 
 /* 和改动面板同一种壳：整列、左描边、聊天区同底。 */
+/* 预览面板：顶上一条横跨全宽的头部（面包屑 + 按钮贴右缘），下面一行
+   两列 —— 左边正文，右边文件树（可收）。树在右侧是 Codex 的布局：对话
+   在窗口中间，树靠外缘，眼睛从对话扫到文件内容不用跨过一列目录。 */
 .preview-panel {
   flex: 1;
   min-width: 0;
@@ -3696,6 +4229,202 @@ html[data-resizing] .slide-panel {
   display: flex;
   flex-direction: column;
   background: var(--bg);
+}
+
+.preview-split {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+}
+
+.preview-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── 文件树 ─────────────────────────────────── */
+
+/* 树栏的外壳：宽度由内联样式定（可拖）。 */
+.file-tree-col {
+  flex-shrink: 0;
+  min-height: 0;
+  display: flex;
+}
+
+.file-tree {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: var(--bg);
+}
+
+/* 头部里的树开关：开着时常亮，和其它两个瞬时动作的按钮区分开。 */
+.preview-panel-head .icon.on {
+  color: var(--text);
+  background: var(--bg-nav-active);
+}
+
+/* 筛选框：树栏顶上一个圆角输入（Codex 同款），不画分隔线 —— 头部那条
+   横线已经把它和上面隔开了。 */
+.file-tree-filter {
+  flex-shrink: 0;
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 8px 8px 4px;
+  color: var(--text-faint);
+}
+
+.file-tree-filter > svg {
+  position: absolute;
+  left: 17px;
+  pointer-events: none;
+}
+
+.file-tree-filter input {
+  width: 100%;
+  height: 28px;
+  padding: 0 24px 0 27px;
+  font-size: 12px;
+  border-radius: 8px;
+  border-color: transparent;
+  background: var(--bg-input);
+}
+
+.file-tree-filter input:focus {
+  border-color: var(--border-strong);
+}
+
+.file-tree-clear {
+  position: absolute;
+  right: 10px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-faint);
+}
+
+.file-tree-clear:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.file-tree-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px 4px 12px;
+  outline: none;
+}
+
+/* 一行：缩进（内联 paddingLeft）+ 图标槛 + 名字。紧凑无边框（Codex /
+   Cursor 同款），一屏能扫三十行。名字不换行、超宽截断 —— 整条相对路径
+   在 title 里。 */
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding-right: 8px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  cursor: default;
+  user-select: none;
+}
+
+.tree-row:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* 正在预览的文件：底色常亮（不只是 hover），一眼看出"我在看哪个"。 */
+.tree-row.selected {
+  background: var(--bg-nav-active);
+  color: var(--text);
+}
+
+/* 键盘光标：只在列表持有焦点时画环，鼠标用户看不到多余的框。 */
+.file-tree-list:focus .tree-row.cursor {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* 图标槛：目录放箭头、文件放类型图标，宽度一致名字才对齐。 */
+.tree-slot {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+}
+
+.tree-slot .file-icon {
+  width: auto;
+  font-size: 15px;
+}
+
+.tree-slot .chevron {
+  color: var(--text-faint);
+}
+
+.tree-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 筛选结果里跟在文件名后面的目录，淡一档、可截。 */
+.tree-dir {
+  min-width: 0;
+  margin-left: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.tree-link {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+/* 条目下面的说明行（正在读取 / 出错 / 还有 N 项）。 */
+.tree-note {
+  height: 24px;
+  display: flex;
+  align-items: center;
+  padding-right: 8px;
+  font-size: 12px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree-note.error {
+  color: var(--danger-soft);
+}
+
+.file-tree-empty {
+  padding: 24px 12px;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--text-faint);
 }
 
 .preview-panel-head {
@@ -3717,6 +4446,30 @@ html[data-resizing] .slide-panel {
   min-width: 0;
 }
 
+/* 面包屑：目录段淡、文件名亮。整条不换行，太长从**头部**截 —— 文件名
+   在末尾必须留着。办法是外层 direction:rtl（省略号落在行的"末端"，
+   RTL 的末端在左）、text-align:left（不溢出时照常靠左），内层一整块
+   isolate 成 LTR，段的先后顺序才不会被反过来。 */
+.preview-crumbs {
+  direction: rtl;
+  text-align: left;
+}
+
+.preview-crumbs-inner {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+.preview-crumb-sep {
+  margin: 0 5px;
+  opacity: 0.6;
+}
+
+.preview-crumb-name {
+  color: var(--text);
+}
+
+/* 面包屑和按钮之间的弹簧：把按钮推到头部最右缘。 */
 .preview-panel-spacer {
   flex: 1;
   min-width: 0;
@@ -3810,10 +4563,43 @@ html[data-resizing] .slide-panel {
   background: var(--bg);
 }
 
+/* 行号栏 + 正文一行排开。容器不限宽（min-width: max-content 在正文
+   pre 上），横向滚动时行号靠 sticky 钉在左缘，底色盖住滑过去的代码。 */
+.code-view-lines {
+  display: flex;
+  align-items: flex-start;
+  min-width: max-content;
+}
+
 .code-view pre {
   margin: 0;
   padding: 12px 16px;
   min-width: max-content;
+}
+
+/* 行号：和正文同字体、同字号、同行高才能逐行对齐 —— 三个值都别单改。
+   右对齐、淡色、不可选中。 */
+.code-view-gutter {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  flex-shrink: 0;
+  padding: 12px 10px 12px 14px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.65;
+  text-align: right;
+  color: var(--text-faint);
+  opacity: 0.7;
+  background: var(--bg);
+  border-right: 1px solid var(--border);
+  user-select: none;
+  white-space: pre;
+}
+
+.code-view-gutter + pre {
+  flex: 1;
+  padding-left: 14px;
 }
 
 .code-view code {
@@ -6654,8 +7440,8 @@ button.field-slider-state:hover {
 }
 
 /* 用户消息行：操作按钮排在气泡右下方的流内位置（和助手消息的操作
-   位置对称）。不用绝对定位 —— thread-col 的 content-visibility 隐含
-   paint containment，定位到气泡边界外的东西会被整块裁掉。 */
+   位置对称）。不用绝对定位 —— .turn 的 content-visibility 隐含
+   paint containment，定位到那一轮边界外的东西会被整块裁掉。 */
 .user-row {
   display: flex;
   flex-direction: column;
@@ -6684,14 +7470,19 @@ button.field-slider-state:hover {
 
 /* ── 消息内联编辑（上下文修改） ───────────────── */
 
-/* 编辑态永远完整渲染。
-   `.thread-col > *` 开了 content-visibility: auto 省渲染 —— 但在一条
-   消息从气泡（几十像素）动态膨胀成大编辑框的这一帧，它偶发把该 row
-   判为"不在视口附近"而跳过渲染，套用 contain-intrinsic-size 的占位高度
-   并施加 size + paint containment：编辑框被压到占位高度、底部的保存/取消
-   按钮被裁掉半截，直到 hover / 滚动触发重新评估才冒出来（偶现）。编辑态
-   只有一个 row，放弃这处渲染优化换按钮稳定可见。 */
-.thread-col > .msg.editing {
+/* 编辑态所在的那一轮永远完整渲染。
+   `.turn` 开了 content-visibility: auto 省渲染 —— 但在一条消息从气泡
+   （几十像素）动态膨胀成大编辑框的这一帧，浏览器偶发把它判为"不在视口
+   附近"而跳过渲染，套用 contain-intrinsic-size 的占位高度并施加
+   size + paint containment：编辑框被压到占位高度、底部的保存/取消按钮
+   被裁掉半截，直到 hover / 滚动触发重新评估才冒出来（偶现）。同一时刻
+   只有一个 row 在编辑，放弃这一轮的渲染优化换按钮稳定可见。
+
+   用 :has() 而不是在编辑的元素自己身上写：省渲染的开关在轮那一层，
+   要关的也是那一层；而膨胀的元素可能嵌在轮内任意深度（用户气泡是
+   .user-row 的孩子）。这样以后再多几种"展开后会长高"的东西，也不用
+   为每一种新加一条规则。 */
+.turn:has(.msg.editing) {
   content-visibility: visible;
 }
 
@@ -7107,7 +7898,7 @@ button.field-slider-state:hover {
    .composer 的上下内边距（共 4px）一起收了，后果有两个：
    - 同一个输入框在宽列上离底边 18px、窄列上 12px，换台显示器就变样；
    - 列宽跨过 560 的那一帧，输入框上边缘硬跳 10px。而侧栏开合正好会
-     跨过这个阈值 —— 240ms 的平滑滑动中间插一帧硬跳，就是"侧栏一开
+     跨过这个阈值 —— 500ms 的平滑滑动中间插一帧硬跳，就是"侧栏一开
      输入框弹一下"。
    横向的变化（内边距收窄、两个 pill 收起）留着：那是这条查询的本职，
    而且发生在一次横向动画里，不会把输入框在纵向上挪位置。 */
@@ -7120,7 +7911,7 @@ button.field-slider-state:hover {
  *
  * `[约束]` 不能挪回 560（早先和下面那条合在一起）。560 落在内边距已经
  * 在约束内容的区间里，跨过去那一帧内容宽度一次变 24px、整屏文字重新
- * 折行 —— 而侧栏 / 抽屉开合正好会扫过这个宽度，300ms 的平滑滑动中间
+ * 折行 —— 而侧栏 / 抽屉开合正好会扫过这个宽度，500ms 的平滑滑动中间
  * 插一帧重排。 */
 @container chat (max-width: 768px) {
   .composer-dock {

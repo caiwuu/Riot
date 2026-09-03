@@ -46,6 +46,7 @@ pub mod session;
 pub mod skills;
 pub mod slash;
 pub mod subagent;
+pub mod tasks;
 pub mod vision;
 pub mod web;
 
@@ -276,6 +277,7 @@ async fn dispatch(request: RpcRequest, manager: &manager::SessionManager) -> Rpc
                 pending_asks: snap.pending_asks,
                 live_text: snap.live_text,
                 live_thinking: snap.live_thinking,
+                tasks: snap.tasks,
             }
         }
         Req::SessionDelete { session_id } => {
@@ -342,6 +344,25 @@ async fn dispatch(request: RpcRequest, manager: &manager::SessionManager) -> Rpc
             entry_id,
         } => RpcResponse::QueueTaken {
             input: manager.queue_take(session_id.as_str(), &entry_id).await,
+        },
+        Req::TaskCancel {
+            session_id,
+            agent_id,
+        } => RpcResponse::Removed {
+            removed: manager.cancel_task(session_id.as_str(), &agent_id).await,
+        },
+        Req::TaskHistory {
+            session_id,
+            agent_id,
+        } => match manager.task_history(session_id.as_str(), &agent_id).await {
+            Some((task, messages)) => RpcResponse::TaskHistory {
+                task: Some(task),
+                messages,
+            },
+            None => RpcResponse::TaskHistory {
+                task: None,
+                messages: Vec::new(),
+            },
         },
         Req::SessionCompact { session_id, model } => {
             match manager.compact(session_id.as_str(), *model).await {

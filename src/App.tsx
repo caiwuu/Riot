@@ -16,6 +16,7 @@ import {
   createSession,
   deleteSession,
   encodePlainForComposer,
+  encodeRefForComposer,
   getConfig,
   type ImageInput,
   listSessions,
@@ -55,12 +56,14 @@ import {
   openFilePreview,
   subscribeFilePreview,
 } from "./components/FilePreview";
+import type { TreeTarget } from "./components/FileTree";
 import { MissingProjectDialog } from "./components/MissingProjectDialog";
 import { ProjectRootContext } from "./components/Markdown";
 import {
   PermissionDialog,
 } from "./components/PermissionDialog";
 import { Settings } from "./components/Settings";
+import { SubagentPanel } from "./components/SubagentPanel";
 import { closeSessionTerminals, TerminalPanel } from "./components/TerminalPanel";
 import { hasActiveTodos, TodoPanel } from "./components/TodoPanel";
 import {
@@ -72,6 +75,7 @@ import { useAppUpdate } from "./hooks/useAppUpdate";
 import { useBrowserPanel } from "./hooks/useBrowserPanel";
 import { newPresetId } from "./lib/prompts";
 import { inheritedSampling } from "./lib/sampling";
+import { SubagentsContext, subscribeSubagentOpen } from "./lib/subagentLink";
 import { Transcript, transcriptView } from "./components/Transcript";
 import {
   ContextMenu,
@@ -97,7 +101,7 @@ import {
   FolderIcon,
   RiotMark,
 } from "./components/icons";
-import { basename, looksAbsPath } from "./pathDisplay";
+import { asDirRef, basename, looksAbsPath } from "./pathDisplay";
 
 /**
  * 布局照着 Codex 桌面端：左侧按项目分组的会话列表（可拖宽、可收起），
@@ -356,7 +360,7 @@ export function App() {
   const rightDrawerOpen = Boolean(active && wb.open && !scheduleDetailOpen);
   /** 抽屉还在画面上（含收起动画）。内容要留着，否则是空壳在滑。 */
   const drawerPresent = usePresence(rightDrawerOpen);
-  /** 收起动画那 300ms 里，空状态定格在收起前的样子。关掉最后一个标签是
+  /** 收起动画那 500ms 里，空状态定格在收起前的样子。关掉最后一个标签是
    *  「标签清空」和「抽屉收起」同一拍发生，照 wb.tabs 直接判的话，"添加
    *  面板"那张菜单会在抽屉往外滑的途中冒出来亮一下 —— 用户刚关完东西，
    *  看到的却是一张新菜单飘走。抽屉 keepMounted，SlidePanel 的"最后一帧"
@@ -445,13 +449,33 @@ export function App() {
 
   /** 激活的工作台标签。抽屉的渲染分支和顶栏开关的亮灭都从它派生。 */
   const activeTab = wb.tabs.find((t) => tabId(t) === wb.active) ?? null;
-  /** 正显示着的标签种类。抽屉收起时是 null —— 开关状态别亮着。 */
+  /** 正显示着的标签种类。抽屉收起时是 null —— 开关状态别亮着。
+   *  这是**逻辑**状态（开关亮灭、快捷键的"再按一次收起"都看它），
+   *  渲染分支不要用它，用下面的 shownKind。 */
   const activeKind = wb.open ? (activeTab?.kind ?? null) : null;
+  /**
+   * 抽屉还在画面上时（含收起动画）该渲染哪一类面板。
+   *
+   * `[约束]` 渲染分支必须走这个，不能走 activeKind。activeKind 挂在
+   * wb.open 上，一点收起就立刻变 null，面板在动画第一帧就被卸掉/隐藏 ——
+   * 标签栏以下只剩一块底色跟着滑出去（症状：刚点收起，浏览器画面就
+   * 整块消失了，然后才看到抽屉在动）。drawerPresent 会多撑一拍（见
+   * usePresence），正好覆盖这段动画。
+   *
+   * 切标签时它跟 activeKind 同步变（drawerPresent 一直是 true），所以
+   * "浏览器切走就停帧流"那条优化不受影响 —— 多留的只是收起动画这
+   * 半秒。
+   */
+  const shownKind = drawerPresent ? (activeTab?.kind ?? null) : null;
+  /** 预览面板在前台：预览某个文件，或"文件"标签（树 + 占位）。两种
+   *  标签落在同一个面板实例上，树只有一份。 */
+  const previewPanelShown = shownKind === "preview" || shownKind === "files";
   /** 打开着的预览文件（kind=preview 的标签），即预览面板的保活集合。 */
   const previewPaths = useMemo(
     () => wb.tabs.flatMap((t) => (t.kind === "preview" ? [t.path] : [])),
     [wb.tabs],
   );
+  const hasFilesTab = wb.tabs.some((t) => t.kind === "files");
   /** 浏览器标签开着没有（不管在不在前台）。页面状态的轮询跟着它走 ——
    *  页面标签展开在统一标签栏上，浏览器在后台时标签也得是活的。 */
   const hasBrowserTab = wb.tabs.some((t) => t.kind === "browser");
@@ -471,16 +495,19 @@ export function App() {
    *  适配必须发生在看得见的容器里（见 FilePreviewPanel 的保活注释）。 */
   const [previewWarm, setPreviewWarm] = useState(false);
   useEffect(() => {
-    if (activeKind === "preview") setPreviewWarm(true);
-  }, [activeKind]);
-  /** 预览面板此刻该显示的文件：激活标签是预览就是它；不是（面板在后台
-   *  保活）就停在最近看过的那个，别的标签切来切去不动它。 */
+    if (previewPanelShown) setPreviewWarm(true);
+  }, [previewPanelShown]);
+  /** 预览面板此刻该显示的文件：激活标签是预览就是它；是"文件"标签就
+   *  没有（占位 + 树）；面板在后台保活时停在最近看过的那个，别的标签
+   *  切来切去不动它。 */
   const activePreviewPath =
     activeTab?.kind === "preview"
       ? activeTab.path
-      : lastPreview.current && previewPaths.includes(lastPreview.current)
-        ? lastPreview.current
-        : (previewPaths[previewPaths.length - 1] ?? null);
+      : shownKind === "files"
+        ? null
+        : lastPreview.current && previewPaths.includes(lastPreview.current)
+          ? lastPreview.current
+          : (previewPaths[previewPaths.length - 1] ?? null);
 
   /** 打开（或激活）一个标签，抽屉随之展开。用户点标签、快捷键、"+"菜单，
    *  以及模型用起浏览器/预览工具，都走这一条。 */
@@ -489,6 +516,7 @@ export function App() {
       const id = tabId(tab);
       const exists = prev.tabs.some((t) => tabId(t) === id);
       return {
+        ...prev,
         tabs: exists ? prev.tabs : [...prev.tabs, tab],
         active: id,
         open: true,
@@ -510,7 +538,7 @@ export function App() {
         const neighbor = tabs[Math.min(idx, tabs.length - 1)];
         active = neighbor ? tabId(neighbor) : null;
       }
-      setWb({ tabs, active, open: tabs.length > 0 && wb.open });
+      setWb({ ...wb, tabs, active, open: tabs.length > 0 && wb.open });
     },
     [wb],
   );
@@ -532,6 +560,47 @@ export function App() {
       for (const p of paths) openFilePreview(p);
     });
   }, []);
+
+  /** 预览头部的树开关。 */
+  const toggleTree = useCallback(() => {
+    setWb((prev) => ({ ...prev, tree: !prev.tree }));
+  }, []);
+
+  /** 树里点了一个文件。开成预览标签之余把树钉住 —— 用户正是从树里
+   *  点过来的，文件一开树就没了等于把他刚用的东西收走。图片开大图、
+   *  预览不了的走访达，这两种不碰树。 */
+  const openFromTree = useCallback((abs: string) => {
+    if (openFilePreview(abs) === "preview") {
+      setWb((prev) => (prev.tree ? prev : { ...prev, tree: true }));
+    }
+  }, []);
+
+  /** 文件树的右键菜单。只读浏览：没有新建 / 改名 / 删除 —— 那些交给
+   *  agent 走工具链和权限管线。 */
+  const treeMenu = (e: React.MouseEvent, t: TreeTarget) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const entries: MenuState["entries"] = [];
+    if (!t.isDir) entries.push({ label: "预览", action: () => openFromTree(t.abs) });
+    entries.push({
+      label: "添加到对话",
+      // 目录引用带结尾 `/`，和 `@` 菜单选目录同一约定（见 pathDisplay.isDirRef）。
+      action: () => setPickSnippet(encodeRefForComposer(t.isDir ? asDirRef(t.rel) : t.rel)),
+    });
+    entries.push({
+      label: "复制相对路径",
+      action: () => void navigator.clipboard.writeText(t.rel),
+    });
+    entries.push({
+      label: "复制完整路径",
+      action: () => void navigator.clipboard.writeText(t.abs),
+    });
+    entries.push({
+      label: "在访达 / 资源管理器中显示",
+      action: () => void revealInFinder(t.abs),
+    });
+    setMenu({ x: e.clientX, y: e.clientY, entries });
+  };
 
   /** 点了标签栏上的某个浏览器页面：把浏览器带到前台并切到那一页。 */
   const selectBrowserPage = (pageId: number) => {
@@ -565,6 +634,27 @@ export function App() {
     () => subscribeFilePreview((p) => openTab({ kind: "preview", path: p })),
     [openTab],
   );
+  // 子 agent 会话：Task 卡片、后台任务面板、回答里的 `agent:` 链接都走
+  // 这一条。同一个 agent 只开一个标签（tabId 按 agentId）。
+  useEffect(
+    () =>
+      subscribeSubagentOpen(({ agentId, title }) =>
+        openTab({ kind: "subagent", agentId, title }),
+      ),
+    [openTab],
+  );
+  /** 子 agent 面板拉到真名后改标签上的字（打开时可能只知道 id）。 */
+  const retitleSubagent = useCallback((agentId: string, title: string) => {
+    setWb((prev) => {
+      let changed = false;
+      const tabs = prev.tabs.map((t) => {
+        if (t.kind !== "subagent" || t.agentId !== agentId || t.title === title) return t;
+        changed = true;
+        return { ...t, title };
+      });
+      return changed ? { ...prev, tabs } : prev;
+    });
+  }, []);
 
   // 切会话：工作台整组随会话切换（每个会话一份）。把当前组存回 Map、
   // 换上目标会话的组；目标会话没存过就是全收起 —— 新会话不该继承上
@@ -932,6 +1022,15 @@ export function App() {
           if (activeKind === "changes") collapseDrawer();
           else openTab({ kind: "changes" });
           return;
+        case "e":
+          // ⌘⇧E 文件树（VS Code 的资源管理器同键）。不带 shift 的 ⌘E 留给
+          // "用选区查找"这类惯例。
+          if (!e.shiftKey) return;
+          e.preventDefault();
+          if (!activeSession) return;
+          if (activeKind === "files") collapseDrawer();
+          else openTab({ kind: "files" });
+          return;
         case "p":
           // ⌘P 打开文件进预览。必须拦下 —— webview 的默认行为是打印。
           if (e.shiftKey) return;
@@ -1266,6 +1365,7 @@ export function App() {
           },
         },
         { label: "Git 改动", action: () => openTab({ kind: "changes" }) },
+        { label: "文件", action: () => openTab({ kind: "files" }) },
         { label: "打开文件…", action: pickAndPreview },
       ],
     });
@@ -1684,6 +1784,7 @@ export function App() {
               <WorkbenchEmpty
                 onChanges={() => openTab({ kind: "changes" })}
                 onBrowser={() => openTab({ kind: "browser" })}
+                onFiles={() => openTab({ kind: "files" })}
                 onOpenFile={pickAndPreview}
               />
             ) : null}
@@ -1694,7 +1795,7 @@ export function App() {
                 的那两个，切换时旧的漏删、新的照建，每切一次就在面板里多叠
                 一份（真出过：从预览切到 Git 改动，改动面板越攒越多）。
                 会话 id 留在 key 里是为了跨会话整块重挂，各标签组互不串。 */}
-            {activeKind === "browser" ? (
+            {shownKind === "browser" ? (
               <>
                 <BrowserPanel
                   key={`browser:${activeSession.id}`}
@@ -1707,24 +1808,41 @@ export function App() {
                 <ScopePanel sessionId={activeSession.id} />
               </>
             ) : null}
-            {activeKind === "changes" ? (
+            {shownKind === "changes" ? (
               <GitChangesPanel
                 key={`changes:${activeSession.id}`}
                 sessionId={activeSession.id}
                 refreshKey={changesRev}
               />
             ) : null}
+            {/* 子 agent 的只读会话。只挂激活的那个：切走就卸，回来重拉 ——
+                一个子 agent 的会话几十 KB，重拉比保活一排轮询便宜。 */}
+            {activeTab?.kind === "subagent" && shownKind === "subagent" ? (
+              <SubagentPanel
+                key={`subagent:${activeSession.id}:${activeTab.agentId}`}
+                sessionId={activeSession.id}
+                agentId={activeTab.agentId}
+                onTitle={(title) => retitleSubagent(activeTab.agentId, title)}
+              />
+            ) : null}
             {/* 预览面板显示过之后就常驻挂载（切走 display:none）：
                 渲染器、滚动位置、表格列宽都留在原地，切回即所见。
-                首挂必须在激活时（activeKind 那个分支先成立，previewWarm
+                首挂必须在激活时（previewPanelShown 先成立，previewWarm
                 随后才置位）—— 渲染器不能在 display:none 里做首屏适配。
+                "文件"标签也落在这个面板上（active 为 null：树 + 占位）。
                 跨会话仍整个重挂 —— 标签组每会话独立。 */}
-            {(activeKind === "preview" || previewWarm) && activePreviewPath ? (
+            {(previewPanelShown || previewWarm) && (activePreviewPath || hasFilesTab) ? (
               <FilePreviewPanel
                 key={`preview:${activeSession.id}`}
+                sessionId={activeSession.id}
                 paths={previewPaths}
                 active={activePreviewPath}
-                visible={activeKind === "preview"}
+                visible={previewPanelShown}
+                tree={wb.tree}
+                onToggleTree={toggleTree}
+                refreshKey={changesRev}
+                onOpen={openFromTree}
+                onTreeContextMenu={treeMenu}
               />
             ) : null}
           </div>
@@ -1938,6 +2056,8 @@ function Chat({
       onQueueDelete={session.queueDelete}
       onQueueEdit={session.queueEdit}
       onQueueSendNow={session.queueSendNow}
+      tasks={session.tasks}
+      onTaskCancel={session.cancelTask}
       onSend={send}
       onStop={session.stop}
       withdrawn={session.withdrawn}
@@ -2000,24 +2120,27 @@ function Chat({
           </p>
         </div>
       ) : (
-        <Transcript
-          sessionId={sessionId}
-          items={session.items}
-          streaming={session.streaming}
-          thinking={session.thinking}
-          streamingPlan={session.streamingPlan}
-          busy={session.busy}
-          compacting={session.compacting}
-          waitSince={waitStartedAt(sessionId)}
-          armed={visible}
-          onRegenerate={session.regenerate}
-          onEditEntry={session.editEntry}
-          onDeleteEntry={session.deleteEntry}
-          {...(planAsk ? { planAsk } : {})}
-          {...(choiceAsk ? { choiceAsk } : {})}
-          onAnswerPlan={(r) => planAsk && void session.answer(r, planAsk.requestId)}
-          onAnswerChoice={(r) => choiceAsk && void session.answer(r, choiceAsk.requestId)}
-        />
+        // 子 agent 视图给 Task 卡片认领（按 tool_use_id 直播标题/模型/动作）。
+        <SubagentsContext.Provider value={session.tasks}>
+          <Transcript
+            sessionId={sessionId}
+            items={session.items}
+            streaming={session.streaming}
+            thinking={session.thinking}
+            streamingPlan={session.streamingPlan}
+            busy={session.busy}
+            compacting={session.compacting}
+            waitSince={waitStartedAt(sessionId)}
+            armed={visible}
+            onRegenerate={session.regenerate}
+            onEditEntry={session.editEntry}
+            onDeleteEntry={session.deleteEntry}
+            {...(planAsk ? { planAsk } : {})}
+            {...(choiceAsk ? { choiceAsk } : {})}
+            onAnswerPlan={(r) => planAsk && void session.answer(r, planAsk.requestId)}
+            onAnswerChoice={(r) => choiceAsk && void session.answer(r, choiceAsk.requestId)}
+          />
+        </SubagentsContext.Provider>
       )}
       {dock}
 

@@ -10,11 +10,13 @@
 import { useEffect, useId, useRef, useState } from "react";
 
 import {
+  type BackgroundTaskView,
   clipboardPaths,
   compactSession,
   type ConfigStatus,
   decodePickFromComposer,
   decodePlainFromComposer,
+  decodeRefFromComposer,
   existingDirs,
   hasActiveKey,
   type ImageInput,
@@ -47,6 +49,7 @@ import {
   fmtTokens,
 } from "../lib/contextWindow";
 import { type ChipSeg, isChipSeg } from "../lib/chips";
+import { registerFileDrop } from "../lib/fileDrag";
 import { asDirRef } from "../pathDisplay";
 import {
   caretToEnd,
@@ -65,6 +68,7 @@ import { ConfirmDialog, type ConfirmRequest } from "./ConfirmDialog";
 import { ContextRing } from "./ContextRing";
 import { ArrowUpIcon, PencilIcon, PlusIcon, StopIcon, TrashIcon } from "./icons";
 import { ModeMenu, Picker, type PickerSection, modelLabel } from "./pickers";
+import { BackgroundTasksPanel } from "./TaskPanel";
 import { ShotViewer } from "./ToolCard";
 
 const drafts = new Map<string, Seg[]>();
@@ -301,6 +305,8 @@ export function Composer({
   onQueueDelete,
   onQueueEdit,
   onQueueSendNow,
+  tasks = [],
+  onTaskCancel,
   onSend,
   onStop,
   withdrawn,
@@ -330,6 +336,9 @@ export function Composer({
     id: string,
   ) => Promise<{ text: string; images: ImageInput[]; refs: string[] } | null>;
   onQueueSendNow: (id: string) => void;
+  /** 后台任务面板：这个会话里在跑 / 刚跑完的子 agent。 */
+  tasks?: BackgroundTaskView[];
+  onTaskCancel?: (agentId: string) => void;
   /** 返回 false = 没发出去（hook 拦了、模型没配好），输入要放回输入框。 */
   onSend: (t: string, images: ImageInput[], refs: string[]) => Promise<boolean>;
   onStop: () => void;
@@ -401,7 +410,10 @@ export function Composer({
   /** 拖/选进来失败的那一条。附件是"扔进去就走"的操作，不报的话用户以为成了。 */
   const [dropError, setDropError] = useState("");
   const [dragging, setDragging] = useState(false);
+  /** 从文件树拖过来的那一项此刻悬在输入框上（应用内拖拽，不是系统拖放）。 */
+  const [treeOver, setTreeOver] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const formRef = useRef<HTMLFormElement>(null);
   // 中文 IME：确认候选/上屏英文时，keydown(Enter) 常在 compositionend 之后到达，
   // 此时 nativeEvent.isComposing 已是 false，会被误当成发送。用 ref 盖住这一拍。
   const imeRef = useRef(false);
@@ -592,8 +604,15 @@ export function Composer({
     // 浏览器取件走的是这条通道，但它不是一段要围栏的文本，而是一个元素 ——
     // 渲染成色块，接在现有内容后面。
     const pick = decodePickFromComposer(insertText);
+    // 文件树"添加到对话"：和 `@` 菜单选中同一种引用块。已经挂着同一个
+    // 文件就不重复挂 —— 连点两次不该出两个一样的块。
+    const fileRef = decodeRefFromComposer(insertText);
     if (pick) {
       setContent([...cur, { kind: "elem", value: pick.selector, label: pick.description }]);
+    } else if (fileRef) {
+      if (!cur.some((s) => s.kind === "ref" && s.value === fileRef)) {
+        setContent([...cur, { kind: "ref", value: fileRef }]);
+      }
     } else {
       const prefix = segsText(cur).trim() ? "\n\n" : "";
       const plain = decodePlainFromComposer(insertText);
@@ -1028,6 +1047,28 @@ export function Composer({
     });
   }, [armed]);
 
+  // 从文件树拖过来的那条。走的是自己那套 pointer 拖拽（原因见 lib/fileDrag），
+  // 但收件和系统拖放共用 takePaths —— 给的都是绝对路径，图片进附件、其余
+  // 变引用块这套分流没道理按来源写两遍。
+  //
+  // 落点只圈输入框这一块，不像系统拖放那样整窗都算：拖到对话流上是另一种
+  // 意图（用户多半在瞄准输入框但手滑了）还是没意图，说不清的时候不接更好。
+  useEffect(() => {
+    const el = formRef.current;
+    if (!armed || !el) {
+      setTreeOver(false);
+      return;
+    }
+    return registerFileDrop({
+      el,
+      onOver: setTreeOver,
+      onDrop: (item) => {
+        setTreeOver(false);
+        void dropRef.current([item.abs]);
+      },
+    });
+  }, [armed]);
+
   // 焦点不在输入框时 ⌘V 也算数 —— 在 Finder 里复制完文件回到窗口，第一
   // 反应是直接粘，不会先去点一下输入框。
   //
@@ -1123,6 +1164,10 @@ export function Composer({
         </button>
       ) : null}
 
+      {tasks.length > 0 ? (
+        <BackgroundTasksPanel tasks={tasks} onCancel={(id) => onTaskCancel?.(id)} />
+      ) : null}
+
       {queued.length > 0 ? <QueuePanel queued={queued} onEdit={(id) => void editQueued(id)} onSendNow={onQueueSendNow} onDelete={onQueueDelete} /> : null}
 
       {/* 菜单是 listbox、条目是 option：键盘操作（↑↓/Tab/Enter/Esc）本来就
@@ -1187,7 +1232,8 @@ export function Composer({
       ) : null}
 
       <form
-        className={dragging ? "composer dragging" : "composer"}
+        ref={formRef}
+        className={dragging || treeOver ? "composer dragging" : "composer"}
         onSubmit={(e) => {
           e.preventDefault();
           submit();

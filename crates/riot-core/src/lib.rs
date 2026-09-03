@@ -17,6 +17,7 @@
 #![deny(clippy::disallowed_types)]
 
 pub mod agent_loop;
+pub mod archive;
 pub mod compactor;
 pub mod guard;
 pub mod invariants;

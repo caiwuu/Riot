@@ -1273,6 +1273,20 @@ pub fn profiles_dir(config_path: &Path) -> PathBuf {
         .join("browser-profiles")
 }
 
+/// 所有会话的工件（截图原图、过大的工具结果、压缩归档的对话原文）都放在
+/// 这个目录下，一个会话一个子目录。
+///
+/// `[约束]` 推导规则只能有这一份，理由同 [`profiles_dir`]：内核按它建目录
+/// 写文件，宿主删会话时按它删目录。以前这个推导只在内核的 Session 里，
+/// 宿主不知道它 —— 于是删会话从来不删工件，截图随着用过的会话数无上限
+/// 增长。压缩归档进来之后每个会话的这份还会更大。
+pub fn artifacts_root(config_path: &Path) -> PathBuf {
+    config_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("artifacts")
+}
+
 /// 可下载能力包的根目录，一个包一个子目录。
 ///
 /// `[约束]` 推导规则只能有这一份。安装、卸载、技能扫描、PATH 注入四处都要

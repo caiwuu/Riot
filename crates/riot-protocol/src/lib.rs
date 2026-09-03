@@ -20,6 +20,7 @@ pub mod provider;
 pub mod rpc;
 pub mod runner;
 pub mod schedule;
+pub mod task;
 pub mod terminal;
 pub mod tool;
 pub mod turn;
@@ -59,6 +60,7 @@ pub use schedule::{
     MissedRun, NoSchedule, Repeat, RunTargetSpec, ScheduleAccess, ScheduleError, SchedulePatch,
     ScheduleRun, ScheduleRunPhase, ScheduleSpec, ScheduledTask, WhenSpec,
 };
+pub use task::{BackgroundTaskStatus, BackgroundTaskView, TaskNotice};
 pub use tool::{
     Clock, FileMeta, FileState, FileStateCache, FileSystem, FileView, InterruptBehavior,
     ProcessOutput, ProcessRunner, ProcessSpec, ProgressSink, PromptContext, ResultBudget, Tool,

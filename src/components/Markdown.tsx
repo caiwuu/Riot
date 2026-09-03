@@ -13,6 +13,7 @@ import remarkGfm from "remark-gfm";
 
 import { openInBrowser, openPath } from "../bridge";
 import { useTimedFlag } from "../hooks/useTimedFlag";
+import { AGENT_LINK_SCHEME, openSubagent } from "../lib/subagentLink";
 import { joinRoot, looksAbsPath } from "../pathDisplay";
 import { openFilePreview } from "./FilePreview";
 import { MermaidBlock } from "./Mermaid";
@@ -256,7 +257,8 @@ export const Markdown = memo(function Markdown({
  * 打开 javascript: 那类注入面。
  */
 function keepFileUrls(url: string): string {
-  return /^file:/i.test(url) ? url : defaultUrlTransform(url);
+  // `agent:` 是子 agent 链接（Task 工具让模型这么写），同样由 MdLink 接管。
+  return /^(file|agent):/i.test(url) ? url : defaultUrlTransform(url);
 }
 
 /**
@@ -336,12 +338,26 @@ function MdLink({
       openFilePreview(target.value);
       return;
     }
+    if (target.kind === "agent") {
+      openSubagent(target.value, label);
+      return;
+    }
     openInBrowser(target.value).catch(() => flashErr(true));
   };
 
   return (
     <>
-      <a href={target.href} title={err ? "打不开" : target.title} onClick={onClick}>
+      <a
+        href={target.href}
+        className={target.kind === "agent" ? "md-agent-link" : undefined}
+        title={err ? "打不开" : target.title}
+        onClick={onClick}
+      >
+        {target.kind === "agent" ? (
+          <span className="md-agent-icon" aria-hidden>
+            ⑂
+          </span>
+        ) : null}
         {children}
       </a>
       {err ? (
@@ -354,15 +370,22 @@ function MdLink({
 }
 
 type MdLinkTarget = {
-  kind: "url" | "file";
+  kind: "url" | "file" | "agent";
   value: string;
   href: string;
   title: string;
 };
 
-/** 把模型写的 href 收成"打开网址"或"打开本地文件"。 */
+/** 把模型写的 href 收成"打开网址"、"打开本地文件"或"打开子 agent 会话"。 */
 function resolveMdLink(href: string | undefined, label: string, root: string): MdLinkTarget | null {
   const raw = (href ?? "").trim();
+
+  // `agent:agt_xxx`：子 agent 的会话（Task 工具提示词里教模型这么写）。
+  if (raw.toLowerCase().startsWith(AGENT_LINK_SCHEME)) {
+    const id = raw.slice(AGENT_LINK_SCHEME.length).trim();
+    if (!id) return null;
+    return { kind: "agent", value: id, href: raw, title: `打开子 agent ${id} 的会话` };
+  }
 
   if (raw.startsWith("file://")) {
     const path = fileUrlToPath(raw);

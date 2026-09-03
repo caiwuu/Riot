@@ -72,12 +72,17 @@ pub struct ResumeSnapshot {
     pub live_text: String,
     /// 正在流式生成的思考。症状同上（思考块的字数清零重数）。
     pub live_thinking: String,
+    /// 后台子 agent（跑着的和刚结束的）。事件只在变化时推，面板靠它重建。
+    pub tasks: Vec<riot_protocol::task::BackgroundTaskView>,
 }
 
 /// 活会话注册表。内核 bin 持有一个。
 pub struct SessionManager {
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     transcripts: Arc<riot_store::Transcripts>,
+    /// 会话工件的根目录（见 [`crate::config::artifacts_root`]）。启动时算一次，
+    /// 每个会话拿它开自己的子目录。
+    artifacts_root: PathBuf,
     mcp: Arc<riot_mcp::McpHub>,
     ids: Arc<NanoIdGenerator>,
     out: Outbound,
@@ -94,6 +99,7 @@ impl SessionManager {
         Self {
             sessions: Mutex::new(HashMap::new()),
             transcripts: Arc::new(riot_store::Transcripts::new(&sessions_dir)),
+            artifacts_root: crate::config::artifacts_root(&crate::config::config_path()),
             mcp: Arc::new(riot_mcp::McpHub::new()),
             ids: Arc::new(NanoIdGenerator),
             out,
@@ -147,6 +153,7 @@ impl SessionManager {
             Some(SessionPersist {
                 store: Arc::clone(&self.transcripts),
                 log,
+                artifacts_root: self.artifacts_root.clone(),
             }),
         ));
         session.attach_sink(Arc::new(RpcEventSink {
@@ -179,6 +186,7 @@ impl SessionManager {
                 pending_asks: s.pending_asks().snapshot().await,
                 live_text,
                 live_thinking,
+                tasks: s.tasks_snapshot(),
             };
         }
         let id = SessionId::from_raw(session_id.to_owned());
@@ -193,6 +201,7 @@ impl SessionManager {
             Some(SessionPersist {
                 store: Arc::clone(&self.transcripts),
                 log,
+                artifacts_root: self.artifacts_root.clone(),
             }),
         ));
         session.attach_sink(Arc::new(RpcEventSink {
@@ -215,7 +224,29 @@ impl SessionManager {
             pending_asks: Vec::new(),
             live_text: String::new(),
             live_thinking: String::new(),
+            tasks: Vec::new(),
         }
+    }
+
+    /// 停掉一个后台子 agent。false = 会话不存在 / 没这个任务 / 已结束。
+    pub async fn cancel_task(
+        &self,
+        session_id: &str,
+        agent_id: &riot_protocol::id::AgentId,
+    ) -> bool {
+        match self.get(session_id).await {
+            Some(s) => s.cancel_task(agent_id),
+            None => false,
+        }
+    }
+
+    /// 一个子 agent 的会话。None = 会话或子 agent 不存在。
+    pub async fn task_history(
+        &self,
+        session_id: &str,
+        agent_id: &riot_protocol::id::AgentId,
+    ) -> Option<(riot_protocol::task::BackgroundTaskView, Vec<Message>)> {
+        self.get(session_id).await?.task_history(agent_id.as_str())
     }
 
     pub async fn delete(&self, session_id: &str) {

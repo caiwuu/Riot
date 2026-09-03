@@ -1,8 +1,9 @@
-import { memo, startTransition, useEffect, useRef, useState } from "react";
+import { memo, startTransition, useContext, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { readImage } from "../bridge";
+import { type BackgroundTaskView, readImage } from "../bridge";
 import type { Item } from "../hooks/useSession";
+import { agentIdFromResult, openSubagent, SubagentsContext } from "../lib/subagentLink";
 import { Chevron } from "./Chevron";
 import { useEscLayer } from "./Modal";
 import { SmoothFold } from "./SmoothFold";
@@ -39,6 +40,88 @@ export const ToolCard = memo(function ToolCard({
    * 贴底的那几条立刻画详情。其余的等进视野再挂 —— Edit/Write 默认
    * 展开，长会话里几十份 diff 一起进 DOM 会把切回卡成白屏。
    */
+  eager?: boolean;
+}) {
+  // 子 agent 有自己的卡：不折叠、不展开输出，点开是它的整个会话。
+  if (tool.name === "Task") return <TaskCard tool={tool} />;
+  return <PlainToolCard tool={tool} eager={eager} />;
+});
+
+/**
+ * Task 工具的卡片（照 Cursor）：一行"标题 · 模型"，下面一行它此刻在做
+ * 什么；整张卡是一个链接，点开右侧抽屉里它的完整会话。
+ *
+ * 数据来自会话的子 agent 登记表（SubagentsContext，按 tool_use_id 认领），
+ * 卡片本身只知道输入参数。登记表没有它（内核重启过）就退回参数里的
+ * 描述，agent id 从结果文本里捞 —— 点开会看到"记录已不在"，但至少
+ * 知道它存在过。
+ */
+const TaskCard = memo(function TaskCard({ tool }: { tool: Tool }) {
+  const tasks = useContext(SubagentsContext);
+  const task: BackgroundTaskView | undefined = tasks.find((t) => t.tool_use_id === tool.id);
+  const i = tool.input as Record<string, unknown>;
+  const str = (k: string) => (typeof i?.[k] === "string" ? (i[k] as string) : "");
+  const title = task?.title || str("description") || "子任务";
+  const agentId = task?.id ?? agentIdFromResult(tool.result) ?? null;
+  const resume = str("resume");
+  const background = task?.background ?? (i?.run_in_background === true || resume === "self");
+  const kind = task?.kind ?? (resume === "self" ? "fork" : str("subagent_type") || "general-purpose");
+  // 运行状态以登记表为准（后台任务的卡片早就 ok 了，任务还在跑）；没有
+  // 登记表时看卡片自己。
+  const status: "running" | "ok" | "error" = task
+    ? task.status === "running"
+      ? "running"
+      : task.status === "completed"
+        ? "ok"
+        : "error"
+    : tool.status;
+  const activity =
+    status === "running"
+      ? task?.activity || tool.output[tool.output.length - 1] || "启动中…"
+      : task
+        ? `${task.status === "completed" ? "完成" : task.status === "cancelled" ? "已停止" : "失败"}${task.tool_uses ? ` · ${task.tool_uses} 步` : ""}`
+        : tool.status === "error"
+          ? "失败"
+          : "完成";
+
+  const open = () => {
+    if (agentId) openSubagent(agentId, title);
+  };
+
+  return (
+    <div className={`tool tool-${status} tool-task`}>
+      <button
+        type="button"
+        className="tool-head task-card-head"
+        onClick={open}
+        disabled={!agentId}
+        title={agentId ? "打开这个子 agent 的会话" : "还没拿到子 agent 的 id"}
+      >
+        <span className={status === "running" ? "tool-icon tool-icon-spin" : "tool-icon"}>
+          {status === "running" ? "◐" : status === "ok" ? "✓" : "✕"}
+        </span>
+        <span className="task-card-title">{title}</span>
+        {task?.model ? <span className="task-card-model">{task.model}</span> : null}
+        <span className="task-card-tags">
+          <span className="task-kind">
+            {kind === "explore" ? "侦察" : kind === "fork" ? "分叉" : resume ? "续接" : "执行"}
+          </span>
+          {background ? <span className="task-kind">后台</span> : null}
+        </span>
+        {agentId ? <span className="task-card-go" aria-hidden>›</span> : null}
+      </button>
+      <div className="task-card-activity" title={activity}>
+        {activity}
+      </div>
+    </div>
+  );
+});
+
+const PlainToolCard = memo(function PlainToolCard({
+  tool,
+  eager = false,
+}: {
+  tool: Tool;
   eager?: boolean;
 }) {
   const [userToggle, setUserToggle] = useState<boolean | null>(null);
@@ -151,8 +234,17 @@ export function summarize(t: Tool): string {
 
   switch (t.name) {
     case "Task": {
-      const kind = str("subagent_type") || "general-purpose";
-      return `${kind === "explore" ? "侦察" : "执行"} · ${str("description") || "子任务"}`;
+      const resume = str("resume");
+      const bg = i?.run_in_background === true || resume === "self";
+      const what =
+        resume === "self"
+          ? "分叉"
+          : resume
+            ? `续接 ${resume}`
+            : (str("subagent_type") || "general-purpose") === "explore"
+              ? "侦察"
+              : "执行";
+      return `${what}${bg ? " · 后台" : ""} · ${str("description") || "子任务"}`;
     }
     case "TodoWrite": {
       const todos = todosOf(t);

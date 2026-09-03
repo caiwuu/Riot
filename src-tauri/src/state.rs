@@ -57,6 +57,17 @@ pub struct HistoryOut {
     pub live_text: String,
     /// 正在流式生成的思考。症状同上：思考块的字数清零重数。
     pub live_thinking: String,
+    /// 后台子 agent（跑着的和刚结束的）。事件只在变化时推，面板靠它重建。
+    pub tasks: Vec<riot_protocol::BackgroundTaskView>,
+}
+
+/// 一个子 agent 的会话（右侧抽屉的只读视图）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskHistoryOut {
+    /// None = 内核不认识这个 id（重启后旧 id 失效）。
+    pub task: Option<riot_protocol::BackgroundTaskView>,
+    pub messages: Vec<Message>,
 }
 
 /// 侧边栏需要知道的会话信息。**不含历史内容** —— 列表要快，内容按需拉。
@@ -323,6 +334,11 @@ impl AppState {
         tauri::async_runtime::spawn(async move {
             while let Some(n) = rx.recv().await {
                 match n {
+                    HostNotice::Started { session_id } => {
+                        if let Some(m) = state.0.sessions.lock().await.get_mut(&session_id) {
+                            m.busy = true;
+                        }
+                    }
                     HostNotice::Done { session_id } => {
                         if let Some(m) = state.0.sessions.lock().await.get_mut(&session_id) {
                             m.busy = false;
@@ -584,6 +600,7 @@ impl AppState {
             pending_asks,
             live_text,
             live_thinking,
+            tasks,
         } = resp
         else {
             return Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
@@ -625,6 +642,7 @@ impl AppState {
             pending_asks,
             live_text,
             live_thinking,
+            tasks,
         })
     }
 
@@ -661,7 +679,33 @@ impl AppState {
             // 进程退出之后(见 remove_browser_profile 的约束)。
             self.0.browsers.lock().await.remove(session_id);
             self.remove_browser_profile(session_id).await;
+            self.remove_artifacts(session_id).await;
             self.persist_index().await;
+        }
+    }
+
+    /// 删掉一个会话的工件目录（截图原图、过大的工具结果、压缩归档的对话原文）。
+    ///
+    /// `[约束]` 必须跟着会话一起删，理由同 [`Self::remove_browser_profile`]：
+    /// 目录名就是会话 id，会话没了就没人会认领它。这一步以前是漏掉的 ——
+    /// 路径推导只在内核的 Session 里，宿主不知道它。现在两边都走
+    /// [`crate::config::artifacts_root`]。
+    ///
+    /// `[约束]` 必须在内核侧删除（中断轮子）**之后**：轮子跑着的时候工具
+    /// 还在往里写截图，边写边删会留残骸。删不掉只告警。
+    async fn remove_artifacts(&self, session_id: &str) {
+        let dir = crate::config::artifacts_root(&self.0.config_path).join(session_id);
+        if !dir.is_dir() {
+            return;
+        }
+        let path = dir.clone();
+        let done = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&path)).await;
+        match done {
+            Ok(Ok(())) => tracing::info!(dir = %dir.display(), "已删除会话的工件目录"),
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, dir = %dir.display(), "会话工件目录没删掉");
+            }
+            Err(e) => tracing::warn!(error = %e, "删工件目录的任务没跑完"),
         }
     }
 
@@ -706,12 +750,29 @@ impl AppState {
     /// transcript，照那个判会把它正在用的 profile 删掉。
     pub async fn gc_browser_profiles(&self) {
         let root = crate::config::profiles_dir(&self.0.config_path);
+        self.gc_orphan_dirs(root, "浏览器 profile").await;
+    }
+
+    /// 清掉没有会话认领的工件目录（截图、过大工具结果、压缩归档）。
+    ///
+    /// 和 [`Self::gc_browser_profiles`] 同一件事、同一个约束（恢复完成之后
+    /// 才能调）。删会话不删工件这个漏洞存在了很久，存量孤儿比 profile 多
+    /// 得多（一台机器上一百多个），单靠 `delete_session` 补上那一步收不回
+    /// 已经积下的。
+    pub async fn gc_artifacts(&self) {
+        let root = crate::config::artifacts_root(&self.0.config_path);
+        self.gc_orphan_dirs(root, "工件目录").await;
+    }
+
+    /// `root` 下每个子目录以会话 id 命名；不在内存会话表里的整个删掉。
+    /// `what` 只用于日志。
+    async fn gc_orphan_dirs(&self, root: PathBuf, what: &'static str) {
         let live: std::collections::HashSet<String> =
             self.0.sessions.lock().await.keys().cloned().collect();
 
         let cleaned = tokio::task::spawn_blocking(move || {
             let mut cleaned = Vec::new();
-            // 目录还不存在 = 一次浏览器都没用过，没什么可收的。
+            // 目录还不存在 = 一次都没用过，没什么可收的。
             let Ok(entries) = std::fs::read_dir(&root) else {
                 return cleaned;
             };
@@ -723,7 +784,7 @@ impl AppState {
                 match std::fs::remove_dir_all(e.path()) {
                     Ok(()) => cleaned.push(name),
                     Err(err) => {
-                        tracing::warn!(error = %err, dir = %name, "孤儿 profile 没删掉");
+                        tracing::warn!(error = %err, dir = %name, "孤儿{what}没删掉");
                     }
                 }
             }
@@ -733,14 +794,10 @@ impl AppState {
 
         match cleaned {
             Ok(v) if !v.is_empty() => {
-                tracing::info!(
-                    count = v.len(),
-                    "清掉了 {} 个没人认领的浏览器 profile",
-                    v.len()
-                );
+                tracing::info!(count = v.len(), "清掉了 {} 个没人认领的{what}", v.len());
             }
             Ok(_) => {}
-            Err(e) => tracing::warn!(error = %e, "清理孤儿 profile 的任务没跑完"),
+            Err(e) => tracing::warn!(error = %e, "清理孤儿{what}的任务没跑完"),
         }
     }
 
@@ -1146,9 +1203,30 @@ impl AppState {
 
     /// `@` 补全菜单的文件搜索。查询为空时给项目里的前几个文件。
     /// 纯 cwd 函数,库两边都链接 —— 宿主本地调,不走 RPC。
-    pub async fn search_files(&self, session_id: &str, query: &str) -> HostResult<Vec<String>> {
+    pub async fn search_files(
+        &self,
+        session_id: &str,
+        query: &str,
+        limit: Option<usize>,
+    ) -> HostResult<Vec<String>> {
         let root = self.session_root(session_id).await?;
-        Ok(crate::mentions::search_files(&root, query).await)
+        Ok(crate::mentions::search_files(&root, query, limit).await)
+    }
+
+    /// 文件树的一层目录。读目录是同步阻塞的（大目录几千次 stat），扔给
+    /// 阻塞线程池 —— 和 `mentions` 的遍历同一个理由：占着 async 线程的话
+    /// 界面上表现为整个应用卡一下。
+    pub async fn list_dir(
+        &self,
+        session_id: &str,
+        rel: &str,
+    ) -> HostResult<crate::tree::DirListing> {
+        let root = self.session_root(session_id).await?;
+        let rel = rel.to_owned();
+        tokio::task::spawn_blocking(move || crate::tree::list_dir(&root, &rel))
+            .await
+            .map_err(|e| HostError::Provider(format!("列目录的任务没跑成：{e}")))?
+            .map_err(HostError::Provider)
     }
 
     /// 展开一条自定义命令。None = 没这条命令或它是内置的。
@@ -1194,6 +1272,44 @@ impl AppState {
             RpcResponse::Removed { removed } => Ok(removed),
             _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
                 "queue.remove 回了意外的应答".into(),
+            ))),
+        }
+    }
+
+    /// 停掉一个后台子 agent。false = 没这个任务或它已经结束。
+    pub async fn task_cancel(&self, session_id: &str, agent_id: &str) -> HostResult<bool> {
+        self.require_session(session_id).await?;
+        match self
+            .kernel_call(RpcRequest::TaskCancel {
+                session_id: sid(session_id),
+                agent_id: riot_protocol::AgentId::from_raw(agent_id),
+            })
+            .await?
+        {
+            RpcResponse::Removed { removed } => Ok(removed),
+            _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
+                "task.cancel 回了意外的应答".into(),
+            ))),
+        }
+    }
+
+    /// 一个子 agent 的会话：视图 + 消息。`task` 为 None = 内核不认识这个 id。
+    pub async fn task_history(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+    ) -> HostResult<TaskHistoryOut> {
+        self.require_session(session_id).await?;
+        match self
+            .kernel_call(RpcRequest::TaskHistory {
+                session_id: sid(session_id),
+                agent_id: riot_protocol::AgentId::from_raw(agent_id),
+            })
+            .await?
+        {
+            RpcResponse::TaskHistory { task, messages } => Ok(TaskHistoryOut { task, messages }),
+            _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
+                "task.history 回了意外的应答".into(),
             ))),
         }
     }
@@ -1790,8 +1906,7 @@ impl AppState {
         // 先认领再提交：Done 事件从提交那一刻起就可能到来。
         {
             let mut g = self.0.schedules.lock().await;
-            g.running
-                .insert(session_id.clone(), task.id.clone());
+            g.running.insert(session_id.clone(), task.id.clone());
             if let Some(t) = g.tasks.iter_mut().find(|t| t.id == task.id) {
                 t.last_run_ms = Some(crate::schedule::now_ms());
                 t.last_session_id = Some(session_id.clone());
@@ -2387,6 +2502,48 @@ mod tests {
         assert!(!dir.exists(), "会话删了 profile 还留着，缓存会无上限增长");
     }
 
+    /// 删会话必须连工件目录一起删（截图、过大工具结果、压缩归档的原文）。
+    ///
+    /// 这一步以前是漏的：路径推导只在内核的 Session 里，宿主不知道它，
+    /// 截图随会话数无上限累积。压缩归档进来后每个会话的这份更大。
+    #[tokio::test]
+    async fn 删除会话连工件目录一起删() {
+        let state = state().await;
+        let info = state
+            .create_session(&temp_ws("art-del"))
+            .await
+            .expect("会话");
+        let dir = crate::config::artifacts_root(&state.0.config_path).join(&info.id);
+        std::fs::create_dir_all(&dir).expect("建工件目录");
+        std::fs::write(dir.join("history.md"), "# 归档").expect("写归档");
+
+        state.delete_session(&info.id).await;
+
+        assert!(!dir.exists(), "会话删了工件目录还留着：{}", dir.display());
+    }
+
+    /// 启动时收孤儿工件目录，不碰活着的会话（约束同 profile 的 GC：按会话表判）。
+    #[tokio::test]
+    async fn 清理孤儿工件目录不碰活着的会话() {
+        let state = state().await;
+        let info = state
+            .create_session(&temp_ws("art-gc"))
+            .await
+            .expect("会话");
+        let root = crate::config::artifacts_root(&state.0.config_path);
+        let live = root.join(&info.id);
+        let orphan = root.join("ses_早就没了");
+        for d in [&live, &orphan] {
+            std::fs::create_dir_all(d).expect("建工件目录");
+            std::fs::write(d.join("history.md"), "# 归档").expect("写归档");
+        }
+
+        state.gc_artifacts().await;
+
+        assert!(live.is_dir(), "活着的会话的工件不能动");
+        assert!(!orphan.exists(), "没人认领的工件目录该收掉");
+    }
+
     /// 启动时的清理只收孤儿，不碰活着的会话。
     ///
     /// `[约束]` 判定必须按会话表，不能按磁盘上的 transcript 文件。这个用例
@@ -2451,7 +2608,10 @@ mod tests {
     #[tokio::test]
     async fn 定时任务_续跑绑定发起会话() {
         let state = state().await;
-        let s = state.create_session(&temp_ws("sched-r")).await.expect("会话");
+        let s = state
+            .create_session(&temp_ws("sched-r"))
+            .await
+            .expect("会话");
         let t = state
             .schedule_create(&s.id, after_60min("下午再扫一次", true))
             .await
@@ -2498,7 +2658,10 @@ mod tests {
     #[tokio::test]
     async fn 定时任务_编辑改名改时间_已跑完的借改时间复活() {
         let state = state().await;
-        let s = state.create_session(&temp_ws("sched-u")).await.expect("会话");
+        let s = state
+            .create_session(&temp_ws("sched-u"))
+            .await
+            .expect("会话");
         let t = state
             .schedule_create(&s.id, after_60min("旧名", false))
             .await
@@ -2543,7 +2706,10 @@ mod tests {
     #[tokio::test]
     async fn 定时任务_编辑运行目标要校验会话存在() {
         let state = state().await;
-        let s = state.create_session(&temp_ws("sched-t2")).await.expect("会话");
+        let s = state
+            .create_session(&temp_ws("sched-t2"))
+            .await
+            .expect("会话");
         let t = state
             .schedule_create(&s.id, after_60min("跟进", false))
             .await
@@ -2581,7 +2747,10 @@ mod tests {
     #[tokio::test]
     async fn 定时任务_tick把到期的一次性任务停用() {
         let state = state().await;
-        let s = state.create_session(&temp_ws("sched-t")).await.expect("会话");
+        let s = state
+            .create_session(&temp_ws("sched-t"))
+            .await
+            .expect("会话");
         let t = state
             .schedule_create(&s.id, after_60min("一次性", false))
             .await
@@ -2614,7 +2783,10 @@ mod tests {
     #[tokio::test]
     async fn 定时任务_续跑目标没了就暂停任务() {
         let state = state().await;
-        let s = state.create_session(&temp_ws("sched-o")).await.expect("会话");
+        let s = state
+            .create_session(&temp_ws("sched-o"))
+            .await
+            .expect("会话");
         let t = state
             .schedule_create(&s.id, after_60min("跟进", true))
             .await

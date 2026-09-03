@@ -9,9 +9,9 @@
 import { useContext, useLayoutEffect, useRef, useState } from "react";
 
 import type { FileChange } from "../bridge";
-import { SETI_BY_EXT, SETI_BY_NAME, SETI_DEFAULT, type SetiIcon } from "../lib/fileIcons";
 import { joinRoot, looksAbsPath } from "../pathDisplay";
 import { Chevron } from "./Chevron";
+import { FileIcon } from "./FileIcon";
 import { openFilePreview } from "./FilePreview";
 import { ProjectRootContext } from "./Markdown";
 
@@ -174,34 +174,6 @@ function ChangeDetail({ c }: { c: FileChange }) {
         <div className="hunk-more">改动太大，只显示了前面一截。完整内容请看文件本身。</div>
       ) : null}
     </div>
-  );
-}
-
-/* ── 文件类型图标 ─────────────────────────────
-   用的是 Cursor / VS Code 内置的 seti 图标字体(拷进 assets/fonts,
-   映射生成在 lib/fileIcons.ts)—— 用户在编辑器里天天看的就是这套,
-   不用重新学一遍"哪个颜色是哪种文件"。 */
-
-/** 文件名 → 图标。先按完整文件名(package.json、dockerfile…),
- *  再按后缀从长到短(x.blade.php 先试 blade.php 再试 php)。 */
-function iconFor(path: string): SetiIcon {
-  const name = path.slice(path.lastIndexOf("/") + 1).toLowerCase();
-  const byName = SETI_BY_NAME[name];
-  if (byName) return byName;
-  const parts = name.split(".");
-  for (let i = 1; i < parts.length; i++) {
-    const icon = SETI_BY_EXT[parts.slice(i).join(".")];
-    if (icon) return icon;
-  }
-  return SETI_DEFAULT;
-}
-
-function FileIcon({ path }: { path: string }) {
-  const icon = iconFor(path);
-  return (
-    <span className="file-icon" style={{ color: icon.color }} aria-hidden>
-      {icon.ch}
-    </span>
   );
 }
 

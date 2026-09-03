@@ -10,7 +10,17 @@ use std::fmt;
 macro_rules! typed_id {
     ($name:ident, $prefix:literal) => {
         #[derive(
-            Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+            Debug,
+            Clone,
+            Default,
+            PartialEq,
+            Eq,
+            Hash,
+            PartialOrd,
+            Ord,
+            Serialize,
+            Deserialize,
+            JsonSchema,
         )]
         #[serde(transparent)]
         pub struct $name(pub String);

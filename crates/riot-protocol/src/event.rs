@@ -115,6 +115,16 @@ pub enum AgentEvent {
         session_empty: bool,
     },
 
+    /// 一个后台子 agent 的状态变了（启动、活动、结束）。每次推全量视图。
+    ///
+    /// 不进 transcript（见 [`Self::is_durable`]）：它描述的是活状态。
+    /// 后台任务可以在**轮与轮之间**跑，所以这条事件不受"Done 是流的最后
+    /// 一个事件"的约束 —— 它属于会话，不属于某一轮。切回会话时的全量
+    /// 靠 `session.resume` 快照。
+    BackgroundTask {
+        task: Box<crate::task::BackgroundTaskView>,
+    },
+
     /// 终止。
     ///
     /// **必须是流的最后一个事件，且必须出现。** 即使内核 panic 被捕获，
@@ -132,7 +142,10 @@ impl AgentEvent {
     pub fn is_durable(&self) -> bool {
         !matches!(
             self,
-            AgentEvent::Delta(_) | AgentEvent::Progress { .. } | AgentEvent::Compacting
+            AgentEvent::Delta(_)
+                | AgentEvent::Progress { .. }
+                | AgentEvent::Compacting
+                | AgentEvent::BackgroundTask { .. }
         )
     }
 }
@@ -395,6 +408,22 @@ mod tests {
             AgentEvent::PromptWithdrawn {
                 message_id: MessageId::from_raw("m1"),
                 session_empty: true,
+            },
+            AgentEvent::BackgroundTask {
+                task: Box::new(crate::task::BackgroundTaskView {
+                    id: crate::id::AgentId::from_raw("agt_1"),
+                    title: "查入口".into(),
+                    kind: "explore".into(),
+                    model: "m".into(),
+                    background: true,
+                    tool_use_id: ToolUseId::from_raw("u1"),
+                    status: crate::task::BackgroundTaskStatus::Running,
+                    activity: "→ Grep".into(),
+                    tool_uses: 1,
+                    tokens: 10,
+                    started_at_ms: 1,
+                    finished_at_ms: None,
+                }),
             },
             AgentEvent::Done {
                 reason: TerminalReason::Completed,

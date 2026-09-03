@@ -71,6 +71,21 @@ pub enum RpcRequest {
         entry_id: String,
     },
 
+    /// 停掉一个后台子 agent（面板上的停止键）。只停它，不碰前台轮次。
+    /// 已经结束的任务停不到，返回 `Removed { removed: false }`。
+    #[serde(rename = "task.cancel")]
+    TaskCancel {
+        session_id: SessionId,
+        agent_id: crate::id::AgentId,
+    },
+    /// 一个子 agent 的会话：它的视图 + 到此刻为止的消息（跑着的也能看，
+    /// 界面据此画只读的子 agent 会话）。不认识的 id 回 `task: None`。
+    #[serde(rename = "task.history")]
+    TaskHistory {
+        session_id: SessionId,
+        agent_id: crate::id::AgentId,
+    },
+
     /// 上下文编辑：把一条历史消息的文本段替换成新文本。
     ///
     /// 只动文本 —— 思考、工具调用/结果、附件原位保留（见
@@ -183,6 +198,10 @@ pub enum RpcResponse {
         /// 正在流式生成的思考。症状同 `live_text`：思考块的字数清零重数。
         #[serde(default)]
         live_thinking: String,
+        /// 这个会话的后台子 agent（跑着的和刚结束的）。事件只在变化时推，
+        /// 切走再切回的面板靠这份快照重建。
+        #[serde(default)]
+        tasks: Vec<crate::task::BackgroundTaskView>,
     },
     SessionList {
         sessions: Vec<SessionSummary>,
@@ -205,6 +224,13 @@ pub enum RpcResponse {
     /// queue.remove 的应答:是否真的删到了。
     Removed {
         removed: bool,
+    },
+    /// task.history 的应答。`task` 为 None = 没有这个子 agent（内核重启后
+    /// 旧 id 都会失效）。分叉出的子 agent 只回它自己产生的那段，不回继承
+    /// 的父历史。
+    TaskHistory {
+        task: Option<crate::task::BackgroundTaskView>,
+        messages: Vec<Message>,
     },
     Changes {
         changes: Vec<FileChange>,

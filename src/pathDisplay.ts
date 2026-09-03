@@ -42,6 +42,19 @@ export function joinRoot(root: string, rel: string): string {
   return `${root.replace(/[\\/]+$/, "")}${sep}${cleaned.replace(/[\\/]+/g, sep)}`;
 }
 
+/**
+ * `path` 在 `root` 下的相对路径（`/` 分隔，根本身是空串）；不在就 null。
+ * 按路径段比较：`/work` 不是 `/workspace/a` 的根。
+ */
+export function relativeTo(root: string, path: string): string | null {
+  if (!root) return null;
+  const base = root.replace(/[\\/]+$/, "");
+  if (!path.startsWith(base)) return null;
+  const rest = path.slice(base.length);
+  if (rest && !/^[\\/]/.test(rest)) return null;
+  return rest.replace(/^[\\/]+/, "").replace(/\\/g, "/");
+}
+
 /** 家目录换成 `~`。macOS 是 `/Users/xxx`，Windows 是 `C:\Users\xxx`。 */
 export function tildify(path: string): string {
   const unix = /^\/Users\/[^/]+/.exec(path);

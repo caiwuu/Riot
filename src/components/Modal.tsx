@@ -5,6 +5,7 @@
 //! Esc 永远只落在最上层。
 
 import { type ReactNode, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 
 /* ── Esc 栈 ─────────────────────────────────── */
 
@@ -73,6 +74,7 @@ export function Modal({
   className,
   label,
   alert,
+  portal,
   onClose,
   children,
 }: {
@@ -81,6 +83,20 @@ export function Modal({
   label: string;
   /** 确认框置真 —— alertdialog 会让读屏立即朗读内容。 */
   alert?: boolean;
+  /**
+   * 渲染到 `document.body` 而不是就地。**住在开合面板里的弹窗必须置真。**
+   *
+   * 面板收起时内容会整层淡出（见 styles.css 的 .slide-panel-inner），而
+   * 透明度是往下乘到所有后代的 —— 包括 `position: fixed` 的遮罩（它不像
+   * containment 那样改包含块，所以不会被壳裁掉，但**会**跟着淡）。留在
+   * 壳里就会变成"看不见但还在、还吃点击"的一层。
+   *
+   * `[约束]` 不能改成默认置真。对话流里的删除确认刻意就地渲染 —— 外面
+   * 套一层 `.transcript-confirm` 把全屏 fixed 遮罩改成相对聊天区的
+   * absolute，遮罩只罩对话列、不盖侧栏（见 styles.css 那处）。portal
+   * 出去那层作用域覆盖就没了。
+   */
+  portal?: boolean;
   /** 请求关闭（Esc / 点遮罩 / 关闭按钮共用一条路）。 */
   onClose: () => void;
   children: ReactNode;
@@ -121,7 +137,7 @@ export function Modal({
     }
   };
 
-  return (
+  const shell = (
     <div
       className="modal-backdrop"
       onMouseDown={(e) => e.target === e.currentTarget && onClose()}
@@ -139,4 +155,8 @@ export function Modal({
       </div>
     </div>
   );
+
+  // Esc 栈和焦点陷阱都不依赖 DOM 位置（栈是模块级的、陷阱走 boxRef），
+  // portal 出去两者照旧工作。
+  return portal ? createPortal(shell, document.body) : shell;
 }

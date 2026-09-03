@@ -275,9 +275,12 @@ impl Provider for AnthropicProvider {
         // 图片按张计价：先把它的 base64 从报文长度里扣掉，再按张加回来。
         // 不扣就还是字节口径，而那个口径下一张图能报出几万 token。
         let (from, base) = riot_protocol::provider::last_usage_checkpoint(messages);
-        let tail = &messages[from..];
-        let (images, b64) = riot_protocol::provider::wire_images(tail);
-        base + riot_protocol::provider::estimate_tokens(wire_bytes(tail).saturating_sub(b64))
+        base + self.estimate_tokens_of(&messages[from..])
+    }
+
+    fn estimate_tokens_of(&self, messages: &[Message]) -> u32 {
+        let (images, b64) = riot_protocol::provider::wire_images(messages);
+        riot_protocol::provider::estimate_tokens(wire_bytes(messages).saturating_sub(b64))
             + riot_protocol::provider::estimate_image_tokens(images)
     }
 }
@@ -444,6 +447,48 @@ mod tests {
 
     async fn collect(p: &AnthropicProvider) -> Vec<ProviderEvent> {
         p.stream(req(), CancellationToken::new()).collect().await
+    }
+
+    /// 子切片里的 assistant 带着"整个上下文"的 usage，`count_tokens` 拿它
+    /// 打底会报出整个窗口的大小；`estimate_tokens_of` 只看内容。
+    ///
+    /// 这条钉的是压缩切分的前提：尾巴该不该留，问的是"尾巴多大"，不是
+    /// "上一次请求多大"。混用过一次，尾巴就再也没被保留过。
+    #[test]
+    fn 纯估算不被切片里的旧_usage_顶大() {
+        use riot_protocol::message::{AssistantContent, Usage};
+        let (p, _t) = provider(Vec::new());
+        let tail = vec![
+            Message::User {
+                id: MessageId::from_raw("u"),
+                content: vec![UserContent::Text {
+                    text: "短问题".into(),
+                }],
+                meta: MessageMeta::default(),
+            },
+            Message::Assistant {
+                id: MessageId::from_raw("a"),
+                content: vec![AssistantContent::Text {
+                    text: "短回答".into(),
+                }],
+                usage: Some(Usage {
+                    input_tokens: 5_000,
+                    cache_read_tokens: 250_000,
+                    cache_creation_tokens: 0,
+                    output_tokens: 50,
+                }),
+                meta: MessageMeta::default(),
+            },
+        ];
+        assert!(
+            p.count_tokens(&tail) >= 255_000,
+            "打底口径报的是那次请求的整个上下文"
+        );
+        assert!(
+            p.estimate_tokens_of(&tail) < 200,
+            "纯估算只看这两条的内容：{}",
+            p.estimate_tokens_of(&tail)
+        );
     }
 
     #[tokio::test(start_paused = true)]

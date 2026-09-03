@@ -338,6 +338,23 @@
           "type": "object"
         },
         {
+          "description": "一个后台子 agent 的状态变了（启动、活动、结束）。每次推全量视图。\n\n不进 transcript（见 [`Self::is_durable`]）：它描述的是活状态。\n后台任务可以在**轮与轮之间**跑，所以这条事件不受\"Done 是流的最后\n一个事件\"的约束 —— 它属于会话，不属于某一轮。切回会话时的全量\n靠 `session.resume` 快照。",
+          "properties": {
+            "task": {
+              "$ref": "#/$defs/BackgroundTaskView"
+            },
+            "type": {
+              "const": "background_task",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "task"
+          ],
+          "type": "object"
+        },
+        {
           "description": "终止。\n\n**必须是流的最后一个事件，且必须出现。** 即使内核 panic 被捕获，\n也要合成一条 `Done { reason: Error }`。消费者依赖这一点做资源清理；\n缺失会导致 UI 永远转圈。由 INV-4 断言保证。",
           "properties": {
             "reason": {
@@ -743,6 +760,104 @@
           "type": "object"
         }
       ]
+    },
+    "BackgroundTaskStatus": {
+      "description": "后台任务的生命周期。\n\n没有\"排队\"态：后台子 agent 一登记就开跑 —— 并发数由模型自己克制\n（Task 工具的提示词里讲了），不做队列。",
+      "oneOf": [
+        {
+          "enum": [
+            "running"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "completed",
+          "description": "正常说完了（含到达步数上限被停下 —— 那种情况汇报里会注明）。",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "内部错误：provider 挂了、装配失败。汇报是错误原因。",
+          "type": "string"
+        },
+        {
+          "const": "cancelled",
+          "description": "被用户（面板上的停止键）或会话关闭取消。",
+          "type": "string"
+        }
+      ]
+    },
+    "BackgroundTaskView": {
+      "description": "一个子 agent 在界面上的样子（同步的、后台的都有一份）。\n\n随 [`crate::event::AgentEvent::BackgroundTask`] 每次变化推一份全量；\n切回会话时随 `session.resume` 快照整批回来。不进 transcript ——\n它描述的是一个活状态，落盘重放会长出永远\"运行中\"的幽灵；\"跑过、\n结果是什么\"由通知消息（[`TaskNotice`]）和 Task 的 tool_result 记在\n历史里。\n\n名字里的 Background 是历史包袱：最初只给后台任务用，后来同步子 agent\n也要在 Task 卡片上直播\"标题 · 模型 · 正在做什么\"，于是全都登记，\n靠 `background` 区分该不该进后台任务面板。",
+      "properties": {
+        "activity": {
+          "description": "最近一行活动（正在调哪个工具、刚说的第一句话）。面板上滚动显示。",
+          "type": "string"
+        },
+        "background": {
+          "default": false,
+          "description": "后台跑的（进面板、完成时发通知）还是同步跑的（只在 Task 卡片上）。",
+          "type": "boolean"
+        },
+        "finished_at_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "`explore` / `general-purpose` / `fork`。",
+          "type": "string"
+        },
+        "model": {
+          "default": "",
+          "description": "它实际用的模型名（便宜档生效时和主模型不同）。",
+          "type": "string"
+        },
+        "started_at_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/BackgroundTaskStatus"
+        },
+        "title": {
+          "description": "模型给的任务名（Task 工具的 `description`）。续接时可以换。",
+          "type": "string"
+        },
+        "tokens": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tool_use_id": {
+          "default": "",
+          "description": "把它开出来的那次 Task 调用。卡片靠它认领自己的子 agent。",
+          "type": "string"
+        },
+        "tool_uses": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "kind",
+        "status",
+        "activity",
+        "tool_uses",
+        "tokens",
+        "started_at_ms"
+      ],
+      "type": "object"
     },
     "ChangeStatus": {
       "oneOf": [
@@ -1363,6 +1478,17 @@
         "synthetic": {
           "description": "是否为系统合成（而非模型产出或用户输入）。",
           "type": "boolean"
+        },
+        "task_notice": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskNotice"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "这条 user 消息是**后台子 agent 的完成通知**，不是用户说的话。\n\n正文（子 agent 的汇报）在 `SystemReminder` 附件里给模型读；这份\n标记给界面画卡片、给轮边界判定（[`Message::is_user_prompt`]）。\n只有内核合成通知时打上。"
         }
       },
       "type": "object"
@@ -2492,6 +2618,64 @@
           "type": "object"
         },
         {
+          "description": "停掉一个后台子 agent（面板上的停止键）。只停它，不碰前台轮次。\n已经结束的任务停不到，返回 `Removed { removed: false }`。",
+          "properties": {
+            "method": {
+              "const": "task.cancel",
+              "type": "string"
+            },
+            "params": {
+              "properties": {
+                "agent_id": {
+                  "type": "string"
+                },
+                "session_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session_id",
+                "agent_id"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "一个子 agent 的会话：它的视图 + 到此刻为止的消息（跑着的也能看，\n界面据此画只读的子 agent 会话）。不认识的 id 回 `task: None`。",
+          "properties": {
+            "method": {
+              "const": "task.history",
+              "type": "string"
+            },
+            "params": {
+              "properties": {
+                "agent_id": {
+                  "type": "string"
+                },
+                "session_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session_id",
+                "agent_id"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
           "description": "上下文编辑：把一条历史消息的文本段替换成新文本。\n\n只动文本 —— 思考、工具调用/结果、附件原位保留（见\n`Message::edit_text`）。只对活历史生效；空闲时才能做。",
           "properties": {
             "method": {
@@ -2968,6 +3152,14 @@
                     "$ref": "#/$defs/PendingAsk"
                   },
                   "type": "array"
+                },
+                "tasks": {
+                  "default": [],
+                  "description": "这个会话的后台子 agent（跑着的和刚结束的）。事件只在变化时推，\n切走再切回的面板靠这份快照重建。",
+                  "items": {
+                    "$ref": "#/$defs/BackgroundTaskView"
+                  },
+                  "type": "array"
                 }
               },
               "required": [
@@ -3137,6 +3329,44 @@
             },
             "result": {
               "const": "removed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "result",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "task.history 的应答。`task` 为 None = 没有这个子 agent（内核重启后\n旧 id 都会失效）。分叉出的子 agent 只回它自己产生的那段，不回继承\n的父历史。",
+          "properties": {
+            "data": {
+              "properties": {
+                "messages": {
+                  "items": {
+                    "$ref": "#/$defs/Message"
+                  },
+                  "type": "array"
+                },
+                "task": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/BackgroundTaskView"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "messages"
+              ],
+              "type": "object"
+            },
+            "result": {
+              "const": "task_history",
               "type": "string"
             }
           },
@@ -3786,6 +4016,26 @@
         "error"
       ],
       "type": "string"
+    },
+    "TaskNotice": {
+      "description": "打在完成通知消息上的标记（`MessageMeta::task_notice`）。\n\n通知本体是一条 user 消息，正文放在 `SystemReminder` 附件里给模型读；\n这份标记给界面 —— 靠它把那条消息画成\"后台任务完成\"卡片而不是\n用户气泡。meta 不进 wire 格式，模型只看得到附件里的文字。",
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/BackgroundTaskStatus"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent_id",
+        "title",
+        "status"
+      ],
+      "type": "object"
     },
     "TerminalReason": {
       "description": "终止原因。\n\n在 TS 版本里这是 AsyncGenerator 的 return 值，控制流与数据流分离。\nRust 的 `async_stream::stream!` 要求块返回 `()`，所以降级成事件变体。\n好处是终止原因现在可序列化、可持久化、可被回放测试断言。\n详见 ARCHITECTURE.md §4.2",

@@ -67,6 +67,18 @@ impl Message {
         }
     }
 
+    /// 抹掉 usage。
+    ///
+    /// assistant 上的 usage 描述的是**产生它那次请求**的整个上下文有多大，
+    /// [`crate::provider::last_usage_checkpoint`] 靠它给历史打底。压缩把它
+    /// 前面的东西换掉之后这个数就不再描述任何存在的上下文 —— 原样保留的
+    /// 尾巴回到新历史之前要过这一道，否则新历史量出来还是旧的尺寸。
+    pub fn forget_usage(&mut self) {
+        if let Message::Assistant { usage, .. } = self {
+            *usage = None;
+        }
+    }
+
     pub fn tool_use_ids(&self) -> Vec<&ToolUseId> {
         match self {
             Message::Assistant { content, .. } => content
@@ -152,6 +164,9 @@ impl Message {
     /// 一份的话，"一轮"的边界会在某天悄悄分叉。
     pub fn is_user_prompt(&self) -> bool {
         match self {
+            // 后台任务的完成通知也是一轮的起点：它是外部事件唤起的一轮，
+            // 模型对它的回应属于它，不属于上一句用户提问。
+            Message::User { meta, .. } if meta.task_notice.is_some() => true,
             Message::User { content, .. } => content.iter().any(|c| match c {
                 UserContent::Text { text } => !text.trim().is_empty(),
                 UserContent::Attachment(
@@ -356,6 +371,13 @@ pub struct MessageMeta {
     /// provider 都持有一份时钟，顺带把黄金回放的确定性也搭进去。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at_ms: Option<u64>,
+    /// 这条 user 消息是**后台子 agent 的完成通知**，不是用户说的话。
+    ///
+    /// 正文（子 agent 的汇报）在 `SystemReminder` 附件里给模型读；这份
+    /// 标记给界面画卡片、给轮边界判定（[`Message::is_user_prompt`]）。
+    /// 只有内核合成通知时打上。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_notice: Option<crate::task::TaskNotice>,
 }
 
 impl MessageMeta {

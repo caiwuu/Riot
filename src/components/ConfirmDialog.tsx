@@ -22,13 +22,16 @@ export interface ConfirmRequest {
  */
 export function ConfirmDialog({
   c,
+  portal,
   onClose,
 }: {
   c: ConfirmRequest;
+  /** 住在开合面板里时必须置真。理由见 [`Modal`] 的同名 prop。 */
+  portal?: boolean;
   onClose: () => void;
 }) {
   return (
-    <Modal className="confirm" label={c.title} alert onClose={onClose}>
+    <Modal className="confirm" label={c.title} alert onClose={onClose} portal={!!portal}>
       <div className="confirm-body">
         <h3>{c.title}</h3>
         <p>{c.body}</p>

@@ -172,16 +172,33 @@ pub async fn summarize_history(
 ///
 /// `memory` 是重新注入的记忆附件（压缩把带着记忆的首条消息一起吞了，
 /// 不重注的话项目约定就此消失）；`restored` 是工作集文件。
+///
+/// `archive` 是被压掉的原文落成的文件（[`crate::archive`]）。给了就在
+/// 续接消息里指路：总结是有损的，模型要报错原文、具体路径、用户某句话
+/// 的时候，有地方可查比靠猜好。宿主写不出文件时传 None，措辞退回
+/// "只有总结"。
 pub fn continuation_message(
     summary: &str,
     memory: Vec<Attachment>,
     restored: Vec<Attachment>,
+    archive: Option<&std::path::Path>,
     id: riot_protocol::id::MessageId,
 ) -> Message {
     let mut content: Vec<UserContent> = memory.into_iter().map(UserContent::Attachment).collect();
+    let archive_note = match archive {
+        Some(p) => format!(
+            "\n\n被压缩的对话**原文**保存在 `{}`（一条消息一个 `## [序号] 角色` 小节，\
+             工具结果只留开头）。总结里没有、但你需要的细节 —— 报错原文、具体路径、\
+             命令输出、用户某句话的准确措辞 —— 用 Grep 搜关键词或 Read 指定行区间去查，\
+             不要靠猜、也不要整份读进来。",
+            p.display()
+        ),
+        None => String::new(),
+    };
     content.push(UserContent::Text {
         text: format!(
-            "本会话由一段更早的对话延续而来，先前内容已压缩。以下是前文的完整总结：\n\n{summary}\n\n\
+            "本会话由一段更早的对话延续而来，先前内容已压缩。以下是前文的完整总结：\n\n{summary}\
+             {archive_note}\n\n\
              直接接着做，不要复述总结、不要向用户再次确认、不要说「我将继续」—— \
              像中断从未发生过一样，接上手头的任务。",
         ),
@@ -195,6 +212,38 @@ pub fn continuation_message(
             ..Default::default()
         },
     }
+}
+
+/// 压缩时原样保留的尾巴最多多大。
+///
+/// 总结负责"前面发生过什么"，尾巴负责"刚刚在做什么"—— 最近一轮的原话
+/// 和工具结果是模型接续时最常回看的东西，让它从总结里重新拼太亏。
+/// 20k 约是默认阈值（300k）的 7%：够装下一轮普通对话，装不下一轮跑了
+/// 几十个工具的长任务（那种尾巴留着等于没压）。
+pub const MAX_TAIL_TOKENS: u32 = 20_000;
+
+/// 压缩的切分点：`messages[..split]` 送去总结，`messages[split..]` 原样保留。
+///
+/// 只在**用户提问**处切（[`Message::is_user_prompt`]）：一轮问答从提问
+/// 开始、到下一条提问前结束，工具调用和结果总在轮内，所以在这里切不会
+/// 拆开配对。取最后一条提问；它引出的那一轮超过 `max_tail_tokens` 就不
+/// 留尾巴（返回 `len`），首条提问也不算（那等于什么都不压）。
+///
+/// `[约束]` 切分是纯函数、只看消息本身。后台预压缩和开工时的换入必须算
+/// 出同一个切点，否则总结的是一段、留下的是另一段 —— 中间要么重复要么
+/// 缺一截，两者都没有报错。
+pub fn split_point(
+    messages: &[Message],
+    count_tokens: impl Fn(&[Message]) -> u32,
+    max_tail_tokens: u32,
+) -> usize {
+    let Some(last_prompt) = messages.iter().rposition(Message::is_user_prompt) else {
+        return messages.len();
+    };
+    if last_prompt == 0 || count_tokens(&messages[last_prompt..]) > max_tail_tokens {
+        return messages.len();
+    }
+    last_prompt
 }
 
 /// 剥出 `<summary>` 正文；没有闭合标签时取开标签之后的全部（流被截断
@@ -377,6 +426,7 @@ mod tests {
                 path: "/p/a.rs".into(),
                 content: "code".into(),
             }],
+            None,
             MessageId::from_raw("m1"),
         );
         let Message::User { content, meta, .. } = &m else {
@@ -402,6 +452,85 @@ mod tests {
             content.last(),
             Some(UserContent::Attachment(Attachment::RestoredFile { .. }))
         ));
+        assert!(
+            !matches!(&content[1], UserContent::Text { text } if text.contains("原文")),
+            "没有归档文件就别提它，否则模型会去找一个不存在的路径"
+        );
+    }
+
+    #[test]
+    fn 续接消息给出归档路径和用法() {
+        let m = continuation_message(
+            "总结",
+            Vec::new(),
+            Vec::new(),
+            Some(std::path::Path::new("/art/s1/history.md")),
+            MessageId::from_raw("m1"),
+        );
+        let Message::User { content, .. } = &m else {
+            panic!("是 user")
+        };
+        let UserContent::Text { text } = &content[0] else {
+            panic!("文本")
+        };
+        assert!(text.contains("/art/s1/history.md"), "{text}");
+        assert!(
+            text.contains("Grep") && text.contains("不要靠猜"),
+            "要教模型怎么用：搜关键词，别整份读：{text}"
+        );
+    }
+
+    /// 切分只在用户提问处，且尾巴有预算。
+    #[test]
+    fn 切分点落在最后一条提问_超预算则不留尾巴() {
+        use riot_protocol::id::ToolUseId;
+        let prompt = |id: &str, t: &str| Message::User {
+            id: MessageId::from_raw(id),
+            content: vec![UserContent::Text { text: t.into() }],
+            meta: MessageMeta::default(),
+        };
+        let result = |id: &str, t: &str| Message::User {
+            id: MessageId::from_raw(id),
+            content: vec![UserContent::ToolResult {
+                tool_use_id: ToolUseId::from_raw("t"),
+                content: ToolResultContent::text(t),
+                is_error: false,
+            }],
+            meta: MessageMeta::default(),
+        };
+        let reply = |id: &str| Message::Assistant {
+            id: MessageId::from_raw(id),
+            content: vec![AssistantContent::Text { text: "好".into() }],
+            usage: None,
+            meta: MessageMeta::default(),
+        };
+        // 每条按 10 token 算。
+        let count = |ms: &[Message]| (ms.len() * 10) as u32;
+
+        let msgs = vec![
+            prompt("u1", "第一问"),
+            reply("a1"),
+            prompt("u2", "第二问"),
+            reply("a2"),
+            result("r2", "工具结果"),
+            reply("a3"),
+        ];
+        assert_eq!(
+            split_point(&msgs, count, 100),
+            2,
+            "从最后一条提问（u2）起留尾巴，工具结果不算提问"
+        );
+        assert_eq!(
+            split_point(&msgs, count, 30),
+            msgs.len(),
+            "尾巴 4 条 = 40 token 超预算，整段都压"
+        );
+        assert_eq!(
+            split_point(&msgs[..2], count, 100),
+            2,
+            "只有首条提问时不切 —— 那等于什么都不压"
+        );
+        assert_eq!(split_point(&[], count, 100), 0);
     }
 
     #[test]

@@ -48,7 +48,8 @@ import { Chip, FileChip } from "./Chip";
 import { ConfirmDialog, type ConfirmRequest } from "./ConfirmDialog";
 import { LazyMarkdown, Markdown } from "./Markdown";
 import { AskChoiceCard, PlanApprovalCard, PlanDraft } from "./PermissionDialog";
-import { groupBlocks, ProcessGroup, ThinkingBlock } from "./ProcessFold";
+import { type Block, groupBlocks, ProcessGroup, ThinkingBlock } from "./ProcessFold";
+import { TaskNoticeCard } from "./TaskPanel";
 import { ShotViewer, ToolCard } from "./ToolCard";
 
 /**
@@ -69,6 +70,68 @@ export const transcriptView = new Map<string, { top: number; stick: boolean }>()
  * 冲成正值，那不算"离开了底部"。
  */
 const distFromBottom = (box: HTMLElement) => Math.max(0, -box.scrollTop);
+
+/**
+ * 一轮问答：一条用户消息开一轮，之后的过程组、回答、报错都归它，直到
+ * 下一条用户消息为止。
+ *
+ * 这是**渲染预算的单位** —— 离屏的轮整个跳过排版和绘制（见 styles.css
+ * 的 `.turn`，那里记着为什么粒度必须是轮、不能退回每块一份）。历史里
+ * 第一条用户消息之前还可能有东西（压缩分隔线、上次的报错），它们自成
+ * 第一轮。
+ *
+ * `from` 是这一轮首块在 blocks 里的下标。懒水合的窗口是按**块数**算的
+ * （见 hydrateFrom），包这一层不该改变它，所以把下标一并带出来。
+ */
+type Turn = { key: string; from: number; blocks: Block[] };
+
+function groupTurns(blocks: Block[]): Turn[] {
+  const turns: Turn[] = [];
+  blocks.forEach((b, i) => {
+    const cur = turns[turns.length - 1];
+    if (!cur || (b.kind === "row" && b.item.kind === "user")) {
+      // key 取首块的 id。用户消息的 id 在整个会话里稳定 —— 轮在长大
+      // （过程组并入、回答落定）时不换 key，里面的东西不会重挂载。
+      turns.push({ key: b.kind === "row" ? b.item.id : b.id, from: i, blocks: [b] });
+      return;
+    }
+    cur.blocks.push(b);
+  });
+  return turns;
+}
+
+/**
+ * 在一组按文档序从上到下排列的兄弟里，二分找第一个底边越过 `boxTop`
+ * 的元素。长会话逐个量 getBoundingClientRect 太贵 —— 这里每次滚动
+ * 都要跑。
+ */
+function firstBelow(kids: HTMLCollection, boxTop: number): Element | null {
+  let lo = 0;
+  let hi = kids.length - 1;
+  let first = kids.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const el = kids[mid];
+    if (!el) break;
+    if (el.getBoundingClientRect().bottom > boxTop) {
+      first = mid;
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
+  return kids[first] ?? null;
+}
+
+/** 文档序里的下一个锚点候选：同轮内的下一块，没有就下一轮的首块。 */
+function nextAnchor(el: Element, col: Element): Element | null {
+  const sib = el.nextElementSibling;
+  if (sib) return sib;
+  const parent = el.parentElement;
+  if (!parent || parent === col) return null;
+  const next = parent.nextElementSibling;
+  return next?.firstElementChild ?? next ?? null;
+}
 
 /**
  * 这次滚轮会不会被目标和对话流之间的子层截住。
@@ -402,33 +465,25 @@ export function Transcript({
       anchor.current = null;
       return;
     }
-    const kids = col.children;
     const boxTop = box.getBoundingClientRect().top;
-    // 二分找第一个底边越过视口顶的块。块按文档序从上到下单调排列，
-    // 长会话逐块量 getBoundingClientRect 太贵 —— 这里每次滚动都要跑。
-    let lo = 0;
-    let hi = kids.length - 1;
-    let first = kids.length - 1;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      const el = kids[mid];
-      if (!el) break;
-      if (el.getBoundingClientRect().bottom > boxTop) {
-        first = mid;
-        hi = mid - 1;
-      } else {
-        lo = mid + 1;
-      }
-    }
-    let el = kids[first];
-    if (!el) {
+    // 两级查找：先定位到轮，再进那一轮里定位到块。
+    //
+    // `[约束]` 第二级不能省。轮是渲染预算的单位（见 styles.css 的
+    // `.turn`），一轮长起来能有好几屏高 —— 只锚到轮的话，基线粗到
+    // 补偿肉眼可见地对不上。降一级之后精度和"每块一份"时代完全一样，
+    // 代价只是多一轮二分（几次 rect 读取）。
+    const turn = firstBelow(col.children, boxTop);
+    if (!turn) {
       anchor.current = null;
       return;
     }
+    // 只对轮降级。列尾那几个直接子元素（正在流的正文、状态行）不是轮，
+    // 它们的孩子不是"按块排列的兄弟"，钻进去锚到的东西没有意义。
+    let el = (turn.classList.contains("turn") ? firstBelow(turn.children, boxTop) : null) ?? turn;
     // 跨着视口顶边的块锚不住：它水合长高时顶边不动、内部整体重排，
     // 补偿无从算起。锚下一个块（顶边在视口内的）—— 除非它一块占满全屏。
     if (el.getBoundingClientRect().top < boxTop - 1) {
-      const next = kids[first + 1];
+      const next = nextAnchor(el, col);
       if (next && next.getBoundingClientRect().top - boxTop < box.clientHeight) el = next;
     }
     anchor.current = { el, top: el.getBoundingClientRect().top - boxTop };
@@ -679,6 +734,9 @@ export function Transcript({
   // Transcript 每帧重渲染，分组不该跟着每帧重算。
   const liveTail = busy && !streaming;
   const blocks = useMemo(() => groupBlocks(items, liveTail), [items, liveTail]);
+  // 再按轮收一层。离屏的轮整个跳过排版绘制，这一层就是那个开关挂的地方
+  // （见 groupTurns 和 styles.css 的 `.turn`）。
+  const turns = useMemo(() => groupTurns(blocks), [blocks]);
   // 正在流的思考并进尾部直播组（组头滚思考预览、落定进组行数不变），
   // 没有直播组可挂时才单独成行 —— 那一行随后被组头原地接替，也不跳。
   const tailBlock = blocks[blocks.length - 1];
@@ -691,27 +749,39 @@ export function Transcript({
     <div className="transcript-shell">
       <main className="transcript" ref={boxRef}>
         <div className="thread-col">
-        {blocks.map((b, i) =>
-          b.kind === "row" ? (
-            <Row
-              key={b.item.id}
-              item={b.item}
-              hydrate={findOpen || i >= hydrateFrom}
-              regenEnabled={!busy}
-              mutateEnabled={!busy}
-              {...(onRegenerate ? { onRegenerate } : {})}
-              {...(onEditEntry ? { onEditEntry } : {})}
-              {...(onDeleteEntry ? { onDeleteEntry: requestDelete } : {})}
-            />
-          ) : (
-            <ProcessGroup
-              key={b.id}
-              items={b.items}
-              live={b.live}
-              {...(b === liveFold && thinking ? { thinkingText: thinking } : {})}
-            />
-          ),
-        )}
+        {turns.map((t, ti) => (
+          <div
+            className="turn"
+            key={t.key}
+            // 最后一轮正在生成时不省渲染：内容每帧在长，估高一直失效，
+            // 而它本来就在视口里（见 styles.css 的 .turn[data-live]）。
+            {...(busy && ti === turns.length - 1 ? { "data-live": "" } : {})}
+          >
+            {t.blocks.map((b, bi) => {
+              // 懒水合的窗口按块数算，所以要用块在 blocks 里的原下标。
+              const i = t.from + bi;
+              return b.kind === "row" ? (
+                <Row
+                  key={b.item.id}
+                  item={b.item}
+                  hydrate={findOpen || i >= hydrateFrom}
+                  regenEnabled={!busy}
+                  mutateEnabled={!busy}
+                  {...(onRegenerate ? { onRegenerate } : {})}
+                  {...(onEditEntry ? { onEditEntry } : {})}
+                  {...(onDeleteEntry ? { onDeleteEntry: requestDelete } : {})}
+                />
+              ) : (
+                <ProcessGroup
+                  key={b.id}
+                  items={b.items}
+                  live={b.live}
+                  {...(b === liveFold && thinking ? { thinkingText: thinking } : {})}
+                />
+              );
+            })}
+          </div>
+        ))}
 
         {thinking && !liveFold ? <ThinkingBlock text={thinking} live /> : null}
         {/* animated：正在流的这一条里，新长出来的块逐个淡入 —— token
@@ -802,7 +872,7 @@ export function Transcript({
  * items 数组里未变化的元素引用是稳定的（更新走的是替换单个元素），
  * 所以浅比较有效。
  */
-const Row = memo(function Row({
+export const Row = memo(function Row({
   item,
   onRegenerate,
   regenEnabled,
@@ -911,6 +981,8 @@ const Row = memo(function Row({
       return <div className="msg error">{item.text}</div>;
     case "notice":
       return <div className="msg notice">{item.text}</div>;
+    case "task_notice":
+      return <TaskNoticeCard item={item} />;
     case "compact":
       return (
         <div className="compact-rule" role="separator">

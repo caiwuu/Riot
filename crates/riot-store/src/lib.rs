@@ -56,6 +56,18 @@ pub enum Record {
         /// 压缩前后的规模，诊断用。
         before_tokens: u32,
         after_tokens: u32,
+        /// 压缩时原样保留的尾巴从哪条消息开始（含）。
+        ///
+        /// 内核压缩时会把最后一轮问答留在总结**之后**，而 transcript 是
+        /// 追加的：那几条早就写在边界前面了，边界后重新追加一遍才能让
+        /// 加载出来的顺序是"续接消息 → 尾巴"。加载时这段**不进归档**
+        /// （否则界面上同一轮出现两遍），也不留在活历史（边界后的重放
+        /// 会再补上）。`None` = 老格式 / 没留尾巴，边界前全归档。
+        ///
+        /// 旧版本读到这个字段会当成普通边界：尾巴既进归档又被重放，界面
+        /// 上那一轮显示两遍，模型看到的历史仍然正确。向前兼容到此为止。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keep_from: Option<String>,
     },
     /// 重新生成：丢掉 `keep_until` 之后的历史。
     ///
@@ -199,9 +211,8 @@ impl Transcripts {
                     }
                 }
                 Ok(Record::Message { message }) => live.push(*message),
-                Ok(Record::CompactBoundary { .. }) => {
-                    // 活历史从边界重新开始。归档留下给界面画分割线上面的记录。
-                    archived.append(&mut live);
+                Ok(Record::CompactBoundary { keep_from, .. }) => {
+                    apply_boundary(&mut live, &mut archived, keep_from.as_deref());
                 }
                 Ok(Record::Rewind { keep_until }) => {
                     apply_rewind(&mut live, &mut archived, &keep_until);
@@ -277,6 +288,23 @@ impl Transcripts {
 
 /// 加载时应用一条 rewind：先在活历史里找，找不到再看归档。
 /// 找不到就不动（文件坏了也不该把整份历史扔掉）。
+/// 压缩边界：活历史从这里重新开始，归档留下给界面画分割线上面的记录。
+///
+/// 带 `keep_from` 时，那条（含）之后的尾巴既不进归档也不留在活历史 ——
+/// 内核在边界之后会把它们重新追加一遍。找不到那条 id（transcript 损坏、
+/// 或尾巴恰好被更早的记录删了）就按普通边界处理：宁可界面上多显示一轮，
+/// 不能让加载到的活历史缺一截。
+fn apply_boundary(live: &mut Vec<Message>, archived: &mut Vec<Message>, keep_from: Option<&str>) {
+    let tail_at = keep_from.and_then(|id| live.iter().position(|m| m.id().as_str() == id));
+    match tail_at {
+        Some(i) => {
+            live.truncate(i);
+            archived.append(live);
+        }
+        None => archived.append(live),
+    }
+}
+
 fn apply_rewind(live: &mut Vec<Message>, archived: &mut Vec<Message>, keep_until: &str) {
     if let Some(i) = live.iter().position(|m| m.id().as_str() == keep_until) {
         live.truncate(i + 1);
@@ -358,6 +386,7 @@ enum Cmd {
     Boundary {
         before_tokens: u32,
         after_tokens: u32,
+        keep_from: Option<String>,
     },
     /// 重新生成：截断到这条消息。
     Rewind {
@@ -421,12 +450,17 @@ impl SessionLog {
     ///
     /// 必须在续接消息 `append` **之前**调用 —— 顺序反了的话，重启加载
     /// 会把续接消息也一起丢掉，会话醒来就是一片空白。
-    pub fn append_boundary(&self, before_tokens: u32, after_tokens: u32) {
+    ///
+    /// `keep_from` 是原样保留的尾巴的首条 id（见 [`Record::CompactBoundary`]）。
+    /// 给了它，调用方要在续接消息之后把尾巴逐条重新 `append` —— 边界记录
+    /// 只负责让加载器把旧的那份从归档里摘掉。
+    pub fn append_boundary(&self, before_tokens: u32, after_tokens: u32, keep_from: Option<&str>) {
         let tx = self.sender();
         if tx
             .send(Cmd::Boundary {
                 before_tokens,
                 after_tokens,
+                keep_from: keep_from.map(str::to_owned),
             })
             .is_err()
         {
@@ -525,9 +559,11 @@ async fn write_loop(path: PathBuf, meta: TranscriptMeta, mut rx: mpsc::Unbounded
                 Cmd::Boundary {
                     before_tokens,
                     after_tokens,
+                    keep_from,
                 } => Some(Record::CompactBoundary {
                     before_tokens,
                     after_tokens,
+                    keep_from,
                 }),
                 Cmd::Rewind { keep_until } => Some(Record::Rewind { keep_until }),
                 Cmd::Withdraw { id } => Some(Record::Withdraw { id }),
@@ -897,7 +933,7 @@ mod tests {
         let log = store.open(meta("s1"));
         log.append(&user("m1", "压缩前的旧话"));
         log.append(&user("m2", "也被总结吞掉"));
-        log.append_boundary(10_000, 800);
+        log.append_boundary(10_000, 800, None);
         log.append(&user("m3", "带总结的续接消息"));
         log.append(&user("m4", "压缩后的新对话"));
         log.flush().await;
@@ -958,7 +994,7 @@ mod tests {
         let log = store.open(meta("s1"));
         log.append(&user("m1", "压缩前"));
         log.append(&assistant("a1", "旧答"));
-        log.append_boundary(1000, 100);
+        log.append_boundary(1000, 100, None);
         log.append(&user("m2", "压缩后"));
         log.append(&assistant("a2", "新答"));
         log.append_rewind("m1");
@@ -967,6 +1003,86 @@ mod tests {
         let parts = store.load_parts(&SessionId::from_raw("s1")).await;
         assert_eq!(parts.archived, vec![user("m1", "压缩前")]);
         assert!(parts.live.is_empty(), "截回归档之后活历史应清空");
+    }
+
+    /// 带尾巴的压缩：边界前的最后一轮原样留在总结之后。
+    ///
+    /// `[约束]` 尾巴在文件里出现两次（边界前的原件、边界后的重放），加载
+    /// 结果里只能有一份，而且在续接消息**之后**。归档里多一份 → 界面同一
+    /// 轮显示两遍；活历史里少一份 → 模型丢了刚刚那一轮。
+    #[tokio::test]
+    async fn 压缩边界保留尾巴时尾巴只出现一次且在总结之后() {
+        let d = dir();
+        let store = Transcripts::new(d.path());
+        let log = store.open(meta("s1"));
+        log.append(&user("m1", "很早的话"));
+        log.append(&assistant("a1", "很早的答"));
+        log.append(&user("m2", "最后一问"));
+        log.append(&assistant("a2", "最后一答"));
+        log.append_boundary(10_000, 800, Some("m2"));
+        log.append(&user("c1", "续接消息"));
+        log.append(&user("m2", "最后一问"));
+        log.append(&assistant("a2", "最后一答"));
+        log.append(&user("m3", "压缩后的新话"));
+        log.flush().await;
+
+        let parts = store.load_parts(&SessionId::from_raw("s1")).await;
+        assert_eq!(
+            parts.archived,
+            vec![user("m1", "很早的话"), assistant("a1", "很早的答")],
+            "尾巴不进归档"
+        );
+        assert_eq!(
+            parts.live,
+            vec![
+                user("c1", "续接消息"),
+                user("m2", "最后一问"),
+                assistant("a2", "最后一答"),
+                user("m3", "压缩后的新话"),
+            ],
+            "活历史 = 续接 → 尾巴 → 新话"
+        );
+    }
+
+    /// `keep_from` 指向一条不存在的消息：退成普通边界，不能让活历史缺一截。
+    #[tokio::test]
+    async fn 压缩边界的_keep_from_找不到时按普通边界处理() {
+        let d = dir();
+        let store = Transcripts::new(d.path());
+        let log = store.open(meta("s1"));
+        log.append(&user("m1", "旧话"));
+        log.append_boundary(1000, 100, Some("ghost"));
+        log.append(&user("c1", "续接"));
+        log.flush().await;
+
+        let parts = store.load_parts(&SessionId::from_raw("s1")).await;
+        assert_eq!(parts.archived, vec![user("m1", "旧话")]);
+        assert_eq!(parts.live, vec![user("c1", "续接")]);
+    }
+
+    /// 老格式的边界记录（没有 keep_from 字段）照样能读。
+    #[tokio::test]
+    async fn 老格式的压缩边界照样能读() {
+        let d = dir();
+        let store = Transcripts::new(d.path());
+        let path = d.path().join("s1.jsonl");
+        let lines = [
+            serde_json::to_string(&Record::Meta(meta("s1"))).unwrap(),
+            serde_json::to_string(&Record::Message {
+                message: Box::new(user("m1", "旧话")),
+            })
+            .unwrap(),
+            r#"{"type":"compact_boundary","before_tokens":1000,"after_tokens":100}"#.to_owned(),
+            serde_json::to_string(&Record::Message {
+                message: Box::new(user("c1", "续接")),
+            })
+            .unwrap(),
+        ];
+        std::fs::write(&path, lines.join("\n") + "\n").expect("写文件");
+
+        let parts = store.load_parts(&SessionId::from_raw("s1")).await;
+        assert_eq!(parts.archived, vec![user("m1", "旧话")]);
+        assert_eq!(parts.live, vec![user("c1", "续接")]);
     }
 
     #[tokio::test]

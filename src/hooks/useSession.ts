@@ -9,6 +9,8 @@ import type {
 } from "../bridge/generated";
 import {
   type AgentEvent,
+  type BackgroundTaskStatus,
+  type BackgroundTaskView,
   type HistorySnapshot,
   type ImageInput,
   type Message,
@@ -29,6 +31,7 @@ import {
   sendTurn,
   subscribeSession,
   subscribeWindowFocus,
+  taskCancel,
 } from "../bridge";
 import { extractTopLevelStringField, extractTopLevelStringFields } from "../lib/partialJson";
 
@@ -72,6 +75,19 @@ export type Item =
   | { kind: "error"; id: string; text: string }
   /** 中性告知（不是出错）：到达轮数上限之类，只是提示"该歇口气了"。 */
   | { kind: "notice"; id: string; text: string }
+  /**
+   * 后台子 agent 的完成通知（内核合成的 user 消息，见 MessageMeta.task_notice）。
+   * `text` 是它的汇报正文。模型收到的是同一段话；这里画成卡片而不是用户气泡。
+   */
+  | {
+      kind: "task_notice";
+      id: string;
+      agentId: string;
+      title: string;
+      status: BackgroundTaskStatus;
+      text: string;
+      at?: number;
+    }
   /** 压缩边界：上面是压缩前的记录，下面是压缩后的对话。 */
   | { kind: "compact"; id: string };
 
@@ -162,6 +178,11 @@ export interface SessionState {
    * （见 `clearWithdrawn`）。
    */
   withdrawn: WithdrawnPrompt | null;
+  /**
+   * 后台子 agent（跑着的和刚结束的），按启动顺序。`background_task` 事件
+   * 每次推一份全量视图，这里按 id 覆盖；切回会话时用快照整批替换。
+   */
+  tasks: BackgroundTaskView[];
 }
 
 const MAX_TOOL_LINES = 200;
@@ -240,6 +261,7 @@ const EMPTY_STATE: SessionState = {
   hostMode: null,
   queued: [],
   withdrawn: null,
+  tasks: [],
 };
 
 /**
@@ -636,6 +658,11 @@ export function useSession(
 
         case "mode_changed":
           setState((s) => ({ ...s, hostMode: event.mode }));
+          break;
+
+        case "background_task":
+          // 每次推全量视图，按 id 覆盖；新来的排在末尾（启动顺序）。
+          setState((s) => ({ ...s, tasks: upsertTask(s.tasks, event.task) }));
           break;
 
         case "compacting":
@@ -1251,6 +1278,20 @@ export function useSession(
     setState((s) => (s.withdrawn ? { ...s, withdrawn: null } : s));
   }, [setState]);
 
+  /**
+   * 停掉一个后台子 agent。只停它，前台轮次不动。
+   *
+   * 不乐观改状态：内核停下来会推一条 `background_task`（cancelled），
+   * 面板跟着那条走 —— 这里先改的话，万一它已经结束（内核回 false），
+   * 面板会先显示"已停止"再跳回"完成"。
+   */
+  const cancelTask = useCallback(
+    (agentId: string) => {
+      void taskCancel(sessionId, agentId).catch(() => {});
+    },
+    [sessionId],
+  );
+
   const answer = useCallback(
     async (response: PermissionResponse, requestId?: string) => {
       // 计划卡、选择题卡和权限弹窗可能同时在场（并发工具各自征求授权），
@@ -1285,6 +1326,7 @@ export function useSession(
     queueEdit,
     queueSendNow,
     clearWithdrawn,
+    cancelTask,
   };
 }
 
@@ -1360,18 +1402,24 @@ function applyHistorySnap(s: SessionState, hist: HistorySnap): SessionState {
   const archived = hist.archived;
   const busy = hist.busy;
   const compacting = hist.compacting;
+  // 后台任务以快照为准：事件只在变化时推，切走期间的变化只有快照里有。
+  // 老宿主没这个字段时保留本地那份。
+  const tasks = hist.tasks ?? s.tasks;
 
   if (messages.length === 0 && archived.length === 0) {
     return {
       ...s,
       busy,
       compacting,
+      tasks,
       ...(!busy
         ? {
             streaming: "",
             thinking: "",
             streamingPlan: null,
-            asks: [],
+            // 空闲也按快照对账而不是清空：后台子 agent 的询问不属于任何
+            // 一轮，前台空闲时它可能正等着人答。快照为准。
+            asks: reconcileAsks(s.asks, hist.pendingAsks),
             items: finalizeIdleItems(s.items, "未完成"),
           }
         : {
@@ -1398,6 +1446,7 @@ function applyHistorySnap(s: SessionState, hist: HistorySnap): SessionState {
       compacting,
       items,
       tokens,
+      tasks,
       // 半截流以快照为准：内核收齐了每一条增量，本地这份在切走/通道
       // 断开期间是缺头的。快照为空（老内核或刚好没在流）才退回本地。
       streaming: mergeLive(
@@ -1417,10 +1466,11 @@ function applyHistorySnap(s: SessionState, hist: HistorySnap): SessionState {
     compacting,
     items,
     tokens,
+    tasks,
     streaming: "",
     thinking: "",
     streamingPlan: null,
-    asks: [],
+    asks: reconcileAsks(s.asks, hist.pendingAsks),
   };
 }
 
@@ -1561,11 +1611,22 @@ function stampOf(meta: MessageMeta | null | undefined): { at?: number } {
   return at ? { at } : {};
 }
 
-function messagesToItems(msgs: Message[], skipSynthetic = false): Item[] {
+/**
+ * 消息 → 界面条目。导出给子 agent 会话视图复用：那边拿到的是同一种
+ * `Message[]`，画法也该和主对话一样（工具卡、思考块、回答）。
+ */
+export function messagesToItems(msgs: Message[], skipSynthetic = false): Item[] {
   const items: Item[] = [];
 
   for (const msg of msgs) {
     if (msg.role === "user") {
+      // 后台子 agent 的完成通知：卡片，不是用户气泡。先于 synthetic 判定 ——
+      // 它也是合成的，但有自己的画法。
+      const notice = taskNoticeItem(msg);
+      if (notice) {
+        items.push(notice);
+        continue;
+      }
       // 带文本的合成用户消息（压缩后的续接摘要）不是用户说的话。
       // 分割线已经说明"上面被压缩了"，这里不再画一块提示把记录盖住。
       // 只拦带文本的：中断时合成的"已取消"消息只有 tool_result，必须
@@ -1692,11 +1753,57 @@ function dropSettled(
   return { ...event, content };
 }
 
+/**
+ * 后台子 agent 的完成通知 → 卡片。
+ *
+ * 正文在 SystemReminder 附件里（模型读的那份）；这里原样拿来给人看。
+ * 不是通知的消息返回 null。
+ */
+function taskNoticeItem(msg: Extract<Message, { role: "user" }>): Item | null {
+  const notice = msg.meta?.task_notice;
+  if (!notice) return null;
+  const text = msg.content
+    .flatMap((c) => (c.type === "attachment" && c.kind === "system_reminder" ? [c.text] : []))
+    .join("\n");
+  return {
+    kind: "task_notice",
+    id: msg.id,
+    agentId: notice.agent_id,
+    title: notice.title,
+    status: notice.status,
+    text: stripNoticePreamble(text),
+    ...stampOf(msg.meta),
+  };
+}
+
+/**
+ * 通知正文前面是给模型的行为说明（"不要复述……"），对人没有信息量；
+ * 卡片只显示 `--- 汇报 ---` 之后的部分。找不到分隔符就全显示。
+ */
+function stripNoticePreamble(text: string): string {
+  const at = text.indexOf("--- 汇报 ---");
+  return at < 0 ? text : text.slice(at + "--- 汇报 ---".length).trim();
+}
+
+/** 按 id 覆盖；没有就追加到末尾。 */
+function upsertTask(tasks: BackgroundTaskView[], task: BackgroundTaskView): BackgroundTaskView[] {
+  const at = tasks.findIndex((t) => t.id === task.id);
+  if (at < 0) return [...tasks, task];
+  const out = [...tasks];
+  out[at] = task;
+  return out;
+}
+
 function applyMessage(s: SessionState, event: Extract<AgentEvent, { type: "message" }>): SessionState {
   const items = [...s.items];
   const msg = event;
 
   if (msg.role === "user") {
+    const notice = taskNoticeItem(msg);
+    if (notice) {
+      items.push(notice);
+      return { ...s, items };
+    }
     for (const c of msg.content) {
       if (c.type === "tool_result") {
         // 找到对应的工具卡片填结果。倒着找 —— 同一个工具在一次会话里
@@ -1824,6 +1931,11 @@ function applyDone(s: SessionState, event: Extract<AgentEvent, { type: "done" }>
   // 这一轮结束了，还排着队的权限请求已经没有意义 —— 它们对应的工具
   // 调用要么被中断要么已超时。留着的话，用户下一轮开口前会先被一个
   // 属于上一轮的弹窗拦住。
+  //
+  // 例外：有后台子 agent 在跑。它们的权限询问不属于任何一轮，前台轮结束
+  // 时还等着人答。这时只能信内核 —— 作废的询问内核会发 permission_resolved
+  // （中断、超时都发），这里不再一把清空。
+  const backgroundRunning = s.tasks.some((t) => t.background && t.status === "running");
   return {
     ...s,
     items,
@@ -1832,7 +1944,7 @@ function applyDone(s: SessionState, event: Extract<AgentEvent, { type: "done" }>
     streaming: "",
     thinking: "",
     streamingPlan: null,
-    asks: [],
+    asks: backgroundRunning ? s.asks : [],
   };
 }
 

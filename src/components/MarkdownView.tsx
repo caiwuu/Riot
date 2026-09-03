@@ -86,19 +86,21 @@ async function renderMarkdown(text: string): Promise<string> {
 }
 
 export default function MarkdownView({ buf, path }: { buf: ArrayBuffer; path: string }) {
-  const [html, setHtml] = useState<string | null>(null);
-  const [truncated, setTruncated] = useState(false);
+  /** 渲染好的一份。截断提示和 HTML 一起换 —— 分成两个 state 的话，重读
+   *  时提示先跟着新字节翻转、正文还是旧的。null = 还没渲染出来。 */
+  const [doc, setDoc] = useState<{ html: string; truncated: boolean } | null>(null);
 
   useEffect(() => {
     let stale = false;
-    setHtml(null);
-    const clipped = buf.byteLength > RENDER_MAX;
-    setTruncated(clipped);
+    // 不先清空。文件被 agent 改了会原地重读（见 FilePreview 的
+    // PreviewBody），清一下就是"正文整块消失 → 正在渲染 → 回来"，
+    // 滚动位置跟着回顶。旧内容留到新的渲染好为止。
+    const truncated = buf.byteLength > RENDER_MAX;
     const text = new TextDecoder("utf-8", { fatal: false }).decode(
-      clipped ? buf.slice(0, RENDER_MAX) : buf,
+      truncated ? buf.slice(0, RENDER_MAX) : buf,
     );
     void renderMarkdown(text).then((out) => {
-      if (!stale) setHtml(out);
+      if (!stale) setDoc({ html: out, truncated });
     });
     return () => {
       stale = true;
@@ -107,15 +109,15 @@ export default function MarkdownView({ buf, path }: { buf: ArrayBuffer; path: st
 
   return (
     <div className="markdown-doc">
-      {truncated ? (
+      {doc?.truncated ? (
         <div className="code-view-note">文件太大，只显示前 1 MB。完整内容请用"系统应用打开"。</div>
       ) : null}
-      {html === null ? (
+      {doc === null ? (
         <div className="preview-panel-state">正在渲染…</div>
       ) : (
         // micromark 默认转义原始 HTML（allowDangerousHtml 未开），
         // 输出里不会有文件自带的 <script> 之类，可直接贴。
-        <div className="md markdown-doc-body" dangerouslySetInnerHTML={{ __html: html }} />
+        <div className="md markdown-doc-body" dangerouslySetInnerHTML={{ __html: doc.html }} />
       )}
     </div>
   );

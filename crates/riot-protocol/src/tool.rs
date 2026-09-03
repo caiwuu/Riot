@@ -342,6 +342,7 @@ impl ProgressSink {
 }
 
 /// 组装工具 prompt 时的上下文。
+#[derive(Clone)]
 pub struct PromptContext {
     pub cwd: PathBuf,
     pub platform: String,

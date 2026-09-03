@@ -15,6 +15,8 @@ import { Channel, type InvokeArgs, invoke as tauriInvoke } from "@tauri-apps/api
 import type {
   AgentEvent,
   ApiProtocol,
+  BackgroundTaskStatus as GeneratedBackgroundTaskStatus,
+  BackgroundTaskView as GeneratedBackgroundTaskView,
   FileChange,
   GitChanges,
   ImageInput as GeneratedImageInput,
@@ -499,9 +501,39 @@ export function slashCommands(root: string | null): Promise<SlashCommand[]> {
   return invoke<SlashCommand[]>("slash_commands", { root });
 }
 
-/** `@` 补全菜单的文件搜索。返回项目内相对路径，最多十来条。 */
-export function searchFiles(sessionId: string, query: string): Promise<string[]> {
-  return invoke<string[]>("search_files", { sessionId, query });
+/**
+ * `@` 补全菜单的文件搜索。返回项目内相对路径；不传 `limit` 是菜单的
+ * 十来条，文件树的筛选框传自己的上限。
+ */
+export function searchFiles(sessionId: string, query: string, limit?: number): Promise<string[]> {
+  // limit 分开写而不是塞 undefined：exactOptionalPropertyTypes 下两者不同，
+  // 而 Tauri 那头 Option<usize> 缺字段和 null 都当 None。
+  return invoke<string[]>("search_files", limit == null ? { sessionId, query } : { sessionId, query, limit });
+}
+
+/** 文件树里的一项。 */
+export interface DirEntry {
+  name: string;
+  /** 能展开。指向围栏内目录的符号链接也算。 */
+  isDir: boolean;
+  isSymlink: boolean;
+}
+
+/** 文件树的一层目录。 */
+export interface DirListing {
+  /** 已排序：目录在前，同类按名字不分大小写。 */
+  entries: DirEntry[];
+  /** 超出宿主上限（5000 条）被截掉的条数。 */
+  truncated: number;
+}
+
+/**
+ * 列会话根下的一层目录。`rel` 相对会话根、`/` 分隔，空串即根。
+ * `.git` 不列；越界、不存在、没权限都 reject，文案已是人话。
+ */
+export function listDir(sessionId: string, rel: string): Promise<DirListing> {
+  // 网络卷、外置盘上一个几千项的目录，stat 一遍要好几秒。
+  return invoke<DirListing>("list_dir", { sessionId, rel }, T_SLOW);
 }
 
 /** 配置里的一条 hook。error 非空时这条是"配置文件有问题"的提示。 */
@@ -562,6 +594,33 @@ export function queueTake(
     sessionId,
     entryId,
   });
+}
+
+/** 一个后台子 agent 在面板上的样子。生成类型的别名。 */
+export type BackgroundTaskView = GeneratedBackgroundTaskView;
+export type BackgroundTaskStatus = GeneratedBackgroundTaskStatus;
+
+/**
+ * 停掉一个后台子 agent（面板上的停止键）。只停它，不碰前台轮次。
+ * false = 没这个任务或它已经结束。
+ */
+export function taskCancel(sessionId: string, agentId: string): Promise<boolean> {
+  return invoke<boolean>("task_cancel", { sessionId, agentId });
+}
+
+/** 一个子 agent 的会话。`task` 为 null = 内核不认识这个 id（重启后旧 id 失效）。 */
+export interface TaskHistory {
+  task: BackgroundTaskView | null;
+  messages: Message[];
+}
+
+/**
+ * 拉一个子 agent 到此刻为止的会话。跑着的也能拉 —— 右侧抽屉的子 agent
+ * 视图靠轮询它追上进度（子 agent 的消息不走主事件流：几个并行的侦察
+ * 每秒几十条工具结果，全推给前端只为一个可能没开的面板不值）。
+ */
+export function taskHistory(sessionId: string, agentId: string): Promise<TaskHistory> {
+  return invoke<TaskHistory>("task_history", { sessionId, agentId });
 }
 
 /** 随消息附上的一张图。data 是 base64，不含 `data:` 前缀。
@@ -940,6 +999,8 @@ export interface HistorySnapshot {
   liveText: string;
   /** 正在流式生成的思考。缺了它思考块的字数会清零重数。 */
   liveThinking: string;
+  /** 后台子 agent（跑着的和刚结束的）。事件只在变化时推，面板靠它重建。 */
+  tasks: BackgroundTaskView[];
 }
 
 export function getHistory(sessionId: string): Promise<HistorySnapshot> {
@@ -1180,9 +1241,20 @@ export interface PickResult {
  */
 const PICK_SENTINEL = "\u0000riot-pick\u0000";
 const PLAIN_SENTINEL = "\u0000riot-plain\u0000";
+/** 文件树"添加到对话"：一个 `@` 引用块，值是项目内相对路径。 */
+const REF_SENTINEL = "\u0000riot-ref\u0000";
 
 export function encodePickForComposer(p: PickResult): string {
   return PICK_SENTINEL + JSON.stringify(p);
+}
+
+export function encodeRefForComposer(rel: string): string {
+  return REF_SENTINEL + rel;
+}
+
+export function decodeRefFromComposer(s: string): string | null {
+  if (!s.startsWith(REF_SENTINEL)) return null;
+  return s.slice(REF_SENTINEL.length) || null;
 }
 
 /** 定时任务开场白：原样进输入框，不要包代码围栏（那是终端选区用的）。 */

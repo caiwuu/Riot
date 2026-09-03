@@ -42,7 +42,27 @@ pub trait Provider: Send + Sync {
     /// `[约束]` 但**进了请求的图片按张算，不按 base64 的字节算** —— 见
     /// [`estimate_image_tokens`] 与 [`wire_images`]。上面那条只管住了"不该
     /// 发的别算"，而真发出去的图如果跟着走字节口径，一张就够顶穿阈值。
+    ///
+    /// `[约束]` 传入的必须是**一份完整的、刚发过（或即将原样发出）的历史**。
+    /// 实现会拿其中最后一条带 usage 的 assistant 打底（见
+    /// [`last_usage_checkpoint`]），那个数是那次请求时整个上下文的大小 ——
+    /// 只有当"它之前的东西"仍然就是当前历史的前缀时才成立。给它一个子
+    /// 切片（比如压缩要保留的尾巴）或者一份刚被改写过的历史，打底值就
+    /// 是别的上下文的尺寸，结果会大出一个量级、且没有任何报错。那些场合
+    /// 用 [`Self::estimate_tokens_of`]。
     fn count_tokens(&self, messages: &[Message]) -> u32;
+
+    /// 只按内容估算，不拿任何 usage 打底。
+    ///
+    /// 给不满足 [`Self::count_tokens`] 那条前提的场合用：历史的一段子切片、
+    /// 压缩后拼出来的新历史、任何"这些消息如果发出去大概多大"的问题。
+    /// 精度比打底差一成半左右，但不会因为切片里带着旧 usage 而错出十倍。
+    ///
+    /// 默认实现退回 `count_tokens`：测试替身多半本来就没打底，两者相同。
+    /// 真实 provider 必须覆盖。
+    fn estimate_tokens_of(&self, messages: &[Message]) -> u32 {
+        self.count_tokens(messages)
+    }
 }
 
 /// 一个 token 折多少字节。

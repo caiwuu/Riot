@@ -128,6 +128,9 @@ impl Compactor for ClearOldResults {
 /// 反应式路径上（413 溢出重试）：清结果是无损的，够用就不动用总结；
 /// 总结有损而且要花一次真实调用，是最后手段。
 ///
+/// 重档的切法和宿主主动压缩一致（[`split_point`]）：最后一条用户提问起的
+/// 尾巴在预算内就原样保留，只总结它之前的部分。
+///
 /// `[约束]` 总结的输入是**原始消息**，不是轻档清理后的产物 —— 两个理由：
 /// 清掉的工具结果里可能有总结需要的细节（"文件与代码段"那一节）；而且
 /// 原始消息就是主循环刚发过的前缀，配合同形状请求（[`RequestShape`]）能
@@ -135,6 +138,7 @@ impl Compactor for ClearOldResults {
 /// 全 miss。输入大一点没关系（走的是 cache_read）；输出才是要控的。
 ///
 /// [`RequestShape`]: crate::summarize::RequestShape
+/// [`split_point`]: crate::summarize::split_point
 pub struct Layered {
     light: ClearOldResults,
     provider: std::sync::Arc<dyn riot_protocol::provider::Provider>,
@@ -177,11 +181,21 @@ impl Compactor for Layered {
             return light;
         }
 
-        // ── 重档：LLM 全量总结（有损，最后手段） ─────────
+        // ── 重档：LLM 总结（有损，最后手段） ─────────────
+        // 和宿主的主动压缩同一个切法：最后一条用户提问起的尾巴原样保留
+        //（预算内的话）。反应式路径上这条提问就是用户**刚发的那句** ——
+        // 把它也总结掉，模型接下来面对的只有一条"接着做"的合成消息，
+        // 用户的原话只剩转述。尾巴用纯估算量（不看 usage），理由见
+        // `split_point` 与 `Provider::estimate_tokens_of`。
+        let split = crate::summarize::split_point(
+            &messages,
+            |m| self.provider.estimate_tokens_of(m),
+            crate::summarize::MAX_TAIL_TOKENS,
+        );
         let summary = crate::summarize::summarize_history(
             &self.provider,
             &self.model,
-            &messages,
+            &messages[..split],
             Some(&self.shape),
             self.cancel.child_token(),
         )
@@ -195,12 +209,26 @@ impl Compactor for Layered {
                     &text,
                     Vec::new(),
                     Vec::new(),
+                    None,
                     self.ids.message_id(),
                 );
-                let after = self.provider.count_tokens(std::slice::from_ref(&msg));
-                tracing::info!(before = budget.current_tokens, after, "LLM 总结完成");
+                let mut out = Vec::with_capacity(1 + messages.len() - split);
+                out.push(msg);
+                // 尾巴上的 usage 描述的是压缩前的上下文，带着它新历史会被
+                // 量回旧尺寸（下一次 count_tokens 拿它打底）。
+                out.extend(messages[split..].iter().cloned().map(|mut m| {
+                    m.forget_usage();
+                    m
+                }));
+                let after = self.provider.estimate_tokens_of(&out);
+                tracing::info!(
+                    before = budget.current_tokens,
+                    after,
+                    kept = out.len() - 1,
+                    "LLM 总结完成"
+                );
                 CompactResult::Compacted {
-                    messages: vec![msg],
+                    messages: out,
                     before_tokens: budget.current_tokens,
                     after_tokens: after,
                     strategy: CompactStrategy::FullSummary,
@@ -332,6 +360,72 @@ mod layered_tests {
         assert_eq!(reqs.len(), 1);
         assert_eq!(reqs[0].system, "主循环的完整 system");
         assert_eq!(reqs[0].tools.len(), 1, "tools 要和主循环一致，不是空");
+    }
+
+    /// 反应式路径上最后一条提问是用户**刚发的那句**。总结只吃它之前的，
+    /// 它和它引出的东西原样留在续接消息之后 —— 用户的原话不能只剩转述。
+    #[tokio::test]
+    async fn 总结保留最后一轮_用户刚发的话不被吞() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![ProviderEvent::Message(
+            assistant_text("<summary>之前聊的</summary>"),
+        )]]));
+        let layered = Layered::new(
+            Arc::clone(&provider) as Arc<dyn riot_protocol::provider::Provider>,
+            "test-model",
+            shape(),
+            ids(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let old_reply = Message::Assistant {
+            id: MessageId::from_raw("a0"),
+            content: vec![riot_protocol::message::AssistantContent::Text {
+                text: "旧回答".into(),
+            }],
+            // 压缩前那次请求的整个上下文。留在尾巴里会把新历史量回这个数。
+            usage: Some(riot_protocol::message::Usage {
+                input_tokens: 200_000,
+                ..Default::default()
+            }),
+            meta: MessageMeta::default(),
+        };
+        let messages = vec![
+            user_text("m1", &"很长的旧话。".repeat(500)),
+            old_reply.clone(),
+            user_text("m2", "刚发的新问题"),
+            old_reply,
+        ];
+        let r = layered
+            .compact(
+                messages,
+                CompactBudget {
+                    target_tokens: 10,
+                    current_tokens: 200_000,
+                },
+            )
+            .await;
+        let CompactResult::Compacted {
+            messages,
+            after_tokens,
+            ..
+        } = r
+        else {
+            panic!("该升级到总结：{r:?}");
+        };
+        assert_eq!(messages.len(), 3, "续接 + 尾巴两条：{messages:?}");
+        assert!(
+            format!("{:?}", messages[1]).contains("刚发的新问题"),
+            "用户刚发的话原样留下"
+        );
+        assert!(
+            matches!(&messages[2], Message::Assistant { usage: None, .. }),
+            "尾巴里的旧 usage 要抹掉"
+        );
+        assert!(after_tokens < 1_000, "{after_tokens}");
+        // 总结请求只带被压掉的那段，不带尾巴。
+        let req = &provider.requests()[0];
+        let sent = format!("{:?}", req.messages);
+        assert!(sent.contains("很长的旧话"));
+        assert!(!sent.contains("刚发的新问题"), "尾巴不进总结：{sent}");
     }
 
     #[tokio::test]

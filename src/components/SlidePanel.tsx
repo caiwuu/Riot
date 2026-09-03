@@ -13,9 +13,9 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
-/** 壳的过渡时长。必须和 styles.css 的 `--dur-3` 一致 —— 短了的话
+/** 壳的过渡时长。必须和 styles.css 的 `--dur-panel` 一致 —— 短了的话
  *  内容会在收起动画播完之前就被卸掉，看到的是空壳在滑。 */
-const SLIDE_MS = 300;
+const SLIDE_MS = 500;
 
 /** open 翻 false 后再撑一拍（给退出动画留时间）。 */
 export function usePresence(open: boolean, ms: number = SLIDE_MS + 40): boolean {

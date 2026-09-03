@@ -129,7 +129,10 @@ struct QueuedEntry {
     /// 条目 id，同时也是构建好的消息的 MessageId —— 前端靠它把
     /// "排队面板里的条目"和"注入后回流的消息"对上。
     id: String,
-    input: TurnInput,
+    /// `None` = 这不是用户的插话，是后台子 agent 的完成通知（见
+    /// [`Session::deliver_task_notice`]）：不进排队面板、不能撤回编辑，
+    /// 只是搭同一条"安全点注入"的路。
+    input: Option<TurnInput>,
     msg: Message,
 }
 
@@ -167,26 +170,30 @@ impl HostInputQueue {
             .lock()
             .expect("插话队列锁不该中毒")
             .iter()
-            .map(|e| QueuedSummary {
-                id: e.id.clone(),
-                text: e.input.text.clone(),
-                images: e.input.images.len(),
-                refs: e.input.refs.clone(),
+            .filter_map(|e| {
+                let input = e.input.as_ref()?;
+                Some(QueuedSummary {
+                    id: e.id.clone(),
+                    text: input.text.clone(),
+                    images: input.images.len(),
+                    refs: input.refs.clone(),
+                })
             })
             .collect()
     }
 
+    /// 只删用户插话。通知条目前端看不见，也删不到 —— 它们的去处由内核定。
     fn remove(&self, id: &str) -> bool {
         let mut g = self.0.lock().expect("插话队列锁不该中毒");
         let before = g.len();
-        g.retain(|e| e.id != id);
+        g.retain(|e| !(e.id == id && e.input.is_some()));
         g.len() < before
     }
 
     fn take(&self, id: &str) -> Option<TurnInput> {
         let mut g = self.0.lock().expect("插话队列锁不该中毒");
-        let at = g.iter().position(|e| e.id == id)?;
-        Some(g.remove(at).input)
+        let at = g.iter().position(|e| e.id == id && e.input.is_some())?;
+        g.remove(at).input
     }
 }
 
@@ -203,6 +210,10 @@ impl riot_core::state::InputQueue for HostInputQueue {
 ///
 /// 打成一包而不是各自当参数:它们的生命周期和取值时机完全一样，而摊平之后
 /// `run_turn` 的参数列表长到要靠数位置来读。
+///
+/// `Clone` 是给后台子 agent 的唤醒轮用的（见 [`LastTurn`]）：那一轮不是
+/// 宿主发起的，没人现装能力，只能沿用上一轮那份。
+#[derive(Clone)]
 pub struct TurnCapabilities {
     pub web: Arc<dyn riot_protocol::web::WebAccess>,
     pub vision: Arc<dyn riot_protocol::vision::VisionAccess>,
@@ -218,10 +229,50 @@ pub struct TurnCapabilities {
 /// 一次压缩的产物。事件由调用方按各自的时机发（见
 /// [`Session::compact_history`] 上的约束），所以规模数字要一起带出来。
 struct CompactOutcome {
-    /// 压缩后的完整历史（一条续接消息）。
+    /// 压缩后的完整历史：续接消息 + 原样保留的尾巴。
     history: Vec<Message>,
     before_tokens: u32,
     after_tokens: u32,
+}
+
+/// 一次后台预压缩：轮刚结束时对历史发起的总结请求（见
+/// [`Session::spawn_precompact`]）。
+///
+/// 这里只有"基于哪份历史、算到哪一步"，没有任何副作用 —— 边界落盘、
+/// 记忆重注、归档写文件全部留到换入那一刻（[`Session::finish_compaction`]），
+/// 由持有 `running` 的下一轮来做。后台任务只产出一个字符串。
+struct Precompact {
+    /// 总结基于的历史指纹（[`history_fingerprint`]）。换入时对不上就作废。
+    fingerprint: (usize, String),
+    /// 总结覆盖 `history[..split]`，尾巴原样保留。和指纹一起钉住，换入时
+    /// 不重算 —— 重算结果理论上相同（纯函数），但两处各算一次没有意义。
+    split: usize,
+    cancel: CancellationToken,
+    /// `None` = 总结失败（原因已进日志）。
+    task: tokio::task::JoinHandle<Option<String>>,
+}
+
+impl Precompact {
+    fn abandon(self) {
+        self.cancel.cancel();
+        self.task.abort();
+    }
+}
+
+/// 历史的指纹：条数 + 末条 id。
+///
+/// 用它而不是逐条比较：预压缩和换入之间历史要么原样不动、要么被上下文
+/// 编辑/删除/重新生成动过 —— 那几种改动都会让条数或末条变化。同条数、
+/// 同末条、中间某条被原地编辑过（`edit_message`）是唯一的漏网情形，
+/// 所以那条路径上显式作废（[`Session::drop_precompact`]），不靠指纹。
+fn history_fingerprint(history: &[Message]) -> (usize, String) {
+    (
+        history.len(),
+        history
+            .last()
+            .map(|m| m.id().as_str().to_owned())
+            .unwrap_or_default(),
+    )
 }
 
 /// 一轮的数值上限，每轮从配置现取。
@@ -266,13 +317,69 @@ struct ToolAssembly {
     deferred: Option<Arc<riot_tools::tools::tool_search::DeferredPool>>,
 }
 
-/// 一个会话的持久化通道。
+/// 一轮怎么开始。
+///
+/// 三种起点三种历史处理：用户输入要经过图片转述、`@` 展开、记忆注入才成为
+/// 消息；重新生成时历史已经以提问结尾、什么都不追加；后台子 agent 的完成
+/// 通知是内核合成好的消息，直接追加（见 [`Session::deliver_task_notice`]）。
+pub enum TurnStart {
+    User(TurnInput),
+    Regenerate,
+    Notices(Vec<Message>),
+}
+
+/// 上一轮用的模型端点、能力、上限。
+///
+/// 存它是为了**没有宿主参与**也能开一轮：后台子 agent 跑完时父会话可能空闲，
+/// 通知要唤起新的一轮，而每轮的配置本来由宿主在 turn.submit 里现给。这里
+/// 沿用上一轮那份 —— 唤醒轮是同一场对话的延续，用同一个模型是对的（Cursor
+/// 续接子 agent 也忽略新模型、沿用旧的）。会话自己的活设置（模式、venv、
+/// 追加提示词、思考策略）不在这里面，run_inner 从会话上现读，用户中途改
+/// 的照常生效。
+#[derive(Clone)]
+struct LastTurn {
+    model: riot_protocol::ModelEndpoint,
+    caps: TurnCapabilities,
+    limits: TurnLimits,
+}
+
+/// 自我分叉的种子：父这一轮的请求形状 + 造调度器要的零件。
+///
+/// 分叉出的子 agent 要和父**同 system、同工具清单**（前缀缓存命中的前提，
+/// 见 `subagent` 模块文档），所以这些东西在 run_inner 装配完就存一份，
+/// Task 工具收到 `resume: "self"` 时从这里取。工具清单里 Task 已经换成了
+/// 深度 1 的那份（同名同形，只是不能再分叉）。
+///
+/// 不放 `Arc<Registry>`：父的注册表里有深度 0 的 Task 工具，而它的 deps
+/// 能摸到会话 —— 存回来就是引用环。存工具列表，用时现建注册表（便宜）。
+#[derive(Clone)]
+struct ForkSeed {
+    system: String,
+    tools: Vec<Arc<dyn Tool>>,
+    prompt_ctx: PromptContext,
+    deferred: Option<Arc<riot_tools::tools::tool_search::DeferredPool>>,
+    gate: Arc<dyn PermissionGate>,
+    provider: Arc<dyn Provider>,
+    model: String,
+    max_turns: u32,
+    thinking: riot_protocol::ThinkingPolicy,
+    max_output_tokens_override: Option<u32>,
+}
+
+/// 一个会话在磁盘上的落点：transcript 通道 + 工件目录。
 ///
 /// `store` 负责读（水合、索引重建），`log` 负责追加。分开是因为读是一次性的
 /// 全量重放，写是贯穿会话生命周期的流 —— 两者的生命周期和并发语义都不同。
+///
+/// `artifacts_root` 是工件（截图、过大工具结果、压缩归档）的根目录，会话在
+/// 它下面开自己的子目录（见 [`Session::artifacts_dir`]）。由宿主/manager 按
+/// [`crate::config::artifacts_root`] 算好传进来，Session 自己不碰配置路径 ——
+/// 于是没有持久化通道的会话（单元测试）也就没有任何路径能通到用户真实的
+/// 配置目录。
 pub struct SessionPersist {
     pub store: Arc<riot_store::Transcripts>,
     pub log: riot_store::SessionLog,
+    pub artifacts_root: std::path::PathBuf,
 }
 
 /// 恢复一个会话时需要的可变设置。
@@ -379,6 +486,10 @@ pub struct Session {
     compacting: AtomicBool,
     /// 压缩边界之前的消息，只给界面画。模型看的是 `history`（活的那截）。
     ui_archive: Mutex<Vec<Message>>,
+    /// 后台预压缩的产物（见 [`Self::spawn_precompact`]）。不落盘、不占
+    /// `running`：它只是"提前算好的一份总结"，换不换入由下一轮开工时按
+    /// 指纹决定。
+    precompact: Mutex<Option<Precompact>>,
     /// 这一轮还没成形的用户消息，只给界面看：不进 `history`、不落盘。
     ///
     /// 用户消息要等主动压缩、图片转述、`@` 展开全跑完才定稿，前两样都是
@@ -408,6 +519,20 @@ pub struct Session {
     env_seen: Mutex<Option<String>>,
     /// 上次宣告过的上下文用量档位（0/50/70/85）。只升不降，压缩时归零。
     env_band: Mutex<u32>,
+    /// 子 agent 登记表（后台任务面板、续接的历史）。见 [`crate::tasks`]。
+    tasks: Arc<crate::tasks::BackgroundTasks>,
+    /// 上一轮的配置，唤醒轮沿用。见 [`LastTurn`]。
+    last_turn: Mutex<Option<LastTurn>>,
+    /// 本轮的分叉种子。见 [`ForkSeed`]。
+    fork_seed: Mutex<Option<ForkSeed>>,
+    /// 还没送进历史的完成通知：到达时会话还没跑过任何一轮（没有配置可
+    /// 沿用），或者上一轮被中断、通知卡在队列里没到安全点。下一轮开工时
+    /// 一并注入。std Mutex：锁内只有 Vec 操作。
+    pending_notices: std::sync::Mutex<Vec<Message>>,
+    /// 会话正在关闭（删会话 / 退应用）。此后到达的通知丢弃 —— 否则后台
+    /// 子 agent 收尾时会往一个正在被删的 transcript 里写、唤起一轮没人看的
+    /// 对话。
+    closing: AtomicBool,
 }
 
 /// 标题截断规则：去空白、取前 40 个字符。
@@ -478,6 +603,7 @@ impl Session {
     }
 
     pub fn new(id: SessionId, cwd: std::path::PathBuf, persist: Option<SessionPersist>) -> Self {
+        let sink = SessionSink::default();
         Self {
             id,
             cwd,
@@ -486,7 +612,8 @@ impl Session {
             running: Mutex::new(None),
             stopped_by_user: AtomicBool::new(false),
             queue: Arc::new(HostInputQueue::default()),
-            sink: SessionSink::default(),
+            tasks: Arc::new(crate::tasks::BackgroundTasks::new(sink.clone())),
+            sink,
             pending_asks: Arc::new(PendingAsks::default()),
             live_stream: Mutex::new(LiveStream::default()),
             sampling_override: Mutex::new(Sampling::default()),
@@ -505,12 +632,17 @@ impl Session {
             ids: Arc::new(NanoIdGenerator),
             compacting: AtomicBool::new(false),
             ui_archive: Mutex::new(Vec::new()),
+            precompact: Mutex::new(None),
             pending_user: Mutex::new(None),
             terminal: std::sync::OnceLock::new(),
             env: std::sync::OnceLock::new(),
             schedule: std::sync::OnceLock::new(),
             env_seen: Mutex::new(None),
             env_band: Mutex::new(0),
+            last_turn: Mutex::new(None),
+            fork_seed: Mutex::new(None),
+            pending_notices: std::sync::Mutex::new(Vec::new()),
+            closing: AtomicBool::new(false),
         }
     }
 
@@ -526,6 +658,7 @@ impl Session {
         persist: Option<SessionPersist>,
     ) -> Self {
         let id = SessionId::from_raw(settings.id.clone());
+        let sink = SessionSink::default();
         Self {
             id,
             cwd,
@@ -534,7 +667,8 @@ impl Session {
             running: Mutex::new(None),
             stopped_by_user: AtomicBool::new(false),
             queue: Arc::new(HostInputQueue::default()),
-            sink: SessionSink::default(),
+            tasks: Arc::new(crate::tasks::BackgroundTasks::new(sink.clone())),
+            sink,
             pending_asks: Arc::new(PendingAsks::default()),
             live_stream: Mutex::new(LiveStream::default()),
             sampling_override: Mutex::new(settings.sampling),
@@ -553,12 +687,17 @@ impl Session {
             ids: Arc::new(NanoIdGenerator),
             compacting: AtomicBool::new(false),
             ui_archive: Mutex::new(Vec::new()),
+            precompact: Mutex::new(None),
             pending_user: Mutex::new(None),
             terminal: std::sync::OnceLock::new(),
             env: std::sync::OnceLock::new(),
             schedule: std::sync::OnceLock::new(),
             env_seen: Mutex::new(None),
             env_band: Mutex::new(0),
+            last_turn: Mutex::new(None),
+            fork_seed: Mutex::new(None),
+            pending_notices: std::sync::Mutex::new(Vec::new()),
+            closing: AtomicBool::new(false),
         }
     }
 
@@ -758,12 +897,90 @@ impl Session {
         self.cancel_turn(true).await
     }
 
-    /// 关会话 / 退应用时取消本轮。
+    /// 关会话 / 退应用时取消本轮，**连同全部后台子 agent**。
     ///
-    /// 和 [`Self::interrupt`] 的唯一差别是**不算用户按停止**：这条路上
-    /// 不撤回任何已经发出的消息 —— 用户下次打开必须还看得见自己说过什么。
+    /// 和 [`Self::interrupt`] 的差别：一，不算用户按停止 —— 这条路上不撤回
+    /// 任何已经发出的消息，用户下次打开必须还看得见自己说过什么；二，后台
+    /// 子 agent 一起停。用户按停止只停前台（"把重活移出前台"就是这个意思，
+    /// 后台任务有自己的停止键）；关会话则什么都不该留下。此后到达的完成
+    /// 通知丢弃（见 `closing`）。
     pub async fn abort_turn(&self) -> bool {
+        self.closing.store(true, Ordering::Relaxed);
+        self.tasks.cancel_all();
         self.cancel_turn(false).await
+    }
+
+    /// 停掉一个后台子 agent（面板上的停止键）。false = 没有这个任务或它
+    /// 已经结束。
+    pub fn cancel_task(&self, agent_id: &riot_protocol::id::AgentId) -> bool {
+        self.tasks.cancel(agent_id)
+    }
+
+    /// 后台任务快照，随 session.resume 回给界面。
+    pub fn tasks_snapshot(&self) -> Vec<riot_protocol::task::BackgroundTaskView> {
+        self.tasks.snapshot()
+    }
+
+    /// 一个后台子 agent 跑完了，把通知送进对话。
+    ///
+    /// 三种去处，在 `running` 锁下判定（和 [`Self::submit`] 同一条约束：
+    /// 判定和置位不在同一次锁里，两边就会各自以为对方在管）：
+    /// - 有轮在跑 → 进插话队列，内核在安全点注入，模型这一轮就能看到；
+    /// - 空闲且跑过至少一轮 → 用上一轮的配置**唤起新的一轮**，模型被
+    ///   叫醒来处理它 —— 这就是"委派完结束回合、完成即通知"的后半段；
+    /// - 空闲但从没跑过（理论上到不了：后台任务只能由某一轮开出来）或
+    ///   会话在关 → 攒进 `pending_notices` / 丢弃。
+    pub async fn deliver_task_notice(self: &Arc<Self>, notice: Message) {
+        if self.closing.load(Ordering::Relaxed) {
+            tracing::info!(session = %self.id.as_str(), "会话正在关闭，丢弃后台任务通知");
+            return;
+        }
+        let cancel = CancellationToken::new();
+        let last = {
+            let mut g = self.running.lock().await;
+            if g.is_some() {
+                self.queue.push(QueuedEntry {
+                    id: notice.id().as_str().to_owned(),
+                    input: None,
+                    msg: notice,
+                });
+                tracing::info!(session = %self.id.as_str(), "后台任务通知已排队，安全点注入");
+                return;
+            }
+            let Some(last) = self.last_turn.lock().await.clone() else {
+                tracing::warn!(session = %self.id.as_str(), "没有可沿用的轮次配置，通知先攒着");
+                self.pending_notices
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(notice);
+                return;
+            };
+            *g = Some(cancel.clone());
+            last
+        };
+        tracing::info!(session = %self.id.as_str(), "后台任务通知唤起新的一轮");
+        let this = Arc::clone(self);
+        let sink = self.sink();
+        tokio::spawn(async move {
+            if let Err(e) = this
+                .run_locked(
+                    TurnStart::Notices(vec![notice]),
+                    last.model,
+                    last.caps,
+                    sink.clone(),
+                    cancel,
+                    last.limits,
+                )
+                .await
+            {
+                tracing::error!(error = %e, "唤醒轮失败");
+                let _ = sink.send(AgentEvent::Done {
+                    reason: riot_protocol::event::TerminalReason::Error {
+                        error: riot_protocol::event::AgentError::Internal { message: e },
+                    },
+                });
+            }
+        });
     }
 
     async fn cancel_turn(&self, by_user: bool) -> bool {
@@ -838,7 +1055,7 @@ impl Session {
                 if g.is_some() {
                     self.queue.push(QueuedEntry {
                         id: id.clone(),
-                        input,
+                        input: Some(input),
                         msg,
                     });
                     return Some(id);
@@ -852,7 +1069,14 @@ impl Session {
         let this = Arc::clone(self);
         tokio::spawn(async move {
             if let Err(e) = this
-                .run_locked(Some(input), model, caps, sink.clone(), cancel, limits)
+                .run_locked(
+                    TurnStart::User(input),
+                    model,
+                    caps,
+                    sink.clone(),
+                    cancel,
+                    limits,
+                )
                 .await
             {
                 tracing::error!(error = %e, "本轮失败");
@@ -1016,7 +1240,7 @@ impl Session {
     /// `model` 是宿主对"此刻激活配置"的解析结果（含会话覆盖合并后的
     /// 采样参数）。每轮传入而不是创建时锁死 —— 换模型下一轮就生效。
     pub async fn run_turn(
-        &self,
+        self: &Arc<Self>,
         input: TurnInput,
         model: riot_protocol::ModelEndpoint,
         caps: TurnCapabilities,
@@ -1031,7 +1255,7 @@ impl Session {
             }
             *g = Some(cancel.clone());
         }
-        self.run_locked(Some(input), model, caps, sink, cancel, limits)
+        self.run_locked(TurnStart::User(input), model, caps, sink, cancel, limits)
             .await
     }
 
@@ -1062,7 +1286,14 @@ impl Session {
         let this = Arc::clone(self);
         tokio::spawn(async move {
             if let Err(e) = this
-                .run_locked(None, model, caps, sink.clone(), cancel, limits)
+                .run_locked(
+                    TurnStart::Regenerate,
+                    model,
+                    caps,
+                    sink.clone(),
+                    cancel,
+                    limits,
+                )
                 .await
             {
                 tracing::error!(error = %e, "重新生成失败");
@@ -1120,6 +1351,7 @@ impl Session {
         self.pending_asks.clear().await;
         *self.env_seen.lock().await = env_seen;
         *self.env_band.lock().await = 0;
+        self.drop_precompact().await;
         Ok(keep_id)
     }
 
@@ -1148,6 +1380,8 @@ impl Session {
             if let Some(p) = &self.persist {
                 p.log.append_edit(message_id, text);
             }
+            // 原地编辑不改条数和末条，指纹抓不住 —— 这里必须显式作废。
+            self.drop_precompact().await;
             Ok(())
         })
         .await
@@ -1199,6 +1433,7 @@ impl Session {
             }
             *self.env_seen.lock().await = env_seen;
             *self.env_band.lock().await = 0;
+            self.drop_precompact().await;
             Ok(())
         })
         .await
@@ -1307,16 +1542,17 @@ impl Session {
         }
         *self.env_seen.lock().await = env_seen;
         *self.env_band.lock().await = 0;
+        self.drop_precompact().await;
         Some(empty)
     }
 
     /// 跑一轮的主体。调用方必须已经把 `running` 置成本轮的令牌 ——
     /// 这里负责跑完、清 `running`、清残留插话。
     ///
-    /// `input` 为 `None` 表示重新生成：历史已经以用户提示结尾，不再追加。
+    /// 起点见 [`TurnStart`]。
     async fn run_locked(
-        &self,
-        input: Option<TurnInput>,
+        self: &Arc<Self>,
+        input: TurnStart,
         model: riot_protocol::ModelEndpoint,
         caps: TurnCapabilities,
         sink: SessionSink,
@@ -1341,9 +1577,14 @@ impl Session {
         //
         // 用 catch_unwind 而不是 Drop guard:清理要 await 两把锁，
         // 而 Drop 里没法 await。
-        let inner = std::panic::AssertUnwindSafe(
-            self.run_inner(input, model, caps, sink.clone(), cancel, limits),
-        );
+        let inner = std::panic::AssertUnwindSafe(self.run_inner(
+            input,
+            model,
+            caps,
+            sink.clone(),
+            cancel,
+            limits,
+        ));
         let result = match futures::FutureExt::catch_unwind(inner).await {
             Ok(r) => r,
             Err(_) => {
@@ -1366,9 +1607,25 @@ impl Session {
         // key，消息根本没进历史也没落盘）。留着的话，界面上会挂着一条
         // 永远等不到回复、重启之后又消失的用户消息。
         *self.pending_user.lock().await = None;
-        if !leftover.is_empty() {
+        // 用户插话由前端面板接管（中断后自动续、出错后停下等用户）；后台
+        // 任务的通知前端看不见，攒回来等下一轮开工时注入 —— 不在这里立刻
+        // 唤起新的一轮：用户刚按了停止，多半是要改说法，这时候冒出一轮
+        // "收到通知"的对话是在和他抢话。
+        let (notices, interjections): (Vec<_>, Vec<_>) =
+            leftover.into_iter().partition(|e| e.input.is_none());
+        if !notices.is_empty() {
+            tracing::info!(
+                count = notices.len(),
+                "没赶上安全点的后台任务通知，留到下一轮"
+            );
+            self.pending_notices
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(notices.into_iter().map(|e| e.msg));
+        }
+        if !interjections.is_empty() {
             tracing::debug!(
-                count = leftover.len(),
+                count = interjections.len(),
                 "清掉没赶上安全点的插话，前端面板接管"
             );
         }
@@ -1431,8 +1688,7 @@ impl Session {
         compact_threshold: u32,
     ) -> Vec<UserContent> {
         let mut status = vec![crate::env::clock_line(now_ms, tz_offset_minutes)];
-        if let Some(line) =
-            last_msg_ms.and_then(|t| crate::env::gap_line(now_ms.saturating_sub(t)))
+        if let Some(line) = last_msg_ms.and_then(|t| crate::env::gap_line(now_ms.saturating_sub(t)))
         {
             status.push(line);
         }
@@ -1602,8 +1858,13 @@ impl Session {
         }
     }
 
-    /// 把一段历史压成摘要：LLM 总结 + 记忆/工作集重注 + 边界落盘。
+    /// 把一段历史压成摘要：LLM 总结 + 记忆/工作集重注 + 归档落盘 + 边界落盘。
     /// 总结失败返回 None（调用方决定要不要声张）。
+    ///
+    /// 这是**阻塞**的那条路：调用方等着总结回来。轮内开工前若有后台预压缩
+    /// 的产物可用（[`Self::take_precompact`]），走的是不等模型的
+    /// [`Self::finish_compaction`]；这里是没有产物、或产物作废时的兜底，
+    /// 以及手动 `/compact`。
     ///
     /// `shape` 是本轮主循环请求的形状（system + tools）：轮内的主动压缩传
     /// 得出来 —— 总结请求同形状才能吃前缀缓存；手动 /compact 在空闲时跑、
@@ -1624,23 +1885,52 @@ impl Session {
         sink: &SessionSink,
         cancel: CancellationToken,
     ) -> Option<CompactOutcome> {
-        let before = provider.count_tokens(history);
+        let split = compaction_split(provider.as_ref(), history);
         // 先说一声再动手。下面那次总结是一个真实的模型调用，几十秒 ——
         // 期间界面上只有那三个点在动，和"模型正在回答"分不出来。
         self.compacting.store(true, Ordering::Relaxed);
         let _ = sink.send(AgentEvent::Compacting);
-        let summary = match riot_core::summarize::summarize_history(
-            provider, model, history, shape, cancel,
+        let summary = riot_core::summarize::summarize_history(
+            provider,
+            model,
+            &history[..split],
+            shape,
+            cancel,
         )
-        .await
-        {
-            Ok(s) => s,
+        .await;
+        self.compacting.store(false, Ordering::Relaxed);
+        match summary {
+            Ok(s) => Some(self.finish_compaction(provider, history, split, &s).await),
             Err(e) => {
                 tracing::warn!(error = %e, "历史总结失败");
-                self.compacting.store(false, Ordering::Relaxed);
-                return None;
+                None
             }
-        };
+        }
+    }
+
+    /// 拿着已经算好的总结把压缩落地：重注记忆/git/工作集、归档原文、
+    /// 组续接消息、边界与尾巴落盘、更新界面归档。
+    ///
+    /// 不调模型 —— 总结来自 [`Self::compact_history`]（刚等回来的）或
+    /// 后台预压缩（[`Self::take_precompact`]，早就算好的）。两条路的落地
+    /// 逻辑必须是同一份，否则"预压缩换入的会话少了 AGENTS.md"这种 bug 只
+    /// 在一条路上出现，另一条路的测试全绿。
+    ///
+    /// `split` 是总结覆盖的范围：`history[..split]` 被总结吞掉并归档，
+    /// `history[split..]` 原样跟在续接消息之后（见
+    /// [`riot_core::summarize::split_point`]）。
+    ///
+    /// `[约束]` 调用方必须持有 `running`：这里改写 transcript 和
+    /// `ui_archive`，和跑动中的轮子并发会让两边都乱。
+    async fn finish_compaction(
+        &self,
+        provider: &Arc<dyn Provider>,
+        history: &[Message],
+        split: usize,
+        summary: &str,
+    ) -> CompactOutcome {
+        let (head, tail) = history.split_at(split);
+        let before = provider.count_tokens(history);
         // 记忆重注：压缩把带着 AGENTS.md 的首条消息吞了，
         // 不重注的话项目约定从此消失（CC 的 postCompactCleanup 同款）。
         let mut memory: Vec<Attachment> = crate::memory::collect(&self.cwd)
@@ -1660,32 +1950,257 @@ impl Session {
         // 环境指纹与档位归零：压缩吞掉了带着旧快照的消息，不归零的话
         // 下一轮差分判定"没变化"，模型从此失明（docs/ENV_DESIGN.md §3.2）。
         // 和记忆/git 重注放同一个函数里 —— 漏一起漏，测试一起钉。
-        *self.env_seen.lock().await = None;
+        // 尾巴里若有快照，它在续接消息之后、模型看得见，指纹指回它。
+        *self.env_seen.lock().await = crate::env::last_snapshot_text(tail);
         *self.env_band.lock().await = 0;
+        // 原文归档：总结是有损的，报错原文、路径、用户原话要有地方可查。
+        // 写不出来也不拦路（续接消息就不提它）。
+        let archive = self.archive_compacted(head).await;
         // 工作集重注：纯总结不够 —— 压缩后模型立即失去对文件
         // 内容的记忆，下一步就是把刚读过的文件再读一遍。
         let restored = restored_files(self.file_state.as_ref());
         let msg = riot_core::summarize::continuation_message(
-            &summary,
+            summary,
             memory,
             restored,
+            archive.as_deref(),
             MessageId::from_raw(self.ids.next_id("msg")),
         );
-        let after = provider.count_tokens(std::slice::from_ref(&msg));
-        // 边界必须先于续接消息落盘 —— 顺序反了，重启加载会把
-        // 续接消息一起丢掉（见 SessionLog::append_boundary）。
+        // 尾巴里 assistant 的 usage 必须抹掉。那个数描述的是压缩前那次请求
+        // 的整个上下文（几十万），而 `count_tokens` 会拿历史里最后一条带
+        // usage 的 assistant 打底 —— 留着它，压缩后的历史量出来还是压缩前
+        // 的尺寸：`after` ≈ `before`、环境档位继续报"快满了"、下一轮开工
+        // 又判定超阈值再压一次（总结的总结）。代价是界面上这一轮的费用
+        // 统计少了几条，换的是压缩后每一处量尺寸的地方都对。
+        let tail: Vec<Message> = tail
+            .iter()
+            .cloned()
+            .map(|mut m| {
+                m.forget_usage();
+                m
+            })
+            .collect();
+        let mut new_history = Vec::with_capacity(1 + tail.len());
+        new_history.push(msg.clone());
+        new_history.extend_from_slice(&tail);
+        let after = provider.count_tokens(&new_history);
+        // 边界必须先于续接消息落盘 —— 顺序反了，重启加载会把续接消息
+        // 一起丢掉；尾巴跟在续接消息之后重新追加一遍，边界记录里的
+        // keep_from 让加载器把边界前的那份从归档里摘掉（见
+        // SessionLog::append_boundary）。
         if let Some(p) = &self.persist {
-            p.log.append_boundary(before, after);
+            p.log
+                .append_boundary(before, after, tail.first().map(|m| m.id().as_str()));
             p.log.append(&msg);
+            for m in &tail {
+                p.log.append(m);
+            }
         }
-        tracing::info!(before, after, "历史压缩完成");
-        self.ui_archive.lock().await.extend(history.iter().cloned());
-        self.compacting.store(false, Ordering::Relaxed);
-        Some(CompactOutcome {
-            history: vec![msg],
+        tracing::info!(before, after, kept = tail.len(), "历史压缩完成");
+        self.ui_archive.lock().await.extend(head.iter().cloned());
+        CompactOutcome {
+            history: new_history,
             before_tokens: before,
             after_tokens: after,
-        })
+        }
+    }
+
+    /// 把被压掉的原文追加到会话的归档文件，返回路径给续接消息指路。
+    ///
+    /// 一个会话一个文件（`artifacts/<会话>/history.md`），每次压缩追加一段 ——
+    /// 模型只需要记一个路径，序号跨段连续（按已归档的条数起算）。放
+    /// artifacts 目录而不是工作区，理由和截图一样：不是项目文件，不该出现
+    /// 在用户的 git status 里。写失败返回 None：归档是锦上添花，不能因为
+    /// 磁盘满了让压缩失败。
+    async fn archive_compacted(&self, head: &[Message]) -> Option<std::path::PathBuf> {
+        if head.is_empty() {
+            return None;
+        }
+        let first_index = self.ui_archive.lock().await.len() + 1;
+        let text = riot_core::archive::render(head, first_index);
+        let path = self.artifacts_dir().join("history.md");
+        let written = async {
+            use tokio::io::AsyncWriteExt;
+            let mut f = tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .await?;
+            f.write_all(text.as_bytes()).await?;
+            f.flush().await
+        }
+        .await;
+        match written {
+            Ok(()) => Some(path),
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path.display(), "压缩归档写不出去，续接消息不提它");
+                None
+            }
+        }
+    }
+
+    /// 把主循环在 413 上做的反应式压缩落到宿主这边：内存历史、transcript、
+    /// 界面归档、环境基线。见 [`RecordingCompactor`]。
+    ///
+    /// `compacted` 是主循环此后用的完整历史。两种形态：
+    /// - 轻档（清旧工具结果）：条数不变、首条 id 还在旧历史里，只是内容
+    ///   换了占位符 → 没有头，全部重写。
+    /// - 重档（总结 + 尾巴）：首条是新的续接消息 → 它前面对应旧历史里
+    ///   到尾巴为止的那段，归档；尾巴的首条若还在旧历史里就是 `keep_from`。
+    ///
+    /// 两种都用同一条 transcript 记录表达：边界（`keep_from` = 新历史里第一
+    /// 条旧历史也有的消息）+ 把新历史逐条重新追加。加载器会把 `keep_from`
+    /// 前的那段归档、之后的丢掉，然后读到重新追加的这份 —— 和主动压缩的
+    /// 落盘方式一致（[`Self::finish_compaction`]）。
+    ///
+    /// `[约束]` 只能在持有 `running` 的轮内调用（事件循环里）。
+    async fn absorb_reactive_compaction(
+        &self,
+        compacted: Vec<Message>,
+        before_tokens: u32,
+        after_tokens: u32,
+    ) {
+        let mut history = self.history.lock().await;
+        // 新历史里第一条"旧历史也有"的消息：它之前的旧消息是被吞掉的头。
+        let keep_at = compacted.iter().find_map(|m| {
+            history
+                .iter()
+                .position(|h| h.id() == m.id())
+                .map(|at| (at, m.id().as_str().to_owned()))
+        });
+        let head: Vec<Message> = match &keep_at {
+            Some((at, _)) => history[..*at].to_vec(),
+            None => std::mem::take(&mut *history),
+        };
+        *history = compacted.clone();
+        drop(history);
+
+        if let Some(p) = &self.persist {
+            p.log.append_boundary(
+                before_tokens,
+                after_tokens,
+                keep_at.as_ref().map(|(_, id)| id.as_str()),
+            );
+            for m in &compacted {
+                p.log.append(m);
+            }
+        }
+        if !head.is_empty() {
+            // 和主动压缩同一套善后：环境指纹归零（吞掉的头里有旧快照，
+            // 不归零下一轮差分判"没变化"），原文归档给模型翻。
+            *self.env_seen.lock().await = crate::env::last_snapshot_text(&compacted);
+            *self.env_band.lock().await = 0;
+            let _ = self.archive_compacted(&head).await;
+            self.ui_archive.lock().await.extend(head);
+        }
+        tracing::info!(
+            before = before_tokens,
+            after = after_tokens,
+            live = compacted.len(),
+            "反应式压缩已落地到宿主历史"
+        );
+    }
+
+    /// 轮刚结束时，历史已经过线的话在后台先把总结算出来。
+    ///
+    /// 为什么是这个时机而不是下一轮开工：
+    /// - 用户不用等。开工时总结要几十秒，期间界面只有三个点在动。
+    /// - 更便宜。总结请求和主循环刚发过的请求同形状、同前缀，走 provider
+    ///   的前缀缓存 —— 而缓存有生命期（Anthropic 默认 5 分钟）。轮刚结束
+    ///   缓存最热；等用户喝完咖啡回来再总结，~100k 的前缀全量重算。
+    ///
+    /// 后台任务**没有副作用**：不碰历史、不落盘、不发事件、不占 `running`
+    /// （占了的话用户就发不了消息，等于没在后台）。它只产出一个字符串，
+    /// 由下一轮开工时 [`Self::take_precompact`] 按指纹决定用不用。界面上
+    /// 也不显示"正在压缩"—— 那个状态在前端意味着等待，而此刻没人在等。
+    ///
+    /// 已经有一份在跑就换掉它：新的基于更新的历史，旧的必然作废。
+    async fn spawn_precompact(
+        &self,
+        provider: &Arc<dyn Provider>,
+        model: &str,
+        history: Vec<Message>,
+        shape: riot_core::summarize::RequestShape,
+    ) {
+        let split = compaction_split(provider.as_ref(), &history);
+        let fingerprint = history_fingerprint(&history);
+        let cancel = CancellationToken::new();
+        let task = {
+            let provider = Arc::clone(provider);
+            let model = model.to_owned();
+            let cancel = cancel.clone();
+            let session = self.id.clone();
+            tokio::spawn(async move {
+                match riot_core::summarize::summarize_history(
+                    &provider,
+                    &model,
+                    &history[..split],
+                    Some(&shape),
+                    cancel,
+                )
+                .await
+                {
+                    Ok(s) => {
+                        tracing::info!(session = %session.as_str(), "后台预压缩完成");
+                        Some(s)
+                    }
+                    Err(e) => {
+                        tracing::warn!(session = %session.as_str(), error = %e, "后台预压缩失败，下一轮开工时再压");
+                        None
+                    }
+                }
+            })
+        };
+        if let Some(old) = self.precompact.lock().await.replace(Precompact {
+            fingerprint,
+            split,
+            cancel,
+            task,
+        }) {
+            old.abandon();
+        }
+    }
+
+    /// 取走一份匹配当前历史的预压缩总结：`(split, summary)`。
+    ///
+    /// 指纹对不上（历史被编辑/删除/截断过）就作废返回 None，调用方走阻塞
+    /// 路径。还没跑完就等它 —— 它已经跑了一段，剩下的比重新来短；这段
+    /// 等待和阻塞压缩一样要让界面知道（`Compacting`），否则用户面对的是
+    /// 无声的空白。`cancel` 是本轮的令牌：用户按停止，等待跟着断。
+    async fn take_precompact(
+        &self,
+        history: &[Message],
+        sink: &SessionSink,
+        cancel: &CancellationToken,
+    ) -> Option<(usize, String)> {
+        let mut pc = self.precompact.lock().await.take()?;
+        if pc.fingerprint != history_fingerprint(history) {
+            tracing::info!("预压缩基于的历史已变，作废");
+            pc.abandon();
+            return None;
+        }
+        if !pc.task.is_finished() {
+            self.compacting.store(true, Ordering::Relaxed);
+            let _ = sink.send(AgentEvent::Compacting);
+        }
+        let split = pc.split;
+        let summary = tokio::select! {
+            r = &mut pc.task => r.ok().flatten(),
+            _ = cancel.cancelled() => {
+                pc.abandon();
+                None
+            }
+        };
+        self.compacting.store(false, Ordering::Relaxed);
+        summary.map(|s| (split, s))
+    }
+
+    /// 作废后台预压缩。历史被改写的每条路径都要调：指纹能抓住条数或末条
+    /// 的变化，抓不住原地编辑（见 [`history_fingerprint`]）。
+    async fn drop_precompact(&self) {
+        if let Some(pc) = self.precompact.lock().await.take() {
+            pc.abandon();
+        }
     }
 
     /// 手动压缩（`/compact`）。空闲时才能做 —— 压缩改写历史，
@@ -1714,10 +2229,18 @@ impl Session {
         let result = if history.is_empty() {
             Err("还没有对话内容，没什么可压缩的。".to_owned())
         } else {
-            match self
-                .compact_history(&provider, &model.model, &history, None, &sink, cancel)
-                .await
-            {
+            // 后台已经算好一份且对得上就直接用；否则走瘦身路径现算。
+            let outcome = match self.take_precompact(&history, &sink, &cancel).await {
+                Some((split, summary)) => Some(
+                    self.finish_compaction(&provider, &history, split, &summary)
+                        .await,
+                ),
+                None => {
+                    self.compact_history(&provider, &model.model, &history, None, &sink, cancel)
+                        .await
+                }
+            };
+            match outcome {
                 Some(o) => {
                     *self.history.lock().await = o.history;
                     Ok((o.before_tokens, o.after_tokens))
@@ -1739,17 +2262,22 @@ impl Session {
         })
     }
 
-    /// 工具产物（截图原图等）的落盘目录，会话专属。
+    /// 工具产物（截图原图、过大工具结果、压缩归档）的落盘目录，会话专属。
     ///
-    /// 放配置目录下而不是工作区:截图不是项目文件，出现在用户的 git
-    /// status 里就是垃圾。目录建不出来也照常返回路径 —— 工具写不进时
-    /// 自行降级（消息里不带路径），链路不断。
+    /// 根目录来自 [`SessionPersist::artifacts_root`]（配置目录下的
+    /// `artifacts/`，见 [`crate::config::artifacts_root`]）；放配置目录下而不是
+    /// 工作区:截图不是项目文件，出现在用户的 git status 里就是垃圾。没有
+    /// 持久化通道的会话（单元测试）落到系统临时目录 —— 测试真会写文件
+    /// （压缩归档），绝不能落进用户真实的配置目录。
+    ///
+    /// 目录建不出来也照常返回路径 —— 工具写不进时自行降级（消息里不带
+    /// 路径），链路不断。
     fn artifacts_dir(&self) -> std::path::PathBuf {
-        let dir = crate::config::config_path()
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .join("artifacts")
-            .join(self.id.as_str());
+        let root = match &self.persist {
+            Some(p) => p.artifacts_root.clone(),
+            None => std::env::temp_dir().join("riot-artifacts"),
+        };
+        let dir = root.join(self.id.as_str());
         #[allow(clippy::disallowed_methods)]
         if let Err(e) = std::fs::create_dir_all(&dir) {
             tracing::warn!(error = %e, dir = %dir.display(), "工件目录建不出来，截图将不落盘");
@@ -1757,16 +2285,214 @@ impl Session {
         dir
     }
 
-    async fn run_inner(
+    /// 主动压缩：历史超阈值就先总结再开工。
+    ///
+    /// 反应式（413 重试）是保命；这条是"到线就处理"—— 不主动的话，
+    /// 会话会一直顶着窗口上限跑，每轮都在 413 的边缘反复横跳。
+    /// 调用方放在追加本轮新消息**之前**：压的是旧账，新话骑在压缩后的历史上。
+    ///
+    /// 上一轮结束时若已在后台把总结算好（spawn_precompact），这里直接
+    /// 落地，不等模型；没有或作废了才走阻塞的 compact_history。
+    /// 失败不拦路：继续用完整历史，真溢出时反应式路径兜底。
+    #[allow(clippy::too_many_arguments)]
+    async fn proactive_compact(
         &self,
-        input: Option<TurnInput>,
+        provider: &Arc<dyn Provider>,
+        model: &str,
+        history: &mut Vec<Message>,
+        summary_shape: &riot_core::summarize::RequestShape,
+        sink: &SessionSink,
+        cancel: &CancellationToken,
+        limits: &TurnLimits,
+    ) {
+        let history_tokens = provider.count_tokens(history);
+        if history.is_empty() || history_tokens < limits.compact_threshold_tokens {
+            return;
+        }
+        let outcome = match self.take_precompact(history, sink, cancel).await {
+            Some((split, summary)) => {
+                tracing::info!("换入后台预压缩的总结");
+                Some(
+                    self.finish_compaction(provider, history, split, &summary)
+                        .await,
+                )
+            }
+            None => {
+                self.compact_history(
+                    provider,
+                    model,
+                    history,
+                    Some(summary_shape),
+                    sink,
+                    cancel.child_token(),
+                )
+                .await
+            }
+        };
+        match outcome {
+            Some(o) => {
+                *history = o.history;
+                *self.history.lock().await = history.clone();
+                // 轮内原地宣布：轮子接着跑，busy 本来就该保持，
+                // 而且 Compacted 后紧跟 RequestStart 的顺序有回放钉着。
+                let _ = sink.send(AgentEvent::Compacted {
+                    before_tokens: o.before_tokens,
+                    after_tokens: o.after_tokens,
+                    strategy: riot_protocol::event::CompactStrategy::FullSummary,
+                });
+            }
+            None => tracing::warn!("主动压缩失败，本轮用完整历史"),
+        }
+    }
+
+    /// 子 agent transcript 的落盘处：`sessions/subagents/<会话>/`。
+    /// 混进主目录会被索引重建当成会话捞回来。None = 本会话不持久化。
+    fn subagent_transcripts(&self) -> Option<Arc<riot_store::Transcripts>> {
+        self.persist.as_ref().map(|p| {
+            Arc::new(riot_store::Transcripts::new(
+                p.store.dir().join("subagents").join(self.id.as_str()),
+            ))
+        })
+    }
+
+    /// 自我分叉：用本轮的种子造一个和父同形的子 agent 任务。
+    ///
+    /// 历史取**此刻**的活历史 —— 含把它分叉出来的那条 assistant 消息；末尾
+    /// 悬空的 tool_use 由 [`crate::subagent::fork_prelude`] 补齐。调度器用
+    /// 和父同一条装配路（`build_scheduler`）：同一个文件状态缓存（分叉
+    /// 继承了父读过什么，改动追踪也要记在同一本账上）、同一个沙箱、同一个
+    /// 权限闸。
+    ///
+    /// `[取舍]` 浏览器和终端面板也共享。它们是会话级独占资源，分叉和父
+    /// 同时操作会打架 —— 但分叉的本意是接管实质工作、父退到协调，真正
+    /// 并发驾驶浏览器的情形靠 Task 的提示词约束。给分叉 NoBrowser 会让它
+    /// 面对一段"刚才浏览器里看到……"的历史却没有浏览器，更糟。
+    async fn fork_job(
+        &self,
+        agent_id: &riot_protocol::id::AgentId,
+        title: &str,
+        prompt: &str,
+        fork_call: &riot_protocol::id::ToolUseId,
+    ) -> Result<crate::subagent::Job, String> {
+        if self.closing.load(Ordering::Relaxed) {
+            return Err("会话正在关闭，不能分叉。".into());
+        }
+        let seed = self
+            .fork_seed
+            .lock()
+            .await
+            .clone()
+            .ok_or("这一轮还没装配完，暂时不能分叉；稍后再试。")?;
+        let last = self
+            .last_turn
+            .lock()
+            .await
+            .clone()
+            .ok_or("这个会话还没跑过完整的一轮，不能分叉。")?;
+
+        // 分叉总在后台跑，权限弹窗要带归属（见 subagent::Attributed）。
+        // 只改 describe，工具清单的 name / schema / prompt 和父一致。
+        let registry = Registry::new(crate::subagent::Attributed::wrap_all(
+            seed.tools.clone(),
+            &format!("后台任务「{title}」"),
+        ))
+        .map(Arc::new)
+        .map_err(|e| format!("分叉的工具装配失败：{e}"))?;
+        let sandbox = self
+            .sandbox
+            .lock()
+            .await
+            .as_ref()
+            .map(|c| Arc::clone(&c.active));
+        let python_venv = self.python_venv().await;
+        let clock: Arc<dyn riot_protocol::tool::Clock> =
+            Arc::new(riot_providers::watchdog::TokioClock);
+        let scheduler = self.build_scheduler(
+            ToolAssembly {
+                registry,
+                prompt_ctx: seed.prompt_ctx.clone(),
+                deferred: seed.deferred.clone(),
+            },
+            Arc::clone(&clock),
+            last.caps,
+            Arc::clone(&seed.gate),
+            python_venv.as_deref(),
+            sandbox,
+        );
+
+        self.hydrate().await;
+        let mut messages = self.history.lock().await.clone();
+        let logged = messages.len();
+        messages.push(crate::subagent::fork_prelude(
+            &messages, agent_id, fork_call, prompt,
+        ));
+
+        let log = self.subagent_transcripts().map(|t| {
+            t.open(riot_store::TranscriptMeta {
+                id: SessionId::from_raw(agent_id.as_str().to_owned()),
+                root: self.cwd.clone(),
+                created_at_ms: clock.now_ms(),
+            })
+        });
+
+        Ok(crate::subagent::Job {
+            agent_id: agent_id.clone(),
+            kind: crate::subagent::Kind::Fork,
+            title: title.to_owned(),
+            provider: seed.provider,
+            model: seed.model,
+            system: seed.system,
+            tools: Arc::new(scheduler),
+            messages,
+            max_turns: seed.max_turns,
+            thinking: seed.thinking,
+            max_output_tokens_override: seed.max_output_tokens_override,
+            log,
+            logged,
+            // 界面从分叉说明那条看起：前面是父会话的对话，用户正对着它。
+            view_from: logged,
+        })
+    }
+
+    /// 一个子 agent 的会话：视图 + 界面该看的消息。None = 不认识这个 id。
+    pub fn task_history(
+        &self,
+        agent_id: &str,
+    ) -> Option<(riot_protocol::task::BackgroundTaskView, Vec<Message>)> {
+        self.tasks.history(agent_id)
+    }
+
+    async fn run_inner(
+        self: &Arc<Self>,
+        input: TurnStart,
         model: riot_protocol::ModelEndpoint,
         mut caps: TurnCapabilities,
         sink: SessionSink,
         cancel: CancellationToken,
         limits: TurnLimits,
     ) -> Result<(), String> {
-        let provider = crate::models::provider_from_endpoint(&model)?;
+        let provider = match crate::models::provider_from_endpoint(&model) {
+            Ok(p) => p,
+            Err(e) => {
+                // 唤醒轮起不来（配置坏了、密钥没了）不能把通知吞掉：攒回去，
+                // 用户下一条消息带着它进历史。
+                if let TurnStart::Notices(notices) = input {
+                    self.pending_notices
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .extend(notices);
+                }
+                return Err(e);
+            }
+        };
+        // 这一轮的配置留一份给唤醒轮沿用（见 LastTurn）。放在 provider 建成
+        // 之后、工具装配之前：建不起 provider 的配置（缺 key）不该被沿用，
+        // 而装配阶段的失败和配置无关。
+        *self.last_turn.lock().await = Some(LastTurn {
+            model: model.clone(),
+            caps: caps.clone(),
+            limits: limits.clone(),
+        });
         let clock: Arc<dyn riot_protocol::tool::Clock> =
             Arc::new(riot_providers::watchdog::TokioClock);
 
@@ -1829,31 +2555,34 @@ impl Session {
         // 是代码错误（下面的 expect 管它），外部工具重名是**用户配置**引起
         // 的（两个 MCP 服务器的 id 消毒后相同），配置错误不能把应用带崩。
         let mut tools = riot_tools::tools::builtin();
-        tools.push(Arc::new(crate::subagent::TaskTool::new(
-            crate::subagent::SubagentDeps {
-                provider: Arc::clone(&provider),
-                model: model.model.clone(),
-                cheap: caps.subagent_cheap.take(),
-                gate: Arc::clone(&gate) as Arc<dyn PermissionGate>,
-                // 和上面那个 gate 来自同一次 activate。缺了它，子 agent 的
-                // 命令在宿主上裸跑而闸里写着 sandboxed: true。
-                sandbox: sandbox.clone(),
-                web: Arc::clone(&caps.web),
-                vision: Arc::clone(&caps.vision),
-                clock: Arc::clone(&clock),
-                ids: Arc::clone(&self.ids) as Arc<dyn IdGenerator>,
-                cwd: self.cwd.clone(),
-                artifacts_dir: self.artifacts_dir(),
-                max_turns: limits.max_turns,
-                // 子 agent transcript 放 subagents/ 子目录 —— 混进主目录
-                // 会被索引重建当成会话捞回来。
-                transcripts: self.persist.as_ref().map(|p| {
-                    Arc::new(riot_store::Transcripts::new(
-                        p.store.dir().join("subagents").join(self.id.as_str()),
-                    ))
-                }),
-            },
-        )));
+        let subagent_deps = crate::subagent::SubagentDeps {
+            provider: Arc::clone(&provider),
+            model: model.model.clone(),
+            cheap: caps.subagent_cheap.clone(),
+            gate: Arc::clone(&gate) as Arc<dyn PermissionGate>,
+            // 和上面那个 gate 来自同一次 activate。缺了它，子 agent 的
+            // 命令在宿主上裸跑而闸里写着 sandboxed: true。
+            sandbox: sandbox.clone(),
+            web: Arc::clone(&caps.web),
+            vision: Arc::clone(&caps.vision),
+            clock: Arc::clone(&clock),
+            ids: Arc::clone(&self.ids) as Arc<dyn IdGenerator>,
+            cwd: self.cwd.clone(),
+            artifacts_dir: self.artifacts_dir(),
+            max_turns: limits.max_turns,
+            transcripts: self.subagent_transcripts(),
+            tasks: Arc::clone(&self.tasks),
+            // Weak：注册表持有工具、工具持有 deps —— 抓 Arc 就是引用环。
+            host: Arc::new(SessionTaskHost {
+                session: Arc::downgrade(self),
+            }),
+        };
+        // 分叉里用的那份 Task：同名同形、深度 1。先造出来，下面存分叉种子
+        // 时把清单里的 Task 换成它。
+        let forked_task: Arc<dyn Tool> =
+            Arc::new(crate::subagent::TaskTool::forked(subagent_deps.clone()));
+        let task_index = tools.len();
+        tools.push(Arc::new(crate::subagent::TaskTool::new(subagent_deps)));
         // 定时任务。永远注册（和浏览器/终端工具同一条惯例）：没挂宿主
         // 代理时是 NoSchedule，工具明说用不了，而不是从清单里消失 ——
         // 有条件注册会让工具列表在环境之间抖动，prompt 前缀跟着变。
@@ -1926,6 +2655,11 @@ impl Session {
 
         let prompt_ctx = make_ctx(tools.iter().map(|t| t.name().to_owned()).collect());
 
+        // 分叉种子要的工具清单：同一份，只把 Task 换成深度 1 的那份。
+        // 在 Registry 吃掉 `tools` 之前留一份（Arc 克隆，便宜）。
+        let mut fork_tools = tools.clone();
+        fork_tools[task_index] = forked_task;
+
         // 注册失败说明内置工具有重名或别名冲突 —— 那是代码错误，不是
         // 运行时状况（外部工具的撞名已经在上面被摘掉了）。
         let registry = Arc::new(Registry::new(tools).expect("内置工具注册表有冲突"));
@@ -1941,6 +2675,10 @@ impl Session {
         // 马上要被 scheduler 拿走 —— 先留一份。
         let vision = Arc::clone(&caps.vision);
         let python_venv = self.python_venv().await;
+        // 分叉种子里也要 prompt_ctx 和 deferred，装配前先留一份。
+        let fork_prompt_ctx = prompt_ctx.clone();
+        let fork_deferred = deferred.clone();
+        let fork_gate: Arc<dyn PermissionGate> = Arc::clone(&gate) as Arc<dyn PermissionGate>;
         let scheduler = self.build_scheduler(
             ToolAssembly {
                 registry,
@@ -1984,17 +2722,41 @@ impl Session {
             tools: tools_runner.specs(),
         };
 
+        // 分叉种子：父这一轮的请求形状。Task 收到 resume="self" 时从这里造
+        // 一个同 system、同工具清单的子 agent（见 ForkSeed / fork_job）。
+        let thinking = self.thinking().await;
+        *self.fork_seed.lock().await = Some(ForkSeed {
+            system: system.clone(),
+            tools: fork_tools,
+            prompt_ctx: fork_prompt_ctx,
+            deferred: fork_deferred,
+            gate: fork_gate,
+            provider: Arc::clone(&provider),
+            model: model.model.clone(),
+            max_turns: limits
+                .max_turns
+                .clamp(*MAX_TURNS_RANGE.start(), *MAX_TURNS_RANGE.end()),
+            thinking,
+            max_output_tokens_override: model.sampling.max_output_tokens,
+        });
+
+        // 反应式压缩的产物槽：主循环压完只发事件不发历史，宿主从这里取。
+        let reactive_compacted: Arc<std::sync::Mutex<Option<Vec<Message>>>> =
+            Arc::new(std::sync::Mutex::new(None));
         let deps = AgentDeps {
             provider: Arc::clone(&provider),
             // 反应式（413）路径的完整阶梯：清旧工具结果 → LLM 总结。
             // 只挂 ClearOldResults 的话，"对话本身超长"的会话一溢出就死。
-            compactor: Arc::new(riot_core::Layered::new(
-                Arc::clone(&provider),
-                model.model.clone(),
-                summary_shape.clone(),
-                Arc::clone(&self.ids) as Arc<dyn IdGenerator>,
-                cancel.child_token(),
-            )),
+            compactor: Arc::new(RecordingCompactor {
+                inner: Arc::new(riot_core::Layered::new(
+                    Arc::clone(&provider),
+                    model.model.clone(),
+                    summary_shape.clone(),
+                    Arc::clone(&self.ids) as Arc<dyn IdGenerator>,
+                    cancel.child_token(),
+                )),
+                taken: Arc::clone(&reactive_compacted),
+            }),
             clock: Arc::clone(&clock),
             ids: Arc::clone(&self.ids) as Arc<dyn IdGenerator>,
             tools: Arc::clone(&tools_runner),
@@ -2026,110 +2788,141 @@ impl Session {
         // 撤回（见 AgentEvent::PromptWithdrawn）。重新生成这一路没有它。
         let mut submitted: Option<MessageId> = None;
 
-        if let Some(input) = input {
-            // 这条消息的 id 先定下来：占位版和定稿版用同一个，前端认 id。
-            let user_id = MessageId::from_raw(self.ids.next_id("msg"));
-            // 时刻也在这里定下来，占位版和定稿版共用。定稿要等主动压缩、
-            // 图片转述、`@` 展开跑完，慢的时候十几秒 —— 各取各的时钟，
-            // 界面上同一条消息会在定稿那一刻跳掉一分钟。
-            let sent_at_ms = clock.now_ms();
-            // 占位先立起来 —— 底下压缩和转述都是模型调用，这段时间里切走
-            // 再切回来必须还看得见自己刚发的话（见 `pending_user`）。
-            *self.pending_user.lock().await = Some(Message::User {
-                id: user_id.clone(),
-                content: crate::content::pending_user_content(&input),
-                meta: MessageMeta {
-                    created_at_ms: Some(sent_at_ms),
-                    ..Default::default()
-                },
-            });
+        // 攒着的后台任务通知（上一轮没赶上安全点、或到得太早）跟着这一轮
+        // 进历史。重新生成不夹带：那一轮是"把上一个回答重来"，历史已经截到
+        // 提问，塞通知进去会改变被重来的那个问题 —— 留到再下一轮。
+        let pending_notices = match &input {
+            TurnStart::Regenerate => Vec::new(),
+            _ => std::mem::take(
+                &mut *self
+                    .pending_notices
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+            ),
+        };
+        // 通知进历史的方式三处一样（攒着的、本轮的），提出来免得写三遍。
+        let push_notice = |history: &mut Vec<Message>, mut m: Message, now_ms: u64| {
+            m.stamp(now_ms);
+            if let Some(p) = &self.persist {
+                p.log.append(&m);
+            }
+            history.push(m);
+        };
 
-            // ── 主动压缩：历史超阈值就先总结再开工 ────────────────────
-            // 反应式（413 重试）是保命；这条是"到线就处理"—— 不主动的话，
-            // 会话会一直顶着窗口上限跑，每轮都在 413 的边缘反复横跳。
-            // 放在追加本轮用户消息**之前**：压的是旧账，新话骑在压缩后的历史上。
-            let history_tokens = provider.count_tokens(&history);
-            if !history.is_empty() && history_tokens >= limits.compact_threshold_tokens {
-                match self
-                    .compact_history(
-                        &provider,
-                        &model.model,
-                        &history,
-                        Some(&summary_shape),
-                        &sink,
-                        cancel.child_token(),
-                    )
-                    .await
-                {
-                    Some(o) => {
-                        history = o.history;
-                        *self.history.lock().await = history.clone();
-                        // 轮内原地宣布：轮子接着跑，busy 本来就该保持，
-                        // 而且 Compacted 后紧跟 RequestStart 的顺序有回放钉着。
-                        let _ = sink.send(AgentEvent::Compacted {
-                            before_tokens: o.before_tokens,
-                            after_tokens: o.after_tokens,
-                            strategy: riot_protocol::event::CompactStrategy::FullSummary,
-                        });
-                    }
-                    // 失败不拦路：继续用完整历史，真溢出时反应式路径兜底。
-                    None => tracing::warn!("主动压缩失败，本轮用完整历史"),
+        match input {
+            TurnStart::Regenerate => {
+                if history.is_empty() {
+                    return Err("没有可重新生成的用户消息".into());
                 }
             }
-            let mut content =
-                crate::content::user_content(input, vision.as_ref(), self.mention_ctx()).await;
-            // 记忆注入：会话的**第一条**用户消息前置 AGENTS.md（全局 + 项目）。
-            // 只注入一次 —— 它随消息进历史和 transcript，往后每轮自然带着；
-            // 每轮都注的话，同一份内容会在上下文里堆出 N 份。
-            let mut prelude = if history.is_empty() {
-                self.first_message_prelude().await
-            } else {
-                Vec::new()
-            };
-            // 环境感知：轮首采样、差分注入（docs/ENV_DESIGN.md）。顺序放在
-            // 记忆之后、用户正文之前 —— 身份和约定先于状态，状态先于问题。
-            // token 数取压缩之后的历史：档位说的是本轮真实的余量。
-            // 间隔的参照是最后一条带时间戳的消息；老 transcript 可能一条
-            // 都没有（created_at_ms 晚于它们），那就不编间隔，只报时刻。
-            let last_msg_ms = history.iter().rev().find_map(|m| match m {
-                Message::User { meta, .. } | Message::Assistant { meta, .. } => meta.created_at_ms,
-                Message::System { .. } => None,
-            });
-            prelude.extend(
-                self.env_prelude(
-                    sent_at_ms,
-                    clock.tz_offset_minutes(),
-                    last_msg_ms,
-                    provider.count_tokens(&history),
-                    limits.compact_threshold_tokens,
+            TurnStart::Notices(notices) => {
+                self.proactive_compact(
+                    &provider,
+                    &model.model,
+                    &mut history,
+                    &summary_shape,
+                    &sink,
+                    &cancel,
+                    &limits,
                 )
-                .await,
-            );
-            if !prelude.is_empty() {
-                prelude.append(&mut content);
-                content = prelude;
+                .await;
+                let now = clock.now_ms();
+                let mut all: Vec<Message> = pending_notices.into_iter().chain(notices).collect();
+                // 规划模式的约束跟在最后一条通知末尾，和用户消息同一个位置逻辑。
+                if let Some(Message::User { content, .. }) = all.last_mut() {
+                    content.extend(crate::prompt::plan_mode_reminder(mode));
+                }
+                for m in all {
+                    push_notice(&mut history, m, now);
+                }
             }
-            // 规划模式的约束跟在消息**末尾**（用户正文之后）：它是对本轮
-            // 状态的注解，不是消息本身，和 extra_context 同一个位置逻辑。
-            // 为什么不进 system prompt，见 plan_mode_reminder 的取舍注释。
-            content.extend(crate::prompt::plan_mode_reminder(mode));
-            let user_msg = Message::User {
-                id: user_id.clone(),
-                content,
-                meta: MessageMeta {
-                    created_at_ms: Some(sent_at_ms),
-                    ..Default::default()
-                },
-            };
-            // 边产生边追加（两家共识）：轮次结束才写盘的话，中途崩溃丢的是
-            // 整轮对话；这里丢的最多是后台通道里还没落盘的几条。
-            if let Some(p) = &self.persist {
-                p.log.append(&user_msg);
+            TurnStart::User(input) => {
+                // 这条消息的 id 先定下来：占位版和定稿版用同一个，前端认 id。
+                let user_id = MessageId::from_raw(self.ids.next_id("msg"));
+                // 时刻也在这里定下来，占位版和定稿版共用。定稿要等主动压缩、
+                // 图片转述、`@` 展开跑完，慢的时候十几秒 —— 各取各的时钟，
+                // 界面上同一条消息会在定稿那一刻跳掉一分钟。
+                let sent_at_ms = clock.now_ms();
+                // 占位先立起来 —— 底下压缩和转述都是模型调用，这段时间里切走
+                // 再切回来必须还看得见自己刚发的话（见 `pending_user`）。
+                *self.pending_user.lock().await = Some(Message::User {
+                    id: user_id.clone(),
+                    content: crate::content::pending_user_content(&input),
+                    meta: MessageMeta {
+                        created_at_ms: Some(sent_at_ms),
+                        ..Default::default()
+                    },
+                });
+
+                self.proactive_compact(
+                    &provider,
+                    &model.model,
+                    &mut history,
+                    &summary_shape,
+                    &sink,
+                    &cancel,
+                    &limits,
+                )
+                .await;
+                // 攒着的通知排在用户这句话**前面**：它们确实先发生。
+                for m in pending_notices {
+                    push_notice(&mut history, m, sent_at_ms);
+                }
+                let mut content =
+                    crate::content::user_content(input, vision.as_ref(), self.mention_ctx()).await;
+                // 记忆注入：会话的**第一条**用户消息前置 AGENTS.md（全局 + 项目）。
+                // 只注入一次 —— 它随消息进历史和 transcript，往后每轮自然带着；
+                // 每轮都注的话，同一份内容会在上下文里堆出 N 份。
+                let mut prelude = if history.is_empty() {
+                    self.first_message_prelude().await
+                } else {
+                    Vec::new()
+                };
+                // 环境感知：轮首采样、差分注入（docs/ENV_DESIGN.md）。顺序放在
+                // 记忆之后、用户正文之前 —— 身份和约定先于状态，状态先于问题。
+                // token 数取压缩之后的历史：档位说的是本轮真实的余量。
+                // 间隔的参照是最后一条带时间戳的消息；老 transcript 可能一条
+                // 都没有（created_at_ms 晚于它们），那就不编间隔，只报时刻。
+                let last_msg_ms = history.iter().rev().find_map(|m| match m {
+                    Message::User { meta, .. } | Message::Assistant { meta, .. } => {
+                        meta.created_at_ms
+                    }
+                    Message::System { .. } => None,
+                });
+                prelude.extend(
+                    self.env_prelude(
+                        sent_at_ms,
+                        clock.tz_offset_minutes(),
+                        last_msg_ms,
+                        provider.count_tokens(&history),
+                        limits.compact_threshold_tokens,
+                    )
+                    .await,
+                );
+                if !prelude.is_empty() {
+                    prelude.append(&mut content);
+                    content = prelude;
+                }
+                // 规划模式的约束跟在消息**末尾**（用户正文之后）：它是对本轮
+                // 状态的注解，不是消息本身，和 extra_context 同一个位置逻辑。
+                // 为什么不进 system prompt，见 plan_mode_reminder 的取舍注释。
+                content.extend(crate::prompt::plan_mode_reminder(mode));
+                let user_msg = Message::User {
+                    id: user_id.clone(),
+                    content,
+                    meta: MessageMeta {
+                        created_at_ms: Some(sent_at_ms),
+                        ..Default::default()
+                    },
+                };
+                // 边产生边追加（两家共识）：轮次结束才写盘的话，中途崩溃丢的是
+                // 整轮对话；这里丢的最多是后台通道里还没落盘的几条。
+                if let Some(p) = &self.persist {
+                    p.log.append(&user_msg);
+                }
+                history.push(user_msg);
+                submitted = Some(user_id);
             }
-            history.push(user_msg);
-            submitted = Some(user_id);
-        } else if history.is_empty() {
-            return Err("没有可重新生成的用户消息".into());
         }
 
         let state = AgentState::new(self.id.clone(), model.model.clone())
@@ -2214,8 +3007,23 @@ impl Session {
             if let AgentEvent::Compacting = &ev {
                 self.compacting.store(true, Ordering::Relaxed);
             }
-            if let AgentEvent::Compacted { .. } = &ev {
+            if let AgentEvent::Compacted {
+                before_tokens,
+                after_tokens,
+                ..
+            } = &ev
+            {
                 self.compacting.store(false, Ordering::Relaxed);
+                // 主循环压缩后的历史只在它自己的 state 里，宿主这边必须跟上，
+                // 否则本轮后续消息叠在压缩前的全量上、下一轮再溢出一次。
+                let taken = reactive_compacted
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take();
+                if let Some(compacted) = taken {
+                    self.absorb_reactive_compaction(compacted, *before_tokens, *after_tokens)
+                        .await;
+                }
             }
             if let AgentEvent::Message(m) = &ev {
                 // 磁盘和内存在同一处追加 —— 两边各攒各的迟早分叉
@@ -2236,7 +3044,100 @@ impl Session {
             }
         }
 
+        // ── 后台预压缩：这一轮结束后历史已经过线，趁缓存还热先把总结算好 ──
+        // 被取消的轮次不做：用户按了停止多半是要改说法，或者应用在退出。
+        // 阈值和开工时的判定同一个 —— 这里算好的正是下一轮开工时要等的那份。
+        if !cancel.is_cancelled() {
+            let history = self.history.lock().await.clone();
+            if !history.is_empty()
+                && provider.count_tokens(&history) >= limits.compact_threshold_tokens
+            {
+                self.spawn_precompact(&provider, &model.model, history, summary_shape)
+                    .await;
+            }
+        }
+
         Ok(())
+    }
+}
+
+/// Task 工具通向会话的那条 Weak 引用（见 [`crate::subagent::TaskHost`]）。
+///
+/// 会话没了（被删、内核在关）就什么都不做：后台子 agent 的收尾撞上一个
+/// 已经不存在的会话，正确的反应是安静地丢弃，而不是把结果塞进别处。
+struct SessionTaskHost {
+    session: std::sync::Weak<Session>,
+}
+
+#[async_trait::async_trait]
+impl crate::subagent::TaskHost for SessionTaskHost {
+    async fn deliver(&self, notice: Message) {
+        match self.session.upgrade() {
+            Some(s) => s.deliver_task_notice(notice).await,
+            None => tracing::info!("会话已不在，丢弃后台任务通知"),
+        }
+    }
+
+    async fn fork_job(
+        &self,
+        agent_id: &riot_protocol::id::AgentId,
+        title: &str,
+        prompt: &str,
+        fork_call: &riot_protocol::id::ToolUseId,
+    ) -> Result<crate::subagent::Job, String> {
+        match self.session.upgrade() {
+            Some(s) => s.fork_job(agent_id, title, prompt, fork_call).await,
+            None => Err("会话已不在，不能分叉。".into()),
+        }
+    }
+}
+
+/// 压缩的切分点（见 [`riot_core::summarize::split_point`]），预算取
+/// [`riot_core::summarize::MAX_TAIL_TOKENS`]。提出来是为了让阻塞压缩和后台
+/// 预压缩调的是**同一个**函数、同一个预算 —— 两处各写一遍，某天一处改了
+/// 预算，预压缩的总结覆盖的范围就和换入时假定的不一样。
+///
+/// `[约束]` 量尾巴必须用 [`Provider::estimate_tokens_of`]，不能用
+/// `count_tokens`。后者拿切片里最后一条 assistant 的 usage 打底，而那个数
+/// 是它那次请求时**整个上下文**的大小（几十万）—— 尾巴永远"超预算"，
+/// `split_point` 永远返回 `len`，最近一轮次次被总结吞掉。测试替身没有
+/// usage 所以看不出来，线上就是"压缩完模型立刻失忆"。
+fn compaction_split(provider: &dyn Provider, history: &[Message]) -> usize {
+    riot_core::summarize::split_point(
+        history,
+        |m| provider.estimate_tokens_of(m),
+        riot_core::summarize::MAX_TAIL_TOKENS,
+    )
+}
+
+/// 反应式压缩的产物截留器。
+///
+/// 主循环在 413 上调 [`riot_protocol::compact::Compactor`] 改写自己的
+/// `state.messages`，然后只 yield 一个 `Compacted` 事件 —— 事件里没有新
+/// 历史。宿主若只翻个标志，内存历史和 transcript 仍是压缩前的全量：本轮
+/// 后续消息追加在全量之上，下一轮开工再把全量发出去 → 再 413 → 再花一次
+/// 总结。界面上划了"已压缩"的线，实际上什么都没变。
+///
+/// 这层包装把 `Compacted` 携带的新历史放进槽位，宿主在收到事件时取走并
+/// 落地（[`Session::absorb_reactive_compaction`]）。事件紧跟在 `compact`
+/// 返回之后 yield，槽位一定先于事件被填上。
+struct RecordingCompactor {
+    inner: Arc<dyn riot_protocol::compact::Compactor>,
+    taken: Arc<std::sync::Mutex<Option<Vec<Message>>>>,
+}
+
+#[async_trait::async_trait]
+impl riot_protocol::compact::Compactor for RecordingCompactor {
+    async fn compact(
+        &self,
+        messages: Vec<Message>,
+        budget: riot_protocol::compact::CompactBudget,
+    ) -> riot_protocol::compact::CompactResult {
+        let r = self.inner.compact(messages, budget).await;
+        if let riot_protocol::compact::CompactResult::Compacted { messages, .. } = &r {
+            *self.taken.lock().unwrap_or_else(|e| e.into_inner()) = Some(messages.clone());
+        }
+        r
     }
 }
 
@@ -2899,7 +3800,9 @@ mod tests {
         let pack = path.find("/packs/doc-runtime/path").expect("能力包要在");
         assert!(venv < pack, "用户显式选的 venv 要排在能力包前面：{path}");
         assert!(
-            spec.env.iter().any(|(k, v)| k == "VIRTUAL_ENV" && v == "/proj/.venv"),
+            spec.env
+                .iter()
+                .any(|(k, v)| k == "VIRTUAL_ENV" && v == "/proj/.venv"),
             "VIRTUAL_ENV 要落到最里层：{:?}",
             spec.env
         );
@@ -3482,11 +4385,11 @@ mod tests {
 
     #[tokio::test]
     async fn 同一会话不允许并发两轮() {
-        let s = Session::new(
+        let s = Arc::new(Session::new(
             SessionId::from_raw("s1"),
             std::path::PathBuf::from("/tmp"),
             None,
-        );
+        ));
         let model = test_model();
         // 第一轮会因为缺 key 立刻失败，但它必须把 running 清干净，
         // 否则会话就卡死了 —— 用户看到的是"发消息没反应"
@@ -3538,6 +4441,373 @@ mod tests {
             "失败路径没有释放 running，会话卡死"
         );
         assert!(!s.is_compacting(), "compacting 标志不能残留");
+    }
+
+    /// 压缩测试用的会话：transcript 和工件都落在一个临时目录里（用完自动
+    /// 删），归档文件不会进用户真实的配置目录。返回 (会话, 临时目录)。
+    fn compact_session() -> (Session, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let store = Arc::new(riot_store::Transcripts::new(dir.path()));
+        let id = SessionId::from_raw("s1");
+        let log = store.open(riot_store::TranscriptMeta {
+            id: id.clone(),
+            root: dir.path().to_path_buf(),
+            created_at_ms: 0,
+        });
+        let s = Session::new(
+            id,
+            dir.path().to_path_buf(),
+            Some(SessionPersist {
+                store,
+                log,
+                artifacts_root: dir.path().join("artifacts"),
+            }),
+        );
+        (s, dir)
+    }
+
+    fn scripted_summary(text: &str) -> Vec<riot_protocol::provider::ProviderEvent> {
+        vec![riot_protocol::provider::ProviderEvent::Message(
+            hist_assistant("sum", &format!("<summary>{text}</summary>")),
+        )]
+    }
+
+    fn summary_shape() -> riot_core::summarize::RequestShape {
+        riot_core::summarize::RequestShape {
+            system: "system".into(),
+            tools: Vec::new(),
+        }
+    }
+
+    fn continuation_text(m: &Message) -> String {
+        let Message::User { content, meta, .. } = m else {
+            panic!("续接消息是 user：{m:?}")
+        };
+        assert!(meta.synthetic, "续接消息要打合成标");
+        content
+            .iter()
+            .find_map(|c| match c {
+                UserContent::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .expect("续接消息有正文")
+    }
+
+    /// 压缩落地：最后一轮原样留在总结之后，被压掉的原文归档成文件，
+    /// 续接消息指路。
+    ///
+    /// `[约束]` 三件事在同一个函数里完成（[`Session::finish_compaction`]），
+    /// 阻塞压缩和后台预压缩共用。这条测的是那份共用逻辑本身。
+    #[tokio::test]
+    // 测试读真文件验证落盘结果，走 std::fs 是刻意的。
+    #[allow(clippy::disallowed_methods)]
+    async fn 压缩落地_尾巴原样保留_原文归档可查() {
+        let (s, tmp) = compact_session();
+        let provider: Arc<dyn Provider> =
+            Arc::new(riot_core::testing::ScriptedProvider::new(Vec::new()));
+        let history = vec![
+            hist_user("u1", "第一问 独特关键词甲"),
+            hist_assistant("a1", "第一答"),
+            hist_user("u2", "第二问"),
+            hist_assistant("a2", "第二答"),
+        ];
+        // 历史先落盘（模拟这几轮是正常跑出来的）。
+        for m in &history {
+            s.persist.as_ref().unwrap().log.append(m);
+        }
+        let split = compaction_split(provider.as_ref(), &history);
+        assert_eq!(split, 2, "从最后一条提问起留尾巴");
+
+        let o = s
+            .finish_compaction(&provider, &history, split, "九节总结")
+            .await;
+
+        // 重启水合出来的必须和内存里一样：归档 = 头，活历史 = 续接 + 尾巴。
+        // 这是 store 的 keep_from 和这里的重放尾巴两半拼起来才成立的事。
+        let p = s.persist.as_ref().unwrap();
+        p.log.flush().await;
+        let parts = p.store.load_parts(&s.id).await;
+        assert_eq!(parts.archived, history[..2], "磁盘归档 = 被压掉的那段");
+        assert_eq!(parts.live, o.history, "磁盘活历史 = 内存里压缩后的历史");
+
+        assert_eq!(o.history.len(), 3, "续接 + 两条尾巴：{:?}", o.history);
+        assert_eq!(o.history[1], history[2]);
+        assert_eq!(o.history[2], history[3]);
+        assert_eq!(
+            s.ui_archive().await,
+            history[..2],
+            "界面归档只收被总结吞掉的那段，尾巴还活着"
+        );
+
+        let path = tmp.path().join("artifacts").join("s1").join("history.md");
+        assert_eq!(
+            path,
+            s.artifacts_dir().join("history.md"),
+            "路径推导要和会话一致"
+        );
+        let text = std::fs::read_to_string(&path).expect("归档文件要落盘");
+        assert!(
+            text.contains("独特关键词甲"),
+            "被压掉的原话要在文件里：{text}"
+        );
+        assert!(!text.contains("第二问"), "尾巴没被压，不进归档：{text}");
+        assert!(text.contains("## [1] 用户"), "序号从 1 起：{text}");
+
+        let cont = continuation_text(&o.history[0]);
+        assert!(cont.contains("九节总结"));
+        assert!(
+            cont.contains(&path.display().to_string()),
+            "续接消息要给出归档路径：{cont}"
+        );
+
+        // 第二次压缩追加到同一个文件，序号接着数。
+        let mut later = o.history.clone();
+        later.push(hist_user("u3", "第三问"));
+        later.push(hist_assistant("a3", "第三答"));
+        let split2 = compaction_split(provider.as_ref(), &later);
+        assert_eq!(split2, 3, "尾巴是 u3/a3");
+        let _ = s
+            .finish_compaction(&provider, &later, split2, "再总结")
+            .await;
+        let text = std::fs::read_to_string(&path).expect("归档文件");
+        assert!(text.contains("独特关键词甲"), "追加而不是覆盖：{text}");
+        assert!(
+            text.contains("## [3] 用户（系统合成）"),
+            "序号接着上一段：{text}"
+        );
+        assert_eq!(s.ui_archive().await.len(), 5, "2 + 3（续接、u2、a2）");
+    }
+
+    /// 和线上 provider 同口径的替身：`count_tokens` 拿最后一条带 usage 的
+    /// assistant 打底，`estimate_tokens_of` 只看内容。`ScriptedProvider`
+    /// 两者相同（没打底），测不出下面那条 bug。
+    struct UsageAware(riot_core::testing::ScriptedProvider);
+
+    #[async_trait::async_trait]
+    impl Provider for UsageAware {
+        fn stream(
+            &self,
+            req: riot_protocol::provider::ProviderRequest,
+            cancel: CancellationToken,
+        ) -> riot_protocol::provider::ProviderStream {
+            self.0.stream(req, cancel)
+        }
+        fn count_tokens(&self, messages: &[Message]) -> u32 {
+            let (from, base) = riot_protocol::provider::last_usage_checkpoint(messages);
+            base + self.0.count_tokens(&messages[from..])
+        }
+        fn estimate_tokens_of(&self, messages: &[Message]) -> u32 {
+            self.0.count_tokens(messages)
+        }
+    }
+
+    fn hist_assistant_with_usage(id: &str, text: &str, context: u32) -> Message {
+        Message::Assistant {
+            id: MessageId::from_raw(id),
+            content: vec![riot_protocol::message::AssistantContent::Text { text: text.into() }],
+            usage: Some(riot_protocol::message::Usage {
+                input_tokens: context,
+                output_tokens: 10,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+            }),
+            meta: MessageMeta::default(),
+        }
+    }
+
+    /// 线上历史里每条 assistant 都带着"那次请求整个上下文"的 usage。切分
+    /// 和落地都不能被它带偏：尾巴照样保留，压缩后量出来是真的小。
+    ///
+    /// 这条曾经坏过：切分用 `count_tokens` 量尾巴，尾巴里的 assistant 一打底
+    /// 就是三十万，永远超 20k 预算 → 从没留过尾巴，每次压缩模型都失忆。
+    #[tokio::test]
+    async fn 尾巴里的旧_usage_不影响切分和压缩后的尺寸() {
+        let (s, _tmp) = compact_session();
+        let provider: Arc<dyn Provider> = Arc::new(UsageAware(
+            riot_core::testing::ScriptedProvider::new(Vec::new()),
+        ));
+        let history = vec![
+            hist_user("u1", "第一问"),
+            hist_assistant_with_usage("a1", "第一答", 290_000),
+            hist_user("u2", "第二问"),
+            hist_assistant_with_usage("a2", "第二答", 300_000),
+        ];
+        assert!(
+            provider.count_tokens(&history) >= 300_000,
+            "整份历史按打底口径量，是压缩前的真实尺寸"
+        );
+
+        let split = compaction_split(provider.as_ref(), &history);
+        assert_eq!(split, 2, "尾巴（u2/a2）几十个字节，必须保留");
+
+        let o = s
+            .finish_compaction(&provider, &history, split, "总结")
+            .await;
+        assert!(o.before_tokens >= 300_000, "{}", o.before_tokens);
+        assert!(
+            o.after_tokens < 1_000,
+            "压缩后的历史不能再被尾巴里的旧 usage 顶回三十万：{}",
+            o.after_tokens
+        );
+        assert_eq!(o.history.len(), 3, "续接 + 尾巴两条");
+        assert!(
+            matches!(&o.history[2], Message::Assistant { usage: None, .. }),
+            "尾巴里 assistant 的 usage 要抹掉：{:?}",
+            o.history[2]
+        );
+        assert!(
+            provider.count_tokens(&o.history) < 1_000,
+            "此后任何地方再量这份历史，都不该被旧 usage 打底"
+        );
+
+        // 重启水合出来的也一样干净。
+        let p = s.persist.as_ref().unwrap();
+        p.log.flush().await;
+        let parts = p.store.load_parts(&s.id).await;
+        assert_eq!(parts.live, o.history);
+    }
+
+    /// 反应式压缩落地：轻档（清占位符）整份重写，重档（总结 + 尾巴）归档头、
+    /// 保尾巴。内存、界面归档、重启水合三边一致。
+    #[tokio::test]
+    async fn 反应式压缩落地_轻档重写_重档归档头保尾巴() {
+        let (s, _tmp) = compact_session();
+        let history = vec![
+            hist_user("u1", "第一问"),
+            hist_assistant("a1", "第一答"),
+            hist_tool_result("r1", "Read"),
+            hist_user("u2", "第二问"),
+            hist_assistant("a2", "第二答"),
+        ];
+        for m in &history {
+            s.persist.as_ref().unwrap().log.append(m);
+        }
+        *s.history.lock().await = history.clone();
+
+        // 轻档：r1 的结果被清成占位符，其余原样。
+        let mut light = history.clone();
+        light[2] = Message::User {
+            id: MessageId::from_raw("r1"),
+            content: vec![UserContent::ToolResult {
+                tool_use_id: riot_protocol::id::ToolUseId::from_raw("Read"),
+                content: riot_protocol::message::ToolResultContent::Cleared,
+                is_error: false,
+            }],
+            meta: MessageMeta::default(),
+        };
+        s.absorb_reactive_compaction(light.clone(), 1000, 900).await;
+        assert_eq!(*s.history.lock().await, light, "内存历史换成压缩后的");
+        assert!(s.ui_archive().await.is_empty(), "轻档没有头，不归档");
+        let p = s.persist.as_ref().unwrap();
+        p.log.flush().await;
+        let parts = p.store.load_parts(&s.id).await;
+        assert_eq!(parts.live, light, "重启读回来的是清过的那份");
+        assert!(parts.archived.is_empty());
+
+        // 重档：总结吞掉 u1..r1，尾巴 u2/a2 原样。
+        let cont = hist_user("c1", "前文总结");
+        let heavy = vec![cont.clone(), light[3].clone(), light[4].clone()];
+        s.absorb_reactive_compaction(heavy.clone(), 900, 100).await;
+        assert_eq!(*s.history.lock().await, heavy);
+        assert_eq!(s.ui_archive().await, light[..3], "被总结吞掉的头进界面归档");
+        p.log.flush().await;
+        let parts = p.store.load_parts(&s.id).await;
+        assert_eq!(parts.live, heavy, "重启：续接 + 尾巴");
+        assert_eq!(parts.archived, light[..3], "重启：头在归档里");
+    }
+
+    /// 预压缩：指纹对得上就换入（不再调模型），对不上就作废。
+    #[tokio::test]
+    async fn 预压缩_指纹对得上换入_对不上作废() {
+        let (s, _tmp) = compact_session();
+        let scripted = Arc::new(riot_core::testing::ScriptedProvider::new(vec![
+            scripted_summary("后台算好的总结"),
+            scripted_summary("第二份"),
+        ]));
+        let provider: Arc<dyn Provider> = Arc::clone(&scripted) as _;
+        let history = vec![
+            hist_user("u1", "第一问"),
+            hist_assistant("a1", "第一答"),
+            hist_user("u2", "第二问"),
+            hist_assistant("a2", "第二答"),
+        ];
+
+        s.spawn_precompact(&provider, "m", history.clone(), summary_shape())
+            .await;
+        let got = s
+            .take_precompact(&history, &test_sink(), &CancellationToken::new())
+            .await
+            .expect("同一份历史，预压缩该能用");
+        assert_eq!(got.0, 2, "切点随总结一起带回");
+        assert_eq!(got.1, "后台算好的总结");
+        assert!(s.precompact.lock().await.is_none(), "取走后槽位清空");
+        assert!(!s.is_compacting(), "compacting 标志不能残留");
+
+        // 历史变了（多了一条）→ 作废。
+        s.spawn_precompact(&provider, "m", history.clone(), summary_shape())
+            .await;
+        let mut changed = history.clone();
+        changed.push(hist_user("u3", "又说了一句"));
+        assert!(
+            s.take_precompact(&changed, &test_sink(), &CancellationToken::new())
+                .await
+                .is_none(),
+            "基于旧历史的总结不能换进新历史"
+        );
+        assert!(s.precompact.lock().await.is_none(), "作废也要清槽位");
+    }
+
+    /// 原地编辑不改条数和末条，指纹抓不住 —— 编辑路径必须显式作废。
+    #[tokio::test]
+    async fn 编辑上下文后预压缩作废() {
+        let (s, _tmp) = compact_session();
+        let provider: Arc<dyn Provider> =
+            Arc::new(riot_core::testing::ScriptedProvider::new(vec![
+                scripted_summary("总结"),
+            ]));
+        let history = vec![
+            hist_user("u1", "第一问"),
+            hist_assistant("a1", "第一答"),
+            hist_user("u2", "第二问"),
+            hist_assistant("a2", "第二答"),
+        ];
+        *s.history.lock().await = history.clone();
+        s.spawn_precompact(&provider, "m", history.clone(), summary_shape())
+            .await;
+        s.edit_message("u1", "改过的第一问")
+            .await
+            .expect("编辑成功");
+        assert!(
+            s.precompact.lock().await.is_none(),
+            "编辑过的历史和预压缩基于的那份不是一回事"
+        );
+    }
+
+    /// 后台总结失败：换入时拿到 None，调用方退回阻塞路径；不 panic、不残留。
+    #[tokio::test]
+    async fn 预压缩失败时换入拿到空_退回阻塞路径() {
+        let (s, _tmp) = compact_session();
+        let provider: Arc<dyn Provider> =
+            Arc::new(riot_core::testing::ScriptedProvider::new(vec![vec![
+                riot_protocol::provider::ProviderEvent::Error(
+                    riot_protocol::provider::ProviderError::Transport {
+                        message: "断网".into(),
+                    },
+                ),
+            ]]));
+        let history = vec![
+            hist_user("u1", "第一问"),
+            hist_assistant("a1", "第一答"),
+            hist_user("u2", "第二问"),
+        ];
+        s.spawn_precompact(&provider, "m", history.clone(), summary_shape())
+            .await;
+        assert!(
+            s.take_precompact(&history, &test_sink(), &CancellationToken::new())
+                .await
+                .is_none()
+        );
+        assert!(!s.is_compacting());
     }
 
     /// 还没定稿的用户消息也要出现在历史快照里。
@@ -3602,10 +4872,10 @@ mod tests {
     fn queued_entry(id: &str, text: &str) -> QueuedEntry {
         QueuedEntry {
             id: id.into(),
-            input: TurnInput {
+            input: Some(TurnInput {
                 text: text.into(),
                 ..Default::default()
-            },
+            }),
             msg: Message::User {
                 id: MessageId::from_raw(id),
                 content: vec![UserContent::Text { text: text.into() }],
@@ -3682,11 +4952,11 @@ mod tests {
         // 中断/出错的轮次没走到内核的 drain 点，队列里可能剩着插话。
         // 宿主只负责清空 —— 排队面板的镜像还在前端手里,由它决定接力
         // 重发还是留给用户处置,宿主再喊一嗓子只会出现两条提示。
-        let s = Session::new(
+        let s = Arc::new(Session::new(
             SessionId::from_raw("s1"),
             std::path::PathBuf::from("/tmp"),
             None,
-        );
+        ));
         s.queue.push(queued_entry("m_q1", "还有这个也改一下"));
 
         // 缺 key，这一轮立刻失败 —— 正是"没走到 drain 点"的那类收尾。
@@ -3701,6 +4971,156 @@ mod tests {
 
         assert!(s.queue_snapshot().is_empty(), "残留插话该被清空");
         assert!(s.running.lock().await.is_none(), "running 该清干净");
+    }
+
+    fn task_view(id: &str) -> riot_protocol::task::BackgroundTaskView {
+        riot_protocol::task::BackgroundTaskView {
+            id: riot_protocol::id::AgentId::from_raw(id),
+            title: "改 a".into(),
+            kind: "general-purpose".into(),
+            model: "m".into(),
+            background: true,
+            tool_use_id: riot_protocol::id::ToolUseId::from_raw("tu_1"),
+            status: riot_protocol::task::BackgroundTaskStatus::Running,
+            activity: String::new(),
+            tool_uses: 0,
+            tokens: 0,
+            started_at_ms: 0,
+            finished_at_ms: None,
+        }
+    }
+
+    fn start_bg_task(s: &Session, id: &str, cancel: CancellationToken) {
+        s.tasks.start(
+            task_view(id),
+            crate::subagent::Kind::Explore,
+            cancel,
+            Vec::new(),
+            0,
+        );
+    }
+
+    fn notice(id: &str) -> Message {
+        let mut view = task_view(id);
+        view.status = riot_protocol::task::BackgroundTaskStatus::Completed;
+        view.finished_at_ms = Some(1);
+        crate::tasks::notice_message(MessageId::from_raw(id), &view, "m", "改好了", 1)
+    }
+
+    /// 父在跑：通知进队列、安全点注入 —— 但排队面板看不见它，也删不到它。
+    #[tokio::test]
+    async fn 后台通知在跑轮中走队列且对面板不可见() {
+        let s = Arc::new(Session::new(
+            SessionId::from_raw("s1"),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        ));
+        *s.running.lock().await = Some(CancellationToken::new());
+        s.queue.push(queued_entry("m_q1", "用户插话"));
+        s.deliver_task_notice(notice("agt_1")).await;
+
+        let snap = s.queue_snapshot();
+        assert_eq!(snap.len(), 1, "面板只该看到用户的插话：{snap:?}");
+        assert_eq!(snap[0].id, "m_q1");
+        assert!(!s.queue_remove("agt_1"), "通知条目前端删不到");
+        assert!(s.queue_take("agt_1").is_none(), "通知条目也撤不回输入框");
+
+        use riot_core::state::InputQueue;
+        let drained = s.queue.drain();
+        assert_eq!(drained.len(), 2, "内核 drain 时两条都要拿到");
+        assert!(
+            drained.iter().any(|m| matches!(
+                m, Message::User { meta, .. } if meta.task_notice.is_some()
+            )),
+            "通知要跟着注入"
+        );
+        assert!(s.pending_notices.lock().unwrap().is_empty());
+    }
+
+    /// 父空闲但还没跑过任何一轮：没有配置可沿用，通知先攒着。
+    #[tokio::test]
+    async fn 后台通知在无配置时先攒着() {
+        let s = Arc::new(Session::new(
+            SessionId::from_raw("s1"),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        ));
+        s.deliver_task_notice(notice("agt_1")).await;
+        assert!(s.running.lock().await.is_none(), "不该开轮");
+        assert_eq!(s.pending_notices.lock().unwrap().len(), 1);
+    }
+
+    /// 父空闲且跑过一轮：通知唤起新的一轮。这里的配置缺 key，轮子立刻
+    /// 失败 —— 通知不能被吞掉，要攒回去等下一轮。
+    #[tokio::test]
+    // 等一个 spawn 出去的轮子收场，真睡是刻意的（没有注入时钟可推）。
+    #[allow(clippy::disallowed_methods)]
+    async fn 后台通知唤醒轮起不来时通知攒回去() {
+        let s = Arc::new(Session::new(
+            SessionId::from_raw("s1"),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        ));
+        *s.last_turn.lock().await = Some(LastTurn {
+            model: test_model(),
+            caps: test_caps(),
+            limits: test_limits(),
+        });
+        s.deliver_task_notice(notice("agt_1")).await;
+        // 唤醒轮在 spawn 里跑，等它收场。
+        for _ in 0..50 {
+            if s.running.lock().await.is_none() && !s.pending_notices.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(s.running.lock().await.is_none(), "失败的唤醒轮要清 running");
+        assert_eq!(
+            s.pending_notices.lock().unwrap().len(),
+            1,
+            "起不来的唤醒轮不能把通知吞掉"
+        );
+    }
+
+    /// 关会话之后到达的通知丢弃，后台任务一起停。
+    #[tokio::test]
+    async fn 关会话时停掉后台任务且丢弃后续通知() {
+        let s = Arc::new(Session::new(
+            SessionId::from_raw("s1"),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        ));
+        let token = CancellationToken::new();
+        start_bg_task(&s, "agt_bg", token.clone());
+        s.abort_turn().await;
+        assert!(token.is_cancelled(), "关会话要把后台任务一起停掉");
+
+        s.deliver_task_notice(notice("agt_bg")).await;
+        assert!(
+            s.pending_notices.lock().unwrap().is_empty(),
+            "关闭后的通知该丢弃"
+        );
+        assert!(s.running.lock().await.is_none());
+    }
+
+    /// 用户按停止只停前台，后台任务不受影响。
+    #[tokio::test]
+    async fn 用户停止不带走后台任务() {
+        let s = Arc::new(Session::new(
+            SessionId::from_raw("s1"),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        ));
+        let token = CancellationToken::new();
+        start_bg_task(&s, "agt_bg", token.clone());
+        *s.running.lock().await = Some(CancellationToken::new());
+        assert!(s.interrupt().await);
+        assert!(!token.is_cancelled(), "停止键只停前台");
+        assert!(
+            s.cancel_task(&riot_protocol::id::AgentId::from_raw("agt_bg")),
+            "面板的停止键停得到"
+        );
+        assert!(token.is_cancelled());
     }
 
     #[tokio::test]
@@ -3851,6 +5271,7 @@ mod tests {
             Some(SessionPersist {
                 store: Arc::clone(&store),
                 log,
+                artifacts_root: dir.path().join("artifacts"),
             }),
         );
 
@@ -3889,6 +5310,7 @@ mod tests {
             Some(SessionPersist {
                 store: Arc::clone(&store),
                 log,
+                artifacts_root: dir.path().join("artifacts"),
             }),
         );
         for m in [hist_user("m1", "第一句"), hist_assistant("a1", "答错了")] {
@@ -3931,6 +5353,7 @@ mod tests {
             Some(SessionPersist {
                 store: Arc::clone(&store),
                 log,
+                artifacts_root: dir.path().join("artifacts"),
             }),
         );
         for m in [
@@ -4090,6 +5513,7 @@ mod tests {
             Some(SessionPersist {
                 store: Arc::clone(&store),
                 log,
+                artifacts_root: dir.path().join("artifacts"),
             }),
         );
 
@@ -4491,8 +5915,7 @@ mod tests {
             "越过 70 档要报实际百分比：{at72:?}"
         );
         assert!(
-            !env_texts(&s.env_prelude(0, 0, None, 73_000, 100_000).await)[0]
-                .contains("上下文已用"),
+            !env_texts(&s.env_prelude(0, 0, None, 73_000, 100_000).await)[0].contains("上下文已用"),
             "同档内不重复唠叨"
         );
 

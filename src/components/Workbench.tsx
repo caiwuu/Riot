@@ -14,15 +14,21 @@
 
 import type { PanelState } from "../bridge";
 import { basename } from "../pathDisplay";
-import { BrowserIcon, DiffIcon, FileDocIcon } from "./icons";
+import { BrowserIcon, DiffIcon, FileDocIcon, FolderIcon } from "./icons";
 
-/** 工作台标签。browser / changes 每会话至多一个，preview 每文件一个。
+/** 工作台标签。browser / changes / files 每会话至多一个，preview 每文件一个。
  *  browser 在标签栏上展开成一组页面标签，但在状态里始终是一项 ——
- *  页面的增删是宿主的事，工作台只关心"浏览器开没开"。 */
+ *  页面的增删是宿主的事，工作台只关心"浏览器开没开"。
+ *  files 是项目文件树的"落脚点"：树本身是预览面板的一栏（见 FilePreview），
+ *  这个标签让它在一个文件都没开的时候也有地方待。 */
 export type WorkbenchTab =
   | { kind: "browser" }
   | { kind: "changes" }
-  | { kind: "preview"; path: string };
+  | { kind: "files" }
+  | { kind: "preview"; path: string }
+  /** 一个子 agent 的只读会话（照 Cursor：点子 agent 开一个标签）。
+   *  `title` 是标签上的字，面板拉到真名后会更新它。 */
+  | { kind: "subagent"; agentId: string; title: string };
 
 /** 工作台的全部状态。收成一个对象是为了跟会话整存整取。 */
 export interface WorkbenchState {
@@ -31,13 +37,22 @@ export interface WorkbenchState {
   active: string | null;
   /** 抽屉展开着没有。收起不清标签（和旧版"收起面板标签保留"同款）。 */
   open: boolean;
+  /** 预览文件时旁边带不带文件树栏。从树里点开文件时自动置上。 */
+  tree: boolean;
 }
 
-export const EMPTY_WORKBENCH: WorkbenchState = { tabs: [], active: null, open: false };
+export const EMPTY_WORKBENCH: WorkbenchState = {
+  tabs: [],
+  active: null,
+  open: false,
+  tree: false,
+};
 
-/** 标签的稳定 id。preview 按路径区分，其余 kind 即 id（单例）。 */
+/** 标签的稳定 id。preview 按路径、subagent 按 agent id 区分，其余 kind 即 id（单例）。 */
 export function tabId(t: WorkbenchTab): string {
-  return t.kind === "preview" ? `preview:${t.path}` : t.kind;
+  if (t.kind === "preview") return `preview:${t.path}`;
+  if (t.kind === "subagent") return `subagent:${t.agentId}`;
+  return t.kind;
 }
 
 /** 还没加载出标题（或停在空白页）的页面显示成这个。 */
@@ -105,13 +120,33 @@ export function WorkbenchTabs({
             ));
           }
           const id = tabId(t);
+          const label =
+            t.kind === "changes"
+              ? "Git 改动"
+              : t.kind === "files"
+                ? "文件"
+                : t.kind === "subagent"
+                  ? t.title
+                  : basename(t.path);
           return (
             <StripTab
               key={id}
               active={id === active}
-              icon={t.kind === "changes" ? <DiffIcon /> : <FileDocIcon />}
-              title={t.kind === "changes" ? "Git 改动" : basename(t.path)}
-              tooltip={t.kind === "preview" ? t.path : "Git 改动"}
+              icon={
+                t.kind === "changes" ? (
+                  <DiffIcon />
+                ) : t.kind === "files" ? (
+                  <FolderIcon />
+                ) : t.kind === "subagent" ? (
+                  <ForkIcon />
+                ) : (
+                  <FileDocIcon />
+                )
+              }
+              title={label}
+              tooltip={
+                t.kind === "preview" ? t.path : t.kind === "subagent" ? `子 agent ${t.agentId}` : label
+              }
               onSelect={() => onSelect(id)}
               onClose={() => onClose(id)}
             />
@@ -141,10 +176,12 @@ export function WorkbenchTabs({
 export function WorkbenchEmpty({
   onChanges,
   onBrowser,
+  onFiles,
   onOpenFile,
 }: {
   onChanges: () => void;
   onBrowser: () => void;
+  onFiles: () => void;
   onOpenFile: () => void;
 }) {
   return (
@@ -162,6 +199,13 @@ export function WorkbenchEmpty({
         </span>
         <span className="wb-empty-label">浏览器</span>
         <kbd className="wb-empty-kbd">⌘T</kbd>
+      </button>
+      <button type="button" className="wb-empty-item" onClick={onFiles}>
+        <span className="wb-empty-icon">
+          <FolderIcon />
+        </span>
+        <span className="wb-empty-label">文件</span>
+        <kbd className="wb-empty-kbd">⌘⇧E</kbd>
       </button>
       <button type="button" className="wb-empty-item" onClick={onOpenFile}>
         <span className="wb-empty-icon">
@@ -237,6 +281,23 @@ function PlusIcon() {
   return (
     <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden>
       <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/** 子 agent 标签的分叉记号。 */
+function ForkIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <circle cx="4" cy="3.5" r="1.7" stroke="currentColor" strokeWidth="1.3" />
+      <circle cx="12" cy="3.5" r="1.7" stroke="currentColor" strokeWidth="1.3" />
+      <circle cx="8" cy="12.5" r="1.7" stroke="currentColor" strokeWidth="1.3" />
+      <path
+        d="M4 5.2v1.3c0 1.2.8 2 2 2h4c1.2 0 2-.8 2-2V5.2M8 8.5v2.3"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
     </svg>
   );
 }

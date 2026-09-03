@@ -396,16 +396,20 @@ const MAX_FILES: usize = 50_000;
 
 /// 给 `@` 补全菜单用的文件搜索：返回项目内相对路径。
 ///
+/// `limit` 是最多几条；`None` 用补全菜单的默认（十来条）。文件树的筛选
+/// 框也走这条，那边一屏能摆几十上百条，传自己的上限。
+///
 /// `[约束]` 走 `ignore` crate 自己遍历，**不 spawn ripgrep**。工具层的
 /// Glob/Grep 依赖外部 rg 是另一回事（那边失败了模型看得到错误，能换
 /// 个做法）；补全菜单没有这种余地 —— 用户机器上没装 rg 的话，敲 `@`
 /// 会毫无反应，而且看不出为什么。`ignore` 正是 ripgrep 的遍历引擎，
 /// .gitignore / .ignore / 全局 gitignore 的语义一致。
-pub async fn search_files(root: &Path, query: &str) -> Vec<String> {
+pub async fn search_files(root: &Path, query: &str, limit: Option<usize>) -> Vec<String> {
+    let limit = limit.unwrap_or(SEARCH_LIMIT);
     let all = file_list(root).await;
     let q = query.trim().to_lowercase();
     if q.is_empty() {
-        return all.into_iter().take(SEARCH_LIMIT).collect();
+        return all.into_iter().take(limit).collect();
     }
 
     // 子序列匹配（`smrs` 能命中 `src/main.rs`），排序按"匹配得紧不紧"
@@ -423,10 +427,7 @@ pub async fn search_files(root: &Path, query: &str) -> Vec<String> {
         })
         .collect();
     hits.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
-    hits.into_iter()
-        .take(SEARCH_LIMIT)
-        .map(|(_, _, p)| p)
-        .collect()
+    hits.into_iter().take(limit).map(|(_, _, p)| p).collect()
 }
 
 /// 把 `query` 当子序列去匹配，返回跨度（越小越紧）。匹配不上是 None。
@@ -487,7 +488,7 @@ mod search_tests {
         );
 
         // 缓存这一层也要通：搜索走的是它。
-        let hits = search_files(root, "keep").await;
+        let hits = search_files(root, "keep", None).await;
         assert_eq!(hits, vec!["keep.rs".to_owned()]);
     }
 

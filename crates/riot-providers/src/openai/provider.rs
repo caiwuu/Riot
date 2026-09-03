@@ -260,9 +260,12 @@ impl Provider for OpenAiProvider {
         // 图片按张计价：先把它的 base64 从报文长度里扣掉，再按张加回来。
         // 不扣就还是字节口径，而那个口径下一张图能报出几万 token。
         let (from, base) = riot_protocol::provider::last_usage_checkpoint(messages);
-        let tail = &messages[from..];
-        let (images, b64) = riot_protocol::provider::wire_images(tail);
-        base + riot_protocol::provider::estimate_tokens(wire_bytes(tail).saturating_sub(b64))
+        base + self.estimate_tokens_of(&messages[from..])
+    }
+
+    fn estimate_tokens_of(&self, messages: &[Message]) -> u32 {
+        let (images, b64) = riot_protocol::provider::wire_images(messages);
+        riot_protocol::provider::estimate_tokens(wire_bytes(messages).saturating_sub(b64))
             + riot_protocol::provider::estimate_image_tokens(images)
     }
 }

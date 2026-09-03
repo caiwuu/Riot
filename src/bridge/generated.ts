@@ -50,6 +50,10 @@ export type AgentEvent =
       type: "prompt_withdrawn";
     }
   | {
+      task: BackgroundTaskView;
+      type: "background_task";
+    }
+  | {
       reason: TerminalReason;
       type: "done";
     };
@@ -249,6 +253,13 @@ export type Attachment =
        */
       text: string;
     };
+/**
+ * 后台任务的生命周期。
+ *
+ * 没有"排队"态：后台子 agent 一登记就开跑 —— 并发数由模型自己克制
+ * （Task 工具的提示词里讲了），不做队列。
+ */
+export type BackgroundTaskStatus = "running" | "completed" | "failed" | "cancelled";
 export type AssistantContent =
   | {
       text: string;
@@ -646,6 +657,20 @@ export type RpcRequest =
       };
     }
   | {
+      method: "task.cancel";
+      params: {
+        agent_id: string;
+        session_id: string;
+      };
+    }
+  | {
+      method: "task.history";
+      params: {
+        agent_id: string;
+        session_id: string;
+      };
+    }
+  | {
       method: "history.edit";
       params: {
         /**
@@ -821,6 +846,11 @@ export type RpcResponse =
          * 活下来靠这份快照。`default` 兼容旧 transcript 回放。
          */
         pending_asks?: PendingAsk[];
+        /**
+         * 这个会话的后台子 agent（跑着的和刚结束的）。事件只在变化时推，
+         * 切走再切回的面板靠这份快照重建。
+         */
+        tasks?: BackgroundTaskView[];
       };
       result: "session_resumed";
     }
@@ -859,6 +889,13 @@ export type RpcResponse =
         removed: boolean;
       };
       result: "removed";
+    }
+  | {
+      data: {
+        messages: Message[];
+        task?: BackgroundTaskView | null;
+      };
+      result: "task_history";
     }
   | {
       data: {
@@ -1030,6 +1067,26 @@ export interface MessageMeta {
    * 是否为系统合成（而非模型产出或用户输入）。
    */
   synthetic?: boolean;
+  /**
+   * 这条 user 消息是**后台子 agent 的完成通知**，不是用户说的话。
+   *
+   * 正文（子 agent 的汇报）在 `SystemReminder` 附件里给模型读；这份
+   * 标记给界面画卡片、给轮边界判定（[`Message::is_user_prompt`]）。
+   * 只有内核合成通知时打上。
+   */
+  task_notice?: TaskNotice | null;
+}
+/**
+ * 打在完成通知消息上的标记（`MessageMeta::task_notice`）。
+ *
+ * 通知本体是一条 user 消息，正文放在 `SystemReminder` 附件里给模型读；
+ * 这份标记给界面 —— 靠它把那条消息画成"后台任务完成"卡片而不是
+ * 用户气泡。meta 不进 wire 格式，模型只看得到附件里的文字。
+ */
+export interface TaskNotice {
+  agent_id: string;
+  status: BackgroundTaskStatus;
+  title: string;
 }
 /**
  * Token 用量。
@@ -1074,6 +1131,51 @@ export interface AskChoiceOption {
    * 给用户看的文案。
    */
   label: string;
+}
+/**
+ * 一个子 agent 在界面上的样子（同步的、后台的都有一份）。
+ *
+ * 随 [`crate::event::AgentEvent::BackgroundTask`] 每次变化推一份全量；
+ * 切回会话时随 `session.resume` 快照整批回来。不进 transcript ——
+ * 它描述的是一个活状态，落盘重放会长出永远"运行中"的幽灵；"跑过、
+ * 结果是什么"由通知消息（[`TaskNotice`]）和 Task 的 tool_result 记在
+ * 历史里。
+ *
+ * 名字里的 Background 是历史包袱：最初只给后台任务用，后来同步子 agent
+ * 也要在 Task 卡片上直播"标题 · 模型 · 正在做什么"，于是全都登记，
+ * 靠 `background` 区分该不该进后台任务面板。
+ */
+export interface BackgroundTaskView {
+  /**
+   * 最近一行活动（正在调哪个工具、刚说的第一句话）。面板上滚动显示。
+   */
+  activity: string;
+  /**
+   * 后台跑的（进面板、完成时发通知）还是同步跑的（只在 Task 卡片上）。
+   */
+  background?: boolean;
+  finished_at_ms?: number | null;
+  id: string;
+  /**
+   * `explore` / `general-purpose` / `fork`。
+   */
+  kind: string;
+  /**
+   * 它实际用的模型名（便宜档生效时和主模型不同）。
+   */
+  model?: string;
+  started_at_ms: number;
+  status: BackgroundTaskStatus;
+  /**
+   * 模型给的任务名（Task 工具的 `description`）。续接时可以换。
+   */
+  title: string;
+  tokens: number;
+  /**
+   * 把它开出来的那次 Task 调用。卡片靠它认领自己的子 agent。
+   */
+  tool_use_id?: string;
+  tool_uses: number;
 }
 /**
  * 启动时发现的错过运行（上次 App 没开着，到点没跑成）。

@@ -40,6 +40,10 @@ type Sinks = Arc<Mutex<HashMap<String, Channel<AgentEvent>>>>;
 /// 太重(token 流每秒上百条),只挑这几样。
 #[derive(Debug)]
 pub enum HostNotice {
+    /// 一轮开始了。宿主在 turn.submit 时已经把 busy 置上,这条只为**内核
+    /// 自己发起的轮**:后台子 agent 跑完唤醒父会话那一轮没有经过宿主,
+    /// 不接这条的话侧栏的运行指示点直到轮子结束都不亮。
+    Started { session_id: String },
     /// 一轮结束(会话空闲了)。
     Done { session_id: String },
     /// 内核侧改了权限模式(ExitPlanMode)。宿主是设置权威,要记下来
@@ -267,6 +271,9 @@ fn spawn_dispatch(
                             let sid = session_id.as_str().to_owned();
                             // 宿主关心的那几件先拷贝一份出去(见 HostNotice)。
                             match &event {
+                                AgentEvent::RequestStart { turn: 1, .. } => {
+                                    let _ = host_tx.send(HostNotice::Started { session_id: sid.clone() });
+                                }
                                 AgentEvent::Done { .. } => {
                                     let _ = host_tx.send(HostNotice::Done { session_id: sid.clone() });
                                 }

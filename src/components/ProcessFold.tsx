@@ -18,7 +18,12 @@ export type Block =
  * 不折叠的工具：编辑类卡片默认展开 diff / 内容（见 ToolCard），
  * 是用户要看的工作产物 —— 折进组里等于把成果藏起来。
  */
-const KEEP_VISIBLE = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+/**
+ * Task 也不折：子 agent 的卡片是一条"标题 · 模型 · 正在做什么"的直播行，
+ * 还是打开它会话的入口（照 Cursor，子 agent 列表始终可见）。折进
+ * "N 步"里用户就找不到它了。
+ */
+const KEEP_VISIBLE = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit", "Task"]);
 
 function foldable(it: Item): it is FoldItem {
   if (it.kind === "thinking") return true;

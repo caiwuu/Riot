@@ -32,6 +32,7 @@ pub mod schedule;
 pub mod state;
 pub mod term;
 pub mod term_access;
+pub mod tree;
 pub mod update;
 #[cfg(any(windows, target_os = "macos"))]
 mod vibrancy;
@@ -190,14 +191,27 @@ async fn slash_expand(
     state.slash_expand(&session_id, &name, &args).await
 }
 
-/// `@` 补全菜单的文件搜索：返回项目内相对路径。
+/// `@` 补全菜单的文件搜索：返回项目内相对路径。`limit` 不传用菜单的
+/// 默认条数；文件树的筛选框传大一些的值。
 #[tauri::command]
 async fn search_files(
     state: tauri::State<'_, AppState>,
     session_id: String,
     query: String,
+    limit: Option<usize>,
 ) -> HostResult<Vec<String>> {
-    state.search_files(&session_id, &query).await
+    state.search_files(&session_id, &query, limit).await
+}
+
+/// 文件树的一层目录：`rel` 是相对会话根的路径（`/` 分隔），空串即根。
+/// 边界与截断规则见 [`tree`] 的模块文档。
+#[tauri::command]
+async fn list_dir(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    rel: String,
+) -> HostResult<tree::DirListing> {
+    state.list_dir(&session_id, &rel).await
 }
 
 /// 定时任务清单（管理面板）。
@@ -288,6 +302,26 @@ async fn queue_take(
     entry_id: String,
 ) -> HostResult<Option<riot_protocol::TurnInput>> {
     state.queue_take(&session_id, &entry_id).await
+}
+
+/// 停掉一个后台子 agent（面板上的停止键）。false = 没这个任务或它已结束。
+#[tauri::command]
+async fn task_cancel(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    agent_id: String,
+) -> HostResult<bool> {
+    state.task_cancel(&session_id, &agent_id).await
+}
+
+/// 一个子 agent 的会话（右侧抽屉的只读视图）。
+#[tauri::command]
+async fn task_history(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    agent_id: String,
+) -> HostResult<state::TaskHistoryOut> {
+    state.task_history(&session_id, &agent_id).await
 }
 
 #[tauri::command]
@@ -1287,11 +1321,14 @@ pub fn run() {
             queue_list,
             queue_remove,
             queue_take,
+            task_cancel,
+            task_history,
             session_compact,
             slash_commands,
             slash_expand,
             hooks_list,
             search_files,
+            list_dir,
             schedule_list,
             schedule_set_enabled,
             schedule_update,
@@ -1396,12 +1433,13 @@ pub fn run() {
                 sync_packs_into_config(&state).await;
                 state.reconcile_mcp().await;
             });
-            // 顺手收掉没人认领的浏览器 profile。同样放 setup：它要在会话表
-            // 恢复完之后才能判断谁是孤儿，而且删目录要 spawn_blocking。
+            // 顺手收掉没人认领的浏览器 profile 和工件目录。同样放 setup：
+            // 要在会话表恢复完之后才能判断谁是孤儿，而且删目录要 spawn_blocking。
             // 不 await —— 启动路径上不该等着删几个 GB 的缓存。
             let state = app.state::<AppState>().inner().clone();
             tauri::async_runtime::spawn(async move {
                 state.gc_browser_profiles().await;
+                state.gc_artifacts().await;
             });
             Ok(())
         })
