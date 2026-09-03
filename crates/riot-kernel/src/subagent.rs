@@ -33,7 +33,10 @@
 //! # 结果与可观测性
 //!
 //! - 结果 = 最后一条有文本的 assistant 消息（CC 同款），附用量脚注；
-//! - 过程以 Progress 事件流回父会话的工具卡片（工具调用逐行可见）；
+//! - 过程**原样**套进 [`ProgressPayload::Nested`] 流回父会话的 Task 卡片：
+//!   子 agent 的每条 Delta / Message / Progress / Done 都是一条嵌套事件，
+//!   界面据此在卡片里画出一条完整的子时间线（思考、正文、每个工具调用
+//!   的参数和输出、直播中的半截流）—— 见 [`forwards_to_parent`]；
 //! - transcript 落在 `sessions/subagents/<会话>/<agent>.jsonl`，和主
 //!   transcript 隔开 —— 放同一目录会被索引重建当成会话捞回来。
 
@@ -45,7 +48,7 @@ use futures::StreamExt;
 use serde::Deserialize;
 
 use riot_core::{AgentDeps, AgentState, run_agent};
-use riot_protocol::event::{AgentEvent, OutputStream, ProgressPayload, TerminalReason};
+use riot_protocol::event::{AgentEvent, ProgressPayload, TerminalReason};
 use riot_protocol::id::{IdGenerator, SessionId};
 use riot_protocol::message::{AssistantContent, Message, Usage};
 use riot_protocol::permission::{
@@ -381,12 +384,10 @@ impl Tool for TaskTool {
         };
         let max_turns = kind.max_turns(self.deps.max_turns);
 
+        // 模型名不用单独报：子 agent 的第一条 RequestStart 就带着它，会随
+        // 嵌套事件流到卡片上 —— "便宜档到底有没有生效"用户在界面上直接
+        // 看得到，不用翻日志。
         let agent_id = self.deps.ids.agent_id();
-        ctx.progress.send(ProgressPayload::Status {
-            // 模型名进进度里：不显示的话，"便宜档到底有没有生效"只能去翻日志，
-            // 而这正是用户配完之后第一个想确认的事。
-            text: format!("[{}·{}] {} 启动", kind.as_str(), model, parsed.description),
-        });
 
         // ── 装配子 agent 的一轮 ────────────────────────────
         let tools = tools_for(kind);
@@ -482,53 +483,44 @@ impl Tool for TaskTool {
         let stream = run_agent(state, deps, ctx.cancel.child_token());
         futures::pin_mut!(stream);
 
-        let mut collected: Vec<Message> = Vec::new();
+        let mut last_text: Option<String> = None;
         let mut usage = Usage::default();
         let mut tool_uses = 0u32;
         let mut terminal: Option<TerminalReason> = None;
 
         while let Some(ev) = stream.next().await {
-            match ev {
+            // 先借着记账，再把事件整个搬进嵌套载荷 —— 消息里可能带图，
+            // 不该为了留一份副本多克隆一次。
+            match &ev {
                 AgentEvent::Message(m) => {
                     if let Some(l) = &log {
-                        l.append(&m);
+                        l.append(m);
                     }
                     if let Message::Assistant {
                         content, usage: u, ..
-                    } = &m
+                    } = m
                     {
                         if let Some(u) = u {
                             usage.merge(u);
                         }
-                        // 进度：让父会话的工具卡片看得到子 agent 在干什么。
-                        for c in content {
-                            match c {
-                                AssistantContent::ToolUse { name, .. } => {
-                                    tool_uses += 1;
-                                    ctx.progress.send(ProgressPayload::Line {
-                                        stream: OutputStream::Stdout,
-                                        text: format!("→ {name}"),
-                                    });
-                                }
-                                AssistantContent::Text { text } => {
-                                    let first = text.lines().find(|l| !l.trim().is_empty());
-                                    if let Some(f) = first {
-                                        ctx.progress.send(ProgressPayload::Line {
-                                            stream: OutputStream::Stdout,
-                                            text: truncate_chars(f, 120),
-                                        });
-                                    }
-                                }
-                                _ => {}
-                            }
+                        tool_uses += content
+                            .iter()
+                            .filter(|c| matches!(c, AssistantContent::ToolUse { .. }))
+                            .count() as u32;
+                        if let Some(t) = assistant_text(content) {
+                            last_text = Some(t);
                         }
                     }
-                    collected.push(m);
                 }
-                AgentEvent::Done { reason } => terminal = Some(reason),
-                // Delta/Progress/权限事件不上转：权限弹窗由共享的 gate 直接
-                // 发到父会话的事件流（同一个 sink），这里转发会出现两份。
+                AgentEvent::Done { reason } => terminal = Some(reason.clone()),
                 _ => {}
+            }
+            // 过程原样套给父卡片：界面拿这条流画子时间线。合帧由宿主那层
+            // 统一做（嵌套的 Delta 和主 agent 的一样按帧攒），这里不攒。
+            if forwards_to_parent(&ev) {
+                ctx.progress.send(ProgressPayload::Nested {
+                    event: Box::new(ev),
+                });
             }
         }
 
@@ -546,8 +538,7 @@ impl Tool for TaskTool {
         );
         match terminal {
             Some(TerminalReason::Completed) | Some(TerminalReason::MaxTurns { .. }) => {
-                let text = last_assistant_text(&collected);
-                match text {
+                match last_text {
                     Some(t) => {
                         let capped = if matches!(terminal, Some(TerminalReason::MaxTurns { .. })) {
                             format!(
@@ -587,29 +578,38 @@ impl Tool for TaskTool {
     }
 }
 
-fn last_assistant_text(messages: &[Message]) -> Option<String> {
-    messages.iter().rev().find_map(|m| match m {
-        Message::Assistant { content, .. } => {
-            let text: String = content
-                .iter()
-                .filter_map(|c| match c {
-                    AssistantContent::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            (!text.trim().is_empty()).then_some(text)
-        }
-        _ => None,
-    })
+/// 一条 assistant 消息里的全部文本块。没有文本（纯工具调用）返回 None，
+/// 这样"最后一条**有文本**的消息"只要在流里不断覆盖就得到了。
+fn assistant_text(content: &[AssistantContent]) -> Option<String> {
+    let text: String = content
+        .iter()
+        .filter_map(|c| match c {
+            AssistantContent::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.trim().is_empty()).then_some(text)
 }
 
-fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_owned()
-    } else {
-        s.chars().take(max).collect()
-    }
+/// 子 agent 的哪些事件要套进父卡片。
+///
+/// 默认都转 —— 界面要的就是"子 agent 在干什么"的完整画面，缺一类就是
+/// 一段空白。刻意留下的例外：
+///
+/// - 权限两兄弟：子 agent 和父共用一个闸，弹窗由闸直接发到父会话的
+///   事件流（同一个 sink），这里再转一份就是两个弹窗；
+/// - 模式切换 / 撤回提问：这两件事只有主会话会发生（子 agent 没有
+///   ExitPlanMode，也没有用户在它开口前按停止），真出现了也是主会话的
+///   事，不该在卡片里冒出来。
+fn forwards_to_parent(ev: &AgentEvent) -> bool {
+    !matches!(
+        ev,
+        AgentEvent::PermissionRequest { .. }
+            | AgentEvent::PermissionResolved { .. }
+            | AgentEvent::ModeChanged { .. }
+            | AgentEvent::PromptWithdrawn { .. }
+    )
 }
 
 #[cfg(test)]
@@ -741,6 +741,64 @@ mod tests {
             reqs[0].system.contains("只读"),
             "explore 的系统提示要立只读规矩"
         );
+    }
+
+    /// 卡片上的子时间线全靠这条流。少转一类事件，界面上就是一段空白 ——
+    /// 而且没有任何报错：子 agent 照常跑完、结果照常回来。
+    #[tokio::test]
+    async fn 子_agent_的过程原样套进父卡片的进度流() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![ProviderEvent::Message(
+            assistant("报告：入口在 src/main.rs:1"),
+        )]]));
+        let tool = TaskTool::new(deps(Arc::clone(&provider)));
+        let (c, mut rx) = ctx();
+
+        let out = tool
+            .call(
+                serde_json::json!({ "description": "找入口", "prompt": "找程序入口", "subagent_type": "explore" }),
+                c,
+            )
+            .await;
+        assert!(matches!(out, ToolOutcome::Ok { .. }), "{out:?}");
+
+        let mut nested = Vec::new();
+        while let Ok((id, payload)) = rx.try_recv() {
+            assert_eq!(id.as_str(), "t1", "进度要挂在发起这次 Task 的 tool_use 上");
+            match payload {
+                ProgressPayload::Nested { event } => nested.push(*event),
+                other => panic!("子 agent 的过程只该以嵌套事件上转，收到了 {other:?}"),
+            }
+        }
+        assert!(
+            matches!(nested.first(), Some(AgentEvent::RequestStart { model, .. }) if model == "test-model"),
+            "第一条该是带模型名的 RequestStart（界面靠它显示子 agent 用的哪档），实际：{:?}",
+            nested.first()
+        );
+        assert!(
+            nested.iter().any(|e| matches!(e, AgentEvent::Message(Message::Assistant { .. }))),
+            "子 agent 的助手消息要到卡片上"
+        );
+        assert!(
+            matches!(nested.last(), Some(AgentEvent::Done { reason: TerminalReason::Completed })),
+            "最后一条该是 Done，界面靠它收尾，实际：{:?}",
+            nested.last()
+        );
+    }
+
+    /// 权限弹窗由共享的闸直接发到父会话，这里再转就是两份。
+    #[test]
+    fn 权限事件不上转_其余都转() {
+        use riot_protocol::id::RequestId;
+        use riot_protocol::permission::DecisionReason;
+        assert!(!forwards_to_parent(&AgentEvent::PermissionResolved {
+            request_id: RequestId::from_raw("r1"),
+            reason: DecisionReason::Timeout,
+        }));
+        assert!(forwards_to_parent(&AgentEvent::Compacting));
+        assert!(forwards_to_parent(&AgentEvent::Progress {
+            tool_use_id: ToolUseId::from_raw("u1"),
+            payload: ProgressPayload::Status { text: "x".into() },
+        }));
     }
 
     #[tokio::test]
