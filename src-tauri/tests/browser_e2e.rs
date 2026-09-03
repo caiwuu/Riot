@@ -1935,6 +1935,108 @@ async fn 点外链开在新标签页里() {
     assert!(s.active_tab().url.contains("AAA"));
 }
 
+/// 公网页面访问本机服务不能悬着；别的权限提示要当场拒绝，也不能悬着。
+///
+/// `[约束]` 这条盯的是子进程有没有替用户应答权限提示。Chromium 142 起，
+/// 公网页面打向 `http://localhost` 的请求要先过 Local Network Access 提示；
+/// Alloy 风格下不实现 `PermissionHandler` 的默认处理是 IGNORE —— 请求
+/// 不放行也不拒绝，**永远悬着**，而离屏渲染没有 UI 能替它弹出来。现象是
+/// https 页面里每个打向本机的 fetch 都等到调用方自己超时，本机服务一个
+/// 字节都收不到，错误长得和"后端没起来"一样（人会归到 Mixed Content，模型
+/// 会去查服务端）。"前端在线上、后端在本机调试"这类排障正好踩在这条路上。
+///
+/// 三个判据缺一不可：回环要真的通（服务端收到请求）；局域网要**明确**被
+/// 拒（不是放行，那等于把内网暴露给模型访问的每个页面）；通知这类别的
+/// 权限也要**明确**被拒（一个 denied 让页面走它自己的降级分支，悬着的
+/// promise 什么都走不到）。只验第一条的话，一个"全部 ACCEPT"的实现照样绿。
+#[tokio::test]
+async fn 公网页面能访问本机服务而别的权限提示当场拒绝() {
+    let _serial = SERIAL.lock().await;
+    let Some(app) = bundle() else {
+        eprintln!("跳过：还没打包");
+        return;
+    };
+
+    use riot_protocol::browser::BrowserAccess as _;
+    use std::io::{Read as _, Write as _};
+
+    // 一个最小的本机 HTTP 服务：记下有没有收到请求，回一个带 CORS 头的 200。
+    // 用 std 的阻塞监听跑在独立线程上 —— 要验的正是"请求真的到了本机"，
+    // 页面那边的 200 只能说明浏览器认为通了，服务端的计数才是铁证。
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("绑本机端口");
+    let port = listener.local_addr().expect("端口").port();
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let served = std::sync::Arc::clone(&hits);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut s) = stream else { break };
+            let mut buf = [0u8; 2048];
+            let _ = s.read(&mut buf);
+            served.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = s.write_all(
+                b"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\n\
+                  Access-Control-Allow-Private-Network: true\r\n\
+                  Content-Length: 2\r\nConnection: close\r\n\r\nok",
+            );
+        }
+    });
+
+    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("lna"));
+
+    // 必须是**真实的公网 https** 页面。data: 页面是不透明来源、非安全上下文，
+    // 打向本机的请求被 CORS 直接拒掉（InsecureLocalNetwork），根本走不到
+    // 权限提示；file:// 页面又免检。只有 https 页面会撞上那道提示。
+    host.navigate("https://example.com/")
+        .await
+        .expect("导航到公网页面");
+
+    // 每个 fetch 自带 3 秒超时。修复前它们会一直悬着，靠这个超时把悬着
+    // 变成一个可断言的字符串，而不是让用例等满 CDP 的 30 秒。
+    let probe = |url: String| {
+        format!(
+            "(async () => {{ try {{ \
+                const r = await fetch({url:?}, {{mode: 'no-cors', signal: AbortSignal.timeout(3000)}}); \
+                return 'ok:' + r.type; \
+            }} catch (e) {{ return e.name; }} }})()"
+        )
+    };
+
+    let loopback = host
+        .evaluate(&probe(format!("http://127.0.0.1:{port}/")))
+        .await
+        .expect("探测回环");
+    assert!(
+        loopback.starts_with("ok:"),
+        "https 页面访问本机服务该通，实际：{loopback}（TimeoutError = 权限提示没人应答）"
+    );
+    assert!(
+        hits.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+        "本机服务该真的收到请求"
+    );
+
+    // 局域网：明确拒绝。放行等于把用户内网暴露给模型访问的每个页面；悬着
+    // 又回到修复前的形态。目标用一个几乎不会有人占的地址，连接本身不重要
+    // —— 权限检查发生在连接之前，被拒时服务端有没有人都一样。
+    let lan = host
+        .evaluate(&probe("http://192.168.255.254:9/".into()))
+        .await
+        .expect("探测局域网");
+    assert_eq!(lan, "TypeError", "局域网该被当场拒绝，不是放行也不是悬着");
+
+    // 通知这类别的权限提示也要当场有答复。修复前这里悬着 —— 3 秒后返回
+    // 'hang'；修复后是一个明确的 denied，页面能据此走降级分支。
+    let notify = host
+        .evaluate(
+            "Promise.race([\
+                Notification.requestPermission(), \
+                new Promise(r => setTimeout(() => r('hang'), 3000))\
+            ])",
+        )
+        .await
+        .expect("问通知权限");
+    assert_eq!(notify, "denied", "别的权限提示该当场拒绝，不能悬着");
+}
+
 /// 页面自己关掉一页之后，面板不能卡住。
 ///
 /// `[约束]` 这一层必须处理 [`Event::TabClosed`]，不能只认自己发出去的

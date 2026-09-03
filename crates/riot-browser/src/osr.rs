@@ -175,6 +175,68 @@ cef::wrap_client! {
         fn jsdialog_handler(&self) -> Option<JsdialogHandler> {
             Some(OsrJsDialog::new())
         }
+
+        fn permission_handler(&self) -> Option<PermissionHandler> {
+            Some(OsrPermission::new())
+        }
+    }
+}
+
+/// 页面申请权限时一律放行的类型。目前只有回环地址（`http://localhost`、
+/// `127.0.0.1`）。
+///
+/// `[取舍]` 不放行局域网（`LOCAL_NETWORK`，192.168.x 之类）。公网页面探测
+/// 用户内网设备是 Chromium 引入这道检查要防的正事，在 Chrome 里也得用户
+/// 亲手点一次 —— 而这里没有人可点，替他答应等于把内网暴露给模型访问的
+/// 每一个页面（prompt injection 就在这条路上）。回环不同：它是"前端在
+/// 线上、后端在本机调试"这类排障场景的必经之路，而且能进这个浏览器的
+/// 页面本就是用户或模型点头访问过的。要放开局域网，先把提示转给宿主的
+/// 权限系统问人，而不是改这张表。
+fn auto_granted() -> u32 {
+    PermissionRequestTypes::LOOPBACK_NETWORK.get_raw() as u32
+}
+
+cef::wrap_permission_handler! {
+    pub struct OsrPermission;
+
+    impl PermissionHandler {
+        /// 页面弹权限提示（访问本机网络、通知、定位……）。当场应答。
+        ///
+        /// `[约束]` 必须实现。Alloy 风格下这个回调的默认处理是 IGNORE ——
+        /// 不放行也不拒绝，请求**永远悬着**，而离屏渲染又没有任何 UI 能替它
+        /// 弹出来。Chromium 142 起公网页面访问本机地址要先过这道提示（Local
+        /// Network Access），于是 https 页面里每个打向 `http://localhost` 的
+        /// fetch 都挂到调用方自己超时，本机服务一个字节都收不到。错误形态是
+        /// TimeoutError，和"后端没起来"一模一样 —— 模型会顺着去查服务端，
+        /// 人会以为是 Mixed Content。通知、定位这些走同一个回调，同样悬着。
+        ///
+        /// 放行清单见 [`auto_granted`]；其余一律 DENY 而不是 DISMISS：一个
+        /// 明确的 denied 让页面走它自己的降级分支，悬着的 promise 什么都走
+        /// 不到。一个提示里可能捎带多种权限，接受是整体的 —— 只有**全部**
+        /// 都在清单里才接受，否则整条拒掉。
+        fn on_show_permission_prompt(
+            &self,
+            _browser: Option<&mut Browser>,
+            _prompt_id: u64,
+            requesting_origin: Option<&CefString>,
+            requested_permissions: u32,
+            callback: Option<&mut PermissionPromptCallback>,
+        ) -> ::std::os::raw::c_int {
+            let Some(cb) = callback else { return 0 };
+            let accept =
+                requested_permissions != 0 && requested_permissions & !auto_granted() == 0;
+            let origin = requesting_origin.map(ToString::to_string).unwrap_or_default();
+            eprintln!(
+                "riot-browser: {origin} 申请权限 {requested_permissions:#x}，{}",
+                if accept { "放行" } else { "拒绝" }
+            );
+            cb.cont(if accept {
+                PermissionRequestResult::ACCEPT
+            } else {
+                PermissionRequestResult::DENY
+            });
+            1
+        }
     }
 }
 
