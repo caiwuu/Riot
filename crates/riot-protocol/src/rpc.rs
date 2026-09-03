@@ -54,6 +54,15 @@ pub enum RpcRequest {
         /// 用户插话时为 true —— UI 不显示"已中断"文案。
         interjection: bool,
     },
+    /// 界面上的一个按钮（转到后台 / 并行构建）→ 一条塞给模型的带外提醒，
+    /// 在当前轮的下一个安全点注入 —— **这一批工具结果就位时**，不等整轮
+    /// 跑完（等了就等于按钮没生效）。没有轮在跑时回
+    /// `Nudged { queued: false }` —— 这些按钮只对正在进行的工作有意义。
+    #[serde(rename = "turn.nudge")]
+    TurnNudge {
+        session_id: SessionId,
+        nudge: crate::turn::Nudge,
+    },
     /// 排队面板:列出等待注入的插话。(跑轮中的新消息经 turn.submit 自动
     /// 入队,drain 时绝不插在 tool_use 和 tool_result 之间 —— INV-2。)
     #[serde(rename = "queue.list")]
@@ -224,6 +233,10 @@ pub enum RpcResponse {
     /// queue.remove 的应答:是否真的删到了。
     Removed {
         removed: bool,
+    },
+    /// turn.nudge 的应答：提醒有没有排上（false = 此刻没有轮在跑）。
+    Nudged {
+        queued: bool,
     },
     /// task.history 的应答。`task` 为 None = 没有这个子 agent（内核重启后
     /// 旧 id 都会失效）。分叉出的子 agent 只回它自己产生的那段，不回继承

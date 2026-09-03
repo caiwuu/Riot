@@ -564,7 +564,10 @@ mod tests {
             ];
             let (from, base) = last_usage_checkpoint(&msgs);
             assert_eq!((from, base), (2, 5_200));
-            assert!(matches!(&msgs[from..], [Message::User { .. }]), "只剩新来的那条");
+            assert!(
+                matches!(&msgs[from..], [Message::User { .. }]),
+                "只剩新来的那条"
+            );
         }
 
         /// `[约束]` 子 agent 的 usage 描述的是**另一个窗口**。拿它给主历史

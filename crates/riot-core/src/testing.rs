@@ -623,25 +623,42 @@ pub fn assistant_tool_use(
 
 /// 跑轮中插话的脚本队列。
 ///
-/// 每次 `drain` 弹出一个批次（可以是空批次，用来跳过一个 drain 点）。
-/// 主循环的 drain 点顺序是固定的：每轮工具结果就位后一次、模型正常
-/// 收尾前一次 —— 测试按这个顺序摆批次，就能精确控制"插话到达的时机"。
+/// 两条通道各自独立排队，对应主循环两个取用点（见
+/// [`crate::state::InputQueue`]）：`batches` 走收尾 drain（用户插话），
+/// `oob` 走工具结果就位后的带外 drain（界面按钮的提醒、完成通知）。
+/// 每次取用弹出一个批次，空批次用来跳过一个取用点 —— 测试按顺序摆批次，
+/// 就能精确控制"消息到达的时机"。
 pub struct ScriptedQueue {
     batches: std::sync::Mutex<std::collections::VecDeque<Vec<Message>>>,
+    oob: std::sync::Mutex<std::collections::VecDeque<Vec<Message>>>,
     drains: AtomicUsize,
+    oob_drains: AtomicUsize,
 }
 
 impl ScriptedQueue {
     pub fn new(batches: Vec<Vec<Message>>) -> Self {
         Self {
             batches: std::sync::Mutex::new(batches.into()),
+            oob: std::sync::Mutex::new(Default::default()),
             drains: AtomicUsize::new(0),
+            oob_drains: AtomicUsize::new(0),
         }
     }
 
-    /// 主循环一共 drain 了几次。
+    /// 排上带外批次：每批在一个工具轮边界上注入。
+    pub fn with_out_of_band(mut self, batches: Vec<Vec<Message>>) -> Self {
+        self.oob = std::sync::Mutex::new(batches.into());
+        self
+    }
+
+    /// 主循环一共 drain 了几次（收尾那条通道）。
     pub fn drain_count(&self) -> usize {
         self.drains.load(Ordering::SeqCst)
+    }
+
+    /// 主循环一共取了几次带外消息。
+    pub fn out_of_band_drain_count(&self) -> usize {
+        self.oob_drains.load(Ordering::SeqCst)
     }
 }
 
@@ -651,6 +668,15 @@ impl crate::state::InputQueue for ScriptedQueue {
         self.batches
             .lock()
             .expect("batches poisoned")
+            .pop_front()
+            .unwrap_or_default()
+    }
+
+    fn drain_out_of_band(&self) -> Vec<Message> {
+        self.oob_drains.fetch_add(1, Ordering::SeqCst);
+        self.oob
+            .lock()
+            .expect("oob batches poisoned")
             .pop_front()
             .unwrap_or_default()
     }

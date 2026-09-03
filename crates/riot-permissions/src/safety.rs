@@ -468,7 +468,11 @@ mod tests {
     #[test]
     fn 大写的凭证路径读也要拦() {
         // 读这条更狠：默认模式下就直接放行，一句都不问。
-        for cred in ["/work/.ENV", "/home/u/.SSH/id_rsa", "/home/u/.AWS/credentials"] {
+        for cred in [
+            "/work/.ENV",
+            "/home/u/.SSH/id_rsa",
+            "/home/u/.AWS/credentials",
+        ] {
             assert_eq!(on_read(cred), Some(SafetyKind::Credentials), "{cred}");
         }
     }

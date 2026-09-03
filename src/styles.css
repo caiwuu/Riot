@@ -3897,15 +3897,27 @@ body.file-dragging.file-drop-hot * {
 .picker-pill {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
   min-width: 0;
 }
 
+/* 真正排图标和字的那一层。不直接挂在 button 上：WKWebView 里 button
+   的匿名内容盒会把子项顶对齐，规划图标就会贴着「全部放行」的上沿。 */
+.picker-pill-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  width: 100%;
+  line-height: 1;
+}
+
 .picker-pill .pick-label {
+  display: block;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  line-height: 14px;
 }
 
 /* 危险权限模式（全部放行/无人值守）激活时 pill 常驻警示色，
@@ -3991,6 +4003,9 @@ body.file-dragging.file-drop-hot * {
   padding: 4px;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
   z-index: var(--z-menu);
+  /* composer 把 --bg-hover 抬到 --bg-input-hover，给 pill 用。菜单底是
+     --bg-card，再吃那一档会比会话右键菜单（同样叠在卡片上）重一截。 */
+  --bg-hover: color-mix(in srgb, #fff 5%, var(--bg-card));
 }
 
 .menu-item {
@@ -4014,6 +4029,43 @@ body.file-dragging.file-drop-hot * {
   background: var(--bg-hover);
 }
 
+/* 模式 / 模型菜单：Cursor 同款右侧勾号，选中不靠整行底色。 */
+.menu-item.menu-pick {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.menu-item.menu-pick.active {
+  background: transparent;
+}
+
+.menu-item.menu-pick:hover {
+  background: var(--bg-hover);
+}
+
+.menu-pick-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  flex: 1;
+}
+
+.menu-pick-label {
+  line-height: 1.3;
+}
+
+.menu-pick-check {
+  flex-shrink: 0;
+  color: var(--text);
+}
+
+.menu-pick-check--empty {
+  visibility: hidden;
+}
+
 .menu-warn {
   font-size: 11px;
   color: var(--warn);
@@ -4026,15 +4078,7 @@ body.file-dragging.file-drop-hot * {
   flex-shrink: 0;
 }
 
-/* 服务方 / 模型下拉:说明靠右，不要叠到名字下面。ModeMenu 仍用默认的
-   纵向排布，那边的警告是一整句，横着放会被截断。 */
-.menu-item.picker-item {
-  flex-direction: row;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
+/* 服务方 / 模型下拉：说明在左侧正文下方，右侧勾号表示选中。 */
 .menu-item.picker-item .pick-main {
   display: inline-flex;
   align-items: center;
@@ -4056,6 +4100,85 @@ body.file-dragging.file-drop-hot * {
   height: 1px;
   margin: 4px 6px;
   background: var(--border);
+}
+
+/* 旧勾选项样式（设置页等若仍引用 menu-check 可保留）。 */
+.menu-check-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.menu-check-box {
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: var(--ok);
+  flex-shrink: 0;
+}
+
+.menu-check.active .menu-check-box {
+  border-color: var(--ok);
+}
+
+/* pill 上的规划记号：橙色，和多任务的绿 ⑂ 分色，两个状态各认各的。
+   方盒包 SVG，理由同 .chevron —— svg 是 inline 元素，直接摆进 pill 会
+   吊在基线上，比汉字高出一截。 */
+.pill-plan {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--warn);
+}
+
+.pill-plan svg {
+  display: block;
+}
+
+/* pill 上的多任务记号：开着时一直在，状态一眼可见。 */
+.pill-multitask {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--ok);
+  font-size: 12px;
+  line-height: 1;
+}
+
+/* 「转到后台」：和停止键并排，比它轻一档（描边 pill），点了不是终止而是挪走。 */
+.handoff-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* 点过之后：提醒要等模型跑完手上这批工具才生效，这段等待必须看得见 ——
+   否则用户以为没点上，再点一次就多分叉一个一样的子 agent。 */
+.handoff-pill.pending {
+  color: var(--text-faint);
+  border-style: dashed;
+  cursor: default;
+}
+
+.handoff-icon,
+.plan-parallel-icon {
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1;
+  margin-right: 4px;
 }
 
 .menu-group-title {

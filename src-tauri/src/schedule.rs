@@ -167,7 +167,9 @@ pub fn resolve_spec(when: &WhenSpec, now_ms: u64) -> Result<(Repeat, u64), Strin
         }
         WhenSpec::Weekly { weekday, time } => {
             if !(1..=7).contains(weekday) {
-                return Err(format!("weekday 要在 1（周一）到 7（周日）之间，收到 {weekday}。"));
+                return Err(format!(
+                    "weekday 要在 1（周一）到 7（周日）之间，收到 {weekday}。"
+                ));
             }
             let repeat = Repeat::Weekly {
                 weekday: *weekday,
@@ -190,10 +192,9 @@ pub fn next_run(repeat: &Repeat, after_ms: u64) -> Option<u64> {
     let (time, want_day): (&str, fn(chrono::Weekday) -> bool) = match repeat {
         Repeat::Once => return None,
         Repeat::Daily { time } => (time, |_| true),
-        Repeat::Weekdays { time } => (
-            time,
-            |w| !matches!(w, chrono::Weekday::Sat | chrono::Weekday::Sun),
-        ),
+        Repeat::Weekdays { time } => (time, |w| {
+            !matches!(w, chrono::Weekday::Sat | chrono::Weekday::Sun)
+        }),
         Repeat::Weekly { weekday, time } => {
             let target = *weekday;
             // 闭包不能捕获又当 fn 用，Weekly 单独走一条循环。
@@ -436,7 +437,10 @@ mod tests {
             now,
         )
         .expect_err("过去的时刻该拒绝");
-        assert!(err.contains("2026-09-02 12:00"), "要报当前时刻让模型自纠：{err}");
+        assert!(
+            err.contains("2026-09-02 12:00"),
+            "要报当前时刻让模型自纠：{err}"
+        );
 
         let (repeat, ts) = resolve_spec(
             &WhenSpec::Once {
@@ -462,7 +466,7 @@ mod tests {
     fn 解析_坏时间格式给修法() {
         let err = resolve_spec(
             &WhenSpec::Daily {
-                time: "8点".into(),
+                time: "8点".into()
             },
             0,
         )

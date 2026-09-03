@@ -233,9 +233,11 @@ fn shape_check(input: &Input) -> Result<(), String> {
     }
 
     if input.old_string == input.new_string {
-        return Err("`old_string` 和 `new_string` 完全相同，这次修改没有任何效果。\
+        return Err(
+            "`old_string` 和 `new_string` 完全相同，这次修改没有任何效果。\
                     请检查是不是漏改了什么。"
-            .to_owned());
+                .to_owned(),
+        );
     }
 
     Ok(())

@@ -41,7 +41,7 @@
 ### 1.2 非目标(明确不做)
 
 - **不做 CLI 产品**。内核是独立进程,但它的对外接口是 JSON-RPC,不是给人用的命令行。保留一个 `--stdio` 调试入口即可。
-- **不做 Team / 常驻 Coordinator 模式**。多 agent 的原语到"后台子 agent + 完成通知 + 续接 + 自我分叉"为止(见 §7.6);Cursor Multitask 那种"主 agent 只协调"的工作模式是提示词层的编排范式,留待原语跑稳之后单独评估。
+- **不做 Team / 常驻 Coordinator 进程**。多 agent 的运行时原语到"后台子 agent + 完成通知 + 续接 + 自我分叉"为止;"主 agent 只协调"的多任务模式是这些原语之上的**提示词层**开关(见 §7.6),不是另一个进程或角色。
 - **不做云端执行**。所有 agent 跑在本地。
 - **不追求 Linux 首发**。macOS 优先,Windows 次之,Linux 看 WebView 情况再说。
 
@@ -410,6 +410,12 @@ pub fn run_agent(
             // ── 6. 工具执行 ────────────────────────────────
             let mut tool_stream = execute_tools(turn.tool_uses(), &state, &deps, cancel.child_token());
             while let Some(ev) = tool_stream.next().await { yield ev; }
+
+            // 带外消息(界面按钮的提醒、后台子 agent 的完成通知)在这里注入:
+            // tool_result 已经成对进历史,插一条 user 消息不违反 INV-2,而
+            // 它们说的都是"你手上这件事",等整轮跑完就没有意义了(见 §7.6)。
+            // 用户插话反过来:它等收尾(上面第 5 步),中途蹦出来是惊吓。
+            for msg in deps.queue.drain_out_of_band() { state.messages.push(msg.clone()); yield AgentEvent::Message(msg); }
 
             // ── 7. 收尾 ────────────────────────────────────
             state.advance(turn, drain_queued_messages(&state.session_id));
@@ -964,6 +970,18 @@ Task 工具就是**再跑一遍主循环**(`riot_kernel::subagent`):独立 syste
 **子 agent 的会话可看**(照 Cursor:点子 agent 开一个只读标签)。`task.history` 回它到此刻为止的消息,右侧抽屉的 `subagent` 标签轮询它(1.2s,跑完即停)—— 子 agent 的消息**不走主事件流**:几个并行的侦察每秒几十条工具结果,全推给前端只为一个可能没开的面板不值。分叉只回它自己产生的那段(`view_from`),继承的父历史是父会话的对话,用户正对着它。入口三处:Task 卡片、后台任务面板、回答里的 `[标题](agent:<id>)` 链接(Task 的提示词和结果脚注都教模型这么写)。没有输入框:子 agent 的对话对象是主 agent,追加指令是主 agent 的事(`resume`)。
 
 `[约束]` 子 agent 的成本档(便宜模型、轮数上限)属于**类型**,续接沿用原类型 —— `resume` 时传 `subagent_type` 不能把一个 explore 升级成会写。
+
+**多任务模式**(Cursor Multitask 的复现,`TurnConfig::multitask`)是上面这些原语之上的一层**纪律**,不是新能力:开着时主 agent 被要求把一切非琐碎的实质工作交给后台子 agent、委派完就结束回合、前台只做协调;零到一次工具调用能答完的直接答;不要为了并行而拆碎。准则文本在 `prompt::multitask_reminder`,走和规划模式提醒同一条**消息侧注入**的路(进出模式不能让前缀缓存作废):进入后第一轮完整版(~500 token),之后每轮一句短提醒,历史被动过(压缩 / 回退 / 撤回)重注完整版;关掉那一轮说一次"恢复正常"。唤醒轮也注 —— 被通知叫醒后要接着协调,不是顺手自己干起来。
+
+界面上三个入口,对应 Cursor 的三个 SimulatedMsgReason:开关放在 composer 的模式菜单里(和规划模式同一个下拉,勾选项,pill 带 ⑂);「转到后台」只在跑轮时出现、挨着停止键(`Nudge::StartMultitasking`:让模型 `resume="self"` 分叉手头的活然后停下);「并行构建」是计划批准卡的第三个按钮(`Nudge::BuildInParallel`:批准 + 进入多任务 + 按 todo 依赖分层、每层一个后台子 agent、测试留给最后一个)。两个按钮都是 `turn.nudge`:一条 `QueuedKind::Nudge` 的队列条目(面板看不见),内核在下一个安全点注入 —— 按钮是对正在进行的工作说话,没有轮在跑就落空。
+
+`[约束]` **两个按钮的注入时机是「下一批工具结果就位」,不是「整轮跑完」**,走 `InputQueue::drain_out_of_band`(和用户插话的收尾 `drain` 是两个取用点,见 §5)。这一点错了功能就等于没有:实测过的表现是用户点了「转到后台」毫无反应,模型把手头的活从头做到尾、写完总结,收尾 drain 才读到提醒,然后开一轮去分叉一个做已经做完的活的子 agent。同理「并行构建」会等到整批代码写完才谈并行。后台子 agent 的完成通知同路 —— 它也是对手头这件事说话。
+
+`[约束]` 轮次半路收场时(用户按停止、出错)队列残留三种处置,见 `run_locked` 的收尾:插话交前端面板、通知攒进 `pending_notices`、**按钮提醒作废**。提醒留到下一轮的话,用户下次随便问句什么都会被无端分叉到后台。
+
+`[约束]` 「并行构建」的指示要在**批准之前**排队:批准放行 ExitPlanMode 的结果后内核立刻 drain,指示紧跟在「已批准」后面;反过来它要等到下一批工具之后。宿主收到 BuildInParallel 时顺手把会话的 multitask 记成 true —— 内核那边虽然自己切了,下一轮 TurnConfig 传回 false 就又关上了。
+
+界面这头,「转到后台」点过之后进入 `pending` 态(虚线描边、文案变「正在转到后台…」、禁用)。这不是装饰:提醒最快也要等当前这批工具跑完才生效,而那可能是一次几十秒的搜索 —— 没有这个反馈,用户会以为没点上、再点一次,于是两条提醒排进去,模型分叉两个一样的子 agent。轮次一结束就复位。
 
 ---
 

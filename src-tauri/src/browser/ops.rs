@@ -1252,9 +1252,11 @@ pub async fn source_of(tab: Tab<'_>, object_id: &str) -> Result<String, BrowserE
         .await?;
     let v = &r["result"]["value"];
     if v.is_null() {
-        return Ok("没找到源码信息。这个页面多半是生产构建（去掉了组件调试数据），\
+        return Ok(
+            "没找到源码信息。这个页面多半是生产构建（去掉了组件调试数据），\
                    或者不是 React / Vue —— 源码映射只在开发构建里有。"
-            .to_owned());
+                .to_owned(),
+        );
     }
     let fw = v["framework"].as_str().unwrap_or("?");
     let comp = v["component"].as_str();

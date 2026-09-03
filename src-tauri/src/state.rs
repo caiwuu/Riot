@@ -92,6 +92,8 @@ pub struct SessionInfo {
     pub mode: riot_protocol::permission::PermissionMode,
     /// 会话级思考策略。和 `sampling` 同理，前端刷新后靠它恢复显示。
     pub thinking: riot_protocol::ThinkingPolicy,
+    /// 多任务模式。显示以宿主为准（理由同 `mode`）。
+    pub multitask: bool,
     /// 会话级 Python 虚拟环境（venv 根目录）。None = 用宿主默认环境。
     pub python_venv: Option<String>,
     /// 会话级追加的系统提示词。None = 只用内置提示词。
@@ -132,6 +134,8 @@ struct Meta {
     python_venv: Option<String>,
     system_prompt: Option<String>,
     thinking: riot_protocol::ThinkingPolicy,
+    /// 多任务模式（见 riot_protocol::TurnConfig::multitask）。
+    multitask: bool,
     /// 有没有轮子在跑(send_turn 置真,Done 事件清掉)。侧栏指示点用。
     busy: bool,
     /// 内核那边已经水合过这个会话。resume 是幂等的,这个标记只是省掉
@@ -277,6 +281,7 @@ impl AppState {
                     python_venv: p.python_venv,
                     system_prompt: p.system_prompt,
                     thinking: p.thinking,
+                    multitask: p.multitask,
                     busy: false,
                     hydrated: false,
                 },
@@ -530,6 +535,7 @@ impl AppState {
                 python_venv: None,
                 system_prompt: None,
                 thinking: riot_protocol::ThinkingPolicy::default(),
+                multitask: false,
                 busy: false,
                 hydrated: false,
             },
@@ -544,6 +550,7 @@ impl AppState {
             sampling: crate::config::Sampling::default(),
             mode,
             thinking: riot_protocol::ThinkingPolicy::default(),
+            multitask: false,
             python_venv: None,
             system_prompt: None,
             busy: false,
@@ -567,6 +574,7 @@ impl AppState {
                 sampling: m.sampling,
                 mode: m.mode,
                 thinking: m.thinking,
+                multitask: m.multitask,
                 python_venv: m.python_venv.clone(),
                 system_prompt: m.system_prompt.clone(),
                 busy: m.busy,
@@ -851,6 +859,7 @@ impl AppState {
                 python_venv: m.python_venv.clone(),
                 system_prompt: m.system_prompt.clone(),
                 thinking: m.thinking,
+                multitask: m.multitask,
             })
             .collect();
         sessions.sort_by_key(|p| p.seq);
@@ -1111,7 +1120,7 @@ impl AppState {
         let distill = named(config.web.distill_target());
         let describe = named(config.vision_target());
 
-        let (mode, python_venv, system_prompt, thinking) = {
+        let (mode, python_venv, system_prompt, thinking, multitask) = {
             let g = self.0.sessions.lock().await;
             let m = g.get(session_id).ok_or(HostError::NoSession)?;
             (
@@ -1119,6 +1128,7 @@ impl AppState {
                 m.python_venv.clone(),
                 m.system_prompt.clone(),
                 m.thinking,
+                m.multitask,
             )
         };
 
@@ -1151,6 +1161,7 @@ impl AppState {
             python_venv,
             system_prompt_extra: system_prompt,
             thinking,
+            multitask,
         })
     }
 
@@ -1455,6 +1466,39 @@ impl AppState {
         }
         self.persist_index().await;
         Ok(())
+    }
+
+    /// 开/关会话的多任务模式。下一轮生效（随 TurnConfig 传给内核）。
+    pub async fn set_multitask(&self, session_id: &str, on: bool) -> HostResult<()> {
+        {
+            let mut g = self.0.sessions.lock().await;
+            g.get_mut(session_id).ok_or(HostError::NoSession)?.multitask = on;
+        }
+        self.persist_index().await;
+        Ok(())
+    }
+
+    /// 界面按钮（转到后台 / 并行构建）→ 内核往当前轮塞一条带外提醒。
+    /// false = 此刻没有轮在跑，按钮落空。
+    pub async fn nudge(&self, session_id: &str, nudge: riot_protocol::Nudge) -> HostResult<bool> {
+        self.require_session(session_id).await?;
+        // 「并行构建」= 进入多任务模式。内核那边会自己切，宿主这边也要记下，
+        // 否则下一轮 TurnConfig 又把 false 传回去。
+        if nudge == riot_protocol::Nudge::BuildInParallel {
+            self.set_multitask(session_id, true).await?;
+        }
+        match self
+            .kernel_call(RpcRequest::TurnNudge {
+                session_id: sid(session_id),
+                nudge,
+            })
+            .await?
+        {
+            RpcResponse::Nudged { queued } => Ok(queued),
+            _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
+                "turn.nudge 回了意外的应答".into(),
+            ))),
+        }
     }
 
     /// 探测会话根目录下的常见虚拟环境（`.venv` / `venv`）。

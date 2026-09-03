@@ -358,7 +358,10 @@ mod tests {
         assert_eq!(gap_line(29 * MIN), None, "半小时内是正常停顿");
         let half_hour = gap_line(30 * MIN).expect("到阈值该说");
         assert!(half_hour.contains("约 30 分钟"), "{half_hour}");
-        assert!(half_hour.contains("重新核实"), "警示要指路行动：{half_hour}");
+        assert!(
+            half_hour.contains("重新核实"),
+            "警示要指路行动：{half_hour}"
+        );
 
         let hours = gap_line(5 * 60 * MIN).expect("有值");
         assert!(hours.contains("约 5 小时"), "{hours}");
@@ -388,7 +391,10 @@ mod tests {
             env_msg("m3", "现在是 2026-08-31（周一）16:37，UTC+8。"),
             env_msg("m4", &new_snap),
         ];
-        assert_eq!(last_snapshot_text(&msgs).as_deref(), Some(new_snap.as_str()));
+        assert_eq!(
+            last_snapshot_text(&msgs).as_deref(),
+            Some(new_snap.as_str())
+        );
 
         assert_eq!(
             last_snapshot_text(&msgs[..1]),

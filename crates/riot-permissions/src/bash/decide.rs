@@ -471,7 +471,11 @@ mod tests {
     #[test]
     fn 只读命令读敏感文件不被拦() {
         let rs = RuleSet::default();
-        for cmd in ["cat .git/config", "cat /home/u/.zshrc", "grep foo .git/config"] {
+        for cmd in [
+            "cat .git/config",
+            "cat /home/u/.zshrc",
+            "grep foo .git/config",
+        ] {
             assert_eq!(verdict(cmd, &rs), "allow", "{cmd}");
         }
     }

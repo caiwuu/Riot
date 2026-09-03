@@ -23,6 +23,7 @@ import type {
   McpServerStatus as GeneratedMcpServerStatus,
   Message,
   MissedRun,
+  Nudge as GeneratedNudge,
   PendingAsk,
   PermissionAsk,
   PermissionMode,
@@ -343,6 +344,8 @@ export interface SessionInfo {
   mode: PermissionMode;
   /** 会话级思考策略。 */
   thinking: ThinkingPolicy;
+  /** 多任务模式：主 agent 只协调，实质工作交给后台子 agent。显示以宿主为准。 */
+  multitask: boolean;
   /** 会话级 Python 虚拟环境（venv 根目录）。null = 宿主默认环境。 */
   pythonVenv: string | null;
   /** 会话级追加的系统提示词。null = 只用内置提示词。 */
@@ -740,6 +743,23 @@ export function setSessionSystemPrompt(sessionId: string, prompt: string): Promi
 /** 会话级思考策略。下一轮生效。 */
 export function setSessionThinking(sessionId: string, thinking: ThinkingPolicy): Promise<void> {
   return invoke("set_session_thinking", { sessionId, thinking });
+}
+
+/** 会话的多任务模式开关。下一轮生效。 */
+export function setSessionMultitask(sessionId: string, on: boolean): Promise<void> {
+  return invoke("set_session_multitask", { sessionId, on });
+}
+
+/** 界面按钮：转到后台 / 并行构建。生成类型的别名。 */
+export type Nudge = GeneratedNudge;
+
+/**
+ * 往当前轮塞一条带外提醒（转到后台 / 并行构建）。内核在下一个安全点注入 ——
+ * 手头这批工具跑完、模型下次开口之前，不等整轮结束。
+ * false = 此刻没有轮在跑，按钮落空。
+ */
+export function turnNudge(sessionId: string, nudge: Nudge): Promise<boolean> {
+  return invoke<boolean>("turn_nudge", { sessionId, nudge });
 }
 
 export function setPermissionMode(

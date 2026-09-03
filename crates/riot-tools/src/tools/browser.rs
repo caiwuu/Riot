@@ -249,7 +249,11 @@ impl Tool for BrowserScreenshot {
     }
 
     fn describe(&self, input: &serde_json::Value) -> String {
-        if input.get("deterministic").and_then(serde_json::Value::as_bool) == Some(true) {
+        if input
+            .get("deterministic")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
             "给当前页面截图（冻结动画）".to_owned()
         } else {
             "给当前页面截图".to_owned()
@@ -275,8 +279,10 @@ impl Tool for BrowserScreenshot {
     }
 
     async fn call(&self, input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
-        let deterministic =
-            input.get("deterministic").and_then(serde_json::Value::as_bool) == Some(true);
+        let deterministic = input
+            .get("deterministic")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
         let full = match ctx.browser.screenshot(deterministic).await {
             Ok(d) => d,
             Err(e) => return ToolOutcome::failed(unavailable_hint(&e)),
@@ -743,8 +749,15 @@ fn format_perf(raw: &str) -> String {
             .iter()
             .filter_map(|r| {
                 let url = r.get("url").and_then(serde_json::Value::as_str)?;
-                let ms = r.get("ms").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-                let kb = r.get("bytes").and_then(serde_json::Value::as_f64).unwrap_or(0.0) / 1024.0;
+                let ms = r
+                    .get("ms")
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(0.0);
+                let kb = r
+                    .get("bytes")
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(0.0)
+                    / 1024.0;
                 Some(format!("  {ms:.0} ms  {kb:.0} KB  {url}"))
             })
             .collect();
@@ -756,9 +769,7 @@ fn format_perf(raw: &str) -> String {
 
     if lines.len() == 1 {
         // 一个指标都没取到:多半是还没导航，或页面不支持 Performance API。
-        return format!(
-            "没取到性能指标。可能页面还没加载完，或者不是常规网页。原始数据：{raw}"
-        );
+        return format!("没取到性能指标。可能页面还没加载完，或者不是常规网页。原始数据：{raw}");
     }
     lines.join("\n")
 }
@@ -924,9 +935,7 @@ impl Tool for BrowserReadTab {
             Ok(s) if s.trim().is_empty() => {
                 ToolOutcome::ok_text(format!("标签页 [{tab}] 上没有可识别的结构。"))
             }
-            Ok(s) => ToolOutcome::ok_text(format!(
-                "标签页 [{tab}]（旁观，未切走当前页）：\n{s}"
-            )),
+            Ok(s) => ToolOutcome::ok_text(format!("标签页 [{tab}]（旁观，未切走当前页）：\n{s}")),
             Err(e) => ToolOutcome::failed(interact_hint(e)),
         }
     }
@@ -998,9 +1007,7 @@ impl Tool for BrowserHar {
                 path.display()
             )),
             // 写不进也别把整条 HAR 塞进上下文（可能几百 KB）——如实说写失败。
-            Err(e) => ToolOutcome::failed(format!(
-                "抓到了 {count} 条请求，但写 HAR 文件失败：{e}"
-            )),
+            Err(e) => ToolOutcome::failed(format!("抓到了 {count} 条请求，但写 HAR 文件失败：{e}")),
         }
     }
 }
@@ -1413,7 +1420,10 @@ impl Tool for BrowserFillForm {
                     i + 1
                 ));
             };
-            let value = field.get("value").and_then(|v| v.as_str()).unwrap_or_default();
+            let value = field
+                .get("value")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             // 逐个字段都不 submit —— 中途按回车可能提前提交，把还没填的字段
             // 丢在半张表上。提交统一留到最后走 submit 目标。
             match ctx.browser.type_text(t.clone(), value, false).await {
@@ -3396,7 +3406,10 @@ impl Tool for BrowserHandoff {
     }
 
     fn describe(&self, input: &serde_json::Value) -> String {
-        let what = input.get("prompt").and_then(|v| v.as_str()).unwrap_or("接管操作");
+        let what = input
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("接管操作");
         format!("请用户操作：{what}")
     }
 
@@ -4635,7 +4648,10 @@ mod tests {
         else {
             panic!("应当成功：{out:?}");
         };
-        assert!(text.contains("BrowserSnapshot") || text.contains("BrowserView"), "{text}");
+        assert!(
+            text.contains("BrowserSnapshot") || text.contains("BrowserView"),
+            "{text}"
+        );
         assert!(text.contains("过一下验证码"), "要带上做了什么：{text}");
     }
 

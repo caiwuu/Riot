@@ -121,19 +121,40 @@ impl SessionSink {
 #[derive(Debug)]
 pub struct SinkClosed;
 
-/// 排队中的一条插话。
-///
-/// 同时留着原始输入和构建好的消息：内核注入用后者（转述等慢活已完成），
-/// 用户撤回编辑用前者 —— 从构建好的消息反推原始输入会把图片还原成转述文字。
+/// 排队中的一条待注入消息。
 struct QueuedEntry {
     /// 条目 id，同时也是构建好的消息的 MessageId —— 前端靠它把
     /// "排队面板里的条目"和"注入后回流的消息"对上。
     id: String,
-    /// `None` = 这不是用户的插话，是后台子 agent 的完成通知（见
-    /// [`Session::deliver_task_notice`]）：不进排队面板、不能撤回编辑，
-    /// 只是搭同一条"安全点注入"的路。
-    input: Option<TurnInput>,
+    kind: QueuedKind,
     msg: Message,
+}
+
+/// 条目的来源。决定它**什么时候**注入、排队面板看不看得见、轮次半路
+/// 收场时怎么处置 —— 三件事都不一样，所以这里是三个变体而不是一个
+/// `Option<TurnInput>`。
+enum QueuedKind {
+    /// 用户在跑轮中发的消息。等当前任务**完全跑完**才注入（Cursor 语义，
+    /// 见 riot_core 的收尾 drain）；面板上可见、可撤回编辑。
+    ///
+    /// 带着原始输入而不只是构建好的消息：注入用后者（转述等慢活已完成），
+    /// 撤回编辑用前者 —— 从消息反推输入会把图片还原成转述文字。
+    Interjection(TurnInput),
+    /// 后台子 agent 的完成通知（见 [`Session::deliver_task_notice`]）。
+    /// 工具轮边界就注入；面板看不见、删不到。轮被中断时攒进
+    /// `pending_notices` 等下一轮。
+    TaskNotice,
+    /// 界面按钮的带外提醒（转到后台 / 并行构建，见 [`Session::nudge`]）。
+    /// 同样工具轮边界注入 —— 它是对正在进行的工作说话，等整轮跑完就
+    /// 没有意义了。同理，轮被中断时直接作废，不留到下一轮。
+    Nudge,
+}
+
+impl QueuedKind {
+    /// 用户插话（面板可见、收尾才注入）还是带外消息（工具轮边界注入）。
+    fn is_interjection(&self) -> bool {
+        matches!(self, Self::Interjection(_))
+    }
 }
 
 /// 给前端排队面板的一条摘要。形状在 protocol(跨进程走 queue.list)。
@@ -165,13 +186,25 @@ impl HostInputQueue {
         std::mem::take(&mut *self.0.lock().expect("插话队列锁不该中毒"))
     }
 
+    /// 取走带外条目（通知、按钮提醒），用户插话留在队列里等收尾。
+    fn take_out_of_band(&self) -> Vec<QueuedEntry> {
+        let mut g = self.0.lock().expect("插话队列锁不该中毒");
+        let (out, keep) = std::mem::take(&mut *g)
+            .into_iter()
+            .partition(|e| !e.kind.is_interjection());
+        *g = keep;
+        out
+    }
+
     fn snapshot(&self) -> Vec<QueuedSummary> {
         self.0
             .lock()
             .expect("插话队列锁不该中毒")
             .iter()
             .filter_map(|e| {
-                let input = e.input.as_ref()?;
+                let QueuedKind::Interjection(input) = &e.kind else {
+                    return None;
+                };
                 Some(QueuedSummary {
                     id: e.id.clone(),
                     text: input.text.clone(),
@@ -182,24 +215,33 @@ impl HostInputQueue {
             .collect()
     }
 
-    /// 只删用户插话。通知条目前端看不见，也删不到 —— 它们的去处由内核定。
+    /// 只删用户插话。带外条目前端看不见，也删不到 —— 它们的去处由内核定。
     fn remove(&self, id: &str) -> bool {
         let mut g = self.0.lock().expect("插话队列锁不该中毒");
         let before = g.len();
-        g.retain(|e| !(e.id == id && e.input.is_some()));
+        g.retain(|e| !(e.id == id && e.kind.is_interjection()));
         g.len() < before
     }
 
     fn take(&self, id: &str) -> Option<TurnInput> {
         let mut g = self.0.lock().expect("插话队列锁不该中毒");
-        let at = g.iter().position(|e| e.id == id && e.input.is_some())?;
-        g.remove(at).input
+        let at = g
+            .iter()
+            .position(|e| e.id == id && e.kind.is_interjection())?;
+        match g.remove(at).kind {
+            QueuedKind::Interjection(input) => Some(input),
+            _ => None,
+        }
     }
 }
 
 impl riot_core::state::InputQueue for HostInputQueue {
     fn drain(&self) -> Vec<Message> {
         self.take_all().into_iter().map(|e| e.msg).collect()
+    }
+
+    fn drain_out_of_band(&self) -> Vec<Message> {
+        self.take_out_of_band().into_iter().map(|e| e.msg).collect()
     }
 }
 
@@ -533,6 +575,13 @@ pub struct Session {
     /// 子 agent 收尾时会往一个正在被删的 transcript 里写、唤起一轮没人看的
     /// 对话。
     closing: AtomicBool,
+    /// 多任务模式（见 `prompt::multitask_reminder`）。宿主是权威，每轮现设。
+    multitask: AtomicBool,
+    /// 完整准则已经在历史里了：之后每轮只注短提醒。历史被动过（压缩、
+    /// 回退、撤回）就清掉，下一轮重注完整版。
+    multitask_announced: AtomicBool,
+    /// 刚关掉多任务模式，下一轮要说一声"恢复正常"。只说一次。
+    multitask_exit_pending: AtomicBool,
 }
 
 /// 标题截断规则：去空白、取前 40 个字符。
@@ -643,6 +692,9 @@ impl Session {
             fork_seed: Mutex::new(None),
             pending_notices: std::sync::Mutex::new(Vec::new()),
             closing: AtomicBool::new(false),
+            multitask: AtomicBool::new(false),
+            multitask_announced: AtomicBool::new(false),
+            multitask_exit_pending: AtomicBool::new(false),
         }
     }
 
@@ -698,6 +750,9 @@ impl Session {
             fork_seed: Mutex::new(None),
             pending_notices: std::sync::Mutex::new(Vec::new()),
             closing: AtomicBool::new(false),
+            multitask: AtomicBool::new(false),
+            multitask_announced: AtomicBool::new(false),
+            multitask_exit_pending: AtomicBool::new(false),
         }
     }
 
@@ -823,6 +878,97 @@ impl Session {
         *self.mode.lock().await = m;
     }
 
+    /// 开/关多任务模式。宿主每轮现设（和 mode 同一条规矩）。
+    ///
+    /// 边沿才有动作：开 → 下一轮注完整准则；关 → 下一轮说一声退出。
+    /// 同值重设什么都不动，否则每轮都会重注一遍完整版。
+    pub fn set_multitask(&self, on: bool) {
+        let was = self.multitask.swap(on, Ordering::Relaxed);
+        if on && !was {
+            self.multitask_announced.store(false, Ordering::Relaxed);
+            self.multitask_exit_pending.store(false, Ordering::Relaxed);
+        } else if !on && was {
+            self.multitask_exit_pending.store(true, Ordering::Relaxed);
+        }
+    }
+
+    pub fn multitask(&self) -> bool {
+        self.multitask.load(Ordering::Relaxed)
+    }
+
+    /// 历史被动过（压缩、回退、撤回）：完整准则可能不在了，下一轮重注。
+    fn forget_multitask_announce(&self) {
+        self.multitask_announced.store(false, Ordering::Relaxed);
+    }
+
+    /// 这一轮该附哪种多任务提醒。跟在用户正文之后，和规划模式提醒同位。
+    ///
+    /// 有副作用（翻 announced / exit_pending 的状态），每轮只能调一次。
+    fn multitask_note(&self) -> Option<UserContent> {
+        use crate::prompt::{MultitaskNote, multitask_reminder};
+        if self.multitask.load(Ordering::Relaxed) {
+            let announced = self.multitask_announced.swap(true, Ordering::Relaxed);
+            Some(multitask_reminder(if announced {
+                MultitaskNote::Short
+            } else {
+                MultitaskNote::Full
+            }))
+        } else if self.multitask_exit_pending.swap(false, Ordering::Relaxed) {
+            Some(multitask_reminder(MultitaskNote::Exit))
+        } else {
+            None
+        }
+    }
+
+    /// 界面上的按钮（转到后台 / 并行构建）→ 一条带外提醒塞进当前轮。
+    ///
+    /// 走队列的**带外**那一半（[`QueuedKind::Nudge`]，面板看不见），内核在
+    /// 下一个安全点注入 —— 正是"这一批工具结果全部就位、模型还没开口"
+    /// 的那一刻，所以最迟一次工具调用之后就生效，不必等整轮跑完。没有轮
+    /// 在跑返回 false：按钮的语义是对正在进行的工作说话，闲着时没有对象。
+    ///
+    /// 「并行构建」顺手把会话切进多任务模式（Cursor 同款：点它就算进入
+    /// Multitask）；宿主那边的开关由前端同步，下一轮 TurnConfig 传回来
+    /// 是同一个值。
+    pub async fn nudge(&self, nudge: riot_protocol::Nudge) -> bool {
+        use riot_protocol::Nudge;
+        let g = self.running.lock().await;
+        if g.is_none() {
+            return false;
+        }
+        let content = match nudge {
+            Nudge::StartMultitasking => crate::prompt::nudge_start_multitasking(),
+            Nudge::BuildInParallel => {
+                self.set_multitask(true);
+                // 完整准则跟着这条一起进去（并行构建的提醒引用了它）。
+                self.multitask_announced.store(true, Ordering::Relaxed);
+                crate::prompt::nudge_build_in_parallel()
+            }
+        };
+        let mut msg_content = Vec::new();
+        if matches!(nudge, Nudge::BuildInParallel) {
+            msg_content.push(crate::prompt::multitask_reminder(
+                crate::prompt::MultitaskNote::Full,
+            ));
+        }
+        msg_content.push(content);
+        let id = self.ids.next_id("msg");
+        self.queue.push(QueuedEntry {
+            id: id.clone(),
+            kind: QueuedKind::Nudge,
+            msg: Message::User {
+                id: MessageId::from_raw(id),
+                content: msg_content,
+                meta: MessageMeta {
+                    synthetic: true,
+                    ..Default::default()
+                },
+            },
+        });
+        tracing::info!(session = %self.id.as_str(), ?nudge, "界面提醒已排队，下一批工具结果就位时注入");
+        true
+    }
+
     pub async fn mode(&self) -> PermissionMode {
         *self.mode.lock().await
     }
@@ -941,7 +1087,7 @@ impl Session {
             if g.is_some() {
                 self.queue.push(QueuedEntry {
                     id: notice.id().as_str().to_owned(),
-                    input: None,
+                    kind: QueuedKind::TaskNotice,
                     msg: notice,
                 });
                 tracing::info!(session = %self.id.as_str(), "后台任务通知已排队，安全点注入");
@@ -1009,9 +1155,9 @@ impl Session {
     }
 
     /// 提交一轮输入：没有轮在跑就把轮子 spawn 到后台并返回 `None`；
-    /// 有轮在跑就入队并返回**条目 id** —— 内核在安全点（工具结果全部
-    /// 就位后）注入，事件流把它当普通消息推回来，消息的 id 就是这个
-    /// 条目 id，前端靠它把排队面板的条目转成对话气泡。
+    /// 有轮在跑就入队并返回**条目 id** —— 内核在当前任务跑完时注入
+    /// （Cursor 语义，不夹进工具轮之间），事件流把它当普通消息推回来，
+    /// 消息的 id 就是这个条目 id，前端靠它把排队面板的条目转成对话气泡。
     ///
     /// `[约束]` "排队还是开轮"的判定和 `running` 的置位在**同一次锁**下。
     /// 分开做的话，两次几乎同时的发送会一个开轮、一个报"上一轮还在
@@ -1055,7 +1201,7 @@ impl Session {
                 if g.is_some() {
                     self.queue.push(QueuedEntry {
                         id: id.clone(),
-                        input: Some(input),
+                        kind: QueuedKind::Interjection(input),
                         msg,
                     });
                     return Some(id);
@@ -1351,6 +1497,7 @@ impl Session {
         self.pending_asks.clear().await;
         *self.env_seen.lock().await = env_seen;
         *self.env_band.lock().await = 0;
+        self.forget_multitask_announce();
         self.drop_precompact().await;
         Ok(keep_id)
     }
@@ -1433,6 +1580,7 @@ impl Session {
             }
             *self.env_seen.lock().await = env_seen;
             *self.env_band.lock().await = 0;
+            self.forget_multitask_announce();
             self.drop_precompact().await;
             Ok(())
         })
@@ -1542,6 +1690,7 @@ impl Session {
         }
         *self.env_seen.lock().await = env_seen;
         *self.env_band.lock().await = 0;
+        self.forget_multitask_announce();
         self.drop_precompact().await;
         Some(empty)
     }
@@ -1607,12 +1756,23 @@ impl Session {
         // key，消息根本没进历史也没落盘）。留着的话，界面上会挂着一条
         // 永远等不到回复、重启之后又消失的用户消息。
         *self.pending_user.lock().await = None;
-        // 用户插话由前端面板接管（中断后自动续、出错后停下等用户）；后台
-        // 任务的通知前端看不见，攒回来等下一轮开工时注入 —— 不在这里立刻
-        // 唤起新的一轮：用户刚按了停止，多半是要改说法，这时候冒出一轮
-        // "收到通知"的对话是在和他抢话。
-        let (notices, interjections): (Vec<_>, Vec<_>) =
-            leftover.into_iter().partition(|e| e.input.is_none());
+        // 三种残留三种处置：
+        // - 用户插话由前端面板接管（中断后自动续、出错后停下等用户）；
+        // - 后台任务的通知前端看不见，攒回来等下一轮开工时注入 —— 不在
+        //   这里立刻唤起新的一轮：用户刚按了停止，多半是要改说法，这时候
+        //   冒出一轮"收到通知"的对话是在和他抢话；
+        // - 界面按钮的提醒**作废**。「转到后台」说的是"你手上这件事挪到
+        //   后台去"，而这件事已经收场了 —— 留到下一轮，用户下次随便问句
+        //   什么都会被无端分叉到后台。
+        let mut notices = Vec::new();
+        let (mut interjections, mut nudges) = (0usize, 0usize);
+        for e in leftover {
+            match e.kind {
+                QueuedKind::TaskNotice => notices.push(e.msg),
+                QueuedKind::Interjection(_) => interjections += 1,
+                QueuedKind::Nudge => nudges += 1,
+            }
+        }
         if !notices.is_empty() {
             tracing::info!(
                 count = notices.len(),
@@ -1621,13 +1781,13 @@ impl Session {
             self.pending_notices
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .extend(notices.into_iter().map(|e| e.msg));
+                .extend(notices);
         }
-        if !interjections.is_empty() {
-            tracing::debug!(
-                count = interjections.len(),
-                "清掉没赶上安全点的插话，前端面板接管"
-            );
+        if interjections > 0 {
+            tracing::debug!(count = interjections, "清掉没赶上收尾的插话，前端面板接管");
+        }
+        if nudges > 0 {
+            tracing::info!(count = nudges, "轮次已收场，界面提醒作废");
         }
         result
     }
@@ -1953,6 +2113,8 @@ impl Session {
         // 尾巴里若有快照，它在续接消息之后、模型看得见，指纹指回它。
         *self.env_seen.lock().await = crate::env::last_snapshot_text(tail);
         *self.env_band.lock().await = 0;
+        // 多任务准则的完整版多半被总结吞了，下一轮重注。
+        self.forget_multitask_announce();
         // 原文归档：总结是有损的，报错原文、路径、用户原话要有地方可查。
         // 写不出来也不拦路（续接消息就不提它）。
         let archive = self.archive_compacted(head).await;
@@ -2090,6 +2252,7 @@ impl Session {
             // 不归零下一轮差分判"没变化"），原文归档给模型翻。
             *self.env_seen.lock().await = crate::env::last_snapshot_text(&compacted);
             *self.env_band.lock().await = 0;
+            self.forget_multitask_announce();
             let _ = self.archive_compacted(&head).await;
             self.ui_archive.lock().await.extend(head);
         }
@@ -2831,6 +2994,9 @@ impl Session {
                 // 规划模式的约束跟在最后一条通知末尾，和用户消息同一个位置逻辑。
                 if let Some(Message::User { content, .. }) = all.last_mut() {
                     content.extend(crate::prompt::plan_mode_reminder(mode));
+                    // 唤醒轮也要记得自己是协调者：被通知叫醒后接着综合、
+                    // 启动下一批，而不是顺手自己干起来。
+                    content.extend(self.multitask_note());
                 }
                 for m in all {
                     push_notice(&mut history, m, now);
@@ -2907,6 +3073,8 @@ impl Session {
                 // 状态的注解，不是消息本身，和 extra_context 同一个位置逻辑。
                 // 为什么不进 system prompt，见 plan_mode_reminder 的取舍注释。
                 content.extend(crate::prompt::plan_mode_reminder(mode));
+                // 多任务模式的准则同位（见 prompt::multitask_reminder）。
+                content.extend(self.multitask_note());
                 let user_msg = Message::User {
                     id: user_id.clone(),
                     content,
@@ -4872,7 +5040,7 @@ mod tests {
     fn queued_entry(id: &str, text: &str) -> QueuedEntry {
         QueuedEntry {
             id: id.into(),
-            input: Some(TurnInput {
+            kind: QueuedKind::Interjection(TurnInput {
                 text: text.into(),
                 ..Default::default()
             }),
@@ -5101,6 +5269,156 @@ mod tests {
             "关闭后的通知该丢弃"
         );
         assert!(s.running.lock().await.is_none());
+    }
+
+    fn note_text(c: Option<UserContent>) -> Option<String> {
+        match c {
+            Some(UserContent::Attachment(Attachment::SystemReminder { text })) => Some(text),
+            None => None,
+            other => panic!("提醒该是 SystemReminder：{other:?}"),
+        }
+    }
+
+    /// 完整准则只注一次，之后是短提醒；历史被动过重注完整版；关掉说一次退出。
+    #[test]
+    fn 多任务提醒_首轮完整_之后简短_关掉说一次() {
+        let s = Session::new(
+            SessionId::from_raw("s1"),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        );
+        assert!(note_text(s.multitask_note()).is_none(), "没开就不注");
+
+        s.set_multitask(true);
+        let first = note_text(s.multitask_note()).expect("开了要注");
+        assert!(first.contains("核心规则"), "首轮完整版：{first}");
+        let second = note_text(s.multitask_note()).expect("之后每轮都注");
+        assert!(second.contains("仍处于"), "之后简短：{second}");
+        assert!(!second.contains("核心规则"));
+
+        s.set_multitask(true);
+        assert!(
+            note_text(s.multitask_note()).unwrap().contains("仍处于"),
+            "同值重设不重注完整版"
+        );
+
+        s.forget_multitask_announce();
+        assert!(
+            note_text(s.multitask_note()).unwrap().contains("核心规则"),
+            "历史动过要重注完整版"
+        );
+
+        s.set_multitask(false);
+        let exit = note_text(s.multitask_note()).expect("关掉说一声");
+        assert!(exit.contains("退出多任务模式"), "{exit}");
+        assert!(note_text(s.multitask_note()).is_none(), "退出只说一次");
+    }
+
+    /// 界面按钮：有轮在跑才排得上；「并行构建」顺手打开多任务、连完整准则一起送。
+    #[tokio::test]
+    async fn 界面提醒只在跑轮时排队_并行构建打开多任务() {
+        let s = Session::new(
+            SessionId::from_raw("s1"),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        );
+        assert!(
+            !s.nudge(riot_protocol::Nudge::StartMultitasking).await,
+            "闲着没对象"
+        );
+
+        *s.running.lock().await = Some(CancellationToken::new());
+        assert!(s.nudge(riot_protocol::Nudge::StartMultitasking).await);
+        assert!(s.queue_snapshot().is_empty(), "提醒不进排队面板");
+
+        assert!(s.nudge(riot_protocol::Nudge::BuildInParallel).await);
+        assert!(s.multitask(), "并行构建 = 进入多任务模式");
+
+        use riot_core::state::InputQueue;
+        // 带外通道取 —— 这就是主循环在工具结果就位时走的那条路。等收尾
+        // drain 才拿到的话，「转到后台」在用户眼里就是个没反应的按钮。
+        let drained = s.queue.drain_out_of_band();
+        assert_eq!(drained.len(), 2);
+        let texts: Vec<String> = drained.iter().map(|m| format!("{m:?}")).collect();
+        assert!(texts[0].contains("转到后台") && texts[0].contains("resume=\\\"self\\\""));
+        assert!(texts[1].contains("并行构建") && texts[1].contains("核心规则"));
+        assert!(
+            note_text(s.multitask_note()).unwrap().contains("仍处于"),
+            "完整版已随提醒送过，下一轮只要短的"
+        );
+    }
+
+    /// 带外通道只带走带外条目：用户插话留在队列里等收尾。
+    ///
+    /// 搞混了两种时机都会坏：插话跟着提醒中途蹦出来（惊吓），或者提醒
+    /// 跟着插话等到整轮跑完（按钮失效）。
+    #[tokio::test]
+    async fn 带外注入不碰用户插话() {
+        use riot_core::state::InputQueue;
+        let s = Arc::new(Session::new(
+            SessionId::from_raw("s1"),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        ));
+        *s.running.lock().await = Some(CancellationToken::new());
+        s.queue.push(queued_entry("m_q1", "用户插话"));
+        assert!(s.nudge(riot_protocol::Nudge::StartMultitasking).await);
+        s.deliver_task_notice(notice("agt_1")).await;
+
+        let oob = s.queue.drain_out_of_band();
+        assert_eq!(oob.len(), 2, "提醒和完成通知都是带外的");
+        let snap = s.queue_snapshot();
+        assert_eq!(snap.len(), 1, "插话还在面板上等收尾：{snap:?}");
+        assert_eq!(snap[0].id, "m_q1");
+        assert_eq!(s.queue.drain().len(), 1, "收尾 drain 拿到的只有插话");
+    }
+
+    /// 轮次半路收场（中断 / 出错）时的残留处置：通知留到下一轮，界面
+    /// 提醒作废。
+    ///
+    /// 提醒留着的话，用户下次随便问句什么都会被无端分叉到后台 —— 它是对
+    /// 当时那件事说的话，那件事已经收场了。
+    #[tokio::test]
+    async fn 轮次收场时界面提醒作废而通知留着() {
+        let s = Arc::new(Session::new(
+            SessionId::from_raw("s1"),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        ));
+        s.queue.push(QueuedEntry {
+            id: "m_nudge".into(),
+            kind: QueuedKind::Nudge,
+            msg: Message::User {
+                id: MessageId::from_raw("m_nudge"),
+                content: vec![crate::prompt::nudge_start_multitasking()],
+                meta: MessageMeta {
+                    synthetic: true,
+                    ..Default::default()
+                },
+            },
+        });
+        s.queue.push(QueuedEntry {
+            id: "agt_1".into(),
+            kind: QueuedKind::TaskNotice,
+            msg: notice("agt_1"),
+        });
+
+        // 缺 key，这一轮立刻失败 —— 正是"没走到 drain 点"的那类收尾。
+        let input = TurnInput {
+            text: "hi".into(),
+            ..Default::default()
+        };
+        let _ = s
+            .run_turn(input, test_model(), test_caps(), test_sink(), test_limits())
+            .await;
+
+        let pending = s.pending_notices.lock().unwrap();
+        assert_eq!(pending.len(), 1, "完成通知要留到下一轮开工时注入");
+        assert!(
+            matches!(&pending[0], Message::User { meta, .. } if meta.task_notice.is_some()),
+            "留下的该是通知，不是那条界面提醒：{:?}",
+            pending[0]
+        );
     }
 
     /// 用户按停止只停前台，后台任务不受影响。

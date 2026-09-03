@@ -650,15 +650,9 @@ mod tests {
                 input_schema: serde_json::json!({"type": "object"}),
             }],
         };
-        summarize_history(
-            &arc,
-            "m",
-            &history,
-            Some(&shape),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("同形状路径成功");
+        summarize_history(&arc, "m", &history, Some(&shape), CancellationToken::new())
+            .await
+            .expect("同形状路径成功");
         summarize_history(&arc, "m", &history, None, CancellationToken::new())
             .await
             .expect("退回路径成功");

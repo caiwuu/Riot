@@ -43,6 +43,7 @@ import {
   subscribeFullscreen,
   subscribeScheduleChanges,
   subscribeScheduleRuns,
+  turnNudge,
 } from "./bridge";
 import { BrowserPanel } from "./components/BrowserPanel";
 import { GitChangesPanel } from "./components/GitChangesPanel";
@@ -1571,6 +1572,7 @@ export function App() {
                       workspaceMissing={missing.has(s.root)}
                       onMissingWorkspace={() => setGoneRoot(s.root)}
                       initialMode={s.mode}
+                      initialMultitask={s.multitask}
                       onConfig={setConfig}
                       onOpenSettings={() => setShowSettings(true)}
                       onFirstMessage={onFirstMessage}
@@ -1914,6 +1916,7 @@ function Chat({
   workspaceMissing,
   onMissingWorkspace,
   initialMode,
+  initialMultitask = false,
   onConfig,
   onOpenSettings,
   onFirstMessage,
@@ -1936,6 +1939,8 @@ function Chat({
   workspaceMissing?: boolean;
   onMissingWorkspace?: () => void;
   initialMode: PermissionMode;
+  /** 宿主侧这个会话的多任务开关。 */
+  initialMultitask?: boolean;
   onConfig: (s: ConfigStatus) => void;
   onOpenSettings: () => void;
   onFirstMessage: (sessionId: string, text: string) => void;
@@ -1965,6 +1970,10 @@ function Chat({
         }
       : undefined,
   );
+
+  /** 宿主侧被「并行构建」顺手打开的多任务开关；Composer 的显示要跟上。
+   *  null = 没发生过（和 hostMode 同一个形状）。 */
+  const [hostMultitask, setHostMultitask] = useState<boolean | null>(null);
 
   const busy = session.busy;
   const turnEndRef = useRef(onTurnEnd);
@@ -2050,6 +2059,8 @@ function Chat({
       config={config}
       onConfig={onConfig}
       initialMode={initialMode}
+      initialMultitask={initialMultitask}
+      hostMultitask={hostMultitask}
       hostMode={session.hostMode}
       tokens={session.tokens}
       queued={session.queued}
@@ -2138,6 +2149,12 @@ function Chat({
             {...(planAsk ? { planAsk } : {})}
             {...(choiceAsk ? { choiceAsk } : {})}
             onAnswerPlan={(r) => planAsk && void session.answer(r, planAsk.requestId)}
+            // 并行构建：先把并行指示排进当前轮（宿主顺手把会话切进多任务模式），
+            // 卡片随后批准。开关的显示由 Composer 自己的缓存管，这里同步一下。
+            onParallelPlan={() => {
+              void turnNudge(sessionId, "build_in_parallel").catch(() => {});
+              setHostMultitask(true);
+            }}
             onAnswerChoice={(r) => choiceAsk && void session.answer(r, choiceAsk.requestId)}
           />
         </SubagentsContext.Provider>

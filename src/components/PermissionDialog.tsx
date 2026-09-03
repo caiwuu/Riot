@@ -234,7 +234,7 @@ export function AskChoiceCard({
 
 /** 批准后切到哪个档，按钮上要写清楚 —— 这是批准动作的一部分，不是细节。 */
 const APPROVE_LABEL: Partial<Record<PermissionMode, { label: string; sub: string }>> = {
-  acceptEdits: { label: "批准，自动接受编辑", sub: "文件修改直接放行，命令仍询问" },
+  acceptEdits: { label: "批准，编辑放行", sub: "文件修改直接放行，命令仍询问" },
   default: { label: "批准，逐步确认", sub: "每个写操作都再问一次" },
 };
 
@@ -288,9 +288,15 @@ export function PlanDraft({ text }: { text: string }) {
 export function PlanApprovalCard({
   ask,
   onAnswer,
+  onParallel,
 }: {
   ask: PermissionAsk;
   onAnswer: (r: PermissionResponse) => void;
+  /**
+   * 「并行构建」（Cursor 的 Build in Parallel）：批准 + 进入多任务模式 +
+   * 让模型把计划按依赖分层、每层一个后台子 agent。没传就不出这个按钮。
+   */
+  onParallel?: () => void;
 }) {
   const [feedback, setFeedback] = useState("");
   const [answered, setAnswered] = useState(false);
@@ -306,6 +312,15 @@ export function PlanApprovalCard({
   const approve = (mode: PermissionMode) => {
     const chosen = ask.suggestions.find((s) => s.type === "set_mode" && s.mode === mode);
     answer({ decision: "allow", remember: chosen ? [chosen] : [] });
+  };
+
+  /** 并行指示先排队、再批准：批准放行工具结果之后内核立刻 drain 队列，
+   *  指示紧跟在「已批准」后面进历史。反过来的话它要等到下一批工具之后。 */
+  const approveParallel = () => {
+    if (answered || !onParallel) return;
+    onParallel();
+    // 后台子 agent 每一步编辑都弹窗的话，并行就名存实亡 —— 默认自动接受编辑。
+    approve(modes.includes("acceptEdits") ? "acceptEdits" : (modes[0] ?? "default"));
   };
 
   return (
@@ -342,6 +357,20 @@ export function PlanApprovalCard({
           打回，继续规划
         </button>
         <span className="plan-card-spacer" />
+        {onParallel ? (
+          <button
+            className="btn-allow-always"
+            disabled={answered}
+            onClick={approveParallel}
+            title="批准，并进入多任务模式：按依赖把步骤分层，每层一个后台子 agent 并行执行"
+          >
+            <span className="plan-parallel-icon" aria-hidden>
+              ⑂
+            </span>
+            并行构建
+            <span className="allow-always-sub">多任务模式，后台子 agent 分工</span>
+          </button>
+        ) : null}
         {modes.length > 0 ? (
           modes.map((m, i) => {
             const label = APPROVE_LABEL[m] ?? { label: `批准（${m}）`, sub: "" };

@@ -226,7 +226,12 @@ mod tests {
             "root":"/w","enabled":true,"createdAtMs":1
         }"#;
         let t: ScheduledTask = serde_json::from_str(raw).expect("解析");
-        assert_eq!(t.repeat, Repeat::Daily { time: "08:00".into() });
+        assert_eq!(
+            t.repeat,
+            Repeat::Daily {
+                time: "08:00".into()
+            }
+        );
         assert!(t.session_id.is_none());
         assert!(t.next_run_ms.is_none());
     }

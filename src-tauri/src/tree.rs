@@ -140,7 +140,10 @@ mod tests {
         std::fs::write(root.join("a.rs"), "").expect("写");
 
         let got = list_dir(root, "").expect("列根目录");
-        assert_eq!(names(&got), vec![".github", "src", "a.rs", "b.rs", "README.md"]);
+        assert_eq!(
+            names(&got),
+            vec![".github", "src", "a.rs", "b.rs", "README.md"]
+        );
         assert_eq!(got.truncated, 0);
         assert!(got.entries[0].is_dir);
         assert!(!got.entries[2].is_dir);

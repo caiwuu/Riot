@@ -27,10 +27,12 @@ import {
   searchFiles,
   setConfig as saveConfig,
   setPermissionMode,
+  setSessionMultitask,
   type SlashCommand,
   slashCommands,
   slashExpand,
   subscribeDragDrop,
+  turnNudge,
 } from "../bridge";
 import { type QueuedItem, type WithdrawnPrompt } from "../hooks/useSession";
 import {
@@ -67,7 +69,7 @@ import { Chip, FileChip } from "./Chip";
 import { ConfirmDialog, type ConfirmRequest } from "./ConfirmDialog";
 import { ContextRing } from "./ContextRing";
 import { ArrowUpIcon, PencilIcon, PlusIcon, StopIcon, TrashIcon } from "./icons";
-import { ModeMenu, Picker, type PickerSection, modelLabel } from "./pickers";
+import { ModeMenu, Picker, type PickerSection, isExecPermissionMode, modelLabel } from "./pickers";
 import { BackgroundTasksPanel } from "./TaskPanel";
 import { ShotViewer } from "./ToolCard";
 
@@ -81,6 +83,10 @@ const drafts = new Map<string, Seg[]>();
  * 屏幕上写着「每次询问」，实际每一步都在静默放行。
  */
 const modeCache = new Map<string, PermissionMode>();
+/** 多任务开关的 UI 缓存。理由同 modeCache，只是错了不出安全问题。 */
+const multitaskCache = new Map<string, boolean>();
+/** 进规划模式前记住的执行档，退出规划时恢复（例如切到多任务）。 */
+const execModeCache = new Map<string, PermissionMode>();
 
 /** 待发的一张图。`data` 是 base64，不含 `data:` 前缀。 */
 interface Shot {
@@ -108,6 +114,8 @@ const shotsCache = new Map<string, Shot[]>();
 export function forgetComposerSession(sessionId: string) {
   drafts.delete(sessionId);
   modeCache.delete(sessionId);
+  multitaskCache.delete(sessionId);
+  execModeCache.delete(sessionId);
   shotsCache.delete(sessionId);
 }
 
@@ -300,6 +308,8 @@ export function Composer({
   onConfig,
   initialMode,
   hostMode,
+  initialMultitask = false,
+  hostMultitask = null,
   tokens,
   queued,
   onQueueDelete,
@@ -328,6 +338,10 @@ export function Composer({
   initialMode: PermissionMode;
   /** 宿主主动切的模式（批准计划）。null = 没发生过。 */
   hostMode: PermissionMode | null;
+  /** 宿主侧这个会话的多任务开关。 */
+  initialMultitask?: boolean;
+  /** 宿主顺手切的多任务开关（计划卡的「并行构建」）。null = 没发生过。 */
+  hostMultitask?: boolean | null;
   tokens: { input: number; output: number; context: number };
   /** 排队面板：跑轮中发的、还没注入对话的插话。 */
   queued: QueuedItem[];
@@ -359,6 +373,41 @@ export function Composer({
   const [mode, setMode] = useState<PermissionMode>(
     () => modeCache.get(sessionId) ?? initialMode,
   );
+  const [multitask, setMultitask] = useState<boolean>(
+    () => multitaskCache.get(sessionId) ?? initialMultitask,
+  );
+  // 宿主顺手切的（并行构建）→ 显示跟上。宿主那边已经落盘，这里只改显示。
+  useEffect(() => {
+    if (hostMultitask === null) return;
+    setMultitask(hostMultitask);
+    multitaskCache.set(sessionId, hostMultitask);
+  }, [hostMultitask, sessionId]);
+  /**
+   * 点过「转到后台」、还没看到模型响应。
+   *
+   * 这个状态不是装饰：提醒注入在**下一批工具结果就位**的那一刻，模型
+   * 正在跑的这批工具（可能是一次几十秒的搜索）跑完之前界面上什么都不会
+   * 变。没有它，用户看到的就是"点了没反应"，然后再点一次 —— 于是两条
+   * 提醒排进去，模型分叉两个一样的子 agent。
+   */
+  const [handoffPending, setHandoffPending] = useState(false);
+  // 轮次结束就复位（无论是被分叉走的还是自己跑完的）：下一轮再点得能点。
+  useEffect(() => {
+    if (!busy) setHandoffPending(false);
+  }, [busy]);
+  useEffect(() => setHandoffPending(false), [sessionId]);
+  /** 「转到后台」：把手头的活交给后台子 agent。落空（轮子恰好结束）就算了。 */
+  const handoff = () => {
+    setHandoffPending(true);
+    void turnNudge(sessionId, "start_multitasking").then(
+      // 落空 = 轮子恰好在这一瞬结束。不弹提示：busy 马上就 false 了，
+      // 按钮自己会消失，此时说"没排上"只是噪音。
+      (queued) => {
+        if (!queued) setHandoffPending(false);
+      },
+      () => setHandoffPending(false),
+    );
+  };
   /** 第几次切模式。失败回滚要靠它认出"这是过期的那次"，见 applyMode。 */
   const modeSeq = useRef(0);
 
@@ -1090,6 +1139,12 @@ export function Composer({
 
   const applyMode = (m: PermissionMode) => {
     const prev = mode;
+    if (m === "plan" && isExecPermissionMode(prev)) {
+      execModeCache.set(sessionId, prev);
+    }
+    if (isExecPermissionMode(m)) {
+      execModeCache.set(sessionId, m);
+    }
     const seq = ++modeSeq.current;
     setMode(m);
     modeCache.set(sessionId, m);
@@ -1107,6 +1162,11 @@ export function Composer({
   };
 
   const changeMode = (m: PermissionMode) => {
+    if (m === "plan" && multitask) {
+      setMultitask(false);
+      multitaskCache.set(sessionId, false);
+      void setSessionMultitask(sessionId, false).catch(() => {});
+    }
     // 无人值守关掉的是最后一层保护，不能一次点击就生效。
     if (m === "unattended" && mode !== "unattended") {
       setModeConfirm({
@@ -1118,6 +1178,25 @@ export function Composer({
       return;
     }
     applyMode(m);
+  };
+
+  /** 规划模式下仍在生效的权限档：批准计划后按它动手，pill 上报的就是它。 */
+  const execMode: PermissionMode = isExecPermissionMode(mode)
+    ? mode
+    : (execModeCache.get(sessionId) ?? (isExecPermissionMode(initialMode) ? initialMode : "default"));
+
+  /** 开/关多任务。与规划模式互斥；宿主是权威，失败回滚显示。 */
+  const changeMultitask = (on: boolean) => {
+    if (on && mode === "plan") {
+      applyMode(execMode);
+    }
+    const prev = multitask;
+    setMultitask(on);
+    multitaskCache.set(sessionId, on);
+    setSessionMultitask(sessionId, on).catch(() => {
+      setMultitask(prev);
+      multitaskCache.set(sessionId, prev);
+    });
   };
 
   return (
@@ -1421,7 +1500,13 @@ export function Composer({
             >
               <PlusIcon />
             </button>
-            <ModeMenu mode={mode} onChange={changeMode} />
+            <ModeMenu
+              mode={mode}
+              execMode={execMode}
+              onChange={changeMode}
+              multitask={multitask}
+              onMultitask={changeMultitask}
+            />
             {/* 窄列藏起来：三个 pill 并排是挤的源头，换服务方/模型去设置里也能做。 */}
             <div className="composer-picks">
               <Picker
@@ -1469,6 +1554,27 @@ export function Composer({
             ) : null}
             {/* 停止常驻：只要在忙就显示，不再被"打了字"的发送按钮顶掉 ——
                 想中止不必先清空输入。有草稿时它和发送并排，各司其职。 */}
+            {/* 转到后台（Cursor 的 Start Multitasking）：只在跑轮时有意义 ——
+                它是对正在进行的工作说"你去后台接着干，对话腾出来"。挨着
+                停止键：两个都是"我不想再在这里等了"，一个停、一个挪。 */}
+            {busy ? (
+              <button
+                type="button"
+                className={`pill handoff-pill${handoffPending ? " pending" : ""}`}
+                onClick={handoff}
+                disabled={handoffPending}
+                title={
+                  handoffPending
+                    ? "已经告诉模型了。它做完手上这一步就会把任务分叉到后台"
+                    : "把手头的任务交给后台子 agent 继续，对话腾出来聊别的"
+                }
+              >
+                <span className="handoff-icon" aria-hidden>
+                  ⑂
+                </span>
+                {handoffPending ? "正在转到后台…" : "转到后台"}
+              </button>
+            ) : null}
             {busy ? (
               <button type="button" className="send stop" onClick={onStop} title="停止 (Esc)" aria-label="停止">
                 <StopIcon />

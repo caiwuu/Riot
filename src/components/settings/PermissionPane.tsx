@@ -51,7 +51,7 @@ const SANDBOX_MODES: { id: SandboxMode; name: string; desc: string; danger?: boo
 
 const MODES: { id: PermissionMode; name: string; desc: string; danger?: boolean }[] = [
   { id: "default", name: "每次询问", desc: "写文件、执行命令前询问。" },
-  { id: "acceptEdits", name: "自动接受编辑", desc: "文件修改放行，命令仍询问。" },
+  { id: "acceptEdits", name: "编辑放行", desc: "文件修改放行，命令仍询问。" },
   {
     id: "plan",
     name: "规划模式",

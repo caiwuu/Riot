@@ -296,7 +296,7 @@ pub fn expand(mentions: &[Mention], file_state: Option<&dyn FileStateCache>) -> 
 
         if let Some(fs) = file_state {
             // 登记进工作集：模型可以直接改。截断只影响给模型看的那段，
-        // 缓存里是全文，Edit 按全文做唯一性检查。
+            // 缓存里是全文，Edit 按全文做唯一性检查。
             let view = if truncated {
                 FileView::Partial {
                     offset: 0,

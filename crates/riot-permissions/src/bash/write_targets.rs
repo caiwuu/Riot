@@ -73,9 +73,7 @@ fn sub_risk(sub: &SubCommand) -> Option<WriteRisk<'_>> {
 
     // git 的执行面配置键。只有「设置」才碰执行面 —— `git config core.pager`
     // (只读取值)不改任何东西,和下面的路径扫描一样受 `read_only` 约束。
-    if !read_only
-        && let Some(key) = git_exec_config_key(&name, &args)
-    {
+    if !read_only && let Some(key) = git_exec_config_key(&name, &args) {
         return Some(WriteRisk {
             kind: SafetyKind::GitInternals,
             message: format!(
@@ -262,7 +260,10 @@ mod tests {
                 "git config 'core.hooksPath' /tmp/evil",
                 SafetyKind::GitInternals,
             ),
-            ("'git' config core.hooksPath /tmp/evil", SafetyKind::GitInternals),
+            (
+                "'git' config core.hooksPath /tmp/evil",
+                SafetyKind::GitInternals,
+            ),
         ] {
             assert_eq!(risk(cmd), Some(want), "{cmd} 被引号绕过了");
         }
@@ -332,7 +333,11 @@ mod tests {
             "env FOO=bar git -c core.pager=evil log",
             "sudo env git config core.hooksPath /tmp/evil",
         ] {
-            assert_eq!(risk(cmd), Some(SafetyKind::GitInternals), "{cmd} 该被扫出来");
+            assert_eq!(
+                risk(cmd),
+                Some(SafetyKind::GitInternals),
+                "{cmd} 该被扫出来"
+            );
         }
     }
 
@@ -382,10 +387,7 @@ mod tests {
             risk("cat /home/u/.ssh/id_rsa"),
             Some(SafetyKind::Credentials)
         );
-        assert_eq!(
-            risk("cat /home/u/.ssh/config"),
-            Some(SafetyKind::SshConfig)
-        );
+        assert_eq!(risk("cat /home/u/.ssh/config"), Some(SafetyKind::SshConfig));
         // 非凭证:写命令照旧拦
         assert_eq!(
             risk("cp evil .git/hooks/pre-commit"),

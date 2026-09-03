@@ -240,6 +240,14 @@ impl SessionManager {
         }
     }
 
+    /// 界面按钮 → 带外提醒。false = 会话不存在或此刻没有轮在跑。
+    pub async fn nudge(&self, session_id: &str, nudge: riot_protocol::Nudge) -> bool {
+        match self.get(session_id).await {
+            Some(s) => s.nudge(nudge).await,
+            None => false,
+        }
+    }
+
     /// 一个子 agent 的会话。None = 会话或子 agent 不存在。
     pub async fn task_history(
         &self,
@@ -302,6 +310,7 @@ impl SessionManager {
             .set_system_prompt(config.system_prompt_extra.clone())
             .await;
         session.set_thinking(config.thinking).await;
+        session.set_multitask(config.multitask);
 
         // 能力现装(和内嵌期 send_turn 同一套,只是从 setup 而非 AppConfig)。
         let web = Arc::new(crate::web::HostWeb::from_setup(&config.web));

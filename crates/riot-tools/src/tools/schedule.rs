@@ -143,7 +143,12 @@ impl Tool for ScheduleTool {
 
 impl ScheduleTool {
     async fn create(&self, input: ScheduleInput, _ctx: &ToolContext) -> ToolOutcome {
-        let Some(name) = input.name.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+        let Some(name) = input
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
             return ToolOutcome::failed("create 需要 name：给任务起个短名字。");
         };
         let Some(prompt) = input
@@ -211,11 +216,9 @@ impl ScheduleTool {
             return ToolOutcome::failed(format!("{verb} 需要 id。先用 list 查任务 id。"));
         };
         match self.access.set_enabled(id, enabled).await {
-            Ok(task) if enabled => ToolOutcome::ok_text(format!(
-                "已恢复「{}」。{}",
-                task.name,
-                render_line(&task)
-            )),
+            Ok(task) if enabled => {
+                ToolOutcome::ok_text(format!("已恢复「{}」。{}", task.name, render_line(&task)))
+            }
             Ok(task) => ToolOutcome::ok_text(format!("已暂停「{}」。恢复用 resume。", task.name)),
             Err(e) => ToolOutcome::failed(e.0),
         }
@@ -385,20 +388,27 @@ mod tests {
         };
         assert!(error_for_model.contains("prompt"), "{error_for_model}");
 
-        let out = tool.call(serde_json::json!({"action": "pause"}), ctx()).await;
+        let out = tool
+            .call(serde_json::json!({"action": "pause"}), ctx())
+            .await;
         let ToolOutcome::Failed {
             error_for_model, ..
         } = out
         else {
             panic!("缺 id 该失败：{out:?}");
         };
-        assert!(error_for_model.contains("list"), "要指路先查 id：{error_for_model}");
+        assert!(
+            error_for_model.contains("list"),
+            "要指路先查 id：{error_for_model}"
+        );
     }
 
     #[tokio::test]
     async fn 列表为空时指路创建() {
         let tool = ScheduleTool::new(Arc::new(FakeAccess::default()));
-        let out = tool.call(serde_json::json!({"action": "list"}), ctx()).await;
+        let out = tool
+            .call(serde_json::json!({"action": "list"}), ctx())
+            .await;
         let ToolOutcome::Ok { model_content, .. } = out else {
             panic!("空列表也该成功：{out:?}");
         };
@@ -411,7 +421,9 @@ mod tests {
     #[tokio::test]
     async fn 没接宿主时明说用不了() {
         let tool = ScheduleTool::new(Arc::new(riot_protocol::schedule::NoSchedule));
-        let out = tool.call(serde_json::json!({"action": "list"}), ctx()).await;
+        let out = tool
+            .call(serde_json::json!({"action": "list"}), ctx())
+            .await;
         let ToolOutcome::Failed {
             error_for_model, ..
         } = out

@@ -257,3 +257,15 @@ export function EyeIcon() {
   );
 }
 
+/** 规划模式：条目清单。和多任务的 ⑂ 一样，只在 pill 上标状态。 */
+export function PlanModeIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <g stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+        <path d="M2.6 4.4h.01M6 4.4h7.4" />
+        <path d="M2.6 8h.01M6 8h7.4" />
+        <path d="M2.6 11.6h.01M6 11.6h7.4" />
+      </g>
+    </svg>
+  );
+}

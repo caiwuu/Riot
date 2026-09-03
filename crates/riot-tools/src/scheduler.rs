@@ -527,7 +527,8 @@ async fn run_one(
     // 第 1 层压缩（ARCHITECTURE §10.3）：超大文本结果落盘，消息里换成
     // 路径 + 预览。放在 hooks 之前 —— hook 是 shell 脚本，几 MB 的
     // stdin 对它和对上下文一样是灾难。
-    let outcome = spill_oversized(outcome, &call.name, spill_fs.as_ref(), &spill_dir, &call.id).await;
+    let outcome =
+        spill_oversized(outcome, &call.name, spill_fs.as_ref(), &spill_dir, &call.id).await;
     let is_error = !matches!(outcome, ToolOutcome::Ok { .. });
 
     // PostToolUse hooks：执行完了让用户配置的检查点看一眼。
@@ -1009,7 +1010,9 @@ mod tests {
             "预览里的密钥必须被遮蔽：{preview}"
         );
         assert!(
-            fs.text(path).expect("盘上有文件").contains("AKIAIOSFODNN7EXAMPLE"),
+            fs.text(path)
+                .expect("盘上有文件")
+                .contains("AKIAIOSFODNN7EXAMPLE"),
             "盘上保留原文 —— 遮蔽只对发给模型的内容"
         );
     }

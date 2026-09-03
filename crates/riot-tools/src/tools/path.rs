@@ -218,7 +218,10 @@ mod tests {
         // 这条已经在权限层被看见、被问过了。再拦一次等于把用户刚给的
         // 授权作废 —— 用户点了"允许"，工具却报错。
         assert_eq!(detour("/Users/u/.zshrc", "/Users/u/.zshrc"), None);
-        assert_eq!(detour(".git/hooks/pre-commit", "/work/.git/hooks/pre-commit"), None);
+        assert_eq!(
+            detour(".git/hooks/pre-commit", "/work/.git/hooks/pre-commit"),
+            None
+        );
     }
 
     #[test]

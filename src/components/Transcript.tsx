@@ -373,6 +373,7 @@ export function Transcript({
   planAsk,
   choiceAsk,
   onAnswerPlan,
+  onParallelPlan,
   onAnswerChoice,
   onRegenerate,
   onEditEntry,
@@ -398,6 +399,8 @@ export function Transcript({
   /** 模型主动提的选择题。同样内联，不弹窗。 */
   choiceAsk?: { requestId: string; detail: PermissionAsk };
   onAnswerPlan?: (r: PermissionResponse) => void;
+  /** 计划卡的「并行构建」：在批准之前先把并行指示排进当前轮。 */
+  onParallelPlan?: () => void;
   onAnswerChoice?: (r: PermissionResponse) => void;
   onRegenerate?: (itemId: string) => void;
   /** 上下文编辑：把这条气泡的文本换掉。false = 没改成，编辑框保留草稿。 */
@@ -802,6 +805,7 @@ export function Transcript({
             key={planAsk.requestId}
             ask={planAsk.detail}
             onAnswer={onAnswerPlan}
+            {...(onParallelPlan ? { onParallel: onParallelPlan } : {})}
           />
         ) : null}
         {choiceAsk && onAnswerChoice ? (

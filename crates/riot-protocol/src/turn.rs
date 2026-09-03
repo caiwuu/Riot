@@ -161,6 +161,28 @@ pub struct TurnConfig {
     /// 会话级思考策略。
     #[serde(default)]
     pub thinking: ThinkingPolicy,
+    /// 多任务模式（Cursor Multitask 同款）：主 agent 只协调，实质工作全部
+    /// 交给后台子 agent，委派完结束回合、由完成通知叫醒。宿主是权威，
+    /// 每轮现传；内核据此在消息侧注入协调者准则。
+    #[serde(default)]
+    pub multitask: bool,
+}
+
+/// 用户在界面上按的一个"推一把"按钮，变成一条塞给模型的带外提醒。
+///
+/// 对应 Cursor 的 SimulatedMsgReason：按钮不产生用户的话，只产生一条
+/// system_reminder，注入到当前轮的下一个安全点 —— 这一批工具结果就位、
+/// 模型还没开口的那一刻。按钮说的是"你手上这件事"，等整轮跑完再给模型
+/// 看，功能就等于不存在。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Nudge {
+    /// 「转到后台」：把手头的活 `resume="self"` 分叉到后台子 agent，
+    /// 主 agent 立刻停下 —— 对话腾出来给用户聊别的。
+    StartMultitasking,
+    /// 「并行构建」：按计划里 todo 的依赖分层，每层一个后台子 agent，
+    /// 能并行的并行；末尾的测试留给最后一个测试 agent。
+    BuildInParallel,
 }
 
 /// 排队面板的一条插话摘要。

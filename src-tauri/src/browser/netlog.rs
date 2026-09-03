@@ -315,7 +315,9 @@ fn har_headers(headers: &Value) -> Vec<Value> {
 /// 依赖不值当。用的是 Howard Hinnant 的 civil-from-days（对格里高利历精确）。
 fn iso8601_utc(epoch_secs: f64) -> String {
     let total = epoch_secs.floor() as i64;
-    let millis = ((epoch_secs - total as f64) * 1000.0).round().clamp(0.0, 999.0) as i64;
+    let millis = ((epoch_secs - total as f64) * 1000.0)
+        .round()
+        .clamp(0.0, 999.0) as i64;
     let days = total.div_euclid(86400);
     let rem = total.rem_euclid(86400);
     let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
@@ -533,7 +535,9 @@ mod tests {
         assert_eq!(entries[0]["response"]["status"], 200);
         assert_eq!(entries[0]["response"]["content"]["size"], 1234.0);
         // CDP 的 {name:value} 头对象要转成 HAR 的 [{name,value}]。
-        let rh = entries[0]["response"]["headers"].as_array().expect("头是数组");
+        let rh = entries[0]["response"]["headers"]
+            .as_array()
+            .expect("头是数组");
         assert!(
             rh.iter()
                 .any(|h| h["name"] == "Server" && h["value"] == "nginx"),

@@ -251,13 +251,19 @@ async fn schedule_update(
 /// 删除一个定时任务。
 #[tauri::command]
 async fn schedule_delete(state: tauri::State<'_, AppState>, id: String) -> HostResult<()> {
-    state.schedule_delete(&id).await.map_err(HostError::Schedule)
+    state
+        .schedule_delete(&id)
+        .await
+        .map_err(HostError::Schedule)
 }
 
 /// 立即跑一次（「立即运行」按钮和错过补跑共用）。
 #[tauri::command]
 async fn schedule_run_now(state: tauri::State<'_, AppState>, id: String) -> HostResult<()> {
-    state.schedule_run_now(&id).await.map_err(HostError::Schedule)
+    state
+        .schedule_run_now(&id)
+        .await
+        .map_err(HostError::Schedule)
 }
 
 /// 启动时发现的错过运行清单。
@@ -440,6 +446,27 @@ async fn set_session_thinking(
     thinking: riot_protocol::ThinkingPolicy,
 ) -> HostResult<()> {
     state.set_thinking(&session_id, thinking).await
+}
+
+/// 会话的多任务模式开关。下一轮生效。
+#[tauri::command]
+async fn set_session_multitask(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    on: bool,
+) -> HostResult<()> {
+    state.set_multitask(&session_id, on).await
+}
+
+/// 界面按钮（转到后台 / 并行构建）→ 塞给当前轮的一条带外提醒。
+/// false = 此刻没有轮在跑。
+#[tauri::command]
+async fn turn_nudge(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    nudge: riot_protocol::Nudge,
+) -> HostResult<bool> {
+    state.nudge(&session_id, nudge).await
 }
 
 /// 当前模型配置与"密钥在不在、从哪来"。
@@ -1346,6 +1373,8 @@ pub fn run() {
             set_session_python_venv,
             set_session_system_prompt,
             set_session_thinking,
+            set_session_multitask,
+            turn_nudge,
             browser_open,
             browser_close,
             browser_navigate,
@@ -1419,7 +1448,9 @@ pub fn run() {
 
             // 系统通知与全局 emit 要用应用句柄。要在 spawn_host_bridge
             // 之前挂上 —— 消费 Done 通知的任务里就会用它发任务完成通知。
-            app.state::<AppState>().inner().attach_app(app.handle().clone());
+            app.state::<AppState>()
+                .inner()
+                .attach_app(app.handle().clone());
             // 接上内核事件里宿主要消费的那几件(busy / mode 回流)。
             app.state::<AppState>().inner().spawn_host_bridge();
             // 定时任务的调度循环（20 秒一查）。调度权威在宿主，

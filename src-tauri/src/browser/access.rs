@@ -1557,9 +1557,12 @@ impl BrowserAccess for HostBrowser {
                 "没有标签页 [{tab}]。用 BrowserTabs 的 list 看现在有哪些页。"
             )));
         }
-        let (text, _refs) = ops::snapshot(Tab { browser: &b, id: tab })
-            .await
-            .map_err(|e| InteractError::Unavailable(BrowserUnavailable(e.to_string())))?;
+        let (text, _refs) = ops::snapshot(Tab {
+            browser: &b,
+            id: tab,
+        })
+        .await
+        .map_err(|e| InteractError::Unavailable(BrowserUnavailable(e.to_string())))?;
         // `[约束]` 不写 snap_refs。那套编号是给**活动页交互**用的:旁观另一页
         // 时把它的编号写进去，下一次对活动页的点击就会拿错页的编号去解析。
         // 所以旁观快照只回文本，不留可交互状态。
@@ -2033,7 +2036,11 @@ const CAST_FALLBACK: (u32, u32) = (4000, 3000);
 
 /// 面板画面区（CSS）× 密度 → JPEG 物理像素上限。
 fn cast_size(view_w: i32, view_h: i32, scale: f32) -> (u32, u32) {
-    let scale = if scale.is_finite() { scale.clamp(1.0, 3.0) } else { 1.0 };
+    let scale = if scale.is_finite() {
+        scale.clamp(1.0, 3.0)
+    } else {
+        1.0
+    };
     let w = ((view_w.max(1) as f32) * scale).round() as u32;
     let h = ((view_h.max(1) as f32) * scale).round() as u32;
     (w.clamp(80, CAST_FALLBACK.0), h.clamp(80, CAST_FALLBACK.1))

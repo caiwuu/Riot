@@ -321,6 +321,9 @@ async fn dispatch(request: RpcRequest, manager: &manager::SessionManager) -> Rpc
             manager.interrupt(session_id.as_str()).await;
             RpcResponse::Ok
         }
+        Req::TurnNudge { session_id, nudge } => RpcResponse::Nudged {
+            queued: manager.nudge(session_id.as_str(), nudge).await,
+        },
         Req::PermissionRespond {
             request_id,
             response,

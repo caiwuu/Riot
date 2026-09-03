@@ -67,7 +67,7 @@ pub use tool::{
     ToolContext, ToolOutcome, UiPayload, ValidationError,
 };
 pub use turn::{
-    ApiProtocol, EndpointSampling, ImageInput, ModelEndpoint, QueuedSummary, SandboxKind,
+    ApiProtocol, EndpointSampling, ImageInput, ModelEndpoint, Nudge, QueuedSummary, SandboxKind,
     TurnConfig, TurnInput, TurnLimits, VisionSetup, WebSetup,
 };
 pub use vision::{DescribeRequest, NoVision, VisionAccess, VisionError};

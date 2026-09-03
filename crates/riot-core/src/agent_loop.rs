@@ -461,11 +461,23 @@ pub fn run_agent(
 
             invariants::check_tool_pairing(&state.messages);
 
-            // 刻意**不在这里** drain 插话队列。工具结果就位后插入虽然对
+            // 刻意**不在这里** drain 用户插话。工具结果就位后插入虽然对
             // API 是安全的（CC 就这么做），但对用户是惊吓：排队面板里的
             // 消息突然在任务中途蹦进对话，模型分心去答它。这里的语义是
             // Cursor 式的 —— 排队的消息等当前任务**完全跑完**（见第 5 步
             // 的收尾 drain），要插队由用户在面板上点"立即发送"（中断）。
+            //
+            // 带外消息是另一回事，它们**必须**在这里注入：「转到后台」
+            // 和后台子 agent 的完成通知说的都是"你现在手上这件事"，等整
+            // 轮跑完再给模型看等于按钮没有生效 —— 用户点完看着它继续干
+            // 到底，几分钟后才冒出一个子 agent 去做已经做完的活。
+            //
+            // 这个位置就是那个安全点：tool_result 已经成对进历史，插一条
+            // user 消息不会夹在 tool_use 和 tool_result 之间（INV-2）。
+            for msg in deps.queue.drain_out_of_band() {
+                state.messages.push(msg.clone());
+                yield AgentEvent::Message(msg);
+            }
 
             // ── 7. 收尾 ──────────────────────────────────────────
             state.advance_turn();

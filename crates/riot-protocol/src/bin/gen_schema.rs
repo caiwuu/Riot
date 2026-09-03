@@ -153,10 +153,7 @@ fn find_tag_clashes(schema: &serde_json::Value) -> Vec<String> {
 /// 给这类分支起名 `{枚举名}{Tag值Pascal}`（如 `AgentEventDelta`），
 /// 包装类型有了自己的名字，被引用的 def 保住原名。
 fn title_tagged_variants(schema: &mut serde_json::Value) {
-    let Some(defs) = schema
-        .get_mut("$defs")
-        .and_then(|d| d.as_object_mut())
-    else {
+    let Some(defs) = schema.get_mut("$defs").and_then(|d| d.as_object_mut()) else {
         return;
     };
     for (enum_name, def) in defs.iter_mut() {
@@ -178,13 +175,15 @@ fn title_tagged_variants(schema: &mut serde_json::Value) {
                 if !obj.contains_key("$ref") {
                     continue;
                 }
-                let Some(tag_value) = obj.get("properties").and_then(|p| p.as_object()).and_then(
-                    |props| {
-                        props
-                            .values()
-                            .find_map(|v| v.get("const").and_then(|c| c.as_str()))
-                    },
-                ) else {
+                let Some(tag_value) =
+                    obj.get("properties")
+                        .and_then(|p| p.as_object())
+                        .and_then(|props| {
+                            props
+                                .values()
+                                .find_map(|v| v.get("const").and_then(|c| c.as_str()))
+                        })
+                else {
                     continue;
                 };
                 let title = format!("{enum_name}{}", pascal(tag_value));

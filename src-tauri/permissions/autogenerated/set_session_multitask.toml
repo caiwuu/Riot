@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-session-multitask"
+description = "Enables the set_session_multitask command without any pre-configured scope."
+commands.allow = ["set_session_multitask"]
+
+[[permission]]
+identifier = "deny-set-session-multitask"
+description = "Denies the set_session_multitask command without any pre-configured scope."
+commands.deny = ["set_session_multitask"]

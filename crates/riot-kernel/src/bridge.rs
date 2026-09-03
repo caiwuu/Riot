@@ -227,7 +227,10 @@ impl ScheduleAccess for RemoteSchedule {
     }
 
     async fn delete(&self, id: &str) -> Result<(), ScheduleError> {
-        match self.call(ScheduleCall::Delete { id: id.to_owned() }).await? {
+        match self
+            .call(ScheduleCall::Delete { id: id.to_owned() })
+            .await?
+        {
             HostResponse::Ok => Ok(()),
             HostResponse::Error { message, .. } => Err(ScheduleError(message)),
             other => Err(ScheduleError(format!("宿主回了意外形状:{other:?}"))),
@@ -293,7 +296,10 @@ impl BrowserAccess for RemoteBrowser {
     }
 
     async fn screenshot(&self, deterministic: bool) -> Result<String, BrowserUnavailable> {
-        match self.simple(BrowserCall::Screenshot { deterministic }).await? {
+        match self
+            .simple(BrowserCall::Screenshot { deterministic })
+            .await?
+        {
             HostResponse::Text { text } => Ok(text),
             other => Err(BrowserUnavailable(format!("宿主回了意外形状:{other:?}"))),
         }

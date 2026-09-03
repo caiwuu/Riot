@@ -637,6 +637,13 @@ export type RpcRequest =
       };
     }
   | {
+      method: "turn.nudge";
+      params: {
+        nudge: Nudge;
+        session_id: string;
+      };
+    }
+  | {
       method: "queue.list";
       params: {
         session_id: string;
@@ -811,6 +818,15 @@ export type ThinkingPolicy =
  */
 export type ThinkingEffort = "low" | "medium" | "high";
 /**
+ * 用户在界面上按的一个"推一把"按钮，变成一条塞给模型的带外提醒。
+ *
+ * 对应 Cursor 的 SimulatedMsgReason：按钮不产生用户的话，只产生一条
+ * system_reminder，注入到当前轮的下一个安全点 —— 这一批工具结果就位、
+ * 模型还没开口的那一刻。按钮说的是"你手上这件事"，等整轮跑完再给模型
+ * 看，功能就等于不存在。
+ */
+export type Nudge = "start_multitasking" | "build_in_parallel";
+/**
  * 内核 → 宿主，对 [`RpcRequest`] 的应答。
  */
 export type RpcResponse =
@@ -889,6 +905,12 @@ export type RpcResponse =
         removed: boolean;
       };
       result: "removed";
+    }
+  | {
+      data: {
+        queued: boolean;
+      };
+      result: "nudged";
     }
   | {
       data: {
@@ -1215,6 +1237,12 @@ export interface TurnConfig {
    * 主模型端点。
    */
   model: ModelEndpoint;
+  /**
+   * 多任务模式（Cursor Multitask 同款）：主 agent 只协调，实质工作全部
+   * 交给后台子 agent，委派完结束回合、由完成通知叫醒。宿主是权威，
+   * 每轮现传；内核据此在消息侧注入协调者准则。
+   */
+  multitask?: boolean;
   /**
    * 会话级 Python 虚拟环境根目录。
    */

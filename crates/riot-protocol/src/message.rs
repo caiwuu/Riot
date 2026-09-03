@@ -545,7 +545,9 @@ mod tests {
     fn user_prompt_boundary() {
         let prompt = Message::User {
             id: MessageId::from_raw("m1"),
-            content: vec![UserContent::Text { text: "问题".into() }],
+            content: vec![UserContent::Text {
+                text: "问题".into(),
+            }],
             meta: MessageMeta::default(),
         };
         assert!(prompt.is_user_prompt());
@@ -609,7 +611,9 @@ mod tests {
     fn stamp_does_not_overwrite() {
         let mut m = Message::User {
             id: MessageId::from_raw("m1"),
-            content: vec![UserContent::Text { text: "问题".into() }],
+            content: vec![UserContent::Text {
+                text: "问题".into(),
+            }],
             meta: MessageMeta::default(),
         };
         m.stamp(1_000);

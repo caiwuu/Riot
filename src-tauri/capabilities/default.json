@@ -51,6 +51,8 @@
     "allow-set-session-python-venv",
     "allow-set-session-system-prompt",
     "allow-set-session-thinking",
+    "allow-set-session-multitask",
+    "allow-turn-nudge",
     "allow-browser-open",
     "allow-browser-close",
     "allow-browser-navigate",

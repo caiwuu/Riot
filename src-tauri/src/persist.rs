@@ -58,6 +58,9 @@ pub struct PersistedSession {
         skip_serializing_if = "riot_protocol::ThinkingPolicy::is_default"
     )]
     pub thinking: riot_protocol::ThinkingPolicy,
+    /// 多任务模式（主 agent 只协调，实质工作交给后台子 agent）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub multitask: bool,
 }
 
 fn default_mode() -> PermissionMode {
@@ -181,6 +184,7 @@ fn from_scan(s: riot_store::ScannedTranscript) -> PersistedSession {
         python_venv: None,
         system_prompt: None,
         thinking: riot_protocol::ThinkingPolicy::default(),
+        multitask: false,
     }
 }
 
@@ -247,6 +251,7 @@ mod tests {
             python_venv: None,
             system_prompt: None,
             thinking: riot_protocol::ThinkingPolicy::default(),
+            multitask: false,
         }
     }
 
@@ -422,9 +427,7 @@ mod tests {
 
         let mut s1 = one("s1", 0);
         s1.created_at_ms = 1_000;
-        let idx = SessionIndex {
-            sessions: vec![s1],
-        };
+        let idx = SessionIndex { sessions: vec![s1] };
         save(d.path(), &idx).expect("保存");
 
         assert_eq!(load(d.path(), &t).sessions, idx.sessions);

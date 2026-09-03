@@ -309,9 +309,7 @@ mod tests {
                                 "capabilities": {}
                             }
                         });
-                        let _ = server_write
-                            .write_all(format!("{resp}\n").as_bytes())
-                            .await;
+                        let _ = server_write.write_all(format!("{resp}\n").as_bytes()).await;
                         // 紧跟一行 GBK 编码的"达梦"（0xB4EF 0xC3CE），
                         // 是非法 UTF-8 —— 客户端必须跳过而不是断连。
                         let _ = server_write
@@ -322,9 +320,7 @@ mod tests {
                         let resp = json!({
                             "jsonrpc": "2.0", "id": id, "result": { "tools": [] }
                         });
-                        let _ = server_write
-                            .write_all(format!("{resp}\n").as_bytes())
-                            .await;
+                        let _ = server_write.write_all(format!("{resp}\n").as_bytes()).await;
                     }
                     _ => {}
                 }

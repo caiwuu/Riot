@@ -904,7 +904,9 @@ const COMPACT_BUFFER: u32 = 13_000;
 /// 归零，那等于每轮都压 —— 压缩本身要花一次模型调用，比不压更贵，而且压完
 /// 立刻又超，会在压缩和重试之间转圈。
 pub fn compact_threshold_for_window(window: u32, max_output: Option<u32>) -> u32 {
-    let reserve = max_output.unwrap_or(OUTPUT_RESERVE_CAP).min(OUTPUT_RESERVE_CAP);
+    let reserve = max_output
+        .unwrap_or(OUTPUT_RESERVE_CAP)
+        .min(OUTPUT_RESERVE_CAP);
     window
         .saturating_sub(reserve)
         .saturating_sub(COMPACT_BUFFER)
@@ -1256,7 +1258,6 @@ pub fn config_path() -> PathBuf {
         .join("riot")
         .join("config.json")
 }
-
 
 /// 所有会话的浏览器 profile 都放在这个目录下，一个会话一个子目录。
 ///
@@ -1937,7 +1938,10 @@ mod tests {
         // 128k：减完仍高于一半，用减出来的值。
         assert_eq!(compact_threshold_for_window(128_000, None), 95_000);
         // 再小的窗口不能低于阈值下限，否则一次工具输出就触发压缩。
-        assert_eq!(compact_threshold_for_window(8_000, None), MIN_COMPACT_THRESHOLD);
+        assert_eq!(
+            compact_threshold_for_window(8_000, None),
+            MIN_COMPACT_THRESHOLD
+        );
     }
 
     /// 手改 config.json 少打或多打一个 0，要在加载时被夹回来。
@@ -1959,8 +1963,14 @@ mod tests {
             "activeModel": "tiny"
         }"#;
         let c = parse(json);
-        assert_eq!(c.providers[0].models[0].context_window, Some(MIN_CONTEXT_WINDOW));
-        assert_eq!(c.providers[0].models[1].context_window, Some(MAX_CONTEXT_WINDOW));
+        assert_eq!(
+            c.providers[0].models[0].context_window,
+            Some(MIN_CONTEXT_WINDOW)
+        );
+        assert_eq!(
+            c.providers[0].models[1].context_window,
+            Some(MAX_CONTEXT_WINDOW)
+        );
     }
 
     /// 没有 `contextWindow` 字段的配置（也就是所有存量配置）要照常读，
@@ -1987,7 +1997,10 @@ mod tests {
     #[test]
     fn 未填的窗口不进配置文件() {
         let json = serde_json::to_string(&one_provider()).expect("序列化");
-        assert!(!json.contains("contextWindow"), "没填就不该出现这个键：{json}");
+        assert!(
+            !json.contains("contextWindow"),
+            "没填就不该出现这个键：{json}"
+        );
     }
 
     /// 主模型自己能看图时不该再走兼容模型。
@@ -2302,10 +2315,7 @@ mod tests {
 
         assert_eq!(c.active_model, "deepseek-chat");
         assert!(c.web.fetch_enabled, "抓取默认开");
-        assert!(
-            c.web.search_enabled,
-            "搜索默认开 —— 空地址走内置实例"
-        );
+        assert!(c.web.search_enabled, "搜索默认开 —— 空地址走内置实例");
         assert!(c.web.search_ready());
         assert!(
             !c.web.using_custom_searxng(),
