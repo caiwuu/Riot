@@ -23,6 +23,7 @@ use riot_providers::{
 };
 
 use crate::config::ResolvedModel;
+use crate::prompt::Flavor;
 
 /// 按配置构建 provider。会话和"测试连接"共用 —— 两处各写一遍的话，
 /// 测试通过而正式请求失败（或反过来）这种事迟早发生。
@@ -59,7 +60,7 @@ pub fn provider_from_endpoint(
         return Ok(Arc::new(AnthropicProvider::new(
             transport,
             clock,
-            Vec::new(),
+            vendor_sections(model),
             AnthropicConfig {
                 base_url: model.base_url.clone(),
                 api_path: model.api_path.clone(),
@@ -74,7 +75,7 @@ pub fn provider_from_endpoint(
     Ok(Arc::new(OpenAiProvider::new(
         transport,
         clock,
-        Vec::<SystemSection>::new(),
+        vendor_sections(model),
         OpenAiConfig {
             base_url: model.base_url.clone(),
             api_path: model.api_path.clone(),
@@ -84,6 +85,45 @@ pub fn provider_from_endpoint(
             ..Default::default()
         },
     )))
+}
+
+/// provider 级的 system 分节：**只对某一家成立**的补充说明挂在这里。
+///
+/// 会话那份完整的 system prompt 不走这条路 —— 它逐会话不同（工作目录、
+/// venv、用户补充指令），而 provider 是按端点建的、跨会话复用，把会话内容
+/// 塞进来只会让两者的生命周期对不上。它走 `ProviderRequest::system`，在
+/// [`crate::prompt::system_prompt`] 里按分节装配好，用
+/// [`riot_providers::anthropic::SYSTEM_SECTION_BOUNDARY`] 标出缓存边界。
+///
+/// 这里留给真正的厂商差异：某一家特有的工具调用怪癖、某一家需要额外一句
+/// 才肯遵守的格式约定。
+///
+/// TODO(prompt): 目前两家都返回空。要往里加内容前先确认它**只**对这一家
+/// 成立 —— 通用的话属于 `prompt.rs` 的分节，写在这里等于让另一半后端拿不到。
+/// 已知的候选：
+/// - Anthropic：并行工具调用的服从度最高，可以给更激进的批量指引；
+/// - OpenAI 兼容（DeepSeek、智谱）：对 `<system-reminder>` 这类 XML 包装的
+///   服从度偏弱，可能需要一句「被 `<system-reminder>` 包住的内容和用户
+///   本人说的话等权」。分节外壳的差异已经由 [`crate::prompt::Flavor`] 处理。
+fn vendor_sections(model: &riot_protocol::ModelEndpoint) -> Vec<SystemSection> {
+    match flavor_for(model) {
+        // 分支合并着写是因为两家现在都空。留着这个 match 而不是直接返回
+        // `Vec::new()`，是为了让「加一句只对某家说的话」有个明确的落点 ——
+        // 没有落点的话，下一个人会把它塞进通用提示词里。
+        Flavor::Anthropic | Flavor::OpenAiCompatible => Vec::new(),
+    }
+}
+
+/// 端点 → 提示词的渲染风格。
+///
+/// 厂商知识留在这个模块里：`prompt.rs` 只认 [`crate::prompt::Flavor`]，
+/// 不认协议枚举 —— 否则每加一个后端都要去改提示词文件。
+pub(crate) fn flavor_for(model: &riot_protocol::ModelEndpoint) -> Flavor {
+    if model.is_anthropic() {
+        Flavor::Anthropic
+    } else {
+        Flavor::OpenAiCompatible
+    }
 }
 
 /// 拉取服务方的可用模型列表（`GET /v1/models`，两个协议的响应

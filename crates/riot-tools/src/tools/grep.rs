@@ -17,6 +17,7 @@ use riot_protocol::tool::{
 };
 use serde::Deserialize;
 
+use super::names::{BASH, GLOB, GREP, READ};
 use super::{path, search};
 
 /// 一次搜索最多看多少个文件。
@@ -34,36 +35,36 @@ const MAX_LINES: usize = 500;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, schemars::JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
 enum OutputMode {
-    /// 显示匹配的行。
+    /// Show the matching lines.
     #[default]
     Content,
-    /// 只显示有匹配的文件路径。
+    /// Show only the paths of files that contain a match.
     FilesWithMatches,
-    /// 每个文件的匹配次数。
+    /// Show the number of matches per file.
     Count,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Input {
-    /// 正则表达式，Rust regex 语法。
+    /// The regular expression to search for, in Rust regex syntax.
     pattern: String,
-    /// 搜索的目录或文件。省略则搜索工作目录。
+    /// Directory or file to search. Omit to search the working directory.
     #[serde(default)]
     path: Option<String>,
-    /// 文件名过滤，如 `*.rs` 或 `**/test/*.py`。
+    /// Filename filter, such as `*.rs` or `**/test/*.py`.
     #[serde(default)]
     glob: Option<String>,
-    /// 输出形式。默认 `content`。
+    /// Output shape. Defaults to `content`.
     #[serde(default)]
     output_mode: OutputMode,
-    /// 忽略大小写。
+    /// Match case-insensitively.
     #[serde(default)]
     case_insensitive: bool,
-    /// 匹配行前后各带几行上下文。只在 `content` 模式下有效。
+    /// Lines of context to show around each match. Only used in `content` mode.
     #[serde(default)]
     context_lines: Option<usize>,
-    /// 最多返回几条结果。
+    /// Maximum number of results to return.
     #[serde(default)]
     head_limit: Option<usize>,
 }
@@ -73,7 +74,7 @@ pub struct Grep;
 #[async_trait]
 impl Tool for Grep {
     fn name(&self) -> &'static str {
-        "Grep"
+        GREP
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -81,14 +82,71 @@ impl Tool for Grep {
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "在文件内容里搜索正则。基于 ripgrep，会自动跳过 .gitignore 里的文件。\n\
-         \n\
-         - 优先用这个而不是 Bash 里的 `grep`／`rg`：更快，输出也已经整理过。\n\
-         - `pattern` 是 Rust regex 语法。字面量里的 `.`、`(`、`[` 等需要转义。\n\
-         - 先用 `files_with_matches` 摸清范围，再对具体文件用 `content` 细看，\
-         比一次拉回几百行更省上下文。\n\
-         - 结果过多时会截断，缩小 `glob` 范围或让 `pattern` 更具体。"
-            .to_owned()
+        format!(
+            "Searches file contents with a regular expression. Built on ripgrep; \
+             .gitignore'd files and .git are skipped automatically.\n\
+             \n\
+             Usage:\n\
+             - ALWAYS prefer this over `grep` or `rg` in {BASH}: it needs no command \
+             approval, it cannot be broken by shell quoting, and its output is already \
+             trimmed to fit your context.\n\
+             - `pattern` is Rust regex syntax, so `.`, `(`, `[`, `?` and `+` need \
+             escaping when you mean them literally: write `parse\\(` to find a call, \
+             not `parse(`.\n\
+             - Output modes: `files_with_matches` returns paths only, `content` returns \
+             matching lines, `count` returns per-file counts. Start with \
+             `files_with_matches` to size the problem, then re-run `content` on the \
+             narrowed `path` or `glob`.\n\
+             - Narrow with `glob` (`*.rs`, `**/test/*.py`) rather than searching \
+             everything and reading past the noise.\n\
+             - Results are capped at {MAX_LINES} lines / {MAX_CHARS} characters and are \
+             truncated when they exceed that. Truncation means your pattern was too \
+             broad, not that you should page through it.\n\
+             - `context_lines` only applies in `content` mode. Use 2-3 when you need to \
+             see the enclosing statement; leave it off when counting call sites.\n\
+             \n\
+             ### When to Use\n\
+             \n\
+             1. Finding where a symbol is defined, used, or imported.\n\
+             2. Checking whether a pattern exists anywhere before assuming it does not.\n\
+             3. Sizing a refactor: how many files contain the thing you are about to \
+             change.\n\
+             4. As the first step of almost any \"where is X?\" question, ahead of {READ}.\n\
+             \n\
+             ### When NOT to Use\n\
+             \n\
+             1. Finding files by name, path, or extension — that is {GLOB}. \
+             `{GREP}(pattern: \".\", glob: \"*.rs\")` matches every line of every Rust file \
+             and will be truncated.\n\
+             2. Reading a file you have already located. Switch to {READ} with an \
+             `offset` around the hit; {GREP} output is line fragments, and editing from \
+             fragments produces `old_string` values that do not match.\n\
+             3. Answering a question you can answer from context you already have.\n\
+             4. Searching build output, `node_modules`, or vendored trees. They are \
+             ignored by default; do not re-enable them with a broad `path` just because \
+             a search came back empty.\n\
+             5. NEVER pipe this tool's job through {BASH} (`{BASH}(\"rg foo\")`). If you \
+             think you need the shell for a search, you need a narrower `pattern` here.\n\
+             \n\
+             <good-example>\n\
+             {GREP}(pattern: \"fn\\s+parse_manifest\", output_mode: \"files_with_matches\")\n\
+             {GREP}(pattern: \"parse_manifest\", path: \"src/manifest.rs\", \
+             output_mode: \"content\", context_lines: 2)\n\
+             </good-example>\n\
+             <reasoning>\n\
+             Two cheap calls: the first says which file, the second shows the call sites \
+             with just enough surrounding code. Neither risks truncation.\n\
+             </reasoning>\n\
+             \n\
+             <bad-example>\n\
+             {GREP}(pattern: \"parse\", output_mode: \"content\")\n\
+             </bad-example>\n\
+             <reasoning>\n\
+             `parse` matches thousands of lines across the repository, so the result is \
+             truncated and the real definition may not even be in what came back. Anchor \
+             the pattern (`fn parse_manifest`) or scope it with `glob`.\n\
+             </reasoning>"
+        )
     }
 
     fn describe(&self, input: &serde_json::Value) -> String {

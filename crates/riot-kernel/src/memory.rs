@@ -111,7 +111,10 @@ fn cap(mut s: String, path: &Path) -> String {
     if chars > MAX_FILE_CHARS {
         tracing::warn!(path = %path.display(), chars, "记忆文件超过上限，已截断");
         s = s.chars().take(MAX_FILE_CHARS).collect();
-        s.push_str("\n\n[记忆文件超长已截断。把大段内容拆成单独文件，用 @路径 按需引用。]");
+        s.push_str(
+            "\n\n[This memory file was too long and has been truncated. Split large sections \
+             into separate files and reference them with @path as needed.]",
+        );
     } else if chars > WARN_FILE_CHARS {
         tracing::warn!(
             path = %path.display(),
@@ -158,7 +161,7 @@ fn expand(text: &str, base: &Path, depth: usize, visited: &mut HashSet<PathBuf>)
             visited.insert(real);
             let expanded = expand(&included, &target, depth + 1, visited);
             out.push_str(&format!(
-                "\n<引用文件 路径=\"{}\">\n{}\n</引用文件>\n",
+                "\n<included-file path=\"{}\">\n{}\n</included-file>\n",
                 target.display(),
                 expanded.trim_end(),
             ));
@@ -321,7 +324,7 @@ mod tests {
             "嵌套引用相对于 docs/ 解析（包含文件的目录），不是项目根：{c}"
         );
         assert!(
-            c.contains("<引用文件"),
+            c.contains("<included-file"),
             "展开要带来源路径，模型才知道内容从哪来"
         );
     }
@@ -359,7 +362,7 @@ mod tests {
             "围栏代码块里的 @ 是代码不是引用：{c}"
         );
         assert!(
-            !c.contains("引用文件 路径=\"@types"),
+            !c.contains("included-file path=\"@types"),
             "行内反引号里的 @ 不是引用"
         );
     }
@@ -375,7 +378,7 @@ mod tests {
         );
         let files = collect_in(&d.path().join("cfg"), &project);
         assert!(
-            !files[0].content.contains("<引用文件"),
+            !files[0].content.contains("<included-file"),
             "邮箱和 @提及 不是文件引用"
         );
     }
@@ -401,7 +404,7 @@ mod tests {
             c.chars().count() < MAX_FILE_CHARS + 200,
             "必须截断 —— 这是每个会话都付的成本"
         );
-        assert!(c.contains("已截断"), "要告诉模型内容不完整");
+        assert!(c.contains("has been truncated"), "要告诉模型内容不完整");
     }
 
     #[test]

@@ -32,7 +32,9 @@ use riot_protocol::id::{MessageId, ToolUseId};
 use riot_protocol::message::{Message, MessageMeta, ToolResultContent, UserContent};
 
 /// 合成结果的正文。措辞面向模型：说清结果没了、为什么、该怎么办。
-const LOST_RESULT_TEXT: &str = "结果丢失：这次工具调用被异常中断（网络断开或程序退出），没有产生结果。仍然需要的话请重新调用。";
+const LOST_RESULT_TEXT: &str = "Result lost: this tool call was interrupted (the connection \
+                                dropped or the program exited) and produced no result. Call the \
+                                tool again if you still need it.";
 
 /// 为每个悬空的 tool_use 合成错误结果，插在它所在的 assistant 消息之后。
 /// 返回修复的 tool_use 个数；0 = 历史本来就配对，未做任何改动。

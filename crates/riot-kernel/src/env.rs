@@ -23,7 +23,8 @@ use riot_protocol::terminal::TerminalInfo;
 /// 快照渲染的首行。差分指纹和水合恢复（[`last_snapshot_text`]）都靠它
 /// 从 `Attachment::Environment` 里认出"这是环境快照"—— git 快照和
 /// 轮首状态行走的是同一种附件。
-pub const SNAPSHOT_HEADER: &str = "环境快照（终端面板与内置浏览器的现状）";
+pub const SNAPSHOT_HEADER: &str =
+    "Environment snapshot (current state of the terminal panel and the built-in browser)";
 
 /// 快照 → 注入给模型的那段文字。空环境也有话说（"没有你能看的终端"）——
 /// 从有到无也是变化，调用方靠首轮 + [`EnvSnapshot::is_quiet`] 决定跳过。
@@ -31,23 +32,25 @@ pub fn render(snap: &EnvSnapshot) -> String {
     let mut s = format!("{SNAPSHOT_HEADER}\n");
 
     if snap.mine.is_empty() && snap.shared.is_empty() {
-        s.push_str("终端面板里没有你能看的终端。\n");
+        s.push_str("No terminal in the panel is visible to you.\n");
     }
     if !snap.mine.is_empty() {
-        s.push_str("你起的服务：\n");
+        s.push_str("Processes you started:\n");
         for t in &snap.mine {
             s.push_str(&format!("  {}\n", term_line(t)));
         }
     }
     if !snap.shared.is_empty() {
-        s.push_str("用户共享给你的终端（能读不能停）：\n");
+        s.push_str("Terminals the user shared with you (readable, not stoppable):\n");
         for t in &snap.shared {
             s.push_str(&format!("  {}\n", term_line(t)));
         }
     }
     if snap.unshared_count > 0 {
         s.push_str(&format!(
-            "用户另有 {} 个未共享的终端；内容你看不到，需要就请他在终端面板上点「共享给 agent」。\n",
+            "The user has {} other terminal(s) that are not shared; you cannot see their \
+             contents. If you need one, ask them to click 「共享给 agent」 on it in the terminal \
+             panel.\n",
             snap.unshared_count
         ));
     }
@@ -55,21 +58,24 @@ pub fn render(snap: &EnvSnapshot) -> String {
         let title = if b.title.is_empty() {
             String::new()
         } else {
-            format!("（{}）", b.title)
+            format!(" ({})", b.title)
         };
         s.push_str(&format!(
-            "浏览器面板开着 {}{title}，共 {} 个标签页。\n",
+            "The browser panel is open at {}{title}, with {} tab(s).\n",
             b.url, b.tabs
         ));
     }
     // 尾行说清差分语义的另一半：快照本身声明时效，别让模型拿三轮前的
     // 快照当现状（git.rs 那条"不必再跑"的教训反过来用）。
-    s.push_str("以上是本轮开始时的采样；之后没有新快照就表示这些没变。");
+    s.push_str(
+        "The above was sampled at the start of this turn; until a new snapshot arrives, it still \
+         holds.",
+    );
     s
 }
 
 fn term_line(t: &TerminalInfo) -> String {
-    let state = if t.running { "在跑" } else { "已退出" };
+    let state = if t.running { "running" } else { "exited" };
     match &t.command {
         Some(cmd) => format!("[{}] {} — {cmd} — {state}", t.id, t.title),
         None => format!("[{}] {} — {state}", t.id, t.title),
@@ -79,8 +85,9 @@ fn term_line(t: &TerminalInfo) -> String {
 /// 一条告警 → system-reminder 文本。
 pub fn alert_text(a: &EnvAlert) -> String {
     format!(
-        "终端 [{}]（{}）的输出里出现了异常：\n{}\n\
-         与当前任务相关就用 TerminalOutput(id={}) 看完整输出；无关就忽略，不必评论。",
+        "Something went wrong in the output of terminal [{}] ({}):\n{}\n\
+         If it bears on the current task, read the full output with TerminalOutput(id={}); if it \
+         does not, ignore it and do NOT comment on it.",
         a.terminal_id, a.title, a.excerpt, a.terminal_id
     )
 }
@@ -102,13 +109,14 @@ pub fn usage_band(pct: u32) -> u32 {
 /// 越档时注入的那一行。
 pub fn band_line(pct: u32) -> String {
     format!(
-        "上下文已用约 {}%（满 100% 会自动压缩历史）。压缩会吞掉旧的工具结果 —— \
-         重要结论尽早写进回复正文。",
+        "About {}% of the context is used (history is compacted automatically at 100%). \
+         Compaction swallows old tool results, so write conclusions that matter into the body of \
+         a reply while you still have them.",
         pct.min(100)
     )
 }
 
-/// 每轮注入的时钟行，如 `现在是 2026-08-31（周一）16:37，UTC+8。`
+/// 每轮注入的时钟行，如 `Now: 2026-08-31 (Monday) 16:37, UTC+8.`
 ///
 /// wire 格式里消息不带时间戳（meta 不进请求），模型对「这轮离上轮隔了
 /// 多久」零感知 —— 上午到下午的五个小时在它眼里是紧挨着的两行字，
@@ -120,12 +128,20 @@ pub fn band_line(pct: u32) -> String {
 pub fn clock_line(epoch_ms: u64, tz_offset_minutes: i32) -> String {
     let shifted = epoch_ms.saturating_add_signed(i64::from(tz_offset_minutes) * 60_000);
     let (y, mo, d) = riot_tools::tools::web::date::ymd_utc(shifted);
-    const WEEKDAYS: [&str; 7] = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+    const WEEKDAYS: [&str; 7] = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ];
     // 1970-01-01 是周四：天序号 +4 再模 7，正好落在 0=周日 的表上。
     let weekday = WEEKDAYS[((shifted / 86_400_000 + 4) % 7) as usize];
     let minutes_of_day = (shifted / 60_000) % (24 * 60);
     format!(
-        "现在是 {y}-{mo:02}-{d:02}（{weekday}）{:02}:{:02}，{}。",
+        "Now: {y}-{mo:02}-{d:02} ({weekday}) {:02}:{:02}, {}.",
         minutes_of_day / 60,
         minutes_of_day % 60,
         tz_label(tz_offset_minutes)
@@ -164,15 +180,17 @@ pub fn gap_line(gap_ms: u64) -> Option<String> {
     }
     let mins = gap_ms / 60_000;
     let human = if mins < 60 {
-        format!("{mins} 分钟")
+        format!("{mins} minutes")
     } else if mins < 48 * 60 {
-        format!("{} 小时", mins / 60)
+        format!("{} hours", mins / 60)
     } else {
-        format!("{} 天", mins / (24 * 60))
+        format!("{} days", mins / (24 * 60))
     };
     Some(format!(
-        "距上一条消息已过去约 {human}。期间终端、浏览器、文件等外部状态都可能变了 —— \
-         历史里的快照和结论只代表当时，涉及现状的判断先重新核实。"
+        "About {human} have passed since the previous message. Terminals, the browser, and files \
+         may all have changed in the meantime — snapshots and conclusions in the history describe \
+         that earlier moment only, so re-verify anything about the current state before you rely \
+         on it."
     ))
 }
 
@@ -181,8 +199,9 @@ pub fn gap_line(gap_ms: u64) -> Option<String> {
 /// 契约是「没有新快照就是环境没变」—— 探针一断，沉默会被这条契约反向
 /// 背书成"一切照旧"。宣告作废之后调用方必须清掉指纹：一来连续断供
 /// 只唠叨这一次，二来恢复采样的那一轮差分对 None 必真，全量重发。
-pub const STALE_NOTICE: &str = "本轮环境采样失败：此前快照里的终端与浏览器状态一律视为未知\
-                                （不是「没变」），需要时用工具重新确认。";
+pub const STALE_NOTICE: &str = "Environment sampling failed this turn: treat the terminal and browser state from every \
+     earlier snapshot as unknown rather than unchanged, and re-check with a tool anything you are \
+     about to rely on.";
 
 /// 历史里模型最后看到的快照全文。水合时恢复差分指纹用。
 ///
@@ -198,7 +217,8 @@ pub fn last_snapshot_text(msgs: &[Message]) -> Option<String> {
     msgs.iter().rev().find_map(|m| match m {
         Message::User { content, .. } => content.iter().rev().find_map(|c| match c {
             UserContent::Attachment(Attachment::Environment { text })
-                if text.starts_with(SNAPSHOT_HEADER) =>
+                if text.starts_with(SNAPSHOT_HEADER)
+                    || text.starts_with(LEGACY_SNAPSHOT_HEADER) =>
             {
                 Some(text.clone())
             }
@@ -207,6 +227,11 @@ pub fn last_snapshot_text(msgs: &[Message]) -> Option<String> {
         _ => None,
     })
 }
+
+/// 英文化之前的快照首行。跨版本会话的历史里还是这一行，不认它的话指纹
+/// 从 None 起步，恰逢环境变空就命中"首轮安静跳过"，旧快照被「没有新快照
+/// = 没变」反向背书成现状 —— 正是上面那段注释记的那次翻车。
+const LEGACY_SNAPSHOT_HEADER: &str = "环境快照（终端面板与内置浏览器的现状）";
 
 #[cfg(test)]
 mod tests {
@@ -246,20 +271,27 @@ mod tests {
             alerts: vec![],
         };
         let out = render(&snap);
-        assert!(out.contains("[3] dev server — pnpm dev — 在跑"), "{out}");
-        assert!(out.contains("[5] 测试 — cargo test — 已退出"), "{out}");
-        assert!(out.contains("能读不能停"), "共享终端要说清权限边界：{out}");
-        assert!(out.contains("另有 2 个未共享"), "{out}");
+        assert!(out.contains("[3] dev server — pnpm dev — running"), "{out}");
+        assert!(out.contains("[5] 测试 — cargo test — exited"), "{out}");
+        assert!(
+            out.contains("readable, not stoppable"),
+            "共享终端要说清权限边界：{out}"
+        );
+        assert!(
+            out.contains("2 other terminal(s) that are not shared"),
+            "{out}"
+        );
+        // 按钮名是界面上的字面量，必须原样给出 —— 翻译过去用户在面板上找不到。
         assert!(
             out.contains("共享给 agent"),
             "要指路怎么共享，不然模型只记住一个数字：{out}"
         );
         assert!(
-            out.contains("http://localhost:5173（Riot），共 3 个标签页"),
+            out.contains("http://localhost:5173 (Riot), with 3 tab(s)"),
             "{out}"
         );
         assert!(
-            out.contains("没有新快照就表示这些没变"),
+            out.contains("until a new snapshot arrives, it still holds"),
             "差分语义要在快照里自declare：{out}"
         );
     }
@@ -276,7 +308,10 @@ mod tests {
             alerts: vec![],
         };
         let out = render(&snap);
-        assert!(out.contains("没有你能看的终端"), "{out}");
+        assert!(
+            out.contains("No terminal in the panel is visible to you"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -289,7 +324,10 @@ mod tests {
         let out = alert_text(&a);
         assert!(out.contains("EADDRINUSE"), "{out}");
         assert!(out.contains("TerminalOutput(id=3)"), "要指路读全文：{out}");
-        assert!(out.ends_with("无关就忽略，不必评论。"), "护栏不能少：{out}");
+        assert!(
+            out.ends_with("ignore it and do NOT comment on it."),
+            "护栏不能少：{out}"
+        );
     }
 
     #[test]
@@ -309,7 +347,7 @@ mod tests {
         let line = band_line(140);
         assert!(line.contains("100%"), "显示要封顶：{line}");
         assert!(
-            line.contains("写进回复"),
+            line.contains("write conclusions that matter into the body of a reply"),
             "失忆预警是这行存在的一半理由：{line}"
         );
     }
@@ -322,21 +360,21 @@ mod tests {
     fn 时钟行_按时区渲染日期星期与时刻() {
         assert_eq!(
             clock_line(MONDAY_0837Z, 480),
-            "现在是 2026-08-31（周一）16:37，UTC+8。"
+            "Now: 2026-08-31 (Monday) 16:37, UTC+8."
         );
         // 拿不到时区就诚实标 UTC，不许把 UTC 假装成本地时间。
         assert_eq!(
             clock_line(MONDAY_0837Z, 0),
-            "现在是 2026-08-31（周一）08:37，UTC。"
+            "Now: 2026-08-31 (Monday) 08:37, UTC."
         );
         // 西向偏移与半小时时区（印度 UTC+5:30）。
         assert_eq!(
             clock_line(MONDAY_0837Z, -420),
-            "现在是 2026-08-31（周一）01:37，UTC-7。"
+            "Now: 2026-08-31 (Monday) 01:37, UTC-7."
         );
         assert_eq!(
             clock_line(MONDAY_0837Z, 330),
-            "现在是 2026-08-31（周一）14:07，UTC+5:30。"
+            "Now: 2026-08-31 (Monday) 14:07, UTC+5:30."
         );
     }
 
@@ -347,7 +385,7 @@ mod tests {
         // 2026-08-31T20:00Z → 东八区 09-01 04:00，周二。
         assert_eq!(
             clock_line(1_788_206_400_000, 480),
-            "现在是 2026-09-01（周二）04:00，UTC+8。"
+            "Now: 2026-09-01 (Tuesday) 04:00, UTC+8."
         );
     }
 
@@ -357,16 +395,16 @@ mod tests {
         const MIN: u64 = 60_000;
         assert_eq!(gap_line(29 * MIN), None, "半小时内是正常停顿");
         let half_hour = gap_line(30 * MIN).expect("到阈值该说");
-        assert!(half_hour.contains("约 30 分钟"), "{half_hour}");
+        assert!(half_hour.contains("About 30 minutes"), "{half_hour}");
         assert!(
-            half_hour.contains("重新核实"),
+            half_hour.contains("re-verify"),
             "警示要指路行动：{half_hour}"
         );
 
         let hours = gap_line(5 * 60 * MIN).expect("有值");
-        assert!(hours.contains("约 5 小时"), "{hours}");
+        assert!(hours.contains("About 5 hours"), "{hours}");
         let days = gap_line(3 * 24 * 60 * MIN).expect("有值");
-        assert!(days.contains("约 3 天"), "{days}");
+        assert!(days.contains("About 3 days"), "{days}");
     }
 
     /// 水合恢复指纹：取历史里**最后**一份快照，git 快照和轮首状态行

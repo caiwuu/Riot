@@ -17,6 +17,7 @@ pub mod glob;
 pub mod grep;
 #[cfg(any(test, feature = "testing"))]
 pub mod memfs;
+pub mod names;
 pub mod path;
 pub mod pentest;
 pub mod plan;

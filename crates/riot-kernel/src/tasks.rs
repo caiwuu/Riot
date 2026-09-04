@@ -267,6 +267,10 @@ impl BackgroundTasks {
 ///
 /// `report` 是子 agent 的最后一条回复（同步 Task 里原样作为 tool_result
 /// 回去的那份），失败时是失败原因。
+///
+/// 前奏是给模型的行为说明（界面按 `--- 汇报 ---` 切掉后只显示汇报本体，
+/// 见 `useSession.ts` 的 `stripNoticePreamble`），所以用英文和其余提示词
+/// 保持一致；分隔符本身是前后端约定的字面量，改它会让卡片显示整段前奏。
 pub fn notice_message(
     id: MessageId,
     view: &BackgroundTaskView,
@@ -275,17 +279,21 @@ pub fn notice_message(
     now_ms: u64,
 ) -> Message {
     let verb = match view.status {
-        BackgroundTaskStatus::Running => "仍在运行",
-        BackgroundTaskStatus::Completed => "已完成",
-        BackgroundTaskStatus::Failed => "失败了",
-        BackgroundTaskStatus::Cancelled => "被停止了",
+        BackgroundTaskStatus::Running => "is still running",
+        BackgroundTaskStatus::Completed => "has finished",
+        BackgroundTaskStatus::Failed => "failed",
+        BackgroundTaskStatus::Cancelled => "was stopped",
     };
     let text = format!(
-        "后台子任务「{}」{verb}（agent id：{} · {} · {model} · {} tokens · {} 次工具调用）。\n\
-         下面是它的汇报。用户已经在界面上看到了这份汇报 —— 不要复述；只做需要你做的事：\
-         综合多个任务的结果、处理它报告的阻塞或失败、或据此继续协调。没有需要做的就简短\
-         确认一句。要给它追加指令，用 Task 工具、resume 填上面这个 agent id；回复里提到它\
-         写成链接 [{}](agent:{})。\n\n\
+        "The background subtask \"{}\" {verb} (agent id: {} · {} · {model} · {} tokens · {} tool \
+         calls).\n\
+         Its report follows. The user has ALREADY seen this report in the UI, so do NOT recite \
+         it back — repeating it just makes them read the same thing twice. Do only what actually \
+         needs doing: combine the results of several tasks, deal with a blocker or failure it \
+         reports, or carry on coordinating from here. If nothing needs doing, acknowledge it in \
+         one short sentence. To send it further instructions, use the Task tool with resume set \
+         to the agent id above; when you mention it in a reply, write it as the link \
+         [{}](agent:{}).\n\n\
          --- 汇报 ---\n{report}",
         view.title,
         view.id.as_str(),
@@ -491,7 +499,7 @@ mod tests {
         assert!(matches!(
             &content[0],
             UserContent::Attachment(Attachment::SystemReminder { text })
-                if text.contains("报告正文") && text.contains("不要复述")
+                if text.contains("报告正文") && text.contains("do NOT recite")
         ));
     }
 }

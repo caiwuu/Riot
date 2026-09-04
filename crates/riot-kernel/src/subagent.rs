@@ -210,6 +210,11 @@ pub struct SubagentDeps {
     pub ids: Arc<dyn IdGenerator>,
     pub cwd: PathBuf,
     pub artifacts_dir: PathBuf,
+    /// 提示词分节的渲染风格，跟父会话的端点走。
+    ///
+    /// 子 agent 和父用同一个 provider（便宜档也是同一家配置出来的），
+    /// 让它自己猜的话，换后端时主 agent 变了、子 agent 没变。
+    pub flavor: crate::prompt::Flavor,
     pub max_turns: u32,
     /// 子 agent transcript 的落盘处（`sessions/subagents/<会话>/`）。
     /// None = 父会话本身不持久化（测试）。
@@ -370,42 +375,74 @@ fn tools_for(kind: Kind) -> Vec<Arc<dyn Tool>> {
 
 /// 子 agent 的系统提示。
 ///
+/// 和主 agent 共用 [`crate::prompt`] 的分节装配：同名分节（`reporting_results`、
+/// `output_language`）用的是**同一个常量**。两边各写一份的话，改主 agent 的
+/// 汇报规矩时子 agent 不会跟着变 —— 而子 agent 的汇报是直接展示给用户的。
+///
 /// 刻意**不注入** AGENTS.md：那份东西是给"在这个项目里写代码"的人看的，
 /// 而侦察档只汇报。CC 源码注释说 Explore 省掉 CLAUDE.md 一项每周省
 /// 5–15 G token —— 这里的省法一样，只是它从一开始就没接进来。
-fn system_prompt_for(kind: Kind, cwd: &std::path::Path) -> String {
-    let base = format!(
-        "工作目录：{}\n平台：{}\n\n",
-        cwd.display(),
-        std::env::consts::OS
-    );
+fn system_prompt_for(kind: Kind, cwd: &std::path::Path, flavor: crate::prompt::Flavor) -> String {
+    use crate::prompt::{OUTPUT_LANGUAGE, REPORTING_RESULTS, Sections};
+
+    let mut s = Sections::new(flavor);
     match kind {
-        Kind::Explore => format!(
-            "你是只读侦察专家，任务是快速、准确地摸清情况并汇报。\n\n{base}\
-             规则：\n\
-             - 只读。不修改任何文件、不执行有副作用的操作 —— 委托方是按\
-               「只读侦察」放你进来的，越界的写操作绕过了他的审查。\n\
-             - 并行地广撒网（Grep/Glob 可以同批多个），再对命中处精读 —— \
-               串行搜索是这类任务最大的时间浪费。\n\
-             - 汇报要可跳转：结论都带文件路径和行号 —— 委托方要照着你的\
-               报告直接动手，少个行号他就得重找一遍。\n\
-             - 你的回复会**原样**作为调查结果交回，写成一份紧凑的报告：\
-               先结论，再证据，不要过程独白 —— 过程只消耗委托方的上下文，\
-               不增加信息。\n\n回答用中文。",
+        Kind::Explore => s.push("agent_identity", EXPLORE_IDENTITY).push(
+            "operating_rules",
+            "- Read-only. NEVER modify a file and NEVER run anything with side effects. The \
+             delegator let you in on the understanding that this is read-only reconnaissance; a \
+             write from you bypasses the review they would otherwise have done.\n\
+             - Cast a wide net in parallel (several Grep/Glob calls in one batch), then read \
+             closely at the hits. Searching one pattern at a time is the single biggest waste of \
+             time in this kind of task.",
         ),
-        Kind::GeneralPurpose | Kind::Fork => format!(
-            "你是自主完成任务的执行者。委托方给你一个任务，你独立做完并汇报。\n\n{base}\
-             规则：\n\
-             - 动手前先看清楚：改文件前 Read，找位置用 Grep —— 凭猜测改出的\
-               错误，委托方比你更难发现。\n\
-             - 只做任务描述里的事，不顺手扩展 —— 委托方看不到你的过程，\
-               扩展出的改动他无从审查，只能连你做对的部分一起怀疑。\n\
-             - 你的最后一条回复会**原样**作为任务结果交回 —— 写清楚做了什么、\
-               改了哪些文件、验证结果如何；失败就如实说失败和原因，粉饰的\
-               「完成」会让委托方带着错误结论继续走。\n\n回答用中文。",
+        Kind::GeneralPurpose | Kind::Fork => s.push("agent_identity", WORKER_IDENTITY).push(
+            "operating_rules",
+            "- Look before you touch: Read a file before you edit it, use Grep to find the \
+             place. An error you introduce from a guess is harder for the delegator to spot than \
+             for you, because they never saw the code you were guessing about.\n\
+             - Do only what the task description asks; NEVER extend the scope on your own. The \
+             delegator cannot see your process, so an unrequested change is one they have no way \
+             to review — and it makes them doubt the parts you got right.",
         ),
-    }
+    };
+
+    s.push("reporting_results", REPORTING_RESULTS)
+        .push(
+            "handing_back",
+            match kind {
+                Kind::Explore => {
+                    "Your reply is handed back VERBATIM as the investigation result. Write it as \
+                     one compact report."
+                }
+                Kind::GeneralPurpose | Kind::Fork => {
+                    "Your last reply is handed back VERBATIM as the task result. Say what you \
+                     did, which files you changed, and how you verified it. If you failed, say \
+                     so and say why — a dressed-up \"done\" sends the delegator onward with a \
+                     conclusion that is not true."
+                }
+            },
+        )
+        .push("output_language", OUTPUT_LANGUAGE)
+        .push(
+            "host_environment",
+            format!(
+                "Working directory: {}\nPlatform: {}",
+                cwd.display(),
+                std::env::consts::OS
+            ),
+        );
+
+    s.render()
 }
+
+const EXPLORE_IDENTITY: &str = "\
+You are a read-only reconnaissance specialist. Your job is to find out what is going on, fast \
+and accurately, and report it back.";
+
+const WORKER_IDENTITY: &str = "\
+You are an autonomous worker. The delegator hands you one task; you complete it on your own and \
+report back.";
 
 /// 给后台子 agent 的工具贴上归属：权限弹窗的那句话前面带"后台任务「x」"。
 ///
@@ -741,9 +778,10 @@ pub fn fork_prelude(
     if let Some(last @ Message::Assistant { .. }) = history.last() {
         for id in last.tool_use_ids() {
             let text = if id == fork_call {
-                "这就是把你分叉出来的那次调用。你现在是那个后台子 agent。"
+                "This is the call that forked you. You are now that background subagent."
             } else {
-                "这个调用由主 agent 执行，结果在它那边，你这条线里看不到。"
+                "The main agent ran this call; its result stayed there and is not visible on \
+                 this branch."
             };
             content.push(UserContent::ToolResult {
                 tool_use_id: id.clone(),
@@ -754,18 +792,24 @@ pub fn fork_prelude(
     }
     content.push(UserContent::Attachment(Attachment::SystemReminder {
         text: format!(
-            "你是从主 agent 分叉出来的后台子 agent（agent id：{}），继承了到此为止的全部\
-             对话和工作区状态。从现在起你独立执行下面的任务；主 agent 只协调，不会重复\
-             做你的活。规则：\n\
-             - 不要再用 resume=\"self\" 分叉自己（会被拒绝）；需要拆分就开同步的子 agent。\n\
-             - 不要向用户提问 —— 用户看不到你的过程，只看得到你的最后一条回复。\n\
-             - 你的最后一条回复会作为汇报**原样**交回主 agent，用户也会看到：写清做了\
-               什么、改了哪些文件、验证结果如何；失败就如实说。",
+            "You are a background subagent forked from the main agent (agent id: {}). You \
+             inherited the entire conversation and workspace state up to this point. From here \
+             you carry out the task below independently; the main agent only coordinates and \
+             will not redo your work. Rules:\n\
+             - NEVER fork yourself again with resume=\"self\" — it will be rejected. If the work \
+               needs splitting, start synchronous subagents instead.\n\
+             - Do NOT ask the user questions. They cannot see your process, only your final \
+               reply, so a question just stalls the task. Pick the most reasonable reading and \
+               say which assumption you made in your report.\n\
+             - Your final reply is handed back to the main agent **verbatim** as your report, \
+               and the user sees it too. Write what you did, which files you changed, and how \
+               verification went. If it failed, say so plainly — a report that hides a failure \
+               makes the main agent build on something that does not work.",
             agent_id.as_str()
         ),
     }));
     content.push(UserContent::Text {
-        text: format!("任务：{prompt}"),
+        text: format!("Task: {prompt}"),
     });
     Message::User {
         id: riot_protocol::id::MessageId::from_raw(format!("{}_fork", agent_id.as_str())),
@@ -867,7 +911,7 @@ impl TaskTool {
             title,
             provider,
             model,
-            system: system_prompt_for(kind, &self.deps.cwd),
+            system: system_prompt_for(kind, &self.deps.cwd, self.deps.flavor),
             tools: Arc::new(scheduler),
             messages,
             max_turns,
@@ -894,26 +938,36 @@ impl Tool for TaskTool {
     /// `[约束]` 描述不能随 `depth` 变：分叉的工具清单要和父逐字节一致，
     /// 前缀缓存才命中（见模块文档）。深度差异只体现在运行时的拒绝上。
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "启动一个子 agent 自主完成任务。适合：需要多步探索的调研（不确定东西在哪、\
-         要广撒网）、可以并行的独立子问题、一段可独立交付的实现。不适合：读一个已知\
-         路径的文件（直接 Read）、找一个具体符号（直接 Grep）—— 那些一步就完，包一层\
-         子 agent 只是变慢。\n\n\
-         subagent_type 选 `explore`（只读侦察，便宜、可并行）或 `general-purpose`\
-         （全工具，能改代码跑命令）。\n\n\
-         写 prompt 时把它当成一个刚进门的同事：它**看不到**本对话的任何内容。背景、\
-         目标、范围、已排除的方向、相关文件路径都要写进去；要求它汇报什么形式的结果\
-         也写明。它的回复不会直接展示给用户 —— 你要自己转述要点。可以在一条消息里\
-         并行发起多个 Task。\n\n\
-         run_in_background=true 把它放到后台：立刻拿到 agent id，你结束本轮回复即可，\
-         它完成后会有一条通知消息（含汇报）唤醒你。适合要跑几分钟以上的实现/测试类\
-         任务，以及你还有别的事要同时协调的时候。**不要等它、不要轮询、不要在前台\
-         重复它正在做的活**。侦察类的短任务用同步更合适。\n\n\
-         resume=<agent id> 续接一个跑过的子 agent（它记得之前的一切，prompt 只写增量\
-         指令）；resume=\"self\" 把你自己分叉成后台子 agent 去执行一段实质工作 —— 它\
-         继承本对话全部上下文，你不用重述背景；分叉后你在前台只做协调，不要再做同一\
-         件事。不要为了并行而过度拆分：小到中等的任务一个子 agent 就够。\n\n\
-         在回复里提到某个子 agent 时写成链接 `[任务名](agent:<agent id>)`，用户点它能\
-         打开那个子 agent 的完整会话看过程。"
+        "Launches a subagent that works on a task autonomously.\n\n\
+         Use it for: research that needs multi-step exploration (you do not know where \
+         the thing is and have to cast a wide net), independent sub-problems that can run \
+         in parallel, a slice of implementation that can be delivered on its own.\n\n\
+         NEVER use it for: reading a file whose path you already know (call Read), finding \
+         one specific symbol (call Grep). Those finish in a single step, and wrapping them \
+         in a subagent only makes them slower.\n\n\
+         `subagent_type` is `explore` (read-only reconnaissance, cheap, parallel-friendly) \
+         or `general-purpose` (full tool set, can edit code and run commands).\n\n\
+         Write the prompt as if briefing a colleague on their first day: it CANNOT see any \
+         part of this conversation. Spell out the background, the goal, the scope, the \
+         directions you already ruled out, and the relevant file paths; say what shape of \
+         result you want back. Its reply is not shown to the user — you have to relay the \
+         key points yourself. You may start several Task calls in one message to run them \
+         in parallel.\n\n\
+         `run_in_background=true` puts it in the background: you get an agent id \
+         immediately and can end your turn, and a notification message (carrying its \
+         report) wakes you when it finishes. Use it for implementation or test work that \
+         runs for minutes, and whenever you have other things to coordinate meanwhile. \
+         NEVER wait for it, poll it, or redo its work in the foreground. Short \
+         reconnaissance is better run synchronously.\n\n\
+         `resume=<agent id>` continues a subagent that already ran (it remembers \
+         everything, so the prompt only carries the delta). `resume=\"self\"` forks you \
+         into a background subagent to do a stretch of real work — it inherits this \
+         conversation's full context, so you do not restate the background; after forking, \
+         you only coordinate in the foreground and MUST NOT keep doing the same work. Do \
+         not over-split for the sake of parallelism: one subagent is enough for a small or \
+         medium task.\n\n\
+         When you mention a subagent in your reply, write it as a link \
+         `[task name](agent:<agent id>)` so the user can open its full session."
             .into()
     }
 
@@ -1375,6 +1429,7 @@ mod tests {
             ids: Arc::new(NanoIdGenerator),
             cwd: "/tmp".into(),
             artifacts_dir: std::env::temp_dir(),
+            flavor: crate::prompt::Flavor::Anthropic,
             max_turns: 8,
             transcripts: None,
             tasks: Arc::new(BackgroundTasks::new(crate::session::SessionSink::default())),
@@ -1462,9 +1517,60 @@ mod tests {
             "explore 不能有写工具"
         );
         assert!(
-            reqs[0].system.contains("只读"),
-            "explore 的系统提示要立只读规矩"
+            reqs[0].system.contains("Read-only. NEVER modify a file"),
+            "explore 的系统提示要立只读规矩：{}",
+            reqs[0].system
         );
+    }
+
+    /// 主 agent 和子 agent 共用同一份汇报规矩。
+    ///
+    /// `[约束]` 「先结论，再证据」过去只写在子 agent 这边，主 agent 反而没有。
+    /// 现在两边引用同一个常量 —— 各写一份的话，改主 agent 的汇报规矩时
+    /// 子 agent 不会跟着变，而子 agent 的汇报是直接展示给用户的。
+    #[test]
+    fn 子_agent_和主_agent_共用汇报分节() {
+        let main = crate::prompt::system_prompt(&crate::prompt::SystemPromptInput {
+            cwd: std::path::Path::new("/w"),
+            today: "2026年8月",
+            python_venv: None,
+            extra: None,
+            has_hooks: false,
+            flavor: crate::prompt::Flavor::Anthropic,
+        });
+        for kind in [Kind::Explore, Kind::GeneralPurpose] {
+            let sub = system_prompt_for(
+                kind,
+                std::path::Path::new("/w"),
+                crate::prompt::Flavor::Anthropic,
+            );
+            assert!(
+                sub.contains(crate::prompt::REPORTING_RESULTS),
+                "{kind:?} 少了共用的汇报分节"
+            );
+            assert!(
+                sub.contains(crate::prompt::OUTPUT_LANGUAGE),
+                "{kind:?} 的输出语言也该跟主 agent 是同一句"
+            );
+            assert!(sub.contains("<reporting_results>"), "分节标签要自动生成");
+            // 汇报会原样交回并展示给用户，两边的规矩必须逐字一致。
+            assert!(main.contains(crate::prompt::REPORTING_RESULTS));
+        }
+    }
+
+    /// 子 agent 的分节外壳也跟着厂商走。
+    ///
+    /// 不跟的话，换到 OpenAI 兼容后端时主 agent 是 Markdown 小标题、
+    /// 子 agent 还是 XML —— 同一次会话里两种结构，没有理由。
+    #[test]
+    fn 子_agent_的分节外壳跟着厂商走() {
+        let md = system_prompt_for(
+            Kind::Explore,
+            std::path::Path::new("/w"),
+            crate::prompt::Flavor::OpenAiCompatible,
+        );
+        assert!(md.contains("## agent_identity"));
+        assert!(!md.contains("<agent_identity>"));
     }
 
     #[tokio::test]
@@ -1884,8 +1990,8 @@ mod tests {
             "tool_result 要排在最前"
         );
         let text = format!("{content:?}");
-        assert!(text.contains("分叉出来的那次调用"));
-        assert!(text.contains("把测试跑一遍"));
-        assert!(text.contains("不要再用 resume"));
+        assert!(text.contains("This is the call that forked you"));
+        assert!(text.contains("把测试跑一遍"), "任务原文要原样带上");
+        assert!(text.contains("NEVER fork yourself again with resume"));
     }
 }

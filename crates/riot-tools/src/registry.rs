@@ -201,11 +201,26 @@ mod tests {
             "NotebookEdit",
         ];
 
+        // 按词边界比对。`LS`、`Task` 这类短词做子串匹配会被 `FAILS`、
+        // `Tasks` 之类的普通英文词误命中。
+        fn mentions(prompt: &str, word: &str) -> bool {
+            prompt
+                .match_indices(word)
+                .any(|(at, _)| {
+                    let before = prompt[..at].chars().next_back();
+                    let after = prompt[at + word.len()..].chars().next();
+                    let boundary = |c: Option<char>| {
+                        c.is_none_or(|c| !c.is_alphanumeric() && c != '_')
+                    };
+                    boundary(before) && boundary(after)
+                })
+        }
+
         for t in &tools {
             let prompt = t.prompt(&ctx);
             for word in TOOL_WORDS {
                 assert!(
-                    !prompt.contains(word) || r.get(word).is_some(),
+                    !mentions(&prompt, word) || r.get(word).is_some(),
                     "{} 的描述里让模型用 `{word}`，但它没有注册",
                     t.name()
                 );

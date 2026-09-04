@@ -173,7 +173,7 @@ pub fn run_agent(
                         if let Some(msg) = synthesize_orphan_results(
                             &state,
                             "interrupted",
-                            "结果丢失：请求中断，这次调用没有执行。",
+                            "Result lost: the request was interrupted and this call never ran.",
                         ) {
                             state.messages.push(msg.clone());
                             yield AgentEvent::Message(msg);
@@ -319,9 +319,11 @@ pub fn run_agent(
                             content: vec![UserContent::Attachment(
                                 riot_protocol::message::Attachment::SystemReminder {
                                     text: format!(
-                                        "Stop hook 检查未通过：{reason}\n\
-                                         请处理上述问题后再收尾。这是自动化检查的反馈，\
-                                         不是用户消息。"
+                                        "A stop hook check did not pass: {reason}\n\
+                                         Deal with the problem above before you wrap up. This is \
+                                         feedback from an automated check, not a user message, \
+                                         but treat it with the same authority — the user \
+                                         configured the check."
                                     ),
                                 },
                             )],
@@ -570,7 +572,7 @@ fn attempt_recovery(state: &mut AgentState, err: &ProviderError) -> Recovery {
 /// 中断时必须做这件事。Anthropic API 要求每个 tool_use 都有配对的
 /// tool_result，缺一个就整条请求 400 —— 而且报错信息不会告诉你缺哪个。
 fn synthesize_cancelled_results(state: &AgentState) -> Option<Message> {
-    synthesize_orphan_results(state, "cancelled", "已取消")
+    synthesize_orphan_results(state, "cancelled", "Cancelled by the user.")
 }
 
 /// 同上，但措辞和 id 后缀由调用方定 —— 致命错误路径的中断不是用户

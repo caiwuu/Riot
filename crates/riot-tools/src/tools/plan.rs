@@ -28,13 +28,20 @@ use riot_protocol::permission::{
 };
 use riot_protocol::tool::{PromptContext, Tool, ToolContext, ToolOutcome, UiPayload};
 
+use super::names::EXIT_PLAN_MODE;
+
 #[derive(Deserialize, schemars::JsonSchema)]
 struct Input {
-    /// 完整的实施计划（Markdown）。用户会逐字看到它 —— 写清楚要做什么、
-    /// 动哪些文件、按什么顺序、怎么验证。
-    ///
-    /// 字段本身只在反序列化时校验存在性（call 里 plan 的消费者是
-    /// preview_of 和弹窗，不是这段代码），所以这里 allow dead_code。
+    /// The complete implementation plan, in Markdown. The user reads it
+    /// verbatim, so state what you will do, which files you will touch, in
+    /// what order, and how you will verify it.
+    //
+    // 正文到此为止 —— 下面是给开发者的，不能进 doc comment：schemars 把
+    // 整段 `///` concat 进 schema 的 description 发给模型，实现备注混在
+    // 参数说明里既费 token 又让模型困惑。
+    //
+    // 字段只在反序列化时校验存在性（call 里 plan 的消费者是 preview_of
+    // 和弹窗，不是这段代码），所以 allow dead_code。
     #[allow(dead_code)]
     plan: String,
 }
@@ -44,7 +51,7 @@ pub struct ExitPlanMode;
 #[async_trait]
 impl Tool for ExitPlanMode {
     fn name(&self) -> &str {
-        "ExitPlanMode"
+        EXIT_PLAN_MODE
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -54,13 +61,22 @@ impl Tool for ExitPlanMode {
     fn prompt(&self, _ctx: &PromptContext) -> String {
         // 措辞对照 CC：明确"这就是问'计划可以吗'的唯一方式"，否则模型
         // 会用普通文本问一句然后干等 —— 那条路上没有任何按钮。
-        "规划完成、准备好让用户批准时调用。把完整的实施计划（Markdown）放进 \
-         plan 参数：做什么、动哪些文件、什么顺序、怎么验证。用户会看到计划\
-         原文并选择批准或打回。\n\n\
-         重要：不要用普通回复问「这个计划可以吗？」「要开始吗？」——提交计划\
-         就是问这句话的唯一方式。批准后规划模式自动退出，你就可以动手了；\
-         被打回则继续留在规划模式，按用户的反馈修改计划再提交。"
-            .into()
+        format!(
+            "Call this when planning is finished and you are ready for the user to \
+             approve. Put the complete implementation plan (Markdown) in `plan`: what \
+             you will do, which files you will touch, in what order, and how you will \
+             verify it. The user reads the plan verbatim and either approves or sends \
+             it back.\n\n\
+             CRITICAL: submitting the plan is the ONLY way to ask \"does this plan look \
+             right?\". NEVER ask that in an ordinary reply — a plain text question \
+             renders no buttons, so the user has nothing to approve and you will wait \
+             forever. On approval, plan mode exits automatically and you can start \
+             work. On rejection you stay in plan mode: revise according to the feedback \
+             and submit again.\n\n\
+             Only for plans you intend to execute. If the user asked a question about \
+             an approach and wants an answer rather than work, answer in your reply \
+             and do not call {EXIT_PLAN_MODE}."
+        )
     }
 
     fn describe(&self, _input: &serde_json::Value) -> String {

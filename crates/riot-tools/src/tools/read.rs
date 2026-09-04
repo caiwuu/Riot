@@ -12,6 +12,7 @@ use riot_protocol::tool::{
 };
 use serde::Deserialize;
 
+use super::names::{BASH, EDIT, GLOB, GREP, READ, Siblings, WRITE};
 use super::path;
 use super::text::{self, DecodeError};
 
@@ -56,12 +57,12 @@ fn image_media_type(path: &Path) -> Option<&'static str> {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Input {
-    /// 要读取的文件路径。可以是相对于工作目录的路径。
+    /// Path of the file to read. May be relative to the working directory.
     path: String,
-    /// 从第几行开始读，从 1 开始。省略则从头开始。
+    /// 1-based line to start from. Omit to start at the top of the file.
     #[serde(default)]
     offset: Option<usize>,
-    /// 最多读几行。省略则读到上限为止。
+    /// Maximum number of lines to return. Omit to read up to the built-in cap.
     #[serde(default)]
     limit: Option<usize>,
 }
@@ -71,25 +72,88 @@ pub struct Read;
 #[async_trait]
 impl Tool for Read {
     fn name(&self) -> &'static str {
-        "Read"
+        READ
     }
 
     fn input_schema(&self) -> schemars::Schema {
         schemars::schema_for!(Input)
     }
 
-    fn prompt(&self, _ctx: &PromptContext) -> String {
+    fn prompt(&self, ctx: &PromptContext) -> String {
+        // 写工具缺席时（只读的探查型 agent）不该吊着模型说"读了好去写"。
+        let sib = Siblings::of(ctx);
+        let before_write = sib.line(
+            EDIT,
+            format!(
+                "2. You are about to {WRITE} over an existing file (required) or to \
+                 {EDIT} a region you have not seen in this session.\n             "
+            ),
+        );
+        let stale_write = sib.line(
+            WRITE,
+            format!(
+                "6. NEVER shell out to `cat`, `head`, `tail`, or `sed -n` to read a \
+                 file. Those bypass the read-before-write bookkeeping that {WRITE} and \
+                 {EDIT} depend on, so a later write is rejected or, worse, based on \
+                 stale content.\n             "
+            ),
+        );
         format!(
-            "读取文件内容。返回结果每行带行号，格式是 `行号\\t内容`。\n\
+            "Reads a file from disk. Every returned line is prefixed with its number, \
+             formatted `number<TAB>content`.\n\
              \n\
-             - 行号是显示用的，不是文件内容的一部分。用 Edit 时 `old_string` \
-             不要带行号。\n\
-             - 一次最多返回 {MAX_LINES} 行；文件更长时用 `offset` 继续读。\n\
-             - 超过 {MAX_LINE_CHARS} 字符的行会被截断。\n\
-             - 文件很长时用 `offset` 分段读。Edit 会自行载入全文做唯一性\
-             检查，不必为了改文件再读一遍整份。\n\
-             - 图片文件（png / jpg / gif / webp）也可以读:会返回图片内容。\
-             `offset` 和 `limit` 对图片无效。不要试图用 shell 去解码图片。"
+             Usage:\n\
+             - The line numbers are display only. NEVER put them in {EDIT}'s \
+             `old_string` — they are not in the file.\n\
+             - At most {MAX_LINES} lines come back per call. Longer files continue \
+             with `offset`.\n\
+             - Lines longer than {MAX_LINE_CHARS} characters are truncated.\n\
+             - Image files (png / jpg / gif / webp) are returned as images. `offset` \
+             and `limit` do not apply to them, and you must not try to decode them \
+             through {BASH}.\n\
+             - Read several files in one message when you already know their paths; \
+             they are fetched in parallel.\n\
+             - Reading a file that does not exist is fine — you get an error, not a \
+             crash — so prefer reading over checking existence in a shell first.\n\
+             \n\
+             ### When to Use\n\
+             \n\
+             1. You know which file you need and want its actual contents.\n\
+             {before_write}\
+             3. Inspecting a specific range you already located, using `offset`/`limit`.\n\
+             \n\
+             ### When NOT to Use\n\
+             \n\
+             1. Looking for where something is defined or used. Run {GREP} first and \
+             read only the files it points at. Reading candidates one by one to find a \
+             symbol wastes an entire context window on files you will not change.\n\
+             2. Looking for files by name or extension — that is {GLOB}. Do not read \
+             directory entries to explore a tree.\n\
+             3. Re-reading a file you already read in this session and have not \
+             changed since. The content is still in your context.\n\
+             4. Re-reading a whole file just so {EDIT} will accept it. {EDIT} loads the \
+             file itself for its uniqueness check.\n\
+             5. Paging through a large file to \"see everything\". Search it with {GREP}, \
+             then read the ranges around the hits.\n\
+             {stale_write}\
+             \n\
+             <good-example>\n\
+             {GREP}(pattern: \"fn parse_manifest\", output_mode: \"files_with_matches\")\n\
+             {READ}(path: \"src/manifest.rs\", offset: 120, limit: 80)\n\
+             </good-example>\n\
+             <reasoning>\n\
+             Locate first, then read a window. One search plus 80 lines answers what \
+             reading four whole files would have.\n\
+             </reasoning>\n\
+             \n\
+             <bad-example>\n\
+             {READ}(path: \"src/a.rs\") {READ}(path: \"src/b.rs\") {READ}(path: \"src/c.rs\") \
+             … hoping one of them defines `parse_manifest`\n\
+             </bad-example>\n\
+             <reasoning>\n\
+             This is a search performed by hand. {GREP} answers it in one call and tells \
+             you the line number as well.\n\
+             </reasoning>"
         )
     }
 

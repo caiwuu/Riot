@@ -17,6 +17,10 @@ use riot_protocol::tool::{
 };
 use serde::Deserialize;
 
+use super::names::{
+    BASH, EDIT, GLOB, GREP, READ, Siblings, TERMINAL_KILL, TERMINAL_OUTPUT, WRITE,
+};
+
 /// 默认超时。
 ///
 /// 够跑一次中等规模的测试套件。比这更长的命令应该用后台执行,
@@ -32,26 +36,33 @@ const MAX_STREAM_CHARS: usize = 30_000;
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Input {
-    /// 要执行的 shell 命令。
+    /// The shell command to run.
     command: String,
-    /// 这条命令在做什么，5-10 个字，用于向用户展示。
-    ///
-    /// 只在 schema 和 `describe()` 里用到 —— 但字段必须留着，
-    /// `deny_unknown_fields` 会把没声明的参数当成错误拒掉。
+    /// What this command does, in 5-10 words, shown to the user.
+    //
+    // 正文到此为止 —— 下面是给开发者的，不能进 doc comment：schemars 把
+    // 整段 `///` concat 进 schema 的 description 发给模型，实现备注混在
+    // 参数说明里既费 token 又让模型困惑。
+    //
+    // 这个字段只在 schema 和 `describe()` 里用到，但必须留着：
+    // `deny_unknown_fields` 会把没声明的参数当成错误拒掉。
     #[serde(default)]
     #[allow(dead_code)]
     description: Option<String>,
-    /// 超时毫秒数。默认 120000，最大 600000。
+    /// Timeout in milliseconds. Defaults to 120000, capped at 600000.
     #[serde(default)]
     timeout_ms: Option<u64>,
-    /// 长期服务（dev server、watch 编译）设 true：命令跑在用户的终端
-    /// 面板里，立刻返回终端 id，不等它结束。
+    /// Set true for anything long-lived (dev server, watch build): the command
+    /// runs in the user's terminal panel and returns a terminal id immediately
+    /// instead of blocking.
     #[serde(default)]
     background: bool,
-    /// 设为 false 表示这条命令必须在 OS 沙箱**之外**执行。会请求用户确认。
+    /// Set false to run this command OUTSIDE the OS sandbox. Prompts the user
+    /// for confirmation.
     ///
-    /// 只在命令确实被沙箱边界挡住时才用（失败输出里会有 `[riot:sandbox]`
-    /// 提示）。`None` = 照常在沙箱里跑。
+    /// Only use it when the command is genuinely blocked by the sandbox
+    /// boundary — failures caused by it carry a `[riot:sandbox]` marker.
+    /// Omit to run inside the sandbox as usual.
     #[serde(default)]
     sandbox: Option<bool>,
 }
@@ -61,7 +72,7 @@ pub struct Bash;
 #[async_trait]
 impl Tool for Bash {
     fn name(&self) -> &'static str {
-        "Bash"
+        BASH
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -73,13 +84,17 @@ impl Tool for Bash {
         // 把普通的权限错误当成沙箱拦截，然后去申请一个根本不存在的豁免。
         let sandbox = if ctx.sandboxed {
             "\n\
-             - 命令跑在 **OS 沙箱**里：可写范围限于工作目录、临时目录和构建缓存，\
-             读不受限；连接 unix socket 和 Apple Events 一律被拒，所以 `docker`、\
-             `osascript` 这类要跟本机 daemon 或别的 App 通信的工具在沙箱内必然失败。\n\
-             - 命令失败且输出里带 `[riot:sandbox]` 时，说明失败**可能**源自这条边界。\
-             确认目标确实在边界之外、而且这次操作有必要，就带 `sandbox: false` 重跑 —— \
-             它会在沙箱外执行并请求用户确认。失败与边界无关（路径写错、依赖缺失、\
-             测试真的挂了）就照常修，别用这个参数：它每次都会打断用户。\n"
+             - Commands run inside an **OS sandbox**. Writes are limited to the working \
+             directory, temp directories and build caches; reads are unrestricted. \
+             Connecting to unix sockets and sending Apple Events is denied, so tools \
+             that talk to a local daemon or another app — `docker`, `osascript` — always \
+             fail in the sandbox.\n\
+             - When a command fails and its output carries `[riot:sandbox]`, the boundary \
+             MAY be the cause. If the target really is outside the boundary and the \
+             operation is necessary, re-run it with `sandbox: false`: it executes outside \
+             and asks the user to confirm. If the failure is unrelated (wrong path, \
+             missing dependency, a genuinely failing test), fix it normally and do NOT \
+             reach for this parameter — it interrupts the user every single time.\n"
         } else {
             ""
         };
@@ -89,34 +104,87 @@ impl Tool for Bash {
         // 全不成立，其中 `&` 还会把命令放到后台，错得很隐蔽。给出具体的
         // 反例对照，比一句抽象的「用 POSIX 语法」拦截率高得多。
         let windows_note = if ctx.platform == "windows" {
-            "- **语法是 POSIX bash（Git Bash），不是 cmd.exe / PowerShell**：\
-             `dir /a` → `ls -la`，`2>nul` → `2>/dev/null`，`del` / `copy` → \
-             `rm` / `cp`，`%VAR%` → `$VAR`。`&` 在 bash 里是把命令放到后台，\
-             顺序执行用 `;`，失败即停用 `&&`。Windows 路径加引号可以直接用\
-             （`cd \"D:\\proj\"`），写成 `D:/proj` 也行。\n"
+            "- **The syntax is POSIX bash (Git Bash), not cmd.exe or PowerShell**: \
+             `dir /a` → `ls -la`, `2>nul` → `2>/dev/null`, `del` / `copy` → `rm` / `cp`, \
+             `%VAR%` → `$VAR`. In bash `&` backgrounds the command — use `;` to sequence \
+             and `&&` to stop on failure. Quoted Windows paths work as-is \
+             (`cd \"D:\\proj\"`), and so does `D:/proj`.\n"
         } else {
             ""
         };
+        // 分工声明按会话的实际工具集裁剪。子 agent 拿的是子集 —— 对着一个
+        // 缺席的工具指路，模型会照着调、失败、再换参数重试。
+        let sib = Siblings::of(ctx);
+        let search_note = sib.line(
+            GLOB,
+            format!(
+                "- Searching. Finding files is {GLOB}, searching contents is {GREP}. \
+                 Both are faster, need no approval, and are not cut off by the output \
+                 cap. If you still end up needing a shell search, STOP and re-read those \
+                 two tools first.\n"
+            ),
+        );
+        let file_note = sib.line(
+            READ,
+            format!(
+                "- Reading or writing files. Use {READ}, {WRITE}, {EDIT}. NEVER use \
+                 `cat`, `head`, `tail`, `sed -i`, or `echo >` for that — the shell path \
+                 skips the read-before-write bookkeeping, so a later {WRITE} is either \
+                 rejected or based on content you never saw.\n"
+            ),
+        );
         format!(
-            "在工作目录下执行一条 shell 命令。\n\
+            "Runs one shell command in the working directory.\n\
              {sandbox}\
              \n\
+             Usage:\n\
              {windows_note}\
-             - 每次调用都是**独立的一次执行**。`cd` 只在这一条命令内有效，\
-             不会影响下一次调用。需要切目录就写成 `cd sub && cmd`，或者直接用相对\
-             工作目录的路径。\n\
-             - 环境是非交互的：没有 stdin，编辑器和分页器都被禁用。需要输入的命令\
-             会失败而不是挂住，请改用非交互参数（例如 `git commit -m`）。\
-             `git push` / `ssh` 要凭证时走宿主的 GIT_ASKPASS，不会去开 /dev/tty。\n\
-             - 默认 {}s 超时，最长 {}s。\n\
-             - **长期服务**（dev server、watch、任何不会自己结束的东西）必须\
-             设 `background: true`：它会跑在用户的终端面板里，立刻返回终端 id。\
-             不设的话命令要么卡到超时、要么在收尾时连同整个进程组被杀掉。\
-             起完用 TerminalOutput 看日志、TerminalKill 停。\n\
-             - 输出过长时会保留开头和结尾，中间省略。\n\
-             - 查找文件用 Glob、搜索内容用 Grep，它们比 `find` 和 `grep` 更快，\
-             也不会被输出上限截断。\n\
-             - 读文件用 Read，不要用 `cat`。",
+             - Every call is an **independent execution**. `cd` only applies within that \
+             one command and does not carry over. Write `cd sub && cmd`, or use paths \
+             relative to the working directory.\n\
+             - The environment is non-interactive: no stdin, editors and pagers \
+             disabled. A command that wants input fails instead of hanging, so pass \
+             non-interactive flags (`git commit -m`). `git push` and `ssh` get \
+             credentials through the host's GIT_ASKPASS; they never open /dev/tty.\n\
+             - Timeout defaults to {}s, capped at {}s.\n\
+             - Anything **long-lived** (dev server, watcher, anything that will not exit \
+             on its own) MUST set `background: true`: it runs in the user's terminal \
+             panel and returns a terminal id immediately. Without it the command either \
+             burns the whole timeout or gets killed with the process group at cleanup. \
+             Then read its log with {TERMINAL_OUTPUT} and stop it with {TERMINAL_KILL}.\n\
+             - Long output keeps the head and the tail and elides the middle. Do not \
+             re-run a command just to see the part that was elided; narrow the command.\n\
+             - Quote paths that contain spaces: `cd \"/a/My Documents\"`, not \
+             `cd /a/My Documents`.\n\
+             \n\
+             ### When NOT to Use\n\
+             \n\
+             {search_note}\
+             {file_note}\
+             - Talking to the user. NEVER `echo` explanations, progress, or plans; \
+             write them in your reply instead.\n\
+             - Destructive or irreversible operations the user did not ask for: \
+             `git push --force`, `git reset --hard`, `rm -rf` outside build output. Ask \
+             first.\n\
+             - Interactive tools (`vim`, `top`, `git rebase -i`, `npm init` without \
+             `-y`). They cannot work here. Find the non-interactive flag.\n\
+             \n\
+             <good-example>\n\
+             {BASH}(command: \"cargo test -p riot-tools\", description: \"run tools crate \
+             tests\")\n\
+             </good-example>\n\
+             <reasoning>\n\
+             Absolute-scoped command with no `cd`, and a short description so the user \
+             can see what is running without reading the command.\n\
+             </reasoning>\n\
+             \n\
+             <bad-example>\n\
+             {BASH}(command: \"cd crates/riot-tools && grep -rn 'fn prompt' .\")\n\
+             </bad-example>\n\
+             <reasoning>\n\
+             Two mistakes: the search belongs in {GREP}, and the `cd` suggests an \
+             expectation that state persists between calls. It does not.\n\
+             </reasoning>",
             DEFAULT_TIMEOUT_MS / 1000,
             MAX_TIMEOUT_MS / 1000,
         )

@@ -17,6 +17,7 @@ use riot_protocol::tool::{
 };
 use serde::Deserialize;
 
+use super::names::{BASH, EDIT, GLOB, GREP, READ, WRITE};
 use super::path;
 use super::precondition::{check_fresh, verify_unchanged};
 use super::text::{self, Newline};
@@ -24,9 +25,9 @@ use super::text::{self, Newline};
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Input {
-    /// 要写入的文件路径。
+    /// Path of the file to write. May be relative to the working directory.
     path: String,
-    /// 文件的完整内容。
+    /// The complete content of the file. Replaces whatever was there before.
     content: String,
 }
 
@@ -35,7 +36,7 @@ pub struct Write;
 #[async_trait]
 impl Tool for Write {
     fn name(&self) -> &'static str {
-        "Write"
+        WRITE
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -43,12 +44,68 @@ impl Tool for Write {
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "写入文件，内容会完全覆盖原有内容。\n\
-         \n\
-         - 覆盖已存在的文件前必须先用 Read 读过它。\n\
-         - 只改动文件的一部分时优先用 Edit —— 全量覆盖容易丢掉你没看到的内容。\n\
-         - 创建新文件不需要先 Read。"
-            .to_owned()
+        format!(
+            "Writes a file to disk. The content you provide replaces the whole file.\n\
+             \n\
+             Usage:\n\
+             - You MUST have read an existing file with {READ} earlier in this session \
+             before overwriting it. The call is rejected otherwise, and it is also \
+             rejected if the file changed on disk since that read.\n\
+             - Creating a file that does not exist yet needs no prior {READ}.\n\
+             - Pass the complete final content. There is no append mode and no partial write.\n\
+             - Match the surrounding conventions: indentation, line endings, and whether \
+             the file ends with a newline.\n\
+             \n\
+             ### When to Use\n\
+             \n\
+             1. Creating a file that does not exist yet.\n\
+             2. Rewriting a file you have just read in full, where most lines change.\n\
+             3. Regenerating a file whose entire content is derived from one source \
+             (a lockfile, a generated client, a fixture).\n\
+             \n\
+             ### When NOT to Use\n\
+             \n\
+             1. Changing part of a file — use {EDIT}. A full overwrite silently drops \
+             anything that was not in your context: an edit made by the user while you \
+             were working, a section past the {READ} line limit, or a change you yourself \
+             made earlier in this session.\n\
+             2. Writing a file you have only seen through {GREP} or {GLOB} output. Those \
+             return matching lines and paths, not file contents. Read it first or use {EDIT}.\n\
+             3. Writing a file longer than one {READ} call returned. You have not seen all \
+             of it. Either use {EDIT}, or read the remaining ranges with `offset` first.\n\
+             4. NEVER proactively create documentation, README, or example files. Create \
+             them only when the user asks for them.\n\
+             5. Creating a scratch file to feed a shell command — pipe into {BASH} instead \
+             and leave no artifact behind.\n\
+             6. Reverting your own change: re-{EDIT} the specific lines rather than \
+             rewriting the file from memory.\n\
+             \n\
+             <good-example>\n\
+             {READ}(path: \"src/config.rs\")   → 240 lines, whole file returned\n\
+             {WRITE}(path: \"src/config.rs\", content: <complete rewritten file>)\n\
+             </good-example>\n\
+             <reasoning>\n\
+             The file was read in full in this session, so the overwrite cannot drop \
+             content you never saw.\n\
+             </reasoning>\n\
+             \n\
+             <bad-example>\n\
+             {GREP}(pattern: \"timeout_ms\", path: \"src/config.rs\")   → 3 matching lines\n\
+             {WRITE}(path: \"src/config.rs\", content: <file rebuilt from those 3 lines>)\n\
+             </bad-example>\n\
+             <reasoning>\n\
+             {GREP} shows matches, not the file. Everything that did not match is deleted, \
+             and nothing reports the loss. {EDIT} the three lines instead.\n\
+             </reasoning>\n\
+             \n\
+             <bad-example>\n\
+             {WRITE}(path: \"src/auth.rs\", content: <900 lines, one of them changed>)\n\
+             </bad-example>\n\
+             <reasoning>\n\
+             A one-line change is an {EDIT}. Re-emitting the file burns output tokens and \
+             risks reintroducing an older version of the other 899 lines.\n\
+             </reasoning>"
+        )
     }
 
     fn describe(&self, input: &serde_json::Value) -> String {

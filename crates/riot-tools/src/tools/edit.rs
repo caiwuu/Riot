@@ -19,6 +19,7 @@ use riot_protocol::tool::{
 };
 use serde::Deserialize;
 
+use super::names::{BASH, EDIT, GREP, READ, WRITE};
 use super::path;
 use super::precondition::{ensure_loaded, verify_unchanged};
 use super::text;
@@ -26,13 +27,15 @@ use super::text;
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Input {
-    /// 要修改的文件路径。
+    /// Path of the file to modify. May be relative to the working directory.
     path: String,
-    /// 要被替换的原文。必须与文件内容逐字符一致，不要带行号。
+    /// The text to replace. Must match the file byte for byte, including
+    /// indentation. Never include the line-number prefix shown by Read.
     old_string: String,
-    /// 替换成的新内容。
+    /// The replacement text.
     new_string: String,
-    /// 替换所有出现处。省略时要求 `old_string` 在文件中唯一。
+    /// Replace every occurrence. When omitted, `old_string` must be unique
+    /// in the file or the call fails.
     #[serde(default)]
     replace_all: bool,
 }
@@ -42,7 +45,7 @@ pub struct Edit;
 #[async_trait]
 impl Tool for Edit {
     fn name(&self) -> &'static str {
-        "Edit"
+        EDIT
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -50,15 +53,81 @@ impl Tool for Edit {
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "修改文件中的一段文本。\n\
-         \n\
-         - 改之前最好先 Read 看过相关位置；系统会自行载入全文做唯一性检查，\
-         不必为了过关再读一遍整文件。\n\
-         - `old_string` 要和文件内容逐字符一致，**不要带 Read 显示的行号**。\n\
-         - `old_string` 必须在文件里唯一。如果它出现多次，加上前后几行\
-         上下文让它唯一，或者用 `replace_all`。\n\
-         - 缩进和空白也要一致。"
-            .to_owned()
+        format!(
+            "Performs an exact string replacement in one file. This is the default way \
+             to change existing code.\n\
+             \n\
+             Usage:\n\
+             - `old_string` must match the file byte for byte: same indentation \
+             (tabs vs. spaces), same trailing whitespace, same line breaks.\n\
+             - NEVER include the `line<TAB>` prefix that {READ} puts in front of every \
+             line. That prefix is display only and is not in the file.\n\
+             - The call FAILS and changes nothing if `old_string` occurs zero times or \
+             more than once. Two recovery paths, in this order: (a) extend `old_string` \
+             with the lines above and below until exactly one place matches; \
+             (b) pass `replace_all: true` when you genuinely mean every occurrence, \
+             such as renaming a local variable throughout a file.\n\
+             - Read the region first if you are not sure of the exact text. The file is \
+             loaded in full for the uniqueness check either way, so you never need to \
+             re-{READ} a whole file just to satisfy this tool.\n\
+             - Batch independent edits to different files in one message; they run \
+             in parallel.\n\
+             \n\
+             ### When to Use\n\
+             \n\
+             1. Any change to a file that already exists — this is the default.\n\
+             2. Renaming a symbol inside a single file, with `replace_all: true`.\n\
+             3. Deleting a block: pass the block as `old_string` and \"\" as `new_string`.\n\
+             \n\
+             ### When NOT to Use\n\
+             \n\
+             1. Creating a new file — use {WRITE}. {EDIT} needs existing text to anchor to.\n\
+             2. Replacing most of a file you have read in full — one {WRITE} is cheaper \
+             and clearer than a dozen edits.\n\
+             3. Guessing at `old_string` from memory or from a {GREP} snippet after \
+             several edits to the same file. Re-read the region: your earlier edits \
+             moved and changed it, and a stale `old_string` fails or, worse, matches \
+             the wrong place.\n\
+             4. Renaming a symbol across the repository. Locate every file with {GREP} \
+             first, then send one {EDIT} per file. Editing blind leaves callers broken.\n\
+             5. Using `replace_all` for a short or common string. `replace_all: true` on \
+             `id` rewrites every `id` in the file, including comments and unrelated \
+             identifiers. Make the string long enough to be unambiguous instead.\n\
+             6. Reformatting a whole file — run the project's formatter through {BASH} \
+             rather than hand-editing.\n\
+             \n\
+             <good-example>\n\
+             {EDIT}(\n\
+             \x20 path: \"src/server.rs\",\n\
+             \x20 old_string: \"fn connect(&self) -> Result<Conn> {{\\n        \
+             let timeout = 30;\",\n\
+             \x20 new_string: \"fn connect(&self) -> Result<Conn> {{\\n        \
+             let timeout = 60;\"\n\
+             )\n\
+             </good-example>\n\
+             <reasoning>\n\
+             `let timeout = 30;` alone appears in three functions. Including the \
+             enclosing signature makes exactly one place match, so the right function \
+             is changed.\n\
+             </reasoning>\n\
+             \n\
+             <bad-example>\n\
+             {EDIT}(path: \"src/server.rs\", old_string: \"let timeout = 30;\", \
+             new_string: \"let timeout = 60;\")\n\
+             </bad-example>\n\
+             <reasoning>\n\
+             Three matches, so the edit is rejected. Retrying with `replace_all: true` \
+             would be worse: it changes all three call sites when you meant one.\n\
+             </reasoning>\n\
+             \n\
+             <bad-example>\n\
+             {EDIT}(path: \"src/server.rs\", old_string: \"  42\\tlet timeout = 30;\", …)\n\
+             </bad-example>\n\
+             <reasoning>\n\
+             `42\\t` is {READ}'s line-number prefix, not file content, so nothing matches. \
+             Strip the prefix and keep the file's own indentation.\n\
+             </reasoning>"
+        )
     }
 
     fn describe(&self, input: &serde_json::Value) -> String {

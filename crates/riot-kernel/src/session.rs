@@ -2732,6 +2732,7 @@ impl Session {
             ids: Arc::clone(&self.ids) as Arc<dyn IdGenerator>,
             cwd: self.cwd.clone(),
             artifacts_dir: self.artifacts_dir(),
+            flavor: crate::models::flavor_for(&model),
             max_turns: limits.max_turns,
             transcripts: self.subagent_transcripts(),
             tasks: Arc::clone(&self.tasks),
@@ -2869,15 +2870,16 @@ impl Session {
         // system prompt 在这里就定下来，而不是 run_agent 前夕 —— 主动/反应式
         // 压缩的总结请求要用**同一份**：同形状（system + tools 逐字节一致）
         // 的总结请求才能吃到 provider 的前缀缓存，~100k 的输入走 cache_read。
-        let system = crate::prompt::system_prompt(
-            &self.cwd,
-            &today,
-            python_venv.as_deref(),
-            self.system_prompt_extra().await.as_deref(),
-            hook_engine.has_pre_tool_use()
+        let system = crate::prompt::system_prompt(&crate::prompt::SystemPromptInput {
+            cwd: &self.cwd,
+            today: &today,
+            python_venv: python_venv.as_deref(),
+            extra: self.system_prompt_extra().await.as_deref(),
+            has_hooks: hook_engine.has_pre_tool_use()
                 || hook_engine.has_post_tool_use()
                 || hook_engine.has_stop(),
-        );
+            flavor: crate::models::flavor_for(&model),
+        });
         // specs 取轮首快照。轮中 ToolSearch 发现新工具时主循环的 tools 会变
         //（那本来就会断缓存），总结形状不跟 —— 只影响命中率，不影响正确性。
         let summary_shape = riot_core::summarize::RequestShape {
@@ -4527,9 +4529,9 @@ mod tests {
             eprintln!("这里不是 git 仓库，跳过");
             return;
         };
-        assert!(text.contains("Git 仓库"), "{text}");
+        assert!(text.contains("Git repository"), "{text}");
         assert!(
-            text.contains("当前分支：") || text.contains("detached"),
+            text.contains("Current branch:") || text.contains("detached"),
             "总得说清在不在分支上：{text}"
         );
     }
@@ -5291,26 +5293,33 @@ mod tests {
 
         s.set_multitask(true);
         let first = note_text(s.multitask_note()).expect("开了要注");
-        assert!(first.contains("核心规则"), "首轮完整版：{first}");
+        assert!(first.contains("Core rules"), "首轮完整版：{first}");
         let second = note_text(s.multitask_note()).expect("之后每轮都注");
-        assert!(second.contains("仍处于"), "之后简短：{second}");
-        assert!(!second.contains("核心规则"));
+        assert!(
+            second.contains("still in **multitask mode**"),
+            "之后简短：{second}"
+        );
+        assert!(!second.contains("Core rules"));
 
         s.set_multitask(true);
         assert!(
-            note_text(s.multitask_note()).unwrap().contains("仍处于"),
+            note_text(s.multitask_note())
+                .unwrap()
+                .contains("still in **multitask mode**"),
             "同值重设不重注完整版"
         );
 
         s.forget_multitask_announce();
         assert!(
-            note_text(s.multitask_note()).unwrap().contains("核心规则"),
+            note_text(s.multitask_note())
+                .unwrap()
+                .contains("Core rules"),
             "历史动过要重注完整版"
         );
 
         s.set_multitask(false);
         let exit = note_text(s.multitask_note()).expect("关掉说一声");
-        assert!(exit.contains("退出多任务模式"), "{exit}");
+        assert!(exit.contains("has left multitask mode"), "{exit}");
         assert!(note_text(s.multitask_note()).is_none(), "退出只说一次");
     }
 
@@ -5341,9 +5350,11 @@ mod tests {
         assert_eq!(drained.len(), 2);
         let texts: Vec<String> = drained.iter().map(|m| format!("{m:?}")).collect();
         assert!(texts[0].contains("转到后台") && texts[0].contains("resume=\\\"self\\\""));
-        assert!(texts[1].contains("并行构建") && texts[1].contains("核心规则"));
+        assert!(texts[1].contains("并行构建") && texts[1].contains("Core rules"));
         assert!(
-            note_text(s.multitask_note()).unwrap().contains("仍处于"),
+            note_text(s.multitask_note())
+                .unwrap()
+                .contains("still in **multitask mode**"),
             "完整版已随提醒送过，下一轮只要短的"
         );
     }
@@ -6086,7 +6097,7 @@ mod tests {
         // 第三轮：服务退出了（running 翻转），差分触发。
         let third = s.env_prelude(0, 0, None, 0, 100_000).await;
         assert_eq!(snap_texts(&third).len(), 1, "状态变了该再注入");
-        assert!(snap_texts(&third)[0].contains("已退出"), "{third:?}");
+        assert!(snap_texts(&third)[0].contains("exited"), "{third:?}");
     }
 
     /// 首轮对着空环境不说话；但从有到无是变化，要说。
@@ -6109,7 +6120,7 @@ mod tests {
         );
         let gone = s.env_prelude(0, 0, None, 0, 100_000).await;
         assert!(
-            snap_texts(&gone)[0].contains("没有你能看的终端"),
+            snap_texts(&gone)[0].contains("No terminal in the panel is visible to you"),
             "从有到无也是变化：{gone:?}"
         );
     }
@@ -6124,7 +6135,7 @@ mod tests {
         assert_eq!(parts.len(), 1, "{parts:?}");
         assert!(snap_texts(&parts).is_empty());
         assert!(
-            !env_texts(&parts)[0].contains("采样失败"),
+            !env_texts(&parts)[0].contains("Environment sampling failed"),
             "从没有过快照就不该宣告作废：{parts:?}"
         );
     }
@@ -6138,7 +6149,7 @@ mod tests {
         let monday = 1_788_165_420_000u64;
         let p1 = s.env_prelude(monday, 480, None, 0, 100_000).await;
         assert!(
-            env_texts(&p1)[0].contains("2026-08-31（周一）16:37，UTC+8"),
+            env_texts(&p1)[0].contains("2026-08-31 (Monday) 16:37, UTC+8"),
             "{p1:?}"
         );
         // 一分钟后再来一轮，照发新时刻。
@@ -6156,7 +6167,7 @@ mod tests {
             .env_prelude(now, 0, Some(now - 5 * 3_600_000), 0, 100_000)
             .await;
         assert!(
-            env_texts(&gapped)[0].contains("已过去约 5 小时"),
+            env_texts(&gapped)[0].contains("About 5 hours have passed"),
             "{gapped:?}"
         );
 
@@ -6164,13 +6175,13 @@ mod tests {
             .env_prelude(now, 0, Some(now - 10 * 60_000), 0, 100_000)
             .await;
         assert!(
-            !env_texts(&recent)[0].contains("已过去"),
+            !env_texts(&recent)[0].contains("have passed"),
             "十分钟是正常停顿：{recent:?}"
         );
 
         let unstamped = s.env_prelude(now, 0, None, 0, 100_000).await;
         assert!(
-            !env_texts(&unstamped)[0].contains("已过去"),
+            !env_texts(&unstamped)[0].contains("have passed"),
             "老 transcript 没有时间戳，不能编一个间隔出来：{unstamped:?}"
         );
     }
@@ -6196,14 +6207,14 @@ mod tests {
 
         let outage = s.env_prelude(0, 0, None, 0, 100_000).await;
         assert!(
-            env_texts(&outage)[0].contains("采样失败"),
+            env_texts(&outage)[0].contains("Environment sampling failed"),
             "断供必须宣告旧快照作废：{outage:?}"
         );
         assert!(snap_texts(&outage).is_empty());
 
         let outage2 = s.env_prelude(0, 0, None, 0, 100_000).await;
         assert!(
-            !env_texts(&outage2)[0].contains("采样失败"),
+            !env_texts(&outage2)[0].contains("Environment sampling failed"),
             "连续断供只唠叨一次：{outage2:?}"
         );
 
@@ -6224,7 +6235,8 @@ mod tests {
         s.attach_env(FakeEnv::new(vec![q(), q(), q(), q(), q()]));
 
         assert!(
-            !env_texts(&s.env_prelude(0, 0, None, 40_000, 100_000).await)[0].contains("上下文已用"),
+            !env_texts(&s.env_prelude(0, 0, None, 40_000, 100_000).await)[0]
+                .contains("of the context is used"),
             "50% 以下不说话"
         );
         let at72 = s.env_prelude(0, 0, None, 72_000, 100_000).await;
@@ -6233,7 +6245,8 @@ mod tests {
             "越过 70 档要报实际百分比：{at72:?}"
         );
         assert!(
-            !env_texts(&s.env_prelude(0, 0, None, 73_000, 100_000).await)[0].contains("上下文已用"),
+            !env_texts(&s.env_prelude(0, 0, None, 73_000, 100_000).await)[0]
+                .contains("of the context is used"),
             "同档内不重复唠叨"
         );
 
@@ -6277,7 +6290,7 @@ mod tests {
         assert_eq!(reminders.len(), 1, "{second:?}");
         assert!(reminders[0].contains("EADDRINUSE"), "{reminders:?}");
         assert!(
-            reminders[0].contains("不必评论"),
+            reminders[0].contains("do NOT comment on it"),
             "防分心护栏：{reminders:?}"
         );
     }

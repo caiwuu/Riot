@@ -45,7 +45,31 @@ use riot_protocol::tool::{
     InterruptBehavior, PromptContext, ResultBudget, Tool, ToolContext, ToolOutcome, ValidationError,
 };
 
+use super::names::{
+    BROWSER_CLICK, BROWSER_CONSOLE, BROWSER_COOKIES, BROWSER_CRAWL, BROWSER_DISCOVER, BROWSER_DRAG,
+    BROWSER_EVALUATE, BROWSER_FILL_FORM, BROWSER_FUZZ, BROWSER_GO, BROWSER_HANDOFF, BROWSER_HAR,
+    BROWSER_HOVER, BROWSER_INTERCEPT, BROWSER_KEY, BROWSER_NAVIGATE, BROWSER_NETWORK,
+    BROWSER_PERF, BROWSER_READ_TAB, BROWSER_REPLAY, BROWSER_REPORT, BROWSER_SCREENSHOT,
+    BROWSER_SCROLL, BROWSER_SECRETS, BROWSER_SELECT, BROWSER_SNAPSHOT, BROWSER_SOURCE_OF,
+    BROWSER_TABS, BROWSER_TYPE, BROWSER_UPLOAD, BROWSER_VIEW, BROWSER_WAIT_FOR, SHOW_BROWSER,
+    WEB_FETCH,
+};
 use super::web::url as weburl;
+
+/// 延迟加载时替这一组站台的一行能力索引（见
+/// [`tool_search::GROUPS`](super::tool_search)）。
+///
+/// `[约束]` 32 个工具的定义（描述 + schema 合计约 2.4 万字符）按需取，
+/// 但**能力的存在感必须常驻**。少了这一行，模型不知道有浏览器，会去
+/// shell 里 `screencapture` 截整个屏幕、用 osascript 找窗口，然后拿着
+/// 一张截错的图言之凿凿 —— 真实发生过一次，排查方向整个跑偏。
+pub const DEFER_SUMMARY: &str = "drive the built-in browser. Open a page, read its \
+     accessibility tree, click / type / fill forms, take screenshots, read the console \
+     and network traffic, map an element back to its source file, and run web-security \
+     probes. Load these whenever the task involves a live page, a running dev server, \
+     or reproducing something visually — this is the only way to see a rendered page, \
+     and a screen-capture command in the shell is NEVER a substitute. Start with \
+     BrowserNavigate and BrowserSnapshot.";
 
 /// 导航的入参。
 ///
@@ -77,20 +101,32 @@ pub struct BrowserNavigate;
 #[async_trait::async_trait]
 impl Tool for BrowserNavigate {
     fn name(&self) -> &'static str {
-        "BrowserNavigate"
+        BROWSER_NAVIGATE
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "在内置浏览器里打开一个地址并等页面加载完。\
-         之后可以用 BrowserSnapshot 看结构、BrowserScreenshot 看渲染、\
-         BrowserConsole 看报错，用 BrowserClick / BrowserType 操作页面。\
-         适合验证自己刚改完的前端。\
-         `url` 必须带协议；本地开发服务器用 `http://localhost:端口/...`，不要改成 https。\
-         本地 HTML / 静态页用 `file:///绝对路径`，也可以直接给本机绝对路径。\
-         \n\n\
-         用户**看不到**你在浏览器里干的事:这一组工具都不会把浏览器面板弹到\
-         他面前。想让他看这一页，导航完再调一次 ShowBrowser。"
-            .to_owned()
+        format!(
+            "Opens a URL in the built-in browser and waits for the page to load. This is \
+             the entry point for every browser task.\n\
+             \n\
+             - `url` must include the scheme. A local dev server is \
+             `http://localhost:<port>/…` — NEVER rewrite it to https, that fails. Local \
+             HTML is `file:///<absolute path>`, or just an absolute path.\n\
+             - After navigating: {BROWSER_SNAPSHOT} for structure, {BROWSER_SCREENSHOT} \
+             for what it looks like, {BROWSER_CONSOLE} for errors, \
+             {BROWSER_CLICK} / {BROWSER_TYPE} to drive it.\n\
+             - Use it to verify front-end work you just changed, instead of asking the \
+             user whether it looks right.\n\
+             - To go back, forward, or reload a page you already visited, use \
+             {BROWSER_GO}. Re-navigating to the same URL discards page state.\n\
+             - To read an article or documentation page as text, prefer {WEB_FETCH}: it \
+             costs a fraction of a browser session. Come here when you need the page \
+             *rendered* or *interactive*.\n\
+             \n\
+             The user does NOT see any of this. Nothing in this group opens the browser \
+             panel. If you want the user to look at the page, call {SHOW_BROWSER} after \
+             navigating."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -172,15 +208,27 @@ pub struct BrowserSnapshot;
 #[async_trait::async_trait]
 impl Tool for BrowserSnapshot {
     fn name(&self) -> &'static str {
-        "BrowserSnapshot"
+        BROWSER_SNAPSHOT
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "读当前页面的可访问性结构：有哪些按钮、链接、输入框，各自叫什么。\
-         行首的 [n] 是元素编号，BrowserClick / BrowserType 用它指定目标；\
-         页面变过之后编号会失效，重新快照拿新的。\
-         比截图省得多，判断页面上有什么，优先用它。"
-            .to_owned()
+        format!(
+            "Reads the accessibility tree of the current page: which buttons, links and \
+             inputs exist and what each is called. Text only.\n\
+             \n\
+             - The `[n]` at the start of each line is the element ref that \
+             {BROWSER_CLICK} / {BROWSER_TYPE} take as a target.\n\
+             - Refs go stale as soon as the page changes (navigation, a script rewriting \
+             the DOM). Take a fresh snapshot rather than reusing old numbers.\n\
+             - ALWAYS prefer this over {BROWSER_SCREENSHOT} to find out what is on a \
+             page. An image costs orders of magnitude more context and tells you less \
+             about structure.\n\
+             - It does NOT tell you how the page looks. Layout, spacing, colour and \
+             overlap are {BROWSER_SCREENSHOT}. Ambiguity between several identical \
+             labels is {BROWSER_VIEW}.\n\
+             - It covers the whole page, not just the visible part, so there is no need \
+             to {BROWSER_SCROLL} first."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -231,17 +279,27 @@ pub struct BrowserScreenshot;
 #[async_trait::async_trait]
 impl Tool for BrowserScreenshot {
     fn name(&self) -> &'static str {
-        "BrowserScreenshot"
+        BROWSER_SCREENSHOT
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "给当前页面截整页的图。判断视觉效果（布局、间距、颜色、有没有错位）\
-         用它；只想知道页面上有什么元素的话，BrowserSnapshot 更省。\
-         截图会直接显示在界面的工具结果卡片里，用户自己看得到 —— 不要试图\
-         在回复里贴图，也不要说自己无法展示图片。\
-         要对比改动前后（视觉回归/验收），把 deterministic 设为 true：\
-         截图前会冻结动画、隐藏光标，两张图才能干净地做像素 diff。"
-            .to_owned()
+        format!(
+            "Takes a full-page screenshot of the current page.\n\
+             \n\
+             - Use it for visual judgement: layout, spacing, colour, overlap, anything \
+             that is wrong to the eye but fine in the markup.\n\
+             - Set `deterministic: true` when comparing before and after (visual \
+             regression, sign-off). It freezes animations and hides the caret so two \
+             shots diff cleanly.\n\
+             - The image is shown to the user in the tool result card. Do NOT try to \
+             embed it in your reply, and do NOT tell the user you cannot show images.\n\
+             - To find out *what* is on the page, use {BROWSER_SNAPSHOT} instead — it is \
+             far cheaper and gives you the refs you need to interact.\n\
+             - To tell several identical-looking elements apart before clicking, use \
+             {BROWSER_VIEW}: it overlays numbered boxes. A plain screenshot has no refs.\n\
+             - NEVER take a screenshot to \"check the page loaded\". Navigation already \
+             reports that, and {BROWSER_CONSOLE} tells you if it broke."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -375,16 +433,25 @@ pub struct BrowserView;
 #[async_trait::async_trait]
 impl Tool for BrowserView {
     fn name(&self) -> &'static str {
-        "BrowserView"
+        BROWSER_VIEW
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "看当前视口:一张给每个可交互元素叠了编号框的截图，外加「编号 → 元素」\
-         清单。图上第 [n] 个框就是清单里的 [n]，BrowserClick / BrowserType 用这个\
-         编号指目标。纯文本快照（BrowserSnapshot）说不清「是哪一个」时（多个同名\
-         按钮、密集布局）用它 —— 看图一眼就能分辨。编号只对这次调用有效，\
-         页面一变（导航、脚本改 DOM）就要重新看。"
-            .to_owned()
+        format!(
+            "Shows the current viewport as a screenshot with a numbered box drawn over \
+             every interactive element, plus a `number → element` list. Box `[n]` in the \
+             image is entry `[n]` in the list, and {BROWSER_CLICK} / {BROWSER_TYPE} take \
+             that number as a ref.\n\
+             \n\
+             - Use it when text alone cannot say *which one*: several buttons with the \
+             same label, a dense toolbar, a grid of cards.\n\
+             - Refs are valid for this call only. Anything that changes the page \
+             (navigation, a script rewriting the DOM) invalidates them — look again.\n\
+             - It only covers the visible viewport. For the whole page use \
+             {BROWSER_SNAPSHOT}, or {BROWSER_SCROLL} first.\n\
+             - Do NOT reach for this by default. {BROWSER_SNAPSHOT} answers most \
+             questions at a fraction of the cost; come here when it was ambiguous."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -570,13 +637,23 @@ pub struct BrowserConsole;
 #[async_trait::async_trait]
 impl Tool for BrowserConsole {
     fn name(&self) -> &'static str {
-        "BrowserConsole"
+        BROWSER_CONSOLE
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "读当前页面 console 里的消息，含加载期间的报错和未捕获异常。\
-         页面看起来不对但结构正常时，先看这里。"
-            .to_owned()
+        format!(
+            "Reads the current page's console messages, including errors logged during \
+             load and uncaught exceptions.\n\
+             \n\
+             - This is the first thing to check when the page looks wrong but the \
+             markup looks fine, and the first thing to check after any change to \
+             front-end code.\n\
+             - It reports what the page said about itself. Failed requests, status \
+             codes and response bodies are {BROWSER_NETWORK}; slow rendering is \
+             {BROWSER_PERF}.\n\
+             - Do NOT use {BROWSER_EVALUATE} to scrape `console` by hand — messages \
+             from before your script ran are already gone by then."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -669,15 +746,25 @@ pub struct BrowserPerf;
 #[async_trait::async_trait]
 impl Tool for BrowserPerf {
     fn name(&self) -> &'static str {
-        "BrowserPerf"
+        BROWSER_PERF
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "测当前页面的性能:Core Web Vitals（LCP 最大内容绘制、累积布局偏移、\
-         FCP 首次内容绘制）加 TTFB 首字节、DOM 就绪、load 时间、传输字节和\
-         最慢的几个资源，各带好/一般/差的评级。会观察约 0.6 秒再返回。\
-         用户说页面慢、卡时先用它定位是加载慢、渲染慢还是某个资源拖后腿。"
-            .to_owned()
+        format!(
+            "Measures the current page's performance: Core Web Vitals (LCP, CLS, FCP) \
+             plus TTFB, DOM-ready, load time, bytes transferred and the slowest \
+             resources, each with a good / needs-improvement / poor rating. Observes \
+             for about 0.6s before returning.\n\
+             \n\
+             - Start here when the user says the page is slow or janky: it tells you \
+             whether the problem is loading, rendering, or one heavy resource, before \
+             you guess.\n\
+             - It measures one load of one page. Do NOT use it to compare two code \
+             versions without reloading in between, and do not treat a single run as \
+             proof — numbers move between runs.\n\
+             - For per-request timing and payload sizes use {BROWSER_NETWORK}; to hand \
+             a full trace to a human use {BROWSER_HAR}."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -808,17 +895,24 @@ pub struct BrowserSourceOf;
 #[async_trait::async_trait]
 impl Tool for BrowserSourceOf {
     fn name(&self) -> &'static str {
-        "BrowserSourceOf"
+        BROWSER_SOURCE_OF
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "把页面上的一个元素映射回源码:组件名 + 文件:行。定位方式同 BrowserClick——\
-         ref（BrowserSnapshot 行首的 [n]）、selector、text 给一个。\
-         用户指着页面某处说「改这个」时，用它直接定位到要改的代码，\
-         省得在项目里靠文字猜是哪段。\
-         只有开发构建（React/Vue dev）保留了源码位置;生产构建里调试信息被抹了，\
-         那时最多给到组件名或明确说没有。"
-            .to_owned()
+        format!(
+            "Maps an element on the page back to source: component name plus file:line. \
+             Target it the same way as {BROWSER_CLICK} — exactly one of `ref` (the `[n]` \
+             from {BROWSER_SNAPSHOT}), `selector`, or `text`.\n\
+             \n\
+             - Use it the moment the user points at something on screen and says \
+             \"change this\". It beats guessing which component renders that text.\n\
+             - Only development builds (React/Vue dev) keep source locations. In a \
+             production build the debug info is stripped, so expect a component name or \
+             an explicit \"not available\" — do NOT report a guessed path as if it were \
+             the answer.\n\
+             - When it comes back empty, fall back to searching the repository for the \
+             visible string rather than clicking around the page for more clues."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -878,15 +972,23 @@ pub struct BrowserReadTab;
 #[async_trait::async_trait]
 impl Tool for BrowserReadTab {
     fn name(&self) -> &'static str {
-        "BrowserReadTab"
+        BROWSER_READ_TAB
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "读另一个标签页的结构，但**不切走**用户当前看的那一页 —— 用于并行\
-         研究、对比多个页面。tab 是 BrowserTabs 的 list 里的标签页号。\
-         回的是纯文本快照，不带可点击编号:要真正操作某一页，先用 BrowserTabs \
-         切过去（点击/输入只作用于当前活动页，那是「你和用户看同一页」的约定）。"
-            .to_owned()
+        format!(
+            "Reads the structure of another tab WITHOUT switching away from the one the \
+             user is looking at. `tab` is the tab number from {BROWSER_TABS} `list`.\n\
+             \n\
+             - Use it to research or compare several pages side by side while leaving \
+             the active tab where it is.\n\
+             - It returns a text snapshot with NO clickable refs. To actually interact \
+             with that page, switch to it with {BROWSER_TABS} first: clicks and typing \
+             only ever apply to the active tab, which is the contract that keeps you and \
+             the user looking at the same thing.\n\
+             - For the tab that is already active, use {BROWSER_SNAPSHOT} — it gives you \
+             refs and this one does not."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -948,16 +1050,25 @@ pub struct BrowserHar;
 #[async_trait::async_trait]
 impl Tool for BrowserHar {
     fn name(&self) -> &'static str {
-        "BrowserHar"
+        BROWSER_HAR
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "把抓到的网络请求导成一个 HAR 文件（HTTP Archive）—— 可以拖进 Chrome \
-         DevTools 的 Network 面板（右键 → Import HAR）或任何 HAR 查看器里分析。\
-         含每条请求的方法/URL/头/状态/大小/时间，不含响应体（要看某条响应体用 \
-         BrowserNetwork 的 detail）。和抓包同理:先调一次开始累积、刷新或操作页面\
-         产生流量，再导出。"
-            .to_owned()
+        format!(
+            "Exports the captured network requests as a HAR file (HTTP Archive), which \
+             can be dropped into Chrome DevTools' Network panel (right click → Import \
+             HAR) or any HAR viewer.\n\
+             \n\
+             - Contains method, URL, headers, status, size and timing for each request. \
+             It does NOT contain response bodies — for one body use {BROWSER_NETWORK} \
+             `detail`.\n\
+             - Capture works the same way as {BROWSER_NETWORK}: call it once to start \
+             accumulating, then reload or drive the page to generate traffic, then \
+             export.\n\
+             - This produces an artefact for a human to open. Do NOT use it to answer a \
+             question yourself — {BROWSER_NETWORK} gives you the same data in a form you \
+             can actually read."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -1074,19 +1185,31 @@ pub struct BrowserClick;
 #[async_trait::async_trait]
 impl Tool for BrowserClick {
     fn name(&self) -> &'static str {
-        "BrowserClick"
+        BROWSER_CLICK
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "点击页面上的一个元素。三种指定方式给一个即可:ref（BrowserSnapshot \
-         行首的 [n]，最省）、selector（CSS 选择器）、text（可见文字）。\
-         double=true 双击、right=true 右键。目标在视口外会自动滚进视野；\
-         点完会报告页面有没有因此跳转。用 ref 报错说编号失效时，\
-         重新 BrowserSnapshot，或改用 selector/text。\
-         点击常会触发加载或跳转:与其点完再单独等待、再单独看页面，不如带上 \
-         then_wait（等一个条件成立）和 observe（\"snapshot\" 附结构、\"view\" \
-         附带框截图）—— 一次调用拿到结果，省两个回合。"
-            .to_owned()
+        format!(
+            "Clicks an element. Give exactly one target: `ref` (the `[n]` from \
+             {BROWSER_SNAPSHOT}, cheapest and least ambiguous), `selector` (CSS), or \
+             `text` (visible text).\n\
+             \n\
+             - `double: true` double-clicks, `right: true` opens the context menu. \
+             Off-screen targets are scrolled into view automatically, so there is no \
+             need to {BROWSER_SCROLL} first.\n\
+             - A click usually triggers a load or a navigation. Pass `then_wait` (a \
+             condition to wait for) and `observe` (\"snapshot\" for structure, \"view\" \
+             for a boxed screenshot) in the SAME call instead of following up with \
+             separate wait and snapshot calls. One call instead of three.\n\
+             - When a `ref` is reported stale, take a fresh {BROWSER_SNAPSHOT} or switch \
+             to `selector`/`text`. Do NOT retry the same number.\n\
+             - To fill a field use {BROWSER_TYPE}, for a `<select>` use \
+             {BROWSER_SELECT}, and for a whole form use {BROWSER_FILL_FORM} — clicking \
+             each field first is wasted round trips.\n\
+             - NEVER simulate a click through {BROWSER_EVALUATE} (`el.click()`). It \
+             skips the real event sequence, so hover state, focus and framework \
+             handlers behave differently from a user's click."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -1183,17 +1306,29 @@ pub struct BrowserType;
 #[async_trait::async_trait]
 impl Tool for BrowserType {
     fn name(&self) -> &'static str {
-        "BrowserType"
+        BROWSER_TYPE
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "往输入框里填文本：点击聚焦、替换原有内容。定位方式给一个:ref \
-         （BrowserSnapshot 行首的 [n]）、selector（CSS 选择器）、target_text \
-         （输入框附近的可见文字）。submit 为 true 时填完按一次回车 —— \
-         搜索框、单行表单用它能省一次调用。目标不是输入框时会明确报错。\
-         submit 触发搜索/跳转时，配 then_wait（等结果出现或网络空闲）和 \
-         observe（\"view\" / \"snapshot\"）一次拿到结果页，省两个回合。"
-            .to_owned()
+        format!(
+            "Types text into an input: focuses it and replaces whatever was there. Give \
+             exactly one target: `ref` (the `[n]` from {BROWSER_SNAPSHOT}), `selector` \
+             (CSS), or `target_text` (visible text near the field).\n\
+             \n\
+             - `submit: true` presses Enter afterwards, which saves a call on search \
+             boxes and single-field forms.\n\
+             - When submitting triggers a search or a navigation, pass `then_wait` \
+             (result visible, or network idle) and `observe` (\"view\" / \"snapshot\") in \
+             the same call to get the result page back immediately.\n\
+             - Filling two or more fields is {BROWSER_FILL_FORM}, not repeated \
+             {BROWSER_TYPE}. Dropdowns are {BROWSER_SELECT}; file inputs are \
+             {BROWSER_UPLOAD}; single keystrokes and shortcuts are {BROWSER_KEY}.\n\
+             - Targeting something that is not an input fails with a clear error — \
+             re-snapshot rather than retrying the same target.\n\
+             - NEVER set a value through {BROWSER_EVALUATE}. Assigning `input.value` \
+             fires no input event, so React and Vue never see the change and the form \
+             submits empty."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -1337,17 +1472,26 @@ pub struct BrowserFillForm;
 #[async_trait::async_trait]
 impl Tool for BrowserFillForm {
     fn name(&self) -> &'static str {
-        "BrowserFillForm"
+        BROWSER_FILL_FORM
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "一次填完一整张表单，而不是每个字段一次 BrowserType。fields 里每项给\
-         定位（ref / selector / target_text 之一）和 value，按顺序逐个填入。\
-         可选 submit 给一个提交按钮的定位（ref / selector / text），填完自动点它；\
-         再配 then_wait / observe 就能一次调用走完「填表 → 提交 → 看结果页」。\
-         登录、搜索、结算这类多字段表单用它，能把好几个回合压成一个。\
-         中途某个字段失败会明确报第几个坏了、前面几个已经填进去了。"
-            .to_owned()
+        format!(
+            "Fills a whole form in one call. Each entry in `fields` gives a target \
+             (one of `ref` / `selector` / `target_text`) and a `value`; they are filled \
+             in order.\n\
+             \n\
+             - Optional `submit` targets the submit button (`ref` / `selector` / \
+             `text`) and clicks it once the fields are in. Add `then_wait` / `observe` \
+             and a single call covers fill → submit → see the result page.\n\
+             - ALWAYS prefer this over a sequence of {BROWSER_TYPE} calls for logins, \
+             checkouts and search forms. Two fields already make it worth it.\n\
+             - If a field fails, the error names which index broke and confirms the \
+             earlier ones were filled. Re-send only the remaining fields; re-sending \
+             everything can double-submit.\n\
+             - It fills text inputs. Dropdowns still need {BROWSER_SELECT} and file \
+             inputs still need {BROWSER_UPLOAD}."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -1489,15 +1633,22 @@ fn is_chord(key: &str) -> bool {
 #[async_trait::async_trait]
 impl Tool for BrowserKey {
     fn name(&self) -> &'static str {
-        "BrowserKey"
+        BROWSER_KEY
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "对当前聚焦的元素按键:单个功能键（Enter、Escape、Tab、方向键等），\
-         或组合键（Control+a 全选、Meta+c 复制、Control+Shift+k…）。\
-         作用在焦点上 —— 通常先 BrowserClick 或 BrowserType 把焦点放对。\
-         要输入整段文字用 BrowserType，不要逐键拼。"
-            .to_owned()
+        format!(
+            "Presses a key on the focused element: a single key (Enter, Escape, Tab, \
+             arrows) or a combination (Control+a, Meta+c, Control+Shift+k).\n\
+             \n\
+             - It acts on whatever currently has focus, so put focus where you want it \
+             first with {BROWSER_CLICK} or {BROWSER_TYPE}.\n\
+             - NEVER spell out text one key at a time. Use {BROWSER_TYPE} for anything \
+             longer than a single keystroke — it is one call instead of dozens and it \
+             fires the events frameworks listen for.\n\
+             - Enter right after filling a field is already covered by {BROWSER_TYPE}'s \
+             `submit: true`. Come here for Escape, Tab order, and app shortcuts."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -1566,14 +1717,22 @@ pub struct BrowserScroll;
 #[async_trait::async_trait]
 impl Tool for BrowserScroll {
     fn name(&self) -> &'static str {
-        "BrowserScroll"
+        BROWSER_SCROLL
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "垂直滚动页面，正数向下（一屏约 700px）。点击和输入会自动把目标\
-         滚进视野，不用先滚再点；这个工具用于浏览长页面、触发懒加载。\
-         滚完会报告当前位置。"
-            .to_owned()
+        format!(
+            "Scrolls the page vertically. Positive is down; one screen is roughly \
+             700px. Reports the resulting position.\n\
+             \n\
+             - Use it to walk through a long page or to trigger lazy loading.\n\
+             - Do NOT scroll before clicking or typing: {BROWSER_CLICK} and \
+             {BROWSER_TYPE} bring their target into view themselves.\n\
+             - Do NOT scroll to \"see the rest of the page\" as text — \
+             {BROWSER_SNAPSHOT} already covers the whole document, not just the \
+             viewport. Scrolling matters for {BROWSER_VIEW} and \
+             {BROWSER_SCREENSHOT}, which are viewport-bound."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -1668,15 +1827,25 @@ pub struct BrowserWaitFor;
 #[async_trait::async_trait]
 impl Tool for BrowserWaitFor {
     fn name(&self) -> &'static str {
-        "BrowserWaitFor"
+        BROWSER_WAIT_FOR
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "等一个条件成立再继续，别用 sleep 猜时间。恰好给一个条件:selector\
-         （元素出现）、selector_gone（元素消失）、text（文本出现）、\
-         url_contains（跳转到目标页）、network_idle（网络空闲）。\
-         点击/输入后要等结果渲染出来时，先 wait 再 snapshot 更稳。"
-            .to_owned()
+        format!(
+            "Waits until a condition holds. Give exactly one: `selector` (element \
+             appears), `selector_gone` (element disappears), `text` (text appears), \
+             `url_contains` (navigation landed), `network_idle`.\n\
+             \n\
+             - NEVER sleep or poll to pass time. A guessed delay is either flaky or \
+             slow, and re-snapshotting in a loop burns context for the same result.\n\
+             - Prefer `then_wait` on {BROWSER_CLICK} / {BROWSER_TYPE} / \
+             {BROWSER_FILL_FORM} when the wait directly follows an interaction: same \
+             effect, one fewer call. Use this tool for waits that stand alone, such as \
+             a background job finishing.\n\
+             - When the wait times out, the condition is the thing to question. Read \
+             {BROWSER_CONSOLE} and {BROWSER_NETWORK} instead of retrying with a longer \
+             timeout."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -1778,14 +1947,21 @@ pub struct BrowserHover;
 #[async_trait::async_trait]
 impl Tool for BrowserHover {
     fn name(&self) -> &'static str {
-        "BrowserHover"
+        BROWSER_HOVER
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "把鼠标悬停到一个元素上（不点击）——展开悬停菜单、触发 tooltip、\
-         让只在 hover 时出现的按钮显形。定位方式同 BrowserClick:\
-         ref / selector / text 给一个。"
-            .to_owned()
+        format!(
+            "Moves the mouse over an element without clicking: opens hover menus, \
+             triggers tooltips, reveals controls that only exist on hover. Target it \
+             the same way as {BROWSER_CLICK} — one of `ref` / `selector` / `text`.\n\
+             \n\
+             - Follow it with {BROWSER_SNAPSHOT} or {BROWSER_VIEW} to see what appeared; \
+             hovering alone tells you nothing.\n\
+             - Do NOT hover before clicking. {BROWSER_CLICK} produces the full event \
+             sequence on its own, so a preliminary hover is a wasted round trip \
+             unless the target only becomes visible on hover."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -1853,14 +2029,22 @@ pub struct BrowserSelect;
 #[async_trait::async_trait]
 impl Tool for BrowserSelect {
     fn name(&self) -> &'static str {
-        "BrowserSelect"
+        BROWSER_SELECT
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "给下拉框 `<select>`（或受控输入）设值并派发 change 事件。\
-         定位方式同 BrowserClick（ref/selector/text），value 是要选的值。\
-         普通文本框还是用 BrowserType。"
-            .to_owned()
+        format!(
+            "Sets the value of a `<select>` dropdown (or a controlled input) and \
+             dispatches a change event. Target it the same way as {BROWSER_CLICK} \
+             (`ref` / `selector` / `text`); `value` is the option value to choose.\n\
+             \n\
+             - Plain text fields belong to {BROWSER_TYPE}, not here.\n\
+             - Do NOT click the dropdown open and then click an option: native select \
+             popups are rendered by the OS and are not in the page, so the second click \
+             finds nothing.\n\
+             - Custom dropdowns built from divs are not `<select>` elements. When this \
+             reports no match, drive them with {BROWSER_CLICK} instead."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -1971,13 +2155,22 @@ fn prefixed_target(input: &serde_json::Value, prefix: &str) -> Option<Target> {
 #[async_trait::async_trait]
 impl Tool for BrowserDrag {
     fn name(&self) -> &'static str {
-        "BrowserDrag"
+        BROWSER_DRAG
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "把一个元素拖到另一个元素上 —— 看板卡片、排序列表、滑块。\
-         两端各用 from_ref/from_selector/from_text 和 to_* 定位。"
-            .to_owned()
+        format!(
+            "Drags one element onto another: kanban cards, sortable lists, sliders. \
+             Target each end with `from_ref` / `from_selector` / `from_text` and the \
+             matching `to_*`.\n\
+             \n\
+             - Verify the result with {BROWSER_SNAPSHOT} afterwards. Drag-and-drop \
+             implementations vary and a drag that \"succeeded\" may have dropped \
+             nowhere.\n\
+             - Many sortable UIs also support keyboard reordering. When a drag does not \
+             take, try {BROWSER_CLICK} plus {BROWSER_KEY} before repeating the drag \
+             with different coordinates."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -2050,13 +2243,22 @@ pub struct BrowserGo;
 #[async_trait::async_trait]
 impl Tool for BrowserGo {
     fn name(&self) -> &'static str {
-        "BrowserGo"
+        BROWSER_GO
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "在浏览历史里走一步:direction 为 back（后退）、forward（前进）或 \
-         reload（刷新当前页）。都是回到已经访问过的页面，不会到新站点。"
-            .to_owned()
+        format!(
+            "Moves one step through browser history. `direction` is `back`, `forward`, \
+             or `reload`.\n\
+             \n\
+             - All three stay on pages already visited; this never reaches a new site. \
+             For that, use {BROWSER_NAVIGATE}.\n\
+             - `reload` is how you re-run a page after changing its code, and how you \
+             capture a full load for {BROWSER_NETWORK} or {BROWSER_HAR}. Prefer it over \
+             re-navigating to the same URL, which throws away history.\n\
+             - Refs from earlier snapshots do not survive any of these. Take a fresh \
+             {BROWSER_SNAPSHOT} before interacting again."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -2140,14 +2342,22 @@ pub struct BrowserTabs;
 #[async_trait::async_trait]
 impl Tool for BrowserTabs {
     fn name(&self) -> &'static str {
-        "BrowserTabs"
+        BROWSER_TABS
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "管理标签页:action 为 list（列出所有标签页和它们的号）、new（新开一个\
-         空白页，之后用 BrowserNavigate 打开地址）、select（切到 id 那个）、\
-         close（关掉 id 那个）。select/close 的 id 来自 list 的输出。"
-            .to_owned()
+        format!(
+            "Manages tabs. `action` is `list` (every tab and its id), `new` (open a \
+             blank tab, then load it with {BROWSER_NAVIGATE}), `select` (switch to `id`), \
+             or `close` (close `id`).\n\
+             \n\
+             - The `id` for `select` and `close` comes from `list`. Do NOT guess tab \
+             ids; a wrong one closes the user's tab.\n\
+             - Clicks and typing only ever apply to the active tab, so `select` before \
+             interacting with a page you opened earlier.\n\
+             - To read another tab without switching, use {BROWSER_READ_TAB}. Switching \
+             back and forth moves what the user is looking at."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -2252,15 +2462,27 @@ pub struct BrowserEvaluate;
 #[async_trait::async_trait]
 impl Tool for BrowserEvaluate {
     fn name(&self) -> &'static str {
-        "BrowserEvaluate"
+        BROWSER_EVALUATE
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "在当前页面执行一段 JS 并拿回结果:读 DOM、读 localStorage、算个值、\
-         调页面自己的函数。支持 await。`[NEVER]` 不要用它做导航（改地址栏\
-         用 BrowserNavigate），也不要用它整段抓 DOM（用 BrowserSnapshot）——\
-         结果超长会被截断。"
-            .to_owned()
+        format!(
+            "Runs a snippet of JavaScript in the current page and returns its result. \
+             `await` is supported.\n\
+             \n\
+             - Use it for things no other tool exposes: reading `localStorage`, \
+             inspecting a framework's internal state, computing a value, calling a \
+             function the page defines.\n\
+             - NEVER navigate with it (assigning `location`) — use {BROWSER_NAVIGATE}, \
+             which waits for the load and reports failures.\n\
+             - NEVER interact with it. Clicks are {BROWSER_CLICK}, typing is \
+             {BROWSER_TYPE}, dropdowns are {BROWSER_SELECT}. Synthetic DOM calls skip \
+             the events frameworks listen for, so the page ends up in a state a real \
+             user could never produce.\n\
+             - NEVER dump the DOM with it. {BROWSER_SNAPSHOT} returns the same \
+             information already condensed; a raw `outerHTML` is truncated and mostly \
+             markup noise."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -2343,14 +2565,24 @@ pub struct BrowserUpload;
 #[async_trait::async_trait]
 impl Tool for BrowserUpload {
     fn name(&self) -> &'static str {
-        "BrowserUpload"
+        BROWSER_UPLOAD
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "给文件输入框设置要上传的本地文件（不弹系统选择框，直接塞进 input \
-         并触发 change）。定位方式同 BrowserClick（ref/selector/text 指向那个 \
-         `<input type=file>`），paths 是本地文件绝对路径列表。"
-            .to_owned()
+        format!(
+            "Sets the files on a file input directly — no OS picker dialog; the files \
+             are attached to the input and a change event is fired. Target the \
+             `<input type=file>` the same way as {BROWSER_CLICK} (`ref` / `selector` / \
+             `text`); `paths` is a list of absolute local paths.\n\
+             \n\
+             - Do NOT click the file input first. That opens a native dialog this tool \
+             cannot reach, and the page is left waiting on it.\n\
+             - The files must already exist on disk. Create any fixture you need before \
+             calling this.\n\
+             - Drop zones that are not backed by an `<input type=file>` will not match. \
+             Look for the hidden input in {BROWSER_SNAPSHOT} before falling back to \
+             {BROWSER_DRAG}."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -2422,13 +2654,20 @@ pub struct BrowserCookies;
 #[async_trait::async_trait]
 impl Tool for BrowserCookies {
     fn name(&self) -> &'static str {
-        "BrowserCookies"
+        BROWSER_COOKIES
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "读当前页面的 Cookie，含 HttpOnly / Secure / SameSite 等安全属性。\
-         用于登录态分析、会话安全审计。要读 localStorage 用 BrowserEvaluate。"
-            .to_owned()
+        format!(
+            "Reads the current page's cookies, including the HttpOnly, Secure and \
+             SameSite attributes. Read-only.\n\
+             \n\
+             - Use it for login-state debugging and session security review — the \
+             attributes are the point, and `document.cookie` cannot see HttpOnly ones.\n\
+             - For `localStorage` or `sessionStorage` use {BROWSER_EVALUATE}.\n\
+             - Cookie values are credentials. Do NOT echo them into your reply or into \
+             a file; refer to a cookie by name and describe its attributes."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -2482,15 +2721,27 @@ pub struct BrowserNetwork;
 #[async_trait::async_trait]
 impl Tool for BrowserNetwork {
     fn name(&self) -> &'static str {
-        "BrowserNetwork"
+        BROWSER_NETWORK
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "观察当前页面的网络流量（被动抓包）。action:list 列出请求（可 filter \
-         按 URL 子串筛）、detail 看某条的请求/响应头和响应体（request_id 来自 \
-         list 的 #号）、audit 审计主文档响应头的安全配置（CSP/HSTS/CORS 等）。\
-         第一次调用只是开始累积 —— 要抓完整加载流量，先 list 一次再刷新页面。"
-            .to_owned()
+        format!(
+            "Observes the current page's network traffic. Passive: it records, it does \
+             not modify.\n\
+             \n\
+             - `action: list` lists requests (`filter` narrows by URL substring), \
+             `detail` shows one request's headers and response body (`request_id` is \
+             the `#` from `list`), `audit` reviews the main document's security headers \
+             (CSP, HSTS, CORS).\n\
+             - The FIRST call only starts recording. To capture a full page load, call \
+             `list` once, then reload with {BROWSER_GO}, then `list` again. Skipping \
+             this is why an empty result is usually a timing mistake, not an absence of \
+             traffic.\n\
+             - ALWAYS `filter` before asking for a bare `list` on a busy page; \
+             otherwise analytics and font requests crowd out the one you care about.\n\
+             - To change or block traffic use {BROWSER_INTERCEPT}; to re-send a request \
+             use {BROWSER_REPLAY}; to hand a trace to a human use {BROWSER_HAR}."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -2604,14 +2855,29 @@ pub struct BrowserReplay;
 #[async_trait::async_trait]
 impl Tool for BrowserReplay {
     fn name(&self) -> &'static str {
-        "BrowserReplay"
+        BROWSER_REPLAY
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "重放一个请求并看响应（Repeater）:改参数、改头、改 body 重发，对比\
-         差异。在页面上下文里发，自动带当前会话 cookie —— 用已登录身份测试\
-         越权、注入、逻辑漏洞。仅限已授权的渗透 scope 内目标。"
-            .to_owned()
+        format!(
+            "Re-sends a request and shows the response (a repeater): change parameters, \
+             headers or body, send again, compare. It goes out from the page context and \
+             carries the current session cookies, so it tests as the logged-in user — \
+             which is what makes it useful for access-control, injection and \
+             business-logic findings.\n\
+             \n\
+             CRITICAL: only against hosts inside an authorised penetration-testing \
+             scope. This sends real, authenticated, state-changing traffic. If the scope \
+             is not established, stop and ask the user instead of trying one request to \
+             see what happens.\n\
+             \n\
+             - Change ONE thing per replay. Two changes at once and the response \
+             difference tells you nothing.\n\
+             - Get the original request from {BROWSER_NETWORK} `detail` rather than \
+             reconstructing it; a hand-built request usually differs in headers you did \
+             not think about.\n\
+             - To sweep many values through one parameter, use {BROWSER_FUZZ}."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -2703,15 +2969,26 @@ pub struct BrowserIntercept;
 #[async_trait::async_trait]
 impl Tool for BrowserIntercept {
     fn name(&self) -> &'static str {
-        "BrowserIntercept"
+        BROWSER_INTERCEPT
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "拦截/改包:action 为 block（阻断匹配 url_pattern 的请求）、fulfill\
-         （用 status+body 伪造响应，测前端如何处理错误/异常数据）、list、\
-         clear。block/fulfill 要给 host（授权目标，须在 scope 内）和 \
-         url_pattern。仅限已授权的渗透 scope 内目标。"
-            .to_owned()
+        format!(
+            "Intercepts and rewrites traffic. `action` is `block` (drop requests \
+             matching `url_pattern`), `fulfill` (return a fabricated response from \
+             `status` + `body`, to see how the front end handles errors and malformed \
+             data), `list`, or `clear`. `block` and `fulfill` need `host` (an authorised \
+             target, inside scope) and `url_pattern`.\n\
+             \n\
+             - Restricted to hosts inside an authorised penetration-testing scope.\n\
+             - Rules persist for the session. ALWAYS `clear` when you are done — a \
+             forgotten rule makes every later observation wrong, and the symptom looks \
+             like a bug in the page.\n\
+             - `list` first when a page behaves oddly after you have been intercepting; \
+             suspect your own rules before the application.\n\
+             - Just watching traffic is {BROWSER_NETWORK}. Do not install rules to \
+             observe."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -2828,14 +3105,24 @@ pub struct BrowserSecrets;
 #[async_trait::async_trait]
 impl Tool for BrowserSecrets {
     fn name(&self) -> &'static str {
-        "BrowserSecrets"
+        BROWSER_SECRETS
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "扫当前页面的 HTML 和内联脚本里有没有泄露的密钥/凭证（AWS/Google/\
-         GitHub token、JWT、私钥、api_key 赋值等）。命中的值会打码。\
-         被动扫描，只看已经打开的这一页。"
-            .to_owned()
+        format!(
+            "Scans the current page's HTML and inline scripts for leaked keys and \
+             credentials: AWS / Google / GitHub tokens, JWTs, private keys, `api_key` \
+             assignments. Matched values are masked in the output.\n\
+             \n\
+             - Passive, and limited to the page that is already open. It sends no \
+             traffic, so it is safe to run on any page you have legitimately loaded.\n\
+             - It reads what was served. It does NOT scan the repository — search the \
+             source separately for secrets in code.\n\
+             - Do NOT try to unmask a hit or copy the raw value anywhere. Report which \
+             kind of secret appeared and where it was served from.\n\
+             - Bundled JS fetched as a separate file is not inline; check those through \
+             {BROWSER_NETWORK} `detail`."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -2885,14 +3172,21 @@ pub struct BrowserDiscover;
 #[async_trait::async_trait]
 impl Tool for BrowserDiscover {
     fn name(&self) -> &'static str {
-        "BrowserDiscover"
+        BROWSER_DISCOVER
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "枚举当前页面的攻击面:表单（action/method/字段）和页面内的链接。\
-         配合 BrowserNetwork 能拼出接口清单，是渗透侦察的起点。被动，只看\
-         当前页。"
-            .to_owned()
+        format!(
+            "Enumerates the current page's attack surface: forms (action, method, \
+             fields) and in-page links. Passive, current page only.\n\
+             \n\
+             - This is where reconnaissance starts. Combine it with {BROWSER_NETWORK} \
+             to build the endpoint inventory before touching anything.\n\
+             - To cover a whole site rather than one page, use {BROWSER_CRAWL}.\n\
+             - It reports structure, and nothing here sends a probe. Do NOT treat a \
+             listed form as tested; probing is {BROWSER_FUZZ} or {BROWSER_REPLAY}, and \
+             both need an authorised scope."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -2991,14 +3285,16 @@ fn fuzz_host(url: &str) -> Option<String> {
 #[async_trait::async_trait]
 impl Tool for BrowserFuzz {
     fn name(&self) -> &'static str {
-        "BrowserFuzz"
+        BROWSER_FUZZ
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "对一个参数灌 payload，看响应差异 —— 反射型 XSS、SQL 注入、状态\
-         异常都在这里冒头。url 里用 FUZZ 标记注入点（如 \
-         `https://api.test/s?q=FUZZ`），payloads 省略则用内置探针集。\
-         逐个请求带当前会话发出，分析反射/报错/状态变化。仅限已授权 scope。"
+        "Sends payloads into one parameter and compares the responses — reflected XSS, \
+         SQL injection, and state anomalies show up here. Mark the injection point with \
+         `FUZZ` in the url (e.g. `https://api.test/s?q=FUZZ`); omit `payloads` to use the \
+         built-in probe set. Each request is sent with the current session, then analyzed \
+         for reflection, errors, and status changes. Restricted to the authorized review \
+         scope."
             .to_owned()
     }
 
@@ -3147,13 +3443,15 @@ pub struct BrowserReport;
 #[async_trait::async_trait]
 impl Tool for BrowserReport {
     fn name(&self) -> &'static str {
-        "BrowserReport"
+        BROWSER_REPORT
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "把渗透过程中攒下的发现整理成结构化 Markdown 报告并存成文件。\
-         findings 每条给 title、severity（critical/high/medium/low/info）、\
-         evidence、remediation。按严重度排序，返回报告全文和存盘路径。"
+        "Collects the findings gathered during an authorized security review into a \
+         structured Markdown report and writes it to a file. Each entry in `findings` \
+         gives a title, a severity (critical/high/medium/low/info), the evidence, and a \
+         remediation. Entries are ordered by severity; returns the full report text and \
+         the saved path."
             .to_owned()
     }
 
@@ -3247,13 +3545,15 @@ const CRAWL_CAP: usize = 30;
 #[async_trait::async_trait]
 impl Tool for BrowserCrawl {
     fn name(&self) -> &'static str {
-        "BrowserCrawl"
+        BROWSER_CRAWL
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "从起点 URL 开始爬同一站点，生成站点地图:每页的标题、表单数、链接数。\
-         渗透侦察用 —— 摸清攻击面。会实际逐页导航（默认最多 10 页），只跟同 \
-         host 的链接。仅限已授权的渗透 scope 内目标。"
+        "Crawls the same site starting from a URL and builds a site map: each page's \
+         title, form count, and link count. Used for reconnaissance — mapping the attack \
+         surface of a target you are authorized to review. It actually navigates page by \
+         page (default cap 10 pages) and only follows links on the same host. Restricted \
+         to targets inside the authorized review scope."
             .to_owned()
     }
 
@@ -3384,21 +3684,26 @@ pub struct BrowserHandoff;
 #[async_trait::async_trait]
 impl Tool for BrowserHandoff {
     fn name(&self) -> &'static str {
-        "BrowserHandoff"
+        BROWSER_HANDOFF
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "把当前这一步交给用户在浏览器面板里亲自做 —— 用于只有他本人能完成的\
-         环节:登录、过验证码/二次验证、确认支付、点必须真人点的确认框。\
-         对话里会出现一张卡，用户在面板里做完、点「允许」，你才继续；\
-         他也可以拒绝（放弃这条路）。\
-         prompt 写清楚要他做什么。用之前通常你已经 BrowserView/BrowserSnapshot \
-         看到卡在了登录墙之类的地方。\
-         他做完之后页面已经变了 —— 重新 BrowserSnapshot / BrowserView 再继续，\
-         别沿用之前的编号。\
-         这不是要权限，是请真人操作;所以无人值守时它会失败（没有人能接管），\
-         那时改用别的路子或如实告诉用户卡在哪。"
-            .to_owned()
+        format!(
+            "Hands the current step to the user to perform in the browser panel — for \
+             things only they can do: signing in, clearing a captcha or 2FA, confirming \
+             a payment, clicking a dialog that has to be a real person. A card appears in \
+             the conversation; you continue only after they finish in the panel and click \
+             Allow, and they may also decline (abandoning this path).\n\
+             \n\
+             - Write `prompt` so it is clear what they must do. Before using it you have \
+             usually already seen the blocker with {BROWSER_VIEW} / {BROWSER_SNAPSHOT} — \
+             a login wall or similar.\n\
+             - After they finish, the page has changed. Re-run {BROWSER_SNAPSHOT} / \
+             {BROWSER_VIEW} before continuing; NEVER reuse the earlier element numbering.\n\
+             - This is not a permission request, it is asking a human to act, so it FAILS \
+             when nobody is at the keyboard (unattended runs). In that case switch to \
+             another route or tell the user plainly where you are stuck."
+        )
     }
 
     fn input_schema(&self) -> schemars::Schema {

@@ -650,13 +650,13 @@ async fn 沙箱说明只在真的沙箱着时进_prompt() {
     // 没沙箱还讲一堆边界规则，模型会把普通的权限错误当成沙箱拦截，
     // 然后去申请一个根本不存在的豁免。
     let off = Bash.prompt(&prompt_ctx());
-    assert!(!off.contains("沙箱"), "没沙箱时不该提沙箱：{off}");
+    assert!(!off.contains("sandbox"), "没沙箱时不该提沙箱：{off}");
     assert!(!off.contains("sandbox: false"));
 
     let mut on_ctx = prompt_ctx();
     on_ctx.sandboxed = true;
     let on = Bash.prompt(&on_ctx);
-    assert!(on.contains("沙箱"), "沙箱着就要讲清边界：{on}");
+    assert!(on.contains("sandbox"), "沙箱着就要讲清边界：{on}");
     assert!(
         on.contains("sandbox: false"),
         "要给出下一步怎么做，而不只是说有个边界：{on}"
@@ -749,7 +749,10 @@ async fn prompt_说明_cd_不持久() {
     // 不说清楚的话它会写出 `cd foo` 然后下一条命令找不到文件。
     let p = Bash.prompt(&prompt_ctx());
     assert!(p.contains("cd"), "{p}");
-    assert!(p.contains("独立") || p.contains("不会影响"), "{p}");
+    assert!(
+        p.contains("independent execution") || p.contains("does not carry over"),
+        "{p}"
+    );
 }
 
 #[tokio::test]

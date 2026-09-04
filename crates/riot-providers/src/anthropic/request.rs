@@ -69,11 +69,17 @@ impl RetryContext {
 pub struct SystemSection {
     pub name: &'static str,
     pub text: String,
-    /// 这一段的内容在会话中途会不会变。
+    /// 这一段能不能进 `scope: "global"` 的缓存块。
     ///
-    /// `[约束]` 默认应该是 `false`（可缓存）。确实每轮都变的段落要显式标注
-    /// 并写清理由 —— 「缓存是默认、不缓存要报备」这个方向，让缓存命中率
-    /// 变成架构约束而不是事后优化。
+    /// 两类内容不能进：会话中途会变的（时间、模式），以及会话内不变但
+    /// **逐项目逐用户不同**的（工作目录、venv 路径、用户自己写的补充指令）。
+    /// 后者写进全局块的代价不只是自己不命中 —— 全局块是跨会话跨用户共享的，
+    /// 掺进只对一个项目成立的路径，等于把别人那份也挤掉。
+    ///
+    /// `[约束]` 默认应该是 `false`（可缓存）。要置位就走
+    /// [`SystemSection::dangerous_volatile`] 或 [`SystemSection::project_scoped`]，
+    /// 两个构造器都在名字上写清了理由 —— 「缓存是默认、不缓存要报备」这个方向，
+    /// 让缓存命中率变成架构约束而不是事后优化。
     pub volatile: bool,
 }
 
@@ -93,6 +99,42 @@ impl SystemSection {
             text: text.into(),
             volatile: true,
         }
+    }
+
+    /// 会话内不变、但逐项目逐用户不同的段落。
+    ///
+    /// 和 [`Self::stable`] 的差别只在缓存作用域：这些内容进不了全局块，
+    /// 但会话内的复用不亏 —— messages 末尾那个断点的前缀覆盖了整个 system。
+    pub fn project_scoped(name: &'static str, text: impl Into<String>) -> Self {
+        Self {
+            name,
+            text: text.into(),
+            volatile: true,
+        }
+    }
+}
+
+/// 请求级 system 里静态段与项目段的分界线。
+///
+/// `[约束]`（ARCHITECTURE.md §11.5）system prompt 必须分成静态段和动态段，
+/// 中间用一个显式的边界常量分隔。装配方（riot-kernel）没法直接交出
+/// `Vec<SystemSection>`：[`riot_protocol::provider::ProviderRequest::system`]
+/// 是一个 `String`，它要跨 RPC 传输、要参与黄金回放，换成结构体是协议改动。
+/// 于是约定用这个标记切开 —— 标记之前是**跨会话逐字节相同**的部分，
+/// 之后是工作目录、venv、用户补充指令这类逐项目逐用户不同的尾巴。
+///
+/// 找不到标记时整段按静态处理：摘要请求那种极简 system 本来就是常量，
+/// 而漏切的后果只是少一次分块，不会把项目内容错标成全局可共享。
+pub const SYSTEM_SECTION_BOUNDARY: &str = "@@riot:system-cache-boundary@@";
+
+/// 按 [`SYSTEM_SECTION_BOUNDARY`] 切开请求级 system，返回 `(静态段, 项目段)`。
+///
+/// 只切第一处。装配方负责把用户输入里的同名标记洗掉，这里不重复防御 ——
+/// 真漏过来的话，多出来的标记留在项目段里，不会把用户文本抬进全局块。
+pub fn split_request_system(system: &str) -> (&str, &str) {
+    match system.split_once(SYSTEM_SECTION_BOUNDARY) {
+        Some((stable, project)) => (stable.trim_end(), project.trim_start()),
+        None => (system, ""),
     }
 }
 
@@ -263,8 +305,9 @@ pub fn build_request(
 /// 声明全靠 `req.system` 送进来 —— 丢掉它的表现是"Anthropic 协议下模型不认识
 /// 任何工具规矩"，而 OpenAI 侧一切正常（那边一直有拼接），排查会先怀疑模型。
 ///
-/// 顺序对齐 OpenAI 侧的 `full_system`：provider 段在前，请求级在后。按稳定段
-/// 并入 —— 它在会话内不变，进全局缓存块是对的。
+/// 顺序对齐 OpenAI 侧的 `full_system`：provider 段在前，请求级在后。请求级
+/// 按 [`SYSTEM_SECTION_BOUNDARY`] 切成两段并入 —— 前半段跨会话相同，进全局
+/// 缓存块；后半段是这个项目、这个用户独有的，不进。
 fn build_system_with_request(
     sections: &[SystemSection],
     request_system: &str,
@@ -272,15 +315,25 @@ fn build_system_with_request(
     if request_system.is_empty() {
         return build_system(sections);
     }
+    let (stable, project) = split_request_system(request_system);
     let mut merged = sections.to_vec();
-    merged.push(SystemSection::stable("request", request_system.to_owned()));
+    if !stable.is_empty() {
+        merged.push(SystemSection::stable("request", stable.to_owned()));
+    }
+    if !project.is_empty() {
+        merged.push(SystemSection::project_scoped(
+            "request_project",
+            project.to_owned(),
+        ));
+    }
     build_system(&merged)
 }
 
-/// 静态段合并成一块打全局缓存，动态段各自成块不打。
+/// 静态段合并成一块打全局缓存，其余（会变的 + 逐项目的）合并成一块不打。
 ///
 /// `[约束]` 静态段里不许放任何会在会话中途变化的东西（feature flag、
-/// 时间戳、MCP 工具列表）。变一个字节，全局缓存就整个作废 —— 而这个
+/// 时间戳、MCP 工具列表），也不许放只对当前项目/用户成立的东西（工作目录、
+/// venv 路径、会话补充指令）。变一个字节，全局缓存就整个作废 —— 而这个
 /// 损失是跨用户的，不只影响你自己。
 fn build_system(sections: &[SystemSection]) -> Vec<WireSystemBlock> {
     let (stable, volatile): (Vec<_>, Vec<_>) = sections.iter().partition(|s| !s.volatile);
@@ -436,13 +489,16 @@ fn convert_tool_result_content(c: &ToolResultContent) -> serde_json::Value {
         } => serde_json::json!([{
             "type": "text",
             "text": format!(
-                "结果过大（{total_bytes} 字节），已写入 {}。\n预览：\n{preview}",
+                "Result too large ({total_bytes} bytes); written to {}.\nPreview:\n{preview}",
                 path.display()
             ),
         }]),
         // 压缩后的占位符。**不能整条删掉** —— 删了 tool_use 就成了孤儿。
         ToolResultContent::Cleared => {
-            serde_json::json!([{ "type": "text", "text": "[结果已清理以节省上下文]" }])
+            serde_json::json!([{
+                "type": "text",
+                "text": "[result cleared to save context]",
+            }])
         }
         // `path` 指向落盘的原图，是给界面的 —— 发给模型的只有 `data`
         // 里的压缩图（产出方已压好，见 riot-tools 的 shrink 模块）。
@@ -484,19 +540,20 @@ fn convert_attachment(a: &riot_protocol::message::Attachment) -> serde_json::Val
     let text = match a {
         Attachment::Memory { path, content } => {
             format!(
-                "<system-reminder>\n项目记忆 {}：\n{content}\n</system-reminder>",
+                "<system-reminder>\nProject memory {}:\n{content}\n</system-reminder>",
                 path.display()
             )
         }
         Attachment::RestoredFile { path, content } => {
             format!(
-                "<system-reminder>\n压缩前你读过 {}：\n{content}\n</system-reminder>",
+                "<system-reminder>\nYou read {} before compaction:\n{content}\n</system-reminder>",
                 path.display()
             )
         }
         Attachment::UserFile { path, content } => {
             format!(
-                "<system-reminder>\n用户在消息里引用了 {}，内容如下：\n{content}\n</system-reminder>",
+                "<system-reminder>\nThe user referenced {} in their message; its contents \
+                 follow:\n{content}\n</system-reminder>",
                 path.display()
             )
         }
@@ -731,6 +788,44 @@ mod tests {
         let b = build_request(&r, &[], &RetryContext::initial());
         assert_eq!(b.system.len(), 1);
         assert!(b.system[0].text.contains("总结助手的角色声明"));
+    }
+
+    /// 请求级 system 按边界常量切开：前半段进全局块，后半段不进。
+    ///
+    /// `[约束]` 全局块是跨会话跨用户共享的。工作目录、venv 路径、用户自己
+    /// 写的补充指令混进去，别人永远命不中，还把自己那份挤掉 —— 而这个损失
+    /// 在本地完全看不出来，请求照发照回，只是 cache_read 一直是 0。
+    #[test]
+    fn 请求级_system_按边界切成全局段和项目段() {
+        let mut r = req(vec![user("hi")]);
+        r.system = format!("跨会话相同的准则{SYSTEM_SECTION_BOUNDARY}工作目录：/tmp/proj");
+
+        let b = build_request(&r, &[], &RetryContext::initial());
+        assert_eq!(b.system.len(), 2, "切成两块");
+        assert_eq!(b.system[0].cache_control, Some(CacheControl::global()));
+        assert!(b.system[0].text.contains("跨会话相同的准则"));
+        assert!(
+            !b.system[0].text.contains("/tmp/proj"),
+            "逐项目的内容不能进全局块：{}",
+            b.system[0].text
+        );
+        assert_eq!(b.system[1].cache_control, None);
+        assert!(b.system[1].text.contains("/tmp/proj"));
+
+        // 标记不能念给模型听。
+        let wire = serde_json::to_string(&b.system).expect("序列化");
+        assert!(!wire.contains("riot:system-cache-boundary"), "{wire}");
+
+        assert_eq!(validate_cache_breakpoints(&b), Ok(()));
+    }
+
+    /// 没有边界标记时整段按静态处理 —— 摘要请求那种极简 system 是常量。
+    #[test]
+    fn 没有边界标记时请求级_system_整段算静态() {
+        assert_eq!(
+            split_request_system("你是负责精确总结对话的助手。"),
+            ("你是负责精确总结对话的助手。", "")
+        );
     }
 
     #[test]

@@ -17,6 +17,7 @@ use riot_protocol::tool::{
 };
 use serde::Deserialize;
 
+use super::names::{BASH, GLOB, GREP, READ};
 use super::{path, search};
 
 /// 一次遍历最多看多少个文件。理由同 Grep：超过这个数说明范围没圈对。
@@ -37,12 +38,12 @@ const STAT_BUDGET: usize = 1000;
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Input {
-    /// 文件名匹配模式，如 `**/*.rs` 或 `src/**/test_*.py`。
+    /// Filename pattern, such as `**/*.rs` or `src/**/test_*.py`.
     pattern: String,
-    /// 搜索的根目录。省略则搜索工作目录。
+    /// Root directory to search from. Omit to search the working directory.
     #[serde(default)]
     path: Option<String>,
-    /// 最多返回几条。
+    /// Maximum number of paths to return.
     #[serde(default)]
     head_limit: Option<usize>,
 }
@@ -52,7 +53,7 @@ pub struct Glob;
 #[async_trait]
 impl Tool for Glob {
     fn name(&self) -> &'static str {
-        "Glob"
+        GLOB
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -60,15 +61,60 @@ impl Tool for Glob {
     }
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
-        "按文件名找文件，返回路径列表，最近修改的排在前面。\n\
-         \n\
-         - 想按**文件名**找文件用这个；想按**文件内容**搜用 Grep。\n\
-         - 优先用这个而不是 `Bash(find ...)`：不用等命令授权，也会自动\
-         跳过 .gitignore 里的文件和 .git 目录。\n\
-         - `pattern` 是 glob 不是正则：`**/*.rs` 匹配所有 Rust 文件，\
-         `src/**/*.ts` 只看 src 下面。\n\
-         - 不确定项目结构时，先用 `**/*.{扩展名}` 摸清范围再逐个 Read。"
-            .to_owned()
+        format!(
+            "Finds files by name. Returns a list of paths, most recently modified first.\n\
+             \n\
+             Usage:\n\
+             - `pattern` is a glob, not a regex: `**/*.rs` is every Rust file, \
+             `src/**/*.ts` only the ones under src, `**/test_*.py` only files whose \
+             name starts with test_. `.` is a literal dot here.\n\
+             - ALWAYS prefer this over `{BASH}(\"find …\")` or `ls -R`: no command \
+             approval, and .gitignore'd files and .git are skipped, so you do not get \
+             10000 paths out of `node_modules` or `target`.\n\
+             - At most {MAX_RESULTS} paths come back. Hitting that cap means the pattern \
+             was too broad — narrow it or set `path` to a subtree.\n\
+             - Recency ordering is the useful part when you are looking for the file \
+             someone just touched.\n\
+             \n\
+             ### When to Use\n\
+             \n\
+             1. You know roughly what the file is called or what extension it has.\n\
+             2. Getting a feel for a project's layout: `**/*.toml`, `**/Dockerfile`, \
+             `src/**/mod.rs`.\n\
+             3. Enumerating the files a change has to cover, when membership is decided \
+             by path rather than by content.\n\
+             \n\
+             ### When NOT to Use\n\
+             \n\
+             1. Looking for a symbol, a string, or any file *content* — that is {GREP}. \
+             File names rarely tell you where a function lives.\n\
+             2. As a substitute for reading. A path list is not evidence about what the \
+             code does; follow up with {GREP} or {READ}.\n\
+             3. Broad sweeps like `**/*` or `**` to \"see the project\". That returns \
+             {MAX_RESULTS} arbitrary paths and answers nothing. Ask a narrower question.\n\
+             4. Checking whether one specific path exists. Just {READ} it; the error \
+             tells you, in one call instead of two.\n\
+             5. NEVER shell out to `find`, `ls -R`, or `git ls-files` for this. Those \
+             also ignore the repository's ignore rules and need command approval.\n\
+             \n\
+             <good-example>\n\
+             {GLOB}(pattern: \"**/migrations/*.sql\")\n\
+             </good-example>\n\
+             <reasoning>\n\
+             Membership really is decided by path here, and the recency ordering puts \
+             the newest migration first — which is usually the one being asked about.\n\
+             </reasoning>\n\
+             \n\
+             <bad-example>\n\
+             {GLOB}(pattern: \"**/*auth*\") … then {READ} on each hit, looking for the \
+             login handler\n\
+             </bad-example>\n\
+             <reasoning>\n\
+             The handler may live in `session.rs` and never appear in a filename. \
+             `{GREP}(pattern: \"fn login\")` finds it directly and gives you the line \
+             number too.\n\
+             </reasoning>"
+        )
     }
 
     fn describe(&self, input: &serde_json::Value) -> String {

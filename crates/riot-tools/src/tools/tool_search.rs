@@ -2,8 +2,10 @@
 //!
 //! # 问题
 //!
-//! MCP 服务器多了之后，工具描述和 schema 会吃掉可观的上下文 —— 它们进
-//! 请求的 tools 数组，每一轮都付费，而大多数轮次一个都用不到。
+//! 工具描述和 schema 进请求的 tools 数组，每一轮都付费，而大多数轮次
+//! 用不到。两个大头：MCP 服务器多了之后堆起来的那些，以及 32 个
+//! `Browser*` —— 后者的描述加 schema 约 2.4 万字符，只在真的要开页面
+//! 的会话里用得上，纯文本改代码的会话一次都碰不到。
 //!
 //! # 机制（Claude Code ToolSearchTool 的客户端版本）
 //!
@@ -11,9 +13,10 @@
 //! 剥离 + `tool_reference` 展开），Riot 走的是各家通用的 OpenAI 兼容
 //! 协议，没有那两样。这里做纯客户端的等价物：
 //!
-//! - 延迟工具（`Tool::should_defer`，目前即 MCP 工具）不进 tools 数组，
-//!   [`crate::scheduler::Scheduler::specs`] 把它们过滤掉；
-//! - 模型从 ToolSearch 的描述里看到它们的**名字**；
+//! - 延迟工具（`Tool::should_defer`，目前是 MCP 工具和 `Browser*`）不进
+//!   tools 数组，[`crate::scheduler::Scheduler::specs`] 把它们过滤掉；
+//! - 模型从 ToolSearch 的描述里看到它们的**名字**；成组的（`Browser*`）
+//!   折成一行能力索引，见 [`GROUPS`]；
 //! - `ToolSearch(query: "select:<名字>")` 把完整定义（描述 + 参数 schema）
 //!   作为工具结果文本返回，并把该工具标记为"已发现"；
 //! - 已发现的工具从下一次请求起进 tools 数组，之后和普通工具无异；
@@ -34,9 +37,41 @@ use riot_protocol::tool::{PromptContext, Tool, ToolContext, ToolOutcome, UiPaylo
 
 /// 启用延迟加载的门槛（延迟候选的描述 + schema 总字符数）。
 ///
-/// 约合 1 万多 token —— 128k 窗口的 10% 上下（Claude Code auto 模式的
-/// 默认比例）。低于它时全部工具直接进请求，没有 ToolSearch 这一跳。
-pub const DEFER_THRESHOLD_CHARS: usize = 40_000;
+/// 低于它时全部工具直接进请求，没有 ToolSearch 这一跳 —— 省下的上下文
+/// 抵不过多一跳往返。
+///
+/// 定在 16000（约 4000 token）而不是更高：`Browser*` 一组自己就有约
+/// 2.4 万字符，而它们**每个会话都在**、大多数会话一个都不用。按 128k
+/// 窗口的 10%（4 万字符，Claude Code auto 模式的比例）设门槛的话，没配
+/// MCP 的用户永远跨不过去，等于白摆着一套机制付 32 个工具的常驻税。
+pub const DEFER_THRESHOLD_CHARS: usize = 16_000;
+
+/// 成组延迟的工具：`(名字前缀, 能力索引)`。
+///
+/// 组里的工具在 ToolSearch 的清单里折成一行 —— 32 行名字本身就有
+/// 五百字符，而模型需要的只是"有没有这个能力"。
+///
+/// `[约束]` 定义可以按需取，**能力的存在感必须常驻**。少了这一行，模型
+/// 不知道有浏览器，会去 shell 里 `screencapture` 截整个屏幕、用 osascript
+/// 找窗口，然后拿着一张截错的图言之凿凿 —— 真实发生过一次，排查方向
+/// 整个跑偏。
+const GROUPS: &[(&str, &str)] = &[(
+    crate::tools::names::BROWSER_PREFIX,
+    crate::tools::browser::DEFER_SUMMARY,
+)];
+
+/// 这个名字属于某个成组延迟的工具组吗。
+///
+/// `[取舍]` 组成员靠名字前缀认，而不是让 32 个 `impl Tool` 各写一遍
+/// `should_defer`。这样「谁被延迟」和「延迟后模型看到的那行能力索引」
+/// 出自同一处声明 —— 加一组工具却忘了给索引（模型于是不知道这个能力
+/// 存在）在结构上就不可能发生。
+///
+/// `Tool::should_defer` 仍然有效，MCP 工具走那条路：它们的名字没有共同
+/// 前缀，也不共享一句能力描述。
+fn in_deferred_group(name: &str) -> bool {
+    GROUPS.iter().any(|(prefix, _)| name.starts_with(prefix))
+}
 
 /// 一个延迟工具的完整定义快照。构造时算好 —— prompt / schema 在一轮内
 /// 不变，搜索和取回都不需要再碰工具本体。
@@ -67,7 +102,7 @@ impl DeferredPool {
     ) -> Self {
         let entries = tools
             .iter()
-            .filter(|t| t.should_defer())
+            .filter(|t| t.should_defer() || in_deferred_group(t.name()))
             .map(|t| {
                 let name = t.name().to_owned();
                 let description = t.prompt(ctx);
@@ -196,7 +231,7 @@ impl ToolSearch {
 #[async_trait]
 impl Tool for ToolSearch {
     fn name(&self) -> &str {
-        "ToolSearch"
+        crate::tools::names::TOOL_SEARCH
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -205,20 +240,40 @@ impl Tool for ToolSearch {
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
         let mut p = String::from(
-            "取回延迟工具的完整定义。下面这些工具**存在但还没加载**——\
-             只有名字，没有参数 schema，加载之前不能直接调用：\n\n",
+            "Retrieves the full definition of a deferred tool.\n\n\
+             The tools below EXIST but are NOT loaded: you have their names only, with \
+             no parameter schema. Calling one before loading it is rejected.\n\n\
+             Not loaded yet:\n",
         );
-        for name in self.pool.names() {
+
+        let all = self.pool.names();
+        // 成组的折成一行能力索引，散的逐个列名字。
+        for (prefix, summary) in GROUPS {
+            let n = all.iter().filter(|name| name.starts_with(prefix)).count();
+            if n == 0 {
+                continue;
+            }
+            p.push_str(&format!("- `{prefix}*` ({n} tools): {summary}\n"));
+        }
+        for name in all.iter().filter(|name| !in_deferred_group(name)) {
             p.push_str("- ");
             p.push_str(name);
             p.push('\n');
         }
+
         p.push_str(
-            "\n用法：\n\
-             - `select:名字` 或 `select:名字1,名字2` —— 按名字精确取回\n\
-             - 若干关键词 —— 按名字和描述搜索，返回最匹配的几个\n\n\
-             结果里 <functions> 块内的工具从下一步起可以直接调用。\
-             需要用哪个就先取哪个，不要凭名字猜参数。",
+            "\nUsage:\n\
+             - `select:Name`, or `select:NameA,NameB` — exact retrieval by name. Use \
+             this when you know what you want, including for a whole group \
+             (`select:BrowserNavigate,BrowserSnapshot`).\n\
+             - Anything else — keyword search over names and descriptions, returns the \
+             closest matches.\n\
+             - Retrieve everything you expect to need in one call. Tools returned in \
+             the <functions> block are callable from your next step onward and stay \
+             callable for the rest of the session, so there is no reason to load them \
+             one at a time.\n\
+             - NEVER invent arguments for a tool you have not retrieved. You have not \
+             seen its schema, so the call is rejected rather than guessed at.",
         );
         p
     }

@@ -66,7 +66,7 @@ pub async fn probe(root: &Path) -> Option<GitInfo> {
     let branch = if detached {
         git(root, &["rev-parse", "--short", "HEAD"])
             .await
-            .unwrap_or_else(|| "未知".to_owned())
+            .unwrap_or_else(|| "unknown".to_owned())
     } else {
         raw.trim().to_owned()
     };
@@ -91,31 +91,32 @@ pub async fn probe(root: &Path) -> Option<GitInfo> {
 
 /// 渲染成注入给模型的那段文字。
 pub fn describe(info: &GitInfo) -> String {
-    let mut s = String::from("Git 仓库\n");
+    let mut s = String::from("Git repository\n");
     if info.detached {
         s.push_str(&format!(
-            "当前不在任何分支上（detached HEAD，{}）。在这里提交的东西\
-             很容易丢 —— 动手前先问用户要不要建分支。\n",
+            "Not on any branch right now (detached HEAD, {}). Commits made here are easily \
+             lost, so ALWAYS ask the user whether to create a branch before you start.\n",
             info.branch
         ));
     } else {
-        s.push_str(&format!("当前分支：{}\n", info.branch));
+        s.push_str(&format!("Current branch: {}\n", info.branch));
     }
 
     if info.dirty > 0 {
         // 这句是防事故的。模型看不到工作区脏不脏时，会若无其事地
         // checkout / stash / reset，把用户还没提交的活儿冲掉。
         s.push_str(&format!(
-            "工作区有 {} 个文件未提交。切换分支、stash、reset 之前必须先问 —— \
-             那些改动可能是用户的。\n",
+            "The working tree has {} uncommitted file(s). ALWAYS ask before switching branches, \
+             stashing, or resetting — those changes may be the user's own, and there is no way \
+             to get them back.\n",
             info.dirty
         ));
     } else {
-        s.push_str("工作区干净。\n");
+        s.push_str("The working tree is clean.\n");
     }
 
     if !info.recent.is_empty() {
-        s.push_str("最近的提交（供参考提交信息的写法）：\n");
+        s.push_str("Recent commits (as a model for how commit messages are written here):\n");
         for line in &info.recent {
             s.push_str("  ");
             s.push_str(line);
@@ -126,8 +127,9 @@ pub fn describe(info: &GitInfo) -> String {
     // 结果用户一问"我在哪个分支"，模型就老老实实去跑了一遍 git status，
     // 整份快照白注。既要说清它是快照，又必须明说"不用再查一遍"。
     s.push_str(
-        "以上是本次会话开始时的状态。除非你自己动过 git（切分支、提交、stash），\
-         否则直接用这里的信息回答，不必再跑一遍 git 确认。",
+        "The above is the state at the start of this session. Unless you have used git yourself \
+         since then (switching branches, committing, stashing), answer from this information \
+         directly — there is no need to run git again to confirm it.",
     );
     s
 }
@@ -174,13 +176,13 @@ mod tests {
     #[test]
     fn 干净和脏工作区说法不同() {
         let clean = describe(&info("main", false, 0));
-        assert!(clean.contains("当前分支：main"));
-        assert!(clean.contains("工作区干净"));
+        assert!(clean.contains("Current branch: main"));
+        assert!(clean.contains("The working tree is clean"));
 
         let dirty = describe(&info("main", false, 12));
-        assert!(dirty.contains("12 个文件未提交"));
+        assert!(dirty.contains("12 uncommitted file(s)"));
         // 这句不能少：模型看不到脏工作区时会若无其事地 checkout。
-        assert!(dirty.contains("必须先问"));
+        assert!(dirty.contains("ALWAYS ask before switching branches"));
     }
 
     /// detached 时 `--abbrev-ref HEAD` 会返回字面量 "HEAD"。把它当分支名
@@ -192,8 +194,8 @@ mod tests {
     #[test]
     fn 不能反过来诱导模型去跑_git() {
         let d = describe(&info("main", false, 0));
-        assert!(d.contains("不必再跑"), "{d}");
-        assert!(!d.contains("自己跑 git"), "别把模型推回去查：{d}");
+        assert!(d.contains("no need to run git again"), "{d}");
+        assert!(!d.contains("run git yourself"), "别把模型推回去查：{d}");
     }
 
     #[test]

@@ -2,9 +2,10 @@
 //!
 //! # 设计（对照 Claude Code 的 services/compact）
 //!
-//! - **九节式总结提示词**：主要意图 / 技术概念 / 文件与代码 / 错误与修复 /
-//!   问题解决 / 全部用户原话 / 待办 / 当前工作 / 下一步。九节里最关键的是
-//!   「全部用户原话」—— 意图漂移是压缩最大的风险，原话是锚。
+//! - **九节式总结提示词**：主要意图 / 全部用户原话 / 待办 / 当前工作 /
+//!   下一步 / 错误与修复 / 问题解决 / 技术概念 / 文件与代码。九节里最关键
+//!   的是「全部用户原话」—— 意图漂移是压缩最大的风险，原话是锚，所以要求
+//!   逐字引述而不是转述。节序按抗截断排，理由见 [`COMPACT_PROMPT`]。
 //! - **analysis / summary 分离**：先让模型在 `<analysis>` 里自查遗漏，再产出
 //!   `<summary>`。入库前剥掉 analysis —— 它是脚手架，不是产物。
 //! - **同形状请求吃前缀缓存**：能拿到主循环请求形状（[`RequestShape`]）时，
@@ -54,33 +55,64 @@ pub struct RequestShape {
 
 /// 总结输出的预算。CC 用 20k；对齐它 —— 长会话的九节总结真能写到
 /// 上万 token，砍太狠丢的是"文件与代码段"那节的完整片段。撞上这个
-/// 预算时 provider 会报 OutputLimit，总结按失败处理而不是静默截尾
-/// （九节顺序输出，截掉的恰是用户原话/待办/下一步那几节）。
+/// 预算时 provider 会报 OutputLimit，总结按失败处理而不是静默截尾。
+///
+/// 报失败仍然是对的（半截总结进历史比没有更糟），但节序已经把撞线的
+/// 后果调轻了：先输出的是意图类的四节，垫底的是可以从归档文件 Grep
+/// 回来的代码片段（见 [`COMPACT_PROMPT`]）。
 const SUMMARY_MAX_OUTPUT_TOKENS: u32 = 20_000;
 
-/// 总结提示词。九节结构和 CC 逐节对应，措辞按中文对话习惯改写。
+/// 总结提示词。九节结构和 CC 逐节对应。
+///
+/// `[约束]` **节序按「截断时先丢什么」排**，不按叙事顺序。撞上
+/// [`SUMMARY_MAX_OUTPUT_TOKENS`] 时输出从尾部截断，所以意图类的四节
+/// （原话 / 待办 / 当前工作 / 下一步）排在最前，体量最大且可从归档文件
+/// 找回的「文件与代码段」垫底 —— 丢代码片段还能 Grep 归档补，丢用户
+/// 原话就是任务意图永久漂移。
+///
+/// verbatim 引述（第 2、5 节）是有损通道里开的一条无损子通道：摘要最
+/// 危险的损失不是细节而是意图被转述走样，原话是唯一挡得住的东西。
 const COMPACT_PROMPT: &str = "\
-重要：只输出文本，不要调用任何工具。你需要的全部上下文都已经在上面的对话里。\n\n\
-你的任务：为到目前为止的对话写一份**详尽**的总结，重点保住用户的明确要求和你已经做过的动作。\
-这份总结将替代完整历史供后续继续工作使用 —— 漏掉的信息就永远丢了。\n\n\
-先在 <analysis> 标签里按时间顺序过一遍对话，自查每一段的：用户意图、你的做法、关键决策、\
-具体细节（文件名、完整代码片段、函数签名、文件修改）、踩过的错和修法、用户的反馈（尤其是纠正你的话）。\n\n\
-然后在 <summary> 标签里输出以下九节：\n\
-1. 主要请求与意图：用户的每一个明确要求，写细。\n\
-2. 关键技术概念：涉及的技术、框架、约定。\n\
-3. 文件与代码段：看过/改过/新建的文件，为什么重要，关键代码片段要完整摘录（最近改动优先）。\n\
-4. 错误与修复：踩过的每个错、怎么修的、用户对此的反馈。\n\
-5. 问题解决：已解决的问题和仍在排查的思路。\n\
-6. 全部用户原话：列出**所有**非工具结果的用户消息原文 —— 这是防止意图漂移的锚，一条都不能少。\n\
-7. 待办事项：明确被要求、还没完成的事。\n\
-8. 当前工作：总结前的那一刻正在做什么，文件和代码要具体。\n\
-9. 下一步（可选）：与最近工作直接相关的下一步。必须和用户最近的明确要求一致；\
-   如果上一件事已经收尾，没有新指示就不要发明下一步。引用最近对话的原话来说明接续点。\n\n\
-提醒：只输出 <analysis> 和 <summary> 两个块，不要调用工具。";
+Important: output text only, do NOT call any tool. Everything you need is already in the \
+conversation above.\n\n\
+Your task is to write a thorough summary of the conversation so far, paying close attention to \
+the user's explicit requests and to the actions you have already taken. This summary replaces \
+the full history: another instance of you will read it as its only record of this conversation \
+and continue the work straight from it, so write something that can be worked from directly \
+rather than a description of a conversation. Anything you leave out is lost for good.\n\n\
+First, in an <analysis> block, walk the conversation in chronological order and check off, for \
+each stretch of it: what the user wanted, how you went about it, the decisions that mattered, \
+the concrete details (file names, complete code snippets, function signatures, file edits), the \
+errors you hit and how you fixed them, and the user's feedback — above all the times they \
+corrected you.\n\n\
+Then, in a <summary> block, output these nine sections in this order:\n\
+1. Primary request and intent: every explicit request from the user, in detail.\n\
+2. All user messages: list the text of EVERY user message that is not a tool result, quoted \
+verbatim. Do not paraphrase and do not skip the short ones — this section is the anchor against \
+intent drift, and a paraphrase is exactly where the drift enters.\n\
+3. Pending tasks: what you were explicitly asked to do and have not finished.\n\
+4. Current work: precisely what was being worked on in the moment before this summary, naming \
+files and quoting the code involved.\n\
+5. Next step (optional): the next step, directly continuous with the most recent work. It MUST \
+match the user's most recent explicit request. If the last piece of work was concluded and there \
+is no new instruction, write that there is no next step rather than inventing one — a made-up \
+next step sends the next instance off on work nobody asked for. Include a verbatim quote from \
+the most recent conversation showing what you were doing and where you stopped.\n\
+6. Errors and fixes: every error you hit, how you fixed it, and what the user said about it.\n\
+7. Problem solving: problems already solved, and the lines of investigation still open.\n\
+8. Key technical concepts: the technologies, frameworks, and conventions in play.\n\
+9. Files and code sections: files read, changed, or created, why each one matters, and full \
+excerpts of the code that matters most, most recent changes first.\n\n\
+NEVER refer to the summary, to summarizing, or to this request inside the <summary> block; write \
+it as the working state of the task itself. Reminder: output only the <analysis> and <summary> \
+blocks, and do NOT call tools.";
 
 /// 总结请求的 system prompt。刻意简短 —— 总结靠上面的用户消息驱动，
 /// system 只定角色。
-const SUMMARY_SYSTEM: &str = "你是负责精确总结对话的助手。你只输出文本，从不调用工具。";
+const SUMMARY_SYSTEM: &str = "You summarize conversations precisely. You output text only and \
+                              never call tools. Your summary is handed to another AI assistant \
+                              that continues the task, so align it with the task in the \
+                              conversation.";
 
 /// 调 LLM 总结一段历史。返回剥好的总结正文。
 ///
@@ -187,20 +219,27 @@ pub fn continuation_message(
     let mut content: Vec<UserContent> = memory.into_iter().map(UserContent::Attachment).collect();
     let archive_note = match archive {
         Some(p) => format!(
-            "\n\n被压缩的对话**原文**保存在 `{}`（一条消息一个 `## [序号] 角色` 小节，\
-             工具结果只留开头）。总结里没有、但你需要的细节 —— 报错原文、具体路径、\
-             命令输出、用户某句话的准确措辞 —— 用 Grep 搜关键词或 Read 指定行区间去查，\
-             不要靠猜、也不要整份读进来。",
+            "\n\nThe **verbatim** text of the compacted conversation is saved at `{}`, one \
+             `## [index] role` section per message, with tool results kept only up to their \
+             first lines. When you need a detail the summary does not carry — the exact wording \
+             of an error, a specific path, command output, precisely how the user phrased \
+             something — search it with Grep or Read a line range. Do NOT guess at it, and do \
+             NOT read the whole file in: it is the history you just compacted, so reading it \
+             back undoes the compaction.",
             p.display()
         ),
         None => String::new(),
     };
     content.push(UserContent::Text {
         text: format!(
-            "本会话由一段更早的对话延续而来，先前内容已压缩。以下是前文的完整总结：\n\n{summary}\
-             {archive_note}\n\n\
-             直接接着做，不要复述总结、不要向用户再次确认、不要说「我将继续」—— \
-             像中断从未发生过一样，接上手头的任务。",
+            "This session continues from an earlier conversation whose contents have been \
+             compacted. The full summary of what came before follows:\n\n{summary}{archive_note}\
+             \n\n\
+             Carry on from here directly. Do NOT recap the summary, do NOT ask the user to \
+             confirm anything again, and do NOT announce that you are continuing — they were \
+             present for all of it and see one uninterrupted conversation, so any of that reads \
+             as though you lost the thread. Pick the task back up as if nothing had interrupted \
+             it.",
         ),
     });
     content.extend(restored.into_iter().map(UserContent::Attachment));
@@ -302,7 +341,7 @@ fn strip_for_summary(messages: &[Message]) -> Vec<Message> {
                     .map(|c| match c {
                         UserContent::Attachment(Attachment::Image { .. }) => {
                             UserContent::Attachment(Attachment::SystemReminder {
-                                text: "[此处原本是一张图片，总结时已省略]".into(),
+                                text: "[an image was here; omitted for summarization]".into(),
                             })
                         }
                         // 视觉兼容那张图：转述留着（模型本来读的就是它，
@@ -318,9 +357,9 @@ fn strip_for_summary(messages: &[Message]) -> Vec<Message> {
                             is_error,
                         } => UserContent::Text {
                             text: format!(
-                                "[工具调用 {} 的结果{}]\n{}",
+                                "[result of tool call {}{}]\n{}",
                                 tool_use_id.as_str(),
-                                if *is_error { "（失败）" } else { "" },
+                                if *is_error { " (failed)" } else { "" },
                                 tool_result_text(content),
                             ),
                         },
@@ -343,7 +382,7 @@ fn strip_for_summary(messages: &[Message]) -> Vec<Message> {
                         AssistantContent::ToolUse { id, name, input } => {
                             Some(AssistantContent::Text {
                                 text: format!(
-                                    "[调用工具 {name}（{}），参数：{}]",
+                                    "[called tool {name} ({}) with input: {}]",
                                     id.as_str(),
                                     serde_json::to_string(input).unwrap_or_else(|_| "{}".into()),
                                 ),
@@ -370,15 +409,15 @@ fn tool_result_text(c: &ToolResultContent) -> String {
             preview,
             total_bytes,
         } => format!(
-            "结果过大（{total_bytes} 字节），已写入 {}。\n预览：\n{preview}",
+            "Result too large ({total_bytes} bytes); written to {}.\nPreview:\n{preview}",
             path.display()
         ),
-        ToolResultContent::Cleared => "[结果已清理以节省上下文]".into(),
-        ToolResultContent::Image { .. } => "[图片结果，总结时已省略]".into(),
+        ToolResultContent::Cleared => "[result cleared to save context]".into(),
+        ToolResultContent::Image { .. } => "[image result; omitted for summarization]".into(),
         // 转述是模型本来就在读的内容，保留；图片本体进不了文本总结。
         ToolResultContent::DescribedImage { text, .. } => text.clone(),
         ToolResultContent::MarkedImage { text, .. } => {
-            format!("{text}\n[图片本体总结时已省略]")
+            format!("{text}\n[image itself omitted for summarization]")
         }
     }
 }
@@ -445,7 +484,7 @@ mod tests {
         );
         assert!(matches!(&content[1], UserContent::Text { text } if text.contains("九节总结")));
         assert!(
-            matches!(&content[1], UserContent::Text { text } if text.contains("像中断从未发生过")),
+            matches!(&content[1], UserContent::Text { text } if text.contains("as if nothing had interrupted it")),
             "续接指令必须在：没有它模型会先复述一遍总结再开工"
         );
         assert!(matches!(
@@ -453,7 +492,7 @@ mod tests {
             Some(UserContent::Attachment(Attachment::RestoredFile { .. }))
         ));
         assert!(
-            !matches!(&content[1], UserContent::Text { text } if text.contains("原文")),
+            !matches!(&content[1], UserContent::Text { text } if text.contains("saved at")),
             "没有归档文件就别提它，否则模型会去找一个不存在的路径"
         );
     }
@@ -475,7 +514,7 @@ mod tests {
         };
         assert!(text.contains("/art/s1/history.md"), "{text}");
         assert!(
-            text.contains("Grep") && text.contains("不要靠猜"),
+            text.contains("Grep") && text.contains("Do NOT guess at it"),
             "要教模型怎么用：搜关键词，别整份读：{text}"
         );
     }

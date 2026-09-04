@@ -11,4 +11,6 @@ pub mod wire;
 
 pub use decode::StreamDecoder;
 pub use provider::{AnthropicConfig, AnthropicProvider};
-pub use request::{RetryContext, SystemSection, build_request};
+pub use request::{
+    RetryContext, SYSTEM_SECTION_BOUNDARY, SystemSection, build_request, split_request_system,
+};

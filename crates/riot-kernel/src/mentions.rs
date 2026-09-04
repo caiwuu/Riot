@@ -246,8 +246,9 @@ pub fn expand(mentions: &[Mention], file_state: Option<&dyn FileStateCache>) -> 
             Ok(meta) => meta,
             Err(e) => {
                 out.push(note(format!(
-                    "用户在消息里写了 @{}，但这个路径读不到（{e}）。\
-                     需要的话请他确认路径，别自己猜一个。",
+                    "The user wrote @{} in their message, but that path cannot be read ({e}). If \
+                     you need it, ask them to confirm the path — do NOT guess one, since a \
+                     guessed path silently gives you the wrong file.",
                     m.raw
                 )));
                 continue;
@@ -261,8 +262,8 @@ pub fn expand(mentions: &[Mention], file_state: Option<&dyn FileStateCache>) -> 
 
         if budget == 0 {
             out.push(note(format!(
-                "用户还引用了 {}，但这条消息带的文件已经够多了，没有一起附上。\
-                 需要的话用 Read 读它。",
+                "The user also referenced {}, but this message already carries enough files, so \
+                 it was not attached. Read it with the Read tool if you need it.",
                 m.path.display()
             )));
             continue;
@@ -277,7 +278,8 @@ pub fn expand(mentions: &[Mention], file_state: Option<&dyn FileStateCache>) -> 
                 out.push(Attachment::UserFile {
                     path: m.path.clone(),
                     content: format!(
-                        "读不成文本（{e}）—— 可能是二进制文件。需要的话用 Read 读它。"
+                        "Could not be read as text ({e}); it is probably a binary file. Use Read \
+                         on it if you need its contents."
                     ),
                 });
                 continue;
@@ -317,7 +319,8 @@ pub fn expand(mentions: &[Mention], file_state: Option<&dyn FileStateCache>) -> 
 
         let tail = if truncated {
             format!(
-                "\n\n[只附了前 {} 个字符，全文共 {total} 个。剩下的用 Read 按需读取。]",
+                "\n\n[Only the first {} characters are attached, out of {total}. Read the rest \
+                 with Read as you need it.]",
                 body.chars().count()
             )
         } else {
@@ -337,7 +340,10 @@ fn note(text: String) -> Attachment {
 
 fn list_dir(dir: &Path) -> String {
     let Ok(rd) = std::fs::read_dir(dir) else {
-        return format!("用户引用了目录 {}，但它列不出来。", dir.display());
+        return format!(
+            "The user referenced the directory {}, but it could not be listed.",
+            dir.display()
+        );
     };
     let mut names: Vec<String> = rd
         .flatten()
@@ -354,12 +360,12 @@ fn list_dir(dir: &Path) -> String {
     let total = names.len();
     names.truncate(MAX_DIR_ENTRIES);
     let more = if total > MAX_DIR_ENTRIES {
-        format!("\n…… 还有 {} 项", total - MAX_DIR_ENTRIES)
+        format!("\n… and {} more entries", total - MAX_DIR_ENTRIES)
     } else {
         String::new()
     };
     format!(
-        "用户引用了目录 {}，里面有：\n{}{more}",
+        "The user referenced the directory {}, which contains:\n{}{more}",
         dir.display(),
         names.join("\n")
     )
@@ -704,7 +710,10 @@ mod tests {
         );
         match &got[..] {
             [Attachment::UserFile { content, .. }] => {
-                assert!(content.contains("剩下的用 Read"), "要告诉模型还有后文");
+                assert!(
+                    content.contains("Read the rest with Read"),
+                    "要告诉模型还有后文"
+                );
             }
             other => panic!("该是一个 UserFile：{other:?}"),
         }
@@ -742,7 +751,7 @@ mod tests {
         match &got[..] {
             [Attachment::UserFile { path, content }] => {
                 assert_eq!(path, &f);
-                assert!(content.contains("读不成文本"), "{content}");
+                assert!(content.contains("Could not be read as text"), "{content}");
             }
             other => panic!("该是一个 UserFile：{other:?}"),
         }
@@ -777,7 +786,7 @@ mod tests {
             .sum();
         assert!(total <= MAX_TOTAL_CHARS + 200, "总量要有兜底，实际 {total}");
         assert!(
-            got.iter().any(|a| matches!(a, Attachment::SystemReminder { text } if text.contains("没有一起附上"))),
+            got.iter().any(|a| matches!(a, Attachment::SystemReminder { text } if text.contains("was not attached"))),
             "被挡下的要告诉模型"
         );
     }

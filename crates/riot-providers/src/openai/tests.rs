@@ -593,7 +593,7 @@ fn 错误结果带上标记() {
     }];
 
     match &convert_messages(&msgs)[0] {
-        WireMessage::Tool { content, .. } => assert!(content.contains("错误")),
+        WireMessage::Tool { content, .. } => assert!(content.contains("Error:")),
         other => panic!("{other:?}"),
     }
 }

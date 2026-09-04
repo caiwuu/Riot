@@ -37,16 +37,21 @@ const MAX_TOKENS: u32 = 1200;
 /// `[约束]` 必须要求结构化输出。自由散文的转述读起来像"这个页面看着挺正常"，
 /// 主模型没法从里面提取任何可操作的信息 —— 而它接下来要做的是改代码。
 const SYSTEM: &str = "\
-你在帮一个看不到图片的编程助手理解一张网页截图。
-只描述你**真正看到**的东西，不要推测页面的用途，不要给建议。
-截图可能是很长的整页：只挑主要区块概括，整个回答控制在六百字以内，\
-宁可少写几条也要把 JSON 写完整。
-用紧凑的 JSON 回答，不要包代码块，结构如下：
-{\"layout\":\"整体版式，一两句\",\
-\"texts\":[\"看到的主要文字，按视觉顺序，最多 20 条\"],\
-\"controls\":[\"按钮/输入框/链接等控件及其文字\"],\
-\"problems\":[\"错位、重叠、溢出、空白区、明显的报错文字；没有就空数组\"],\
-\"colors\":\"主要配色，一句\"}";
+You are helping a coding assistant that cannot see images understand a screenshot of a web page.
+Describe ONLY what you actually see. Do NOT speculate about the page's purpose and do NOT give \
+advice — the assistant acts on what you report, and a guess presented as an observation sends it \
+to change the wrong code.
+The screenshot may be a very long full page: cover only the main regions, keep the whole answer \
+under 400 words, and ALWAYS finish the JSON even if that means listing fewer items. A truncated \
+object cannot be parsed at all, so a short complete answer beats a detailed cut-off one.
+Reply with compact JSON and no code fence, in this shape:
+{\"layout\":\"overall layout, one or two sentences\",\
+\"texts\":[\"the main text you can see, in visual order, at most 20 entries, each quoted \
+exactly as it appears\"],\
+\"controls\":[\"buttons, inputs, links and similar controls, with their labels\"],\
+\"problems\":[\"misalignment, overlap, overflow, blank regions, visible error text; empty array \
+if none\"],\
+\"colors\":\"the main colors, one sentence\"}";
 
 pub struct HostVision {
     /// 主模型能不能直接收图片。
@@ -116,7 +121,7 @@ impl VisionAccess for HostVision {
                 id: MessageId::from_raw("vision"),
                 content: vec![
                     UserContent::Text {
-                        text: format!("重点看：{}", req.focus),
+                        text: format!("Focus on: {}", req.focus),
                     },
                     UserContent::Attachment(Attachment::Image {
                         media_type: req.media_type,

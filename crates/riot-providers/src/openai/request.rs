@@ -62,11 +62,21 @@ pub fn build_request(
         .collect::<Vec<_>>()
         .join("\n\n");
 
-    let full_system = match (system_text.is_empty(), req.system.is_empty()) {
+    // 分段边界只对 Anthropic 的分块缓存有意义，这边一条 system 消息装完，
+    // 把两段原序接回去 —— 顺序不能动，服务端的自动前缀缓存靠稳定前缀命中。
+    // 不切的话那个标记会原样念给模型听。
+    let (stable, project) = crate::anthropic::request::split_request_system(&req.system);
+    let req_system = if project.is_empty() {
+        stable.to_owned()
+    } else {
+        format!("{stable}\n\n{project}")
+    };
+
+    let full_system = match (system_text.is_empty(), req_system.is_empty()) {
         (true, true) => String::new(),
-        (true, false) => req.system.clone(),
+        (true, false) => req_system,
         (false, true) => system_text,
-        (false, false) => format!("{system_text}\n\n{}", req.system),
+        (false, false) => format!("{system_text}\n\n{req_system}"),
     };
     if !full_system.is_empty() {
         messages.push(WireMessage::System {
@@ -285,15 +295,15 @@ fn render_result(content: &ToolResultContent, is_error: bool) -> String {
             preview,
             total_bytes,
         } => format!(
-            "结果过大（{total_bytes} 字节），已写入 {}。开头部分：\n{preview}",
+            "Result too large ({total_bytes} bytes); written to {}. First part:\n{preview}",
             path.display()
         ),
-        ToolResultContent::Cleared => "（历史结果已清理）".to_owned(),
+        ToolResultContent::Cleared => "[result cleared to save context]".to_owned(),
         // 图片本身跟在这条 tool 消息后面的那条 user 消息里（见
         // convert_messages）。这里留一句话是因为 tool 消息不能为空 ——
         // 空结果会让一部分模型误判任务结束。
         ToolResultContent::Image { media_type, .. } => {
-            format!("（{media_type} 图片见下一条消息）")
+            format!("(the {media_type} image is in the next message)")
         }
         // 转述代替图片。图片是给界面的，不随请求发 —— 这个变体本来就
         // 产生于"模型看不了图"的会话（见协议注释）。
@@ -304,19 +314,21 @@ fn render_result(content: &ToolResultContent, is_error: bool) -> String {
         ToolResultContent::MarkedImage {
             media_type, text, ..
         } => {
-            format!("{text}\n（结果配套的图片见下一条消息，{media_type}）")
+            format!(
+                "{text}\n(the image accompanying this result is in the next message, {media_type})"
+            )
         }
     };
 
     // 空的 tool 结果会让部分模型误判任务结束。见 ARCHITECTURE.md §6.7
     let body = if body.trim().is_empty() {
-        "（命令完成，没有输出）".to_owned()
+        "(completed with no output)".to_owned()
     } else {
         body
     };
 
     if is_error {
-        format!("错误：{body}")
+        format!("Error: {body}")
     } else {
         body
     }
@@ -331,15 +343,16 @@ fn render_attachment(a: &riot_protocol::message::Attachment) -> Option<String> {
     use riot_protocol::message::Attachment;
     Some(match a {
         Attachment::Memory { path, content } => format!(
-            "<system-reminder>\n项目记忆 {}：\n{content}\n</system-reminder>",
+            "<system-reminder>\nProject memory {}:\n{content}\n</system-reminder>",
             path.display()
         ),
         Attachment::RestoredFile { path, content } => format!(
-            "<system-reminder>\n压缩前你读过 {}：\n{content}\n</system-reminder>",
+            "<system-reminder>\nYou read {} before compaction:\n{content}\n</system-reminder>",
             path.display()
         ),
         Attachment::UserFile { path, content } => format!(
-            "<system-reminder>\n用户在消息里引用了 {}，内容如下：\n{content}\n</system-reminder>",
+            "<system-reminder>\nThe user referenced {} in their message; its contents \
+             follow:\n{content}\n</system-reminder>",
             path.display()
         ),
         Attachment::Environment { text } | Attachment::SystemReminder { text } => {

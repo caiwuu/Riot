@@ -24,6 +24,8 @@ use serde::{Deserialize, Serialize};
 use riot_protocol::permission::{DecisionReason, PermissionContext, PermissionResult};
 use riot_protocol::tool::{PromptContext, Tool, ToolContext, ToolOutcome, UiPayload};
 
+use super::names::TODO_WRITE;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoStatus {
@@ -35,16 +37,17 @@ pub enum TodoStatus {
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TodoItem {
-    /// 祈使式描述，如「跑全部测试」。
+    /// Imperative description, e.g. "run the full test suite".
     pub content: String,
     pub status: TodoStatus,
-    /// 进行式描述，如「正在跑全部测试」。执行中的条目在界面上用它。
+    /// Progressive description, e.g. "running the full test suite".
+    /// The UI shows this form while the item is in progress.
     pub active_form: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct Input {
-    /// 完整的新清单（整表替换，不是增量）。
+    /// The complete new list. Replaces the previous one; this is not a delta.
     todos: Vec<TodoItem>,
 }
 
@@ -53,7 +56,7 @@ pub struct TodoWrite;
 #[async_trait]
 impl Tool for TodoWrite {
     fn name(&self) -> &str {
-        "TodoWrite"
+        TODO_WRITE
     }
 
     fn input_schema(&self) -> schemars::Schema {
@@ -62,24 +65,38 @@ impl Tool for TodoWrite {
 
     fn prompt(&self, _ctx: &PromptContext) -> String {
         // CC 的 prompt 精华，保留全部行为规则，压掉冗长的示例。
-        "维护本次会话的任务清单。主动、频繁地用它 —— 它让你自己不漏步骤，\
-         也让用户看得到进展。\n\n\
-         ## 什么时候用\n\
-         - 任务要三步以上，或不是一眼能做完的\n\
-         - 用户给了多件事（列表、逗号分隔）\n\
-         - 收到新指令时：立刻把需求记成待办\n\
-         - 开始做某一项前：把它标成 in_progress（同一时刻**只有一项**进行中）\n\
-         - 做完一项：**立刻**标 completed，不要攒一批再改\n\n\
-         ## 什么时候不用\n\
-         单一直白的小事、纯问答 —— 直接做比记录更快。\n\n\
-         ## 状态与措辞\n\
-         - status: pending / in_progress / completed\n\
-         - content 用祈使式（「跑测试」），activeForm 用进行式（「正在跑测试」），两者都必填\n\
-         - 每次调用传**完整的新清单**（整表替换），不再相关的条目直接删掉\n\n\
-         ## 完成的标准\n\
-         只有真正做完才标 completed。测试在红、实现了一半、卡在报错上 —— \
-         都保持 in_progress，另加一条描述阻塞的待办。"
-            .into()
+        format!(
+            "Maintains the task list for this session. Use it proactively: it keeps you \
+             from skipping steps and it is how the user sees progress.\n\n\
+             ## When to Use\n\
+             - The task takes three or more distinct steps, or is not obviously \
+             one-and-done\n\
+             - The user gave you several things at once (a list, or comma-separated)\n\
+             - Right after new instructions arrive: record the requirements as todos\n\
+             - Before starting an item: mark it in_progress — exactly ONE item is \
+             in_progress at any moment\n\
+             - The moment an item is done: mark it completed. Do not batch status \
+             updates for later\n\n\
+             ## When NOT to Use\n\
+             - A single straightforward change, or a question you can just answer. \
+             Doing it is faster than tracking it\n\
+             - Purely informational requests\n\
+             - Do NOT add \"test the change\" as an item unless the user asked for it; \
+             it makes you over-focus on testing\n\
+             - Do NOT narrate the list to the user in prose. Update it and move on\n\n\
+             ## States and Wording\n\
+             - status: pending / in_progress / completed\n\
+             - `content` is imperative (\"run the tests\"), `activeForm` is progressive \
+             (\"running the tests\"). Both are required\n\
+             - Every call passes the COMPLETE new list — it replaces the previous one. \
+             Drop items that no longer apply\n\
+             - Batch the {TODO_WRITE} call together with the first real tool call of \
+             that item, in one message\n\n\
+             ## What Counts as Completed\n\
+             Mark completed only when the item is actually finished. Tests still red, \
+             implementation half-done, blocked on an error: keep it in_progress and add \
+             a separate item describing the blocker."
+        )
     }
 
     fn describe(&self, input: &serde_json::Value) -> String {

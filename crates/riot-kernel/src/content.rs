@@ -127,8 +127,8 @@ pub(crate) async fn user_content(
         if img.data.len() > MAX_IMAGE_B64 {
             content.push(UserContent::Attachment(Attachment::SystemReminder {
                 text: format!(
-                    "用户附了第 {} 张图，但它有 {} KB，超过单张上限，没有发给你。\
-                     可以请用户裁剪或缩小之后再发。",
+                    "The user attached image {}, but at {} KB it exceeds the per-image limit and \
+                     was not sent to you. Ask them to crop or shrink it and send it again.",
                     i + 1,
                     img.data.len() / 1024,
                 ),
@@ -154,8 +154,9 @@ pub(crate) async fn user_content(
             .describe(riot_protocol::vision::DescribeRequest {
                 media_type: img.media_type.clone(),
                 data: img.data.clone(),
-                focus: "用户附上这张图是想让你看懂它的内容:上面的文字、界面元素、\
-                        数据、以及任何看起来是报错的地方"
+                focus: "The user attached this image so the assistant can understand what is in \
+                        it: the text on it, the interface elements, the data, and anything that \
+                        looks like an error"
                     .to_owned(),
             })
             .await;
@@ -163,8 +164,11 @@ pub(crate) async fn user_content(
             media_type: img.media_type,
             data: img.data,
             text: match described {
-                Ok(desc) => format!("用户附的第 {} 张图：\n{desc}", i + 1),
-                Err(e) => format!("用户附了第 {} 张图，但没能转成文字：{e}", i + 1),
+                Ok(desc) => format!("Image {} attached by the user:\n{desc}", i + 1),
+                Err(e) => format!(
+                    "The user attached image {}, but it could not be converted to text: {e}",
+                    i + 1
+                ),
             },
         }));
     }
@@ -193,7 +197,7 @@ pub(crate) async fn user_content(
     // 注解，不是消息本身。
     for ctx in input.extra_context {
         content.push(UserContent::Attachment(Attachment::SystemReminder {
-            text: format!("UserPromptSubmit hook 的补充上下文：\n{ctx}"),
+            text: format!("Additional context from the UserPromptSubmit hook:\n{ctx}"),
         }));
     }
     content
@@ -427,7 +431,7 @@ mod tests {
             content.iter().any(|c| matches!(
                 c,
                 UserContent::Attachment(Attachment::SystemReminder { text })
-                    if text.contains("超过单张上限")
+                    if text.contains("exceeds the per-image limit")
             )),
             "要留一句说明，否则模型以为用户什么都没给：{content:?}"
         );
