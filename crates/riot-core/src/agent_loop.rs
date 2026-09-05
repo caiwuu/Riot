@@ -31,6 +31,7 @@ use crate::guard::guarded;
 use crate::invariant;
 use crate::invariants;
 use crate::state::{AgentDeps, AgentState, BatchContext, BatchEvent, StopDecision, Transition};
+use crate::todo_nudge;
 use crate::turn::TurnAccumulator;
 
 /// 输出上限恢复的最大次数。
@@ -375,6 +376,8 @@ pub fn run_agent(
             // ── 6. 工具执行 ──────────────────────────────────────
             let calls = turn.tool_calls();
             state.messages.extend(turn.take_messages());
+            state.tool_calls_since_todo =
+                todo_nudge::advance(state.tool_calls_since_todo, calls.iter().map(|c| &c.name));
 
             let batch_ctx = BatchContext {
                 session_id: state.session_id.clone(),
@@ -462,6 +465,24 @@ pub fn run_agent(
             }
 
             invariants::check_tool_pairing(&state.messages);
+
+            // 待办清单的兜底提醒：连续多次调用没碰 TodoWrite 而清单还有没
+            // 做完的项，就在这里把清单现状摆给模型看。放在带外消息之前 ——
+            // 它说的是"你手上这份清单"，和"转到后台"一样属于当下这件事。
+            // 和 hook 反馈同一种形状：synthetic user + system-reminder，
+            // 前端不画它，模型读得到。
+            if let Some(text) = todo_nudge::reminder(state.tool_calls_since_todo, &state.messages) {
+                state.tool_calls_since_todo = 0;
+                let nudge = Message::User {
+                    id: riot_protocol::id::MessageId::from_raw(deps.ids.next_id("msg")),
+                    content: vec![UserContent::Attachment(
+                        riot_protocol::message::Attachment::SystemReminder { text },
+                    )],
+                    meta: MessageMeta { synthetic: true, ..Default::default() },
+                };
+                state.messages.push(nudge.clone());
+                yield AgentEvent::Message(nudge);
+            }
 
             // 刻意**不在这里** drain 用户插话。工具结果就位后插入虽然对
             // API 是安全的（CC 就这么做），但对用户是惊吓：排队面板里的

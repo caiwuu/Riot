@@ -30,11 +30,13 @@ struct ProtocolRoot {
     // ProviderEvent 不进前端，但要过 tag 撞名检查 —— 黄金用例是手写 JSON，
     // 撞名的话用例会以「反序列化失败」的形式报错，很难联想到根因。
     provider_event: riot_protocol::provider::ProviderEvent,
-    // 定时任务：列表视图、错过提示、宿主 emit 的运行事件、编辑补丁。
+    // 定时任务：列表视图、错过提示、宿主 emit 的运行事件、编辑补丁、
+    // 表单手动创建的草稿。
     scheduled_task: riot_protocol::ScheduledTask,
     missed_run: riot_protocol::MissedRun,
     schedule_run: riot_protocol::ScheduleRun,
     schedule_patch: riot_protocol::SchedulePatch,
+    schedule_draft: riot_protocol::ScheduleDraft,
 }
 
 // 豁免理由：这是构建期的代码生成器，不是内核代码。它的产物本身就是

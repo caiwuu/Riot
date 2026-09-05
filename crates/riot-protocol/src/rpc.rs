@@ -47,6 +47,17 @@ pub enum RpcRequest {
         message_id: String,
         config: Box<TurnConfig>,
     },
+    /// 编辑一条用户提问并从它重新开始（Cursor 编辑气泡后发送的同款语义）：
+    /// 替换这条消息的文本，丢掉它之后的一切，再从它跑一轮。
+    #[serde(rename = "turn.resend")]
+    TurnResend {
+        session_id: SessionId,
+        /// 要改的用户消息 id。必须是活历史里的用户提问。
+        message_id: String,
+        /// 新文本。附件（图片、引用）原位保留，只换文字。
+        text: String,
+        config: Box<TurnConfig>,
+    },
     /// 中断当前轮。
     #[serde(rename = "turn.interrupt")]
     TurnInterrupt {
@@ -158,6 +169,11 @@ pub enum RpcRequest {
     #[serde(rename = "mcp.restart")]
     McpRestart { id: String },
 
+    /// 同步「历史会话回忆」开关（宿主从设置里读，内核不读配置文件）。
+    /// 启动时和每次保存设置后调用；第一次开启会让内核对账一遍摘录文件。
+    #[serde(rename = "digest.configure")]
+    DigestConfigure { enabled: bool },
+
     #[serde(rename = "permission.respond")]
     PermissionRespond {
         request_id: RequestId,
@@ -244,6 +260,10 @@ pub enum RpcResponse {
     TaskHistory {
         task: Option<crate::task::BackgroundTaskView>,
         messages: Vec<Message>,
+        /// 它派出去的子 agent（含更深层）。它的会话里那些 Task 卡片靠这份
+        /// 认领自己的子 agent，画法和主对话一致。
+        #[serde(default)]
+        descendants: Vec<crate::task::BackgroundTaskView>,
     },
     Changes {
         changes: Vec<FileChange>,

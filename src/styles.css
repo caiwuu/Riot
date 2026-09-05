@@ -2179,6 +2179,9 @@ html[data-resizing] .slide-panel {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* 对话流、输入框、招呼页共用：列宽 ≥768 时被 720 上限吃掉，
+     再窄才真正变成两侧留白。三块必须同一条，否则输入框和正文错轴。 */
+  --chat-gutter: 24px;
 }
 
 /* 空会话的招呼语。只占输入框上面那块空地并在其中居中 —— 输入框自己
@@ -2188,7 +2191,7 @@ html[data-resizing] .slide-panel {
   flex: 1;
   min-height: 0;
   margin: 0 auto;
-  width: min(720px, calc(100% - 48px));
+  width: min(720px, calc(100% - 2 * var(--chat-gutter)));
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -2328,7 +2331,7 @@ html[data-resizing] .slide-panel {
      顶部，而 WebKit 不把滚动容器远端的 padding 计入可滚动区域 ——
      写在这里的 padding-top 滚到顶时会被吞掉，首条消息贴着顶边。
      子元素自己的 padding 是它盒子的一部分，怎么都吞不掉。 */
-  padding: 0 24px;
+  padding: 0 var(--chat-gutter);
   /* 倒排滚动容器（学 Codex 桌面端）：滚动原点挪到底部，scrollTop
      贴底为 0、向上翻为负，浏览器保持的是"距底距离"。两个结构性红利：
      贴底跟随免费（流式追加时 0 恒指底部，不用每帧去追）；视口上方的
@@ -2880,7 +2883,7 @@ html[data-resizing] .slide-panel {
 
 .composer-dock {
   flex-shrink: 0;
-  padding: 8px 24px 18px;
+  padding: 8px var(--chat-gutter) 18px;
 }
 
 .composer-dock .composer-wrap {
@@ -2912,12 +2915,21 @@ html[data-resizing] .slide-panel {
    加一种块就在 lib/chips.ts 里加一支，再来这里加一条颜色。 */
 .chip {
   display: inline-flex;
-  align-items: center;
+  /* 块内也按基线排，不居中。inline-flex 对外的基线取**第一个子项**的：
+     居中排时文件块的第一个子项是图标、命令块的是文字，两种块拿不同的东西
+     去对外面的基线，并排就差两三像素。按基线排之后两种块的基线都由文字
+     决定，图标再相对基线往下压到 x 高中线（见下面的 translate）。 */
+  align-items: baseline;
   gap: 4px;
   /* baseline 对齐，块才不会把行高顶开 */
   vertical-align: baseline;
   font-size: 12px;
-  border-radius: 5px;
+  /* 行高比正文（1.6）收一档。继承 1.6 的话 12px 字加边框接近 21px，塞进
+     22.4px 的一行几乎满格，块一换行上下就贴在一起；收到 1.5 块高 20px，
+     行与行之间空出 2px 左右 —— 靠的是行本身的 leading，不加外边距，
+     所以有块的行和纯文字的行仍然一样高。 */
+  line-height: 1.5;
+  border-radius: 7px;
   padding: 0 5px;
   margin: 0 1px;
   white-space: nowrap;
@@ -2937,6 +2949,32 @@ html[data-resizing] .slide-panel {
   background: currentColor;
   -webkit-mask: var(--chip-icon) center / contain no-repeat;
   mask: var(--chip-icon) center / contain no-repeat;
+  /* 没有文字的盒子拿底边当基线：图标坐在基线上、中心在基线上方 5.5px，
+     文字的视觉中心在上方 3.5px 左右，压 2px 对齐。 */
+  translate: 0 2px;
+}
+
+/* 文件引用按类型换图标：seti 字形（和文件树、@ 菜单同一套），颜色由块上
+   的 --chip-glyph-color 带进来（见 chips.ts 的 chipVars）。覆盖掉上面的
+   mask 图；目录没有 data-glyph，仍走文件夹的 mask 图。 */
+.chip[data-glyph]::before {
+  content: attr(data-glyph);
+  width: 14px;
+  height: auto;
+  opacity: 1;
+  background: none;
+  -webkit-mask: none;
+  mask: none;
+  font-family: 'seti';
+  /* 13px：seti 的 ascent 是 1em、descent 是 0，字形盒基线以上正好 13px，
+     和 12px 文字盒的基线以上（13.5px）齐平，块高不会被撑出去。 */
+  font-size: 13px;
+  line-height: 1;
+  text-align: center;
+  color: var(--chip-glyph-color, currentColor);
+  /* 光学对齐。seti 的字形坐在基线上、墨迹中心在基线上方 6.5px；文字的
+     视觉中心（x 高和大写的折中）在上方 3.5px 左右，压 3px 对齐。 */
+  translate: 0 3px;
 }
 
 .chip::after {
@@ -2951,12 +2989,19 @@ html[data-resizing] .slide-panel {
   user-select: text;
 }
 
-/* 蓝是文件，橙是命令，绿是页面上点来的东西 —— 扫一眼就知道这段不是
-   普通输入，以及它是哪一类。 */
+/* 三种块都是无边框的 pill（Cursor 同款），靠底色分种类：文件中性灰、
+   文字近白，类型色只落在图标上；命令暖色、页面元素绿 —— 它们没有图标，
+   底色是唯一的种类标记，文件和命令并排时一眼分得开。
+   边框留 1px 透明，三种块高度一致。底色用半透色，输入框和气泡底色不同
+   也能各自浮起一档。 */
+.chip-ref,
+.chip-cmd {
+  border: 1px solid transparent;
+}
+
 .chip-ref {
-  color: var(--accent);
-  background: rgba(90, 141, 214, 0.12);
-  border: 1px solid rgba(90, 141, 214, 0.35);
+  color: #dcdce4;
+  background: rgba(255, 255, 255, 0.09);
   --chip-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.3' stroke-linejoin='round'%3E%3Cpath d='M9 1.8H4.5a1 1 0 0 0-1 1v10.4a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1V5.3L9 1.8z'/%3E%3Cpath d='M8.9 2v3.4h3.4'/%3E%3C/svg%3E");
 }
 
@@ -2966,11 +3011,8 @@ html[data-resizing] .slide-panel {
 }
 
 .chip-cmd {
-  color: #e8c39a;
-  background: #4a3420;
-  border: 1px solid #6a4a2a;
-  border-radius: 6px;
-  padding: 1px 7px;
+  color: #e6c9a4;
+  background: rgba(230, 190, 140, 0.14);
 }
 
 /* 命令块只有 `/名字`，没有图标 —— content: none 连带把 gap 也去掉。 */
@@ -3005,7 +3047,8 @@ html[data-resizing] .slide-panel {
   background: var(--bg-card);
   border-radius: 12px;
   padding: 4px;
-  max-height: 260px;
+  /* 命令候选两行一条约 43px，七条出头；再多滚。 */
+  max-height: 320px;
   overflow-y: auto;
 }
 
@@ -3029,8 +3072,74 @@ html[data-resizing] .slide-panel {
   color: var(--text);
 }
 
-.slash-item .chip {
+/* 命令候选：名字一行、说明一行（Cursor 的 / 菜单同款）。 */
+.slash-cmd {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  padding-block: 5px;
+}
+
+.slash-cmd-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.slash-cmd-name {
   flex-shrink: 0;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.slash-cmd .slash-desc {
+  flex: none;
+  font-size: 12px;
+}
+
+/* 分组标题。第二组起上面压一条线分隔。 */
+.slash-group {
+  padding: 4px 8px 2px;
+  font-size: 12px;
+  color: var(--text-faint);
+  user-select: none;
+}
+
+.slash-group-next {
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+/* 文件候选：类型图标 + 文件名 + 灰色目录，一行（Cursor 的 @ 菜单同款）。
+   图标是字形不是文字，baseline 对不齐，这一种按中线排。 */
+.slash-file {
+  align-items: center;
+  padding-block: 4px;
+}
+
+.slash-file .file-icon {
+  width: 16px;
+  font-size: 15px;
+}
+
+.slash-file-name {
+  flex-shrink: 0;
+  font-size: 13px;
+  color: var(--text);
+}
+
+/* 目录从**左边**截断：离文件名最近的那几级目录最有辨识度。rtl 会让首尾
+   的中性标点跳位，两端各夹一个 LRM 钳住（和 .codeblock-ref-path 同法）。 */
+.slash-file-dir {
+  direction: rtl;
+  text-align: left;
+}
+
+.slash-file-dir::before,
+.slash-file-dir::after {
+  content: '\200e';
 }
 
 .slash-hint {
@@ -3047,15 +3156,6 @@ html[data-resizing] .slide-panel {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-faint);
-}
-
-.slash-src {
-  flex-shrink: 0;
-  font-size: 11px;
-  color: var(--text-faint);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 0 6px;
 }
 
 /* 排队面板：跑轮中发的插话停在输入框上方（Cursor 同款），注入对话后
@@ -3403,6 +3503,62 @@ html[data-resizing] .slide-panel {
   color: var(--text-dim);
 }
 
+/* 子 agent 派的子 agent：缩进一格挂在父行下面，左侧一条细线示意层级
+   （照 Cursor 的树形）。每层再缩一格，靠嵌套的 margin 累加。 */
+.task-card-children {
+  margin: 0 8px 6px 26px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.task-child-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 3px 4px;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.task-child-head:hover {
+  background: var(--bg-hover);
+}
+
+.task-child-head .task-card-title {
+  font-weight: 500;
+  font-size: 12px;
+}
+
+.task-child .task-card-activity {
+  padding: 0 4px 4px 24px;
+}
+
+.task-child-running .tool-icon {
+  color: var(--warn);
+}
+
+.task-child-completed .tool-icon {
+  color: var(--ok);
+}
+
+.task-child-failed .tool-icon,
+.task-child-cancelled .tool-icon {
+  color: var(--text-faint);
+}
+
+.task-child:hover .task-card-go {
+  opacity: 1;
+}
+
 /* 通用的"打开子 agent 会话"链接样式：面板标题、通知卡 id。 */
 .task-link {
   border: none;
@@ -3445,6 +3601,11 @@ html[data-resizing] .slide-panel {
 .md-agent-icon {
   color: var(--text-faint);
   font-size: 0.9em;
+}
+
+/* 回答里的 `riot://session/` 链接：同一枚标签，用强调色区分"跳到另一个会话"。 */
+.md .md-session-link {
+  color: var(--accent, var(--text));
 }
 
 /* ── 子 agent 会话面板（右侧抽屉标签） ── */
@@ -3892,7 +4053,7 @@ body.file-dragging.file-drop-hot * {
   background: var(--bg-hover);
 }
 
-/* 输入框里的内联下拉 pill（权限 / 服务方 / 模型）。模型名可能很长，截断，
+/* 输入框里的内联下拉 pill（工作方式 / 服务方 / 模型）。模型名可能很长，截断，
    别把整条工具栏撑开。宽度上限由 .composer-tools .mode-menu 管。 */
 .picker-pill {
   display: inline-flex;
@@ -3920,8 +4081,8 @@ body.file-dragging.file-drop-hot * {
   line-height: 14px;
 }
 
-/* 危险权限模式（全部放行/无人值守）激活时 pill 常驻警示色，
-   不能和"每次询问"长得一样。 */
+/* 危险权限档（全部放行/无人值守）生效时标记常驻警示色，
+   不能和"编辑放行"这类安全档长得一样。 */
 .pill.pill-danger {
   color: var(--warn);
   border-color: color-mix(in srgb, var(--warn) 45%, transparent);
@@ -3938,6 +4099,38 @@ body.file-dragging.file-drop-hot * {
   border-radius: 50%;
   background: var(--warn);
   flex-shrink: 0;
+}
+
+/* 顶栏权限下拉：跟在会话标题后面，长得像标题按钮那样轻（无边框、悬停
+   出底色），不像输入框里的描边 pill —— 顶栏没有别的描边件。安全档淡字，
+   危险档才亮出黄字、黄点和一圈淡边。标题截断时它不跟着缩。 */
+.pill.perm-flag {
+  flex-shrink: 0;
+  max-width: 140px;
+  border-color: transparent;
+  color: var(--text-faint);
+  font-size: 12px;
+  padding: 3px 8px 3px 10px;
+}
+
+.pill.perm-flag:hover:not(:disabled) {
+  color: var(--text-dim);
+  border-color: transparent;
+  background: var(--bg-hover);
+}
+
+.pill.perm-flag[aria-expanded='true'] {
+  background: var(--bg-hover);
+}
+
+.pill.perm-flag.pill-danger {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+}
+
+.pill.perm-flag.pill-danger:hover:not(:disabled) {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 70%, transparent);
 }
 
 .bar-spacer {
@@ -3985,7 +4178,7 @@ body.file-dragging.file-drop-hot * {
   border-color: #555;
 }
 
-/* 权限模式菜单 */
+/* pill 下拉菜单（工作方式 / 服务方 / 模型 / 顶栏权限） */
 
 .mode-menu {
   position: relative;
@@ -4006,6 +4199,12 @@ body.file-dragging.file-drop-hot * {
   /* composer 把 --bg-hover 抬到 --bg-input-hover，给 pill 用。菜单底是
      --bg-card，再吃那一档会比会话右键菜单（同样叠在卡片上）重一截。 */
   --bg-hover: color-mix(in srgb, #fff 5%, var(--bg-card));
+}
+
+/* 顶栏里的菜单往下开：上面就是窗口边，没地方。 */
+.menu.menu-down {
+  bottom: auto;
+  top: calc(100% + 6px);
 }
 
 .menu-item {
@@ -4053,7 +4252,11 @@ body.file-dragging.file-drop-hot * {
   flex: 1;
 }
 
+/* 名字前面可以带记号（工作方式菜单），横排对齐。 */
 .menu-pick-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   line-height: 1.3;
 }
 
@@ -4126,34 +4329,46 @@ body.file-dragging.file-drop-hot * {
   border-color: var(--ok);
 }
 
-/* pill 上的规划记号：橙色，和多任务的绿 ⑂ 分色，两个状态各认各的。
-   方盒包 SVG，理由同 .chevron —— svg 是 inline 元素，直接摆进 pill 会
-   吊在基线上，比汉字高出一截。 */
-.pill-plan {
+/* 工作方式记号的公共盒子：三个记号都是 12px SVG 装在 14px 方盒里，
+   尺寸一致，换方式时 pill 高度和文字位置都不动。方盒包 SVG 的理由同
+   .chevron —— svg 是 inline 元素，直接摆进 pill 会吊在基线上。
+   记号本身不带色，跟着所在容器走：pill 上整体染成模式色，菜单项里
+   和文字同灰（Cursor 的下拉也是素的，颜色只在选中后的 pill 上）。 */
+.pill-mark {
   display: flex;
   align-items: center;
   justify-content: center;
   width: 14px;
   height: 14px;
   flex-shrink: 0;
-  color: var(--warn);
 }
 
-.pill-plan svg {
+.pill-mark svg {
   display: block;
 }
 
-/* pill 上的多任务记号：开着时一直在，状态一眼可见。 */
-.pill-multitask {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  height: 14px;
-  flex-shrink: 0;
+/* 工作方式 pill 整体换色（Cursor 同款）：Agent 是常态，默认灰；Plan 黄
+   （Cursor 的 --composer-mode-plan-text 就是 warning 色）；多任务绿。
+   边框跟文字同色但压淡，和危险权限标记的手法一致。 */
+.pill.pill-mode-plan {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+}
+
+/* hover 要重申字色：.pill:hover 那条比这条特异性高，会把字压回默认灰。 */
+.pill.pill-mode-plan:hover:not(:disabled) {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 70%, transparent);
+}
+
+.pill.pill-mode-multitask {
   color: var(--ok);
-  font-size: 12px;
-  line-height: 1;
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+}
+
+.pill.pill-mode-multitask:hover:not(:disabled) {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 70%, transparent);
 }
 
 /* 「转到后台」：和停止键并排，比它轻一档（描边 pill），点了不是终止而是挪走。 */
@@ -4209,19 +4424,6 @@ body.file-dragging.file-drop-hot * {
   place-items: center;
   padding: 24px;
   z-index: var(--z-modal);
-}
-
-/* 对话流内的确认弹窗（删除一轮问答）相对**聊天区域**居中，不是整个
-   窗口 —— 遮罩只罩对话列、不盖左侧会话栏。作用域覆盖：把通用 Modal
-   的全屏 fixed 遮罩改成相对 .transcript-shell 的 absolute。 */
-.transcript-confirm {
-  position: absolute;
-  inset: 0;
-  z-index: var(--z-modal);
-}
-
-.transcript-confirm .modal-backdrop {
-  position: absolute;
 }
 
 .modal {
@@ -4397,11 +4599,14 @@ body.file-dragging.file-drop-hot * {
 
 /* 筛选框：树栏顶上一个圆角输入（Codex 同款），不画分隔线 —— 头部那条
    横线已经把它和上面隔开了。 */
+/* 筛选框一行：输入框撑满，右边挂一枚"从磁盘打开"（系统选择框，管项目
+   外的文件）。⌘P 落到这个输入框 —— 它就是本应用的 Quick Open。 */
 .file-tree-filter {
   flex-shrink: 0;
   position: relative;
   display: flex;
   align-items: center;
+  gap: 4px;
   padding: 8px 8px 4px;
   color: var(--text-faint);
 }
@@ -4413,7 +4618,8 @@ body.file-dragging.file-drop-hot * {
 }
 
 .file-tree-filter input {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   height: 28px;
   padding: 0 24px 0 27px;
   font-size: 12px;
@@ -4426,6 +4632,7 @@ body.file-dragging.file-drop-hot * {
   border-color: var(--border-strong);
 }
 
+/* 清除键叠在输入框右端内侧；有磁盘键时要往左让出它的宽度 + 间距。 */
 .file-tree-clear {
   position: absolute;
   right: 10px;
@@ -4440,7 +4647,29 @@ body.file-dragging.file-drop-hot * {
   color: var(--text-faint);
 }
 
+.file-tree-clear:has(+ .file-tree-disk) {
+  right: 42px;
+}
+
 .file-tree-clear:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.file-tree-disk {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-faint);
+}
+
+.file-tree-disk:hover {
   background: var(--bg-hover);
   color: var(--text);
 }
@@ -4831,9 +5060,16 @@ button.chip.clickable {
   -webkit-appearance: none;
 }
 
-button.chip-ref.clickable:hover {
-  background: rgba(90, 141, 214, 0.22);
-  border-color: rgba(90, 141, 214, 0.55);
+/* 可点的（气泡里、输入框里点开预览）：hover 只把灰底再抬一档，不换色。
+   输入框里的目录块不可点（没有单文件可预览），保持文本光标。 */
+button.chip-ref.clickable:hover,
+.composer-input .chip-ref:not([data-extra='dir']):hover {
+  background: rgba(255, 255, 255, 0.16);
+  color: var(--text);
+}
+
+.composer-input .chip-ref:not([data-extra='dir']) {
+  cursor: pointer;
 }
 
 /* ── 设置整页 ───────────────────────────────── */
@@ -5319,9 +5555,12 @@ button.chip-ref.clickable:hover {
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
 }
 
-/* 带说明的选项：主标签和灰字之间留一口气，不然两行贴死看着像一行断了。 */
+/* 带说明的选项：主标签和灰字之间留一口气，不然两行贴死看着像一行断了。
+   选项不折行 —— 菜单按 max-content 撑开（见 FieldSelect），"一次性"
+   被掰成两行是触发框太窄时曾出过的样子。 */
 .field-select-menu .menu-item {
   padding: 8px 10px;
+  white-space: nowrap;
 }
 
 .field-select-menu .menu-hint {
@@ -8027,30 +8266,23 @@ button.field-slider-state:hover {
    而且发生在一次横向动画里，不会把输入框在纵向上挪位置。 */
 /* 横向留白收窄。阈值 768 = 内容上限 720 + 两侧各 24。
  *
- * 对话流、输入框、招呼页三块都是"720px 上限 + auto 边距居中"，列宽
- * ≥768 时内边距根本不起作用 —— 富余全被 auto 边距吃掉。所以切换点卡在
- * 768 这一刻正好是"内边距刚要开始约束内容"的临界，切换前后内容宽度
- * 都是 720，肉眼零变化，再往窄走才是连续收窄。
+ * 对话流、输入框、招呼页三块都走 --chat-gutter。列宽 ≥768 时内边距
+ * 根本不起作用 —— 富余全被 auto 边距吃掉。所以切换点卡在 768 这一刻
+ * 正好是"内边距刚要开始约束内容"的临界，切换前后内容宽度都是 720，
+ * 肉眼零变化，再往窄走才是连续收窄。只改这一条变量，三块一起动 ——
+ * 早先输入框收 16、对话流收 12，窄列上左右错开 4px。
  *
  * `[约束]` 不能挪回 560（早先和下面那条合在一起）。560 落在内边距已经
  * 在约束内容的区间里，跨过去那一帧内容宽度一次变 24px、整屏文字重新
  * 折行 —— 而侧栏 / 抽屉开合正好会扫过这个宽度，500ms 的平滑滑动中间
  * 插一帧重排。 */
 @container chat (max-width: 768px) {
-  .composer-dock {
-    padding-inline: 16px;
-  }
-
-  .transcript {
-    padding-inline: 12px;
-  }
-
-  .hero {
-    width: min(720px, calc(100% - 24px));
+  .chat {
+    --chat-gutter: 16px;
   }
 }
 
-/* 真正的窄列：工具栏一行塞不下服务方和模型，藏掉，剩下 + / 权限 / 发送。
+/* 真正的窄列：工具栏一行塞不下服务方和模型，藏掉，剩下 + / 工作方式 / 发送。
    容器挂在 .chat-col 上，避免挂在输入框上裁掉向上弹出的菜单。
 
    display 是离散的，插值不了 —— 但这一条不改盒子尺寸：两个 pill 在 flex
@@ -9005,6 +9237,27 @@ button.field-slider-state:hover {
 
 .sp-clear:disabled {
   opacity: 0.4;
+}
+
+/* 「创建」是个菜单按钮（手动 / 让 Riot 创建），尾巴上带一枚小箭头。
+   详情面板里的「保存」复用 .sp-create 但没有箭头，这条只对带箭头的生效。 */
+.sp-create .chevron {
+  margin: 0 -4px 0 -2px;
+  opacity: 0.7;
+}
+
+/* 创建表单（右侧栏，和详情共用 .sp-detail 壳）：宿主返回的错误就是给人
+   看的一句话，摆在表单底部，红字不加框。 */
+.sp-d-error {
+  font-size: 12.5px;
+  color: var(--danger-soft);
+}
+
+/* 空名字时 .sp-d-name 平时无边框、看起来像一行空白 —— 表单里先把框显
+   出来，用户才知道这里要填。有字了再和详情面板一样收起边框。 */
+.sp-d-name:placeholder-shown {
+  border-color: var(--border-strong);
+  background: var(--bg);
 }
 
 .sp-missed {

@@ -257,7 +257,43 @@ export function EyeIcon() {
   );
 }
 
-/** 规划模式：条目清单。和多任务的 ⑂ 一样，只在 pill 上标状态。 */
+/** 普通 agent：无穷符号（Cursor 同款）—— 边看边做，不设限地跑下去。 */
+export function AgentModeIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path
+        d="M12 12c-2-2.67-4-4-6-4a4 4 0 1 0 0 8c2 0 4-1.33 6-4Zm0 0c2 2.67 4 4 6 4a4 4 0 0 0 0-8c-2 0-4 1.33-6 4Z"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+/**
+ * 多任务：一根主干分出两条支线（fork）。
+ *
+ * 不用 ⑂ 字形：主字体里没有这个字符，回退字体的基线和主字体对不上，
+ * 行盒被撑高，pill 就比 Agent / Plan 高出一两像素。三个记号都走 SVG，
+ * 盒子尺寸才真正一致。
+ */
+export function MultitaskIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <g stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M8 13.2V8.4" />
+        <path d="M8 8.4 4.2 4.6M8 8.4l3.8-3.8" />
+        <circle cx="4.2" cy="3.4" r="1.3" />
+        <circle cx="11.8" cy="3.4" r="1.3" />
+        <circle cx="8" cy="13.3" r="1.3" />
+      </g>
+    </svg>
+  );
+}
+
+/** 规划模式：条目清单。只在 pill 上标状态。 */
 export function PlanModeIcon() {
   return (
     <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden>

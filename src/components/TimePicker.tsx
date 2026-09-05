@@ -112,13 +112,9 @@ function ScrollCol({
 }
 
 const HOURS = Array.from({ length: 24 }, (_, i) => pad2(i));
-
-/** 分钟刻度：5 分钟一格；当前值不在格点上（模型定的 08:37）就插进去。 */
-function minuteItems(cur: number): string[] {
-  const base = Array.from({ length: 12 }, (_, i) => i * 5);
-  if (!base.includes(cur)) base.push(cur);
-  return base.sort((a, b) => a - b).map(pad2);
-}
+/** 分钟逐一列出。5 分钟一格的刻度看着像"分钟不连续"，而且模型定的
+ *  08:37 这种值插进去会显得格外突兀。列表可滚，打开时选中项在正中。 */
+const MINUTES = Array.from({ length: 60 }, (_, i) => pad2(i));
 
 /* ── TimePicker：HH:MM ──────────────────────── */
 
@@ -159,7 +155,7 @@ export function TimePicker({
               />
               <ScrollCol
                 caption="分"
-                items={minuteItems(Number(mm) || 0)}
+                items={MINUTES}
                 picked={mm}
                 onPick={(m) => {
                   onChange(`${hh}:${m}`);
@@ -314,7 +310,7 @@ export function DateTimePicker({
               />
               <ScrollCol
                 caption="分"
-                items={minuteItems(base.mm)}
+                items={MINUTES}
                 picked={pad2(base.mm)}
                 onPick={(m) => {
                   onChange(fmtDt({ ...base, mm: Number(m) }));

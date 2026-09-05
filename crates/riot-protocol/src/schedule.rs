@@ -83,6 +83,19 @@ pub enum RunTargetSpec {
     Session { id: String },
 }
 
+/// 前端表单手动创建一个任务的完整说法。
+///
+/// 和模型用的 [`ScheduleSpec`] 差在目标：模型只能说"在这个会话 / 新会话"
+/// （发起会话就是上下文），表单没有发起会话，目标得显式给出。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleDraft {
+    pub name: String,
+    pub prompt: String,
+    pub when: WhenSpec,
+    pub target: RunTargetSpec,
+}
+
 /// 编辑任务的补丁（前端详情面板保存时用）。None = 那一项不动。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

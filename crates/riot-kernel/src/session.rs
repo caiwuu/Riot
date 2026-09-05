@@ -397,7 +397,12 @@ struct LastTurn {
 #[derive(Clone)]
 struct ForkSeed {
     system: String,
+    /// 父的工具清单，`task_index` 位置是一个占位的深度 1 Task。分叉时用
+    /// 带上分叉 agent id（作为 parent）的那份换掉 —— 同形，只是登记时知道
+    /// 自己派的子 agent 该挂在谁下面。
     tools: Vec<Arc<dyn Tool>>,
+    task_index: usize,
+    subagent_deps: crate::subagent::SubagentDeps,
     prompt_ctx: PromptContext,
     deferred: Option<Arc<riot_tools::tools::tool_search::DeferredPool>>,
     gate: Arc<dyn PermissionGate>,
@@ -413,7 +418,7 @@ struct ForkSeed {
 /// `store` 负责读（水合、索引重建），`log` 负责追加。分开是因为读是一次性的
 /// 全量重放，写是贯穿会话生命周期的流 —— 两者的生命周期和并发语义都不同。
 ///
-/// `artifacts_root` 是工件（截图、过大工具结果、压缩归档）的根目录，会话在
+/// `artifacts_root` 是工件（截图、过大工具结果）的根目录，会话在
 /// 它下面开自己的子目录（见 [`Session::artifacts_dir`]）。由宿主/manager 按
 /// [`crate::config::artifacts_root`] 算好传进来，Session 自己不碰配置路径 ——
 /// 于是没有持久化通道的会话（单元测试）也就没有任何路径能通到用户真实的
@@ -582,6 +587,12 @@ pub struct Session {
     multitask_announced: AtomicBool,
     /// 刚关掉多任务模式，下一轮要说一声"恢复正常"。只说一次。
     multitask_exit_pending: AtomicBool,
+    /// 会话摘录写入器（见 [`crate::digest`]）。宿主创建/恢复会话后挂上；
+    /// 没挂就是不写（单元测试）。
+    digests: std::sync::OnceLock<Arc<crate::digest::DigestWriter>>,
+    /// 会话创建时刻，水合时从 transcript 首行拿到。0 = 还不知道
+    /// （没水合过 / 没有持久化通道），摘录头部退回 log 的元数据。
+    created_at_ms: std::sync::atomic::AtomicU64,
 }
 
 /// 标题截断规则：去空白、取前 40 个字符。
@@ -695,6 +706,8 @@ impl Session {
             multitask: AtomicBool::new(false),
             multitask_announced: AtomicBool::new(false),
             multitask_exit_pending: AtomicBool::new(false),
+            digests: std::sync::OnceLock::new(),
+            created_at_ms: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -753,7 +766,58 @@ impl Session {
             multitask: AtomicBool::new(false),
             multitask_announced: AtomicBool::new(false),
             multitask_exit_pending: AtomicBool::new(false),
+            digests: std::sync::OnceLock::new(),
+            created_at_ms: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// 挂上摘录写入器。宿主创建/恢复会话之后调一次。
+    pub fn attach_digests(&self, w: Arc<crate::digest::DigestWriter>) {
+        let _ = self.digests.set(w);
+    }
+
+    /// 这个项目的摘录目录 —— 提示词里指给模型的路径。没挂写入器或用户
+    /// 关掉了功能就是 None，提示词那一节整个不出现。
+    fn digests_dir(&self) -> Option<std::path::PathBuf> {
+        self.digests.get().and_then(|w| w.project_dir(&self.cwd))
+    }
+
+    /// 这个会话自己的摘录文件 —— 压缩续接消息里指给模型的路径。不看
+    /// 「历史会话回忆」开关（压缩归档不是用户能关的）；没挂写入器（单元
+    /// 测试）才是 None，续接消息的措辞退回"只有总结"。
+    fn digest_path(&self) -> Option<std::path::PathBuf> {
+        self.digests.get().map(|w| w.path_for(&self.cwd, &self.id))
+    }
+
+    /// 重写这个会话的摘录（见 [`crate::digest`] 的触发点清单）。
+    ///
+    /// 快照在写入器的项目锁里取：界面归档 + 活历史 + 此刻的标题。写失败
+    /// 由写入器告警，这里不关心结果 —— 摘录是缓存。
+    pub async fn refresh_digest(&self) {
+        let Some(w) = self.digests.get() else { return };
+        // 没水合过的会话历史是空的 —— 不先水合，改一次名字就把摘录当成
+        // "历史被删空了"收掉。
+        self.hydrate().await;
+        w.write_with(&self.cwd, || async {
+            let mut messages = self.ui_archive.lock().await.clone();
+            messages.extend(self.history.lock().await.iter().cloned());
+            let created = match self.created_at_ms.load(Ordering::Relaxed) {
+                0 => self
+                    .persist
+                    .as_ref()
+                    .map(|p| p.log.meta().created_at_ms)
+                    .unwrap_or(0),
+                t => t,
+            };
+            crate::digest::DigestSnapshot {
+                id: self.id.clone(),
+                root: self.cwd.clone(),
+                title: self.title().await,
+                created_at_ms: created,
+                messages,
+            }
+        })
+        .await;
     }
 
     /// 挂上定时任务调度器。宿主创建/恢复会话之后调一次。
@@ -803,6 +867,9 @@ impl Session {
             .get_or_init(|| async {
                 let Some(p) = &self.persist else { return };
                 let parts = p.store.load_parts(&self.id).await;
+                if let Some(m) = &parts.meta {
+                    self.created_at_ms.store(m.created_at_ms, Ordering::Relaxed);
+                }
                 self.restore_baselines(&parts.archived, &parts.live);
                 *self.ui_archive.lock().await = parts.archived;
                 if parts.live.is_empty() {
@@ -1357,8 +1424,12 @@ impl Session {
     }
 
     /// 手动设置标题。None 或空串表示清除，回退到自动标题。
+    ///
+    /// 标题在摘录头部和 INDEX 里都有，改了要跟上 —— 这是唯一一个不在
+    /// `running` 保护下的触发点，写入器的"锁里取快照"就是为它准备的。
     pub async fn set_title(&self, title: Option<String>) {
         *self.custom_title.lock().await = title.filter(|t| !t.trim().is_empty());
+        self.refresh_digest().await;
     }
 
     /// 手动标题本身（不合并自动标题）。索引落盘用 —— 索引要分开存两者，
@@ -1429,6 +1500,54 @@ impl Session {
             *self.running.lock().await = None;
             return Err(e);
         }
+        self.spawn_rerun(model, caps, sink, cancel, limits);
+        Ok(())
+    }
+
+    /// 编辑一条用户提问并从它重新开始（Cursor 编辑气泡后发送的同款语义）：
+    /// 替换文本、丢掉它之后的一切、再从它跑一轮。
+    ///
+    /// 和 [`Self::regenerate`] 是同一条路，只差"截到哪、改不改字"：重新
+    /// 生成截到助手消息前面那条提问、不改字；这里截到被编辑的提问本身、
+    /// 换掉它的文字。附件（图片、引用）原位保留 —— 用户改的是话，不是图。
+    /// 忙着的时候拒绝，理由同重新生成。
+    pub async fn resend_from(
+        self: &Arc<Self>,
+        message_id: &str,
+        text: &str,
+        model: riot_protocol::ModelEndpoint,
+        caps: TurnCapabilities,
+        sink: SessionSink,
+        limits: TurnLimits,
+    ) -> Result<(), String> {
+        if text.trim().is_empty() {
+            return Err("内容不能为空。想去掉这条消息的话，用删除。".into());
+        }
+        let cancel = CancellationToken::new();
+        {
+            let mut g = self.running.lock().await;
+            if g.is_some() {
+                return Err("正在跑一轮，等它结束再重新发送。".into());
+            }
+            *g = Some(cancel.clone());
+        }
+        if let Err(e) = self.truncate_to_edited_prompt(message_id, text).await {
+            *self.running.lock().await = None;
+            return Err(e);
+        }
+        self.spawn_rerun(model, caps, sink, cancel, limits);
+        Ok(())
+    }
+
+    /// 历史已经以提问结尾，起一轮把它重新跑掉。regenerate / resend 共用。
+    fn spawn_rerun(
+        self: &Arc<Self>,
+        model: riot_protocol::ModelEndpoint,
+        caps: TurnCapabilities,
+        sink: SessionSink,
+        cancel: CancellationToken,
+        limits: TurnLimits,
+    ) {
         let this = Arc::clone(self);
         tokio::spawn(async move {
             if let Err(e) = this
@@ -1450,6 +1569,40 @@ impl Session {
                 });
             }
         });
+    }
+
+    /// 截断活历史到指定用户提问（含）并换掉它的文字；transcript 记一条
+    /// 截断加一条编辑，重启重放出来和内存一致。
+    ///
+    /// 只对活历史生效，理由同 [`Self::edit_message`]：归档里的消息模型已经
+    /// 看不见，从那里"重新开始"会让活历史变空。
+    pub async fn truncate_to_edited_prompt(
+        &self,
+        message_id: &str,
+        text: &str,
+    ) -> Result<(), String> {
+        self.hydrate().await;
+        let mut live = self.history.lock().await;
+        let Some(at) = live.iter().position(|m| m.id().as_str() == message_id) else {
+            drop(live);
+            return Err(self.missing_message_error(message_id).await);
+        };
+        if !live[at].is_user_prompt() {
+            return Err("只能从用户消息重新发送。改回复的话用「编辑」。".into());
+        }
+        live.truncate(at + 1);
+        if !live[at].edit_text(text) {
+            return Err("这条消息没有可编辑的文本。".into());
+        }
+        let env_seen = crate::env::last_snapshot_text(&live);
+        drop(live);
+
+        if let Some(p) = &self.persist {
+            // 顺序即重放顺序：先截到这条（含），再把它的文字换掉。
+            p.log.append_rewind(message_id);
+            p.log.append_edit(message_id, text);
+        }
+        self.after_history_cut(env_seen).await;
         Ok(())
     }
 
@@ -1492,6 +1645,16 @@ impl Session {
         if let Some(p) = &self.persist {
             p.log.append_rewind(&keep_id);
         }
+        self.after_history_cut(env_seen).await;
+        Ok(keep_id)
+    }
+
+    /// 历史被截短之后的善后（重新生成、编辑后重发共用）：半截流清空、
+    /// 排队插话作废、挂着的询问撤掉、环境指纹与档位归位、多任务完整
+    /// 准则下轮重注、后台预压缩作废。
+    ///
+    /// `env_seen` 是截断后模型还看得见的最后一份快照（不变量同 hydrate）。
+    async fn after_history_cut(&self, env_seen: Option<String>) {
         *self.live_stream.lock().await = LiveStream::default();
         let _ = self.queue.take_all();
         self.pending_asks.clear().await;
@@ -1499,7 +1662,6 @@ impl Session {
         *self.env_band.lock().await = 0;
         self.forget_multitask_announce();
         self.drop_precompact().await;
-        Ok(keep_id)
     }
 
     /// 上下文编辑：把一条活历史消息的文本段替换成新文本。
@@ -1529,6 +1691,7 @@ impl Session {
             }
             // 原地编辑不改条数和末条，指纹抓不住 —— 这里必须显式作废。
             self.drop_precompact().await;
+            self.refresh_digest().await;
             Ok(())
         })
         .await
@@ -1582,6 +1745,7 @@ impl Session {
             *self.env_band.lock().await = 0;
             self.forget_multitask_announce();
             self.drop_precompact().await;
+            self.refresh_digest().await;
             Ok(())
         })
         .await
@@ -1789,6 +1953,9 @@ impl Session {
         if nudges > 0 {
             tracing::info!(count = nudges, "轮次已收场，界面提醒作废");
         }
+        // 一轮的历史定下来了，摘录跟上。放在 running 释放之后：写摘录要
+        // 拿历史锁，不该让"这一轮结束了"的判定多等一次磁盘。
+        self.refresh_digest().await;
         result
     }
 
@@ -1813,6 +1980,9 @@ impl Session {
         if !out.is_empty() {
             tracing::info!(count = out.len(), "注入记忆文件");
         }
+        if let Some(note) = self.session_id_note() {
+            out.push(UserContent::Attachment(note));
+        }
 
         // git 快照放这里而不是 system prompt：分支和工作区脏不脏是会变的，
         // 而 system prompt 是 prompt cache 的前缀 —— 把变化的东西写进去，
@@ -1824,6 +1994,24 @@ impl Session {
             }));
         }
         out
+    }
+
+    /// 「你是哪个会话」—— 历史会话回忆开着时，首条消息（和压缩后的续接
+    /// 消息）里带一句会话 id。
+    ///
+    /// 走消息侧而不是 system prompt：id 逐会话不同，写进 system prompt 会让
+    /// 同一项目的不同会话连项目块的缓存都共享不了。模型要它做两件事：
+    /// 翻 INDEX 时认出自己、引用别的会话时不把自己也引一遍。
+    fn session_id_note(&self) -> Option<Attachment> {
+        self.digests_dir()?;
+        Some(Attachment::SystemReminder {
+            text: format!(
+                "This conversation is session `{}`. Its digest in the past-sessions directory \
+                 is just what you already have in context — skip it when you look through \
+                 earlier conversations.",
+                self.id.as_str()
+            ),
+        })
     }
 
     /// 环境感知的轮首注入（docs/ENV_DESIGN.md §3）：时钟行 + 间隔警示 +
@@ -2100,6 +2288,10 @@ impl Session {
                 content: m.content,
             })
             .collect();
+        // 会话 id 同理：首条消息被吞了，模型不再知道自己是哪个会话。
+        if let Some(note) = self.session_id_note() {
+            memory.push(note);
+        }
         // git 快照同理，而且重注的这份是**新的** —— 压缩前的那几十轮里
         // 分支和工作区多半已经变了，照抄旧快照比不给还糟。
         if let Some(info) = crate::git::probe(&self.cwd).await {
@@ -2115,9 +2307,10 @@ impl Session {
         *self.env_band.lock().await = 0;
         // 多任务准则的完整版多半被总结吞了，下一轮重注。
         self.forget_multitask_announce();
-        // 原文归档：总结是有损的，报错原文、路径、用户原话要有地方可查。
-        // 写不出来也不拦路（续接消息就不提它）。
-        let archive = self.archive_compacted(head).await;
+        // 原文去哪找：总结是有损的，报错原文、路径、用户原话要有地方可查。
+        // 指的是这个会话的摘录（`crate::digest`）—— 它由调用方在换完历史
+        // 之后重写（见 [`Self::refresh_digest`]），这里只给路径。
+        let archive = self.digest_path();
         // 工作集重注：纯总结不够 —— 压缩后模型立即失去对文件
         // 内容的记忆，下一步就是把刚读过的文件再读一遍。
         let restored = restored_files(self.file_state.as_ref());
@@ -2164,40 +2357,6 @@ impl Session {
             history: new_history,
             before_tokens: before,
             after_tokens: after,
-        }
-    }
-
-    /// 把被压掉的原文追加到会话的归档文件，返回路径给续接消息指路。
-    ///
-    /// 一个会话一个文件（`artifacts/<会话>/history.md`），每次压缩追加一段 ——
-    /// 模型只需要记一个路径，序号跨段连续（按已归档的条数起算）。放
-    /// artifacts 目录而不是工作区，理由和截图一样：不是项目文件，不该出现
-    /// 在用户的 git status 里。写失败返回 None：归档是锦上添花，不能因为
-    /// 磁盘满了让压缩失败。
-    async fn archive_compacted(&self, head: &[Message]) -> Option<std::path::PathBuf> {
-        if head.is_empty() {
-            return None;
-        }
-        let first_index = self.ui_archive.lock().await.len() + 1;
-        let text = riot_core::archive::render(head, first_index);
-        let path = self.artifacts_dir().join("history.md");
-        let written = async {
-            use tokio::io::AsyncWriteExt;
-            let mut f = tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .await?;
-            f.write_all(text.as_bytes()).await?;
-            f.flush().await
-        }
-        .await;
-        match written {
-            Ok(()) => Some(path),
-            Err(e) => {
-                tracing::warn!(error = %e, path = %path.display(), "压缩归档写不出去，续接消息不提它");
-                None
-            }
         }
     }
 
@@ -2249,13 +2408,15 @@ impl Session {
         }
         if !head.is_empty() {
             // 和主动压缩同一套善后：环境指纹归零（吞掉的头里有旧快照，
-            // 不归零下一轮差分判"没变化"），原文归档给模型翻。
+            // 不归零下一轮差分判"没变化"）。
             *self.env_seen.lock().await = crate::env::last_snapshot_text(&compacted);
             *self.env_band.lock().await = 0;
             self.forget_multitask_announce();
-            let _ = self.archive_compacted(&head).await;
             self.ui_archive.lock().await.extend(head);
         }
+        // 续接消息（主循环的 Layered 组的）已经指着摘录路径了，文件得跟上。
+        // 轻档（只清结果）也重写：摘录里的工具结果该和模型看到的一致。
+        self.refresh_digest().await;
         tracing::info!(
             before = before_tokens,
             after = after_tokens,
@@ -2411,6 +2572,9 @@ impl Session {
                 None => Err("压缩失败，历史保持原样。稍后再试。".to_owned()),
             }
         };
+        if result.is_ok() {
+            self.refresh_digest().await;
+        }
         *self.running.lock().await = None;
         // `[约束]` 宣布完成必须在 running 释放**之后**。前端收到 Compacted
         // 会去拉快照对齐状态 —— 此刻快照必须已经是空闲，否则它把 busy=true
@@ -2425,13 +2589,14 @@ impl Session {
         })
     }
 
-    /// 工具产物（截图原图、过大工具结果、压缩归档）的落盘目录，会话专属。
+    /// 工具产物（截图原图、过大工具结果）的落盘目录，会话专属。
     ///
     /// 根目录来自 [`SessionPersist::artifacts_root`]（配置目录下的
     /// `artifacts/`，见 [`crate::config::artifacts_root`]）；放配置目录下而不是
     /// 工作区:截图不是项目文件，出现在用户的 git status 里就是垃圾。没有
-    /// 持久化通道的会话（单元测试）落到系统临时目录 —— 测试真会写文件
-    /// （压缩归档），绝不能落进用户真实的配置目录。
+    /// 持久化通道的会话（单元测试）落到系统临时目录，绝不能落进用户真实
+    /// 的配置目录。（压缩归档以前也在这里，现在并进了会话摘录，见
+    /// [`crate::digest`]。）
     ///
     /// 目录建不出来也照常返回路径 —— 工具写不进时自行降级（消息里不带
     /// 路径），链路不断。
@@ -2496,6 +2661,9 @@ impl Session {
             Some(o) => {
                 *history = o.history;
                 *self.history.lock().await = history.clone();
+                // 续接消息指着摘录，文件必须在请求发出之前是新的 ——
+                // 这里在换完历史之后、主循环开跑之前同步写。
+                self.refresh_digest().await;
                 // 轮内原地宣布：轮子接着跑，busy 本来就该保持，
                 // 而且 Compacted 后紧跟 RequestStart 的顺序有回放钉着。
                 let _ = sink.send(AgentEvent::Compacted {
@@ -2553,10 +2721,17 @@ impl Session {
             .clone()
             .ok_or("这个会话还没跑过完整的一轮，不能分叉。")?;
 
+        // 分叉里的 Task 要知道自己住在哪个 agent 里（它派的子 agent 挂在
+        // 这个 id 下面）。占位那份换成带真 id 的，形状不变。
+        let mut tools = seed.tools.clone();
+        tools[seed.task_index] = Arc::new(crate::subagent::TaskTool::nested(
+            seed.subagent_deps.clone(),
+            agent_id.clone(),
+        ));
         // 分叉总在后台跑，权限弹窗要带归属（见 subagent::Attributed）。
         // 只改 describe，工具清单的 name / schema / prompt 和父一致。
         let registry = Registry::new(crate::subagent::Attributed::wrap_all(
-            seed.tools.clone(),
+            tools,
             &format!("后台任务「{title}」"),
         ))
         .map(Arc::new)
@@ -2617,11 +2792,9 @@ impl Session {
         })
     }
 
-    /// 一个子 agent 的会话：视图 + 界面该看的消息。None = 不认识这个 id。
-    pub fn task_history(
-        &self,
-        agent_id: &str,
-    ) -> Option<(riot_protocol::task::BackgroundTaskView, Vec<Message>)> {
+    /// 一个子 agent 的会话：视图 + 界面该看的消息 + 它派的子 agent。
+    /// None = 不认识这个 id。
+    pub fn task_history(&self, agent_id: &str) -> Option<crate::tasks::TaskHistory> {
         self.tasks.history(agent_id)
     }
 
@@ -2741,11 +2914,14 @@ impl Session {
                 session: Arc::downgrade(self),
             }),
         };
-        // 分叉里用的那份 Task：同名同形、深度 1。先造出来，下面存分叉种子
-        // 时把清单里的 Task 换成它。
-        let forked_task: Arc<dyn Tool> =
-            Arc::new(crate::subagent::TaskTool::forked(subagent_deps.clone()));
+        // 分叉里用的那份 Task：同名同形、深度 1。这里的 parent 是占位 ——
+        // 分叉的 agent id 到分叉那一刻才有，fork_job 会换成真的。
+        let forked_task: Arc<dyn Tool> = Arc::new(crate::subagent::TaskTool::nested(
+            subagent_deps.clone(),
+            riot_protocol::id::AgentId::from_raw("fork-placeholder"),
+        ));
         let task_index = tools.len();
+        let fork_subagent_deps = subagent_deps.clone();
         tools.push(Arc::new(crate::subagent::TaskTool::new(subagent_deps)));
         // 定时任务。永远注册（和浏览器/终端工具同一条惯例）：没挂宿主
         // 代理时是 NoSchedule，工具明说用不了，而不是从清单里消失 ——
@@ -2870,14 +3046,17 @@ impl Session {
         // system prompt 在这里就定下来，而不是 run_agent 前夕 —— 主动/反应式
         // 压缩的总结请求要用**同一份**：同形状（system + tools 逐字节一致）
         // 的总结请求才能吃到 provider 的前缀缓存，~100k 的输入走 cache_read。
+        let digests_dir = self.digests_dir();
         let system = crate::prompt::system_prompt(&crate::prompt::SystemPromptInput {
             cwd: &self.cwd,
+            model: &model.model,
             today: &today,
             python_venv: python_venv.as_deref(),
             extra: self.system_prompt_extra().await.as_deref(),
             has_hooks: hook_engine.has_pre_tool_use()
                 || hook_engine.has_post_tool_use()
                 || hook_engine.has_stop(),
+            digests_dir: digests_dir.as_deref(),
             flavor: crate::models::flavor_for(&model),
         });
         // specs 取轮首快照。轮中 ToolSearch 发现新工具时主循环的 tools 会变
@@ -2893,6 +3072,8 @@ impl Session {
         *self.fork_seed.lock().await = Some(ForkSeed {
             system: system.clone(),
             tools: fork_tools,
+            task_index,
+            subagent_deps: fork_subagent_deps,
             prompt_ctx: fork_prompt_ctx,
             deferred: fork_deferred,
             gate: fork_gate,
@@ -2913,13 +3094,18 @@ impl Session {
             // 反应式（413）路径的完整阶梯：清旧工具结果 → LLM 总结。
             // 只挂 ClearOldResults 的话，"对话本身超长"的会话一溢出就死。
             compactor: Arc::new(RecordingCompactor {
-                inner: Arc::new(riot_core::Layered::new(
-                    Arc::clone(&provider),
-                    model.model.clone(),
-                    summary_shape.clone(),
-                    Arc::clone(&self.ids) as Arc<dyn IdGenerator>,
-                    cancel.child_token(),
-                )),
+                inner: Arc::new(
+                    riot_core::Layered::new(
+                        Arc::clone(&provider),
+                        model.model.clone(),
+                        summary_shape.clone(),
+                        Arc::clone(&self.ids) as Arc<dyn IdGenerator>,
+                        cancel.child_token(),
+                    )
+                    // 反应式总结的续接消息也指向摘录；文件由
+                    // absorb_reactive_compaction 在 Compacted 事件到达时重写。
+                    .with_archive(self.digest_path()),
+                ),
                 taken: Arc::clone(&reactive_compacted),
             }),
             clock: Arc::clone(&clock),
@@ -4663,16 +4849,23 @@ mod tests {
             .expect("续接消息有正文")
     }
 
-    /// 压缩落地：最后一轮原样留在总结之后，被压掉的原文归档成文件，
-    /// 续接消息指路。
+    /// 压缩落地：最后一轮原样留在总结之后，续接消息指向本会话的摘录，
+    /// 摘录里能翻到被压掉的原文。
     ///
-    /// `[约束]` 三件事在同一个函数里完成（[`Session::finish_compaction`]），
-    /// 阻塞压缩和后台预压缩共用。这条测的是那份共用逻辑本身。
+    /// `[约束]` 落地逻辑在同一个函数里完成（[`Session::finish_compaction`]），
+    /// 阻塞压缩和后台预压缩共用。这条测的是那份共用逻辑本身；摘录的重写
+    /// 由调用方在换完历史之后做，测试里照着调用方的顺序来。
     #[tokio::test]
     // 测试读真文件验证落盘结果，走 std::fs 是刻意的。
     #[allow(clippy::disallowed_methods)]
     async fn 压缩落地_尾巴原样保留_原文归档可查() {
         let (s, tmp) = compact_session();
+        let writer = Arc::new(crate::digest::DigestWriter::new(
+            tmp.path().to_path_buf(),
+            Arc::clone(&s.persist.as_ref().unwrap().store),
+            Arc::new(riot_providers::watchdog::TokioClock),
+        ));
+        s.attach_digests(Arc::clone(&writer));
         let provider: Arc<dyn Provider> =
             Arc::new(riot_core::testing::ScriptedProvider::new(Vec::new()));
         let history = vec![
@@ -4709,42 +4902,60 @@ mod tests {
             "界面归档只收被总结吞掉的那段，尾巴还活着"
         );
 
-        let path = tmp.path().join("artifacts").join("s1").join("history.md");
-        assert_eq!(
-            path,
-            s.artifacts_dir().join("history.md"),
-            "路径推导要和会话一致"
+        // 调用方的顺序：换历史 → 重写摘录。
+        *s.history.lock().await = o.history.clone();
+        s.refresh_digest().await;
+
+        let path = writer.path_for(tmp.path(), &s.id);
+        assert!(
+            path.starts_with(tmp.path().join("digests")),
+            "归档就是会话摘录，不再有 artifacts/history.md：{}",
+            path.display()
         );
-        let text = std::fs::read_to_string(&path).expect("归档文件要落盘");
+        assert!(
+            !tmp.path()
+                .join("artifacts")
+                .join("s1")
+                .join("history.md")
+                .exists(),
+            "旧的归档文件不该再写"
+        );
+        let text = std::fs::read_to_string(&path).expect("摘录要落盘");
         assert!(
             text.contains("独特关键词甲"),
             "被压掉的原话要在文件里：{text}"
         );
-        assert!(!text.contains("第二问"), "尾巴没被压，不进归档：{text}");
+        assert!(
+            text.contains("第二问"),
+            "摘录是整段对话，尾巴也在（模型看的是同一份文件）：{text}"
+        );
         assert!(text.contains("## [1] 用户"), "序号从 1 起：{text}");
 
         let cont = continuation_text(&o.history[0]);
         assert!(cont.contains("九节总结"));
         assert!(
             cont.contains(&path.display().to_string()),
-            "续接消息要给出归档路径：{cont}"
+            "续接消息要给出摘录路径：{cont}"
         );
 
-        // 第二次压缩追加到同一个文件，序号接着数。
+        // 第二次压缩：摘录整体重渲染，序号按整段对话连续。
         let mut later = o.history.clone();
         later.push(hist_user("u3", "第三问"));
         later.push(hist_assistant("a3", "第三答"));
         let split2 = compaction_split(provider.as_ref(), &later);
         assert_eq!(split2, 3, "尾巴是 u3/a3");
-        let _ = s
+        let o2 = s
             .finish_compaction(&provider, &later, split2, "再总结")
             .await;
-        let text = std::fs::read_to_string(&path).expect("归档文件");
-        assert!(text.contains("独特关键词甲"), "追加而不是覆盖：{text}");
+        *s.history.lock().await = o2.history.clone();
+        s.refresh_digest().await;
+        let text = std::fs::read_to_string(&path).expect("摘录");
+        assert!(text.contains("独特关键词甲"), "第一段原文还在：{text}");
         assert!(
             text.contains("## [3] 用户（系统合成）"),
-            "序号接着上一段：{text}"
+            "第一条续接消息排在第 3：{text}"
         );
+        assert!(text.contains("第三问"), "{text}");
         assert_eq!(s.ui_archive().await.len(), 5, "2 + 3（续接、u2、a2）");
     }
 
@@ -5151,6 +5362,7 @@ mod tests {
             model: "m".into(),
             background: true,
             tool_use_id: riot_protocol::id::ToolUseId::from_raw("tu_1"),
+            parent: None,
             status: riot_protocol::task::BackgroundTaskStatus::Running,
             activity: String::new(),
             tool_uses: 0,
@@ -5622,6 +5834,90 @@ mod tests {
         assert!(parts.live.is_empty(), "重启后不该再读回来：{parts:?}");
     }
 
+    /// 编辑后重发：截到那条提问（含）、换掉它的字、附件原位保留；
+    /// 重启重放出来和内存一致。只认用户提问，改回复走「编辑」那条路。
+    #[tokio::test]
+    async fn 编辑后重发_截到提问并换字_重放一致() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let store = Arc::new(riot_store::Transcripts::new(dir.path()));
+        let id = SessionId::from_raw("s1");
+        let log = store.open(riot_store::TranscriptMeta {
+            id: id.clone(),
+            root: dir.path().to_path_buf(),
+            created_at_ms: 0,
+        });
+        let s = Session::new(
+            id.clone(),
+            dir.path().to_path_buf(),
+            Some(SessionPersist {
+                store: Arc::clone(&store),
+                log,
+                artifacts_root: dir.path().join("artifacts"),
+            }),
+        );
+        // 第二条提问带一张图：改字不该把图弄丢。
+        let with_image = Message::User {
+            id: MessageId::from_raw("m2"),
+            content: vec![
+                UserContent::Attachment(Attachment::Image {
+                    media_type: "image/png".into(),
+                    data: "AAAA".into(),
+                }),
+                UserContent::Text {
+                    text: "第二问（原）".into(),
+                },
+            ],
+            meta: MessageMeta::default(),
+        };
+        for m in [
+            hist_user("m1", "第一问"),
+            hist_assistant("a1", "第一答"),
+            with_image.clone(),
+            hist_assistant("a2", "第二答"),
+            hist_user("m3", "第三问"),
+            hist_assistant("a3", "第三答"),
+        ] {
+            s.history.lock().await.push(m.clone());
+            if let Some(p) = &s.persist {
+                p.log.append(&m);
+            }
+        }
+        s.flush_log().await;
+
+        // 只认用户提问。
+        assert!(
+            s.truncate_to_edited_prompt("a2", "改回复").await.is_err(),
+            "从助手消息重发要被拒"
+        );
+        assert!(s.truncate_to_edited_prompt("ghost", "x").await.is_err());
+
+        s.truncate_to_edited_prompt("m2", "第二问（改）")
+            .await
+            .expect("能重发");
+
+        let hist = s.history().await;
+        assert_eq!(hist.len(), 3, "截到 m2（含）：{hist:?}");
+        let Message::User { content, .. } = &hist[2] else {
+            panic!("末条是提问")
+        };
+        assert!(
+            content
+                .iter()
+                .any(|c| matches!(c, UserContent::Attachment(Attachment::Image { .. }))),
+            "图片要原位保留：{content:?}"
+        );
+        assert!(
+            content
+                .iter()
+                .any(|c| matches!(c, UserContent::Text { text } if text == "第二问（改）")),
+            "文字要换成新的：{content:?}"
+        );
+
+        s.flush_log().await;
+        let parts = store.load_parts(&id).await;
+        assert_eq!(parts.live, hist, "重启重放出来必须和内存一致");
+    }
+
     /// 上下文编辑改的是活历史和 transcript 两份，重启后必须还是改过的样子。
     #[tokio::test]
     async fn 编辑消息改历史也改记录() {
@@ -5662,6 +5958,89 @@ mod tests {
         assert!(s.edit_message("a1", "  ").await.is_err());
         // 不存在的消息要报得出来。
         assert!(s.edit_message("ghost", "x").await.is_err());
+    }
+
+    /// 会话摘录跟着上下文变：编辑后是新文本、删除后不再出现、改名后
+    /// INDEX 跟着换；首条消息里带会话 id；写入器没挂或关掉时一切照常。
+    // 豁免理由：测试直接读临时目录里的摘录文件核对落盘结果。
+    #[allow(clippy::disallowed_methods)]
+    #[tokio::test]
+    async fn 摘录跟着编辑_删除_改名走() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let store = Arc::new(riot_store::Transcripts::new(dir.path()));
+        let id = SessionId::from_raw("s1");
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let log = store.open(riot_store::TranscriptMeta {
+            id: id.clone(),
+            root: root.clone(),
+            created_at_ms: 0,
+        });
+        let s = Session::new(
+            id.clone(),
+            root.clone(),
+            Some(SessionPersist {
+                store: Arc::clone(&store),
+                log,
+                artifacts_root: dir.path().join("artifacts"),
+            }),
+        );
+        // 没挂写入器：提示词不指路、首条消息不带 id、刷新是空操作。
+        assert!(s.digests_dir().is_none());
+        assert!(s.session_id_note().is_none());
+        s.refresh_digest().await;
+
+        let writer = Arc::new(crate::digest::DigestWriter::new(
+            dir.path().to_path_buf(),
+            Arc::clone(&store),
+            Arc::new(riot_providers::watchdog::TokioClock),
+        ));
+        s.attach_digests(Arc::clone(&writer));
+        let digest_path = writer.project_dir(&root).expect("开着").join("s1.md");
+        assert_eq!(s.digests_dir().as_deref(), digest_path.parent());
+        let note = s.session_id_note().expect("开着就带 id");
+        let Attachment::SystemReminder { text } = note else {
+            panic!("要走 system-reminder：{note:?}")
+        };
+        assert!(text.contains("`s1`"), "{text}");
+
+        for m in [
+            hist_user("m1", "第一轮的提问"),
+            hist_assistant("a1", "答错了"),
+            hist_user("m2", "第二轮的提问"),
+            hist_assistant("a2", "第二轮的回答"),
+        ] {
+            s.history.lock().await.push(m.clone());
+            if let Some(p) = &s.persist {
+                p.log.append(&m);
+            }
+        }
+        // hydrate 会去读 transcript：先让它落盘，否则水合读到半截。
+        s.flush_log().await;
+
+        s.edit_message("a1", "改对了").await.expect("能编辑");
+        let text = std::fs::read_to_string(&digest_path).expect("编辑后摘录存在");
+        assert!(
+            text.contains("改对了") && !text.contains("答错了"),
+            "{text}"
+        );
+        assert!(text.contains("第二轮的提问"), "{text}");
+
+        s.delete_message("a2").await.expect("能删除");
+        let text = std::fs::read_to_string(&digest_path).unwrap();
+        assert!(!text.contains("第二轮"), "删掉的一轮不能留在摘录里：{text}");
+        assert!(text.contains("第一轮的提问"), "{text}");
+
+        s.set_title(Some("我起的名".into())).await;
+        let text = std::fs::read_to_string(&digest_path).unwrap();
+        assert!(text.contains("title: 我起的名"), "{text}");
+        let idx = std::fs::read_to_string(digest_path.parent().unwrap().join("INDEX.md")).unwrap();
+        assert!(idx.contains("我起的名") && idx.contains("s1.md"), "{idx}");
+
+        // 关掉之后：提示词不指路，刷新不写。
+        writer.set_enabled(false);
+        assert!(s.digests_dir().is_none());
+        assert!(s.session_id_note().is_none());
     }
 
     /// 删除按轮成对：点回复删的是"提问 + 回复"这一轮，历史和

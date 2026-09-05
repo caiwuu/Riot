@@ -35,6 +35,11 @@ pub struct AgentState {
     /// 解析（首请求 vs 工具续轮不同档），存配置的话整个 run 只能一档到底。
     pub thinking: ThinkingPolicy,
 
+    /// 本 run 内距上次 TodoWrite 的工具调用数。到线且清单还有没做完的项
+    /// 就往工具结果后面塞一条提醒（见 [`crate::todo_nudge`]），提醒后归零。
+    /// 只在 run 内计：新一句用户话开的 run 从零起，上一轮欠的账不带过来。
+    pub tool_calls_since_todo: usize,
+
     /// 上一轮为何继续。仅用于测试与观测，不参与决策。
     pub transition: Option<Transition>,
 }
@@ -54,6 +59,7 @@ impl AgentState {
             max_output_tokens_override: None,
             stop_hook_blocks: 0,
             thinking: ThinkingPolicy::Default,
+            tool_calls_since_todo: 0,
             transition: None,
         }
     }

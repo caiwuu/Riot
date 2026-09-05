@@ -31,6 +31,7 @@ pub mod changes;
 pub mod classifier;
 pub mod config;
 pub mod content;
+pub mod digest;
 pub mod env;
 pub mod gate;
 pub mod git;
@@ -317,6 +318,27 @@ async fn dispatch(request: RpcRequest, manager: &manager::SessionManager) -> Rpc
                 },
             },
         },
+        Req::TurnResend {
+            session_id,
+            message_id,
+            text,
+            config,
+        } => match manager
+            .resend(session_id.as_str(), &message_id, &text, *config)
+            .await
+        {
+            Ok(()) => RpcResponse::Ok,
+            Err(e) => RpcResponse::Error {
+                error: RpcError {
+                    code: if e.contains("正在跑") {
+                        RpcErrorCode::TurnInProgress
+                    } else {
+                        RpcErrorCode::Internal
+                    },
+                    message: e,
+                },
+            },
+        },
         Req::TurnInterrupt { session_id, .. } => {
             manager.interrupt(session_id.as_str()).await;
             RpcResponse::Ok
@@ -358,13 +380,15 @@ async fn dispatch(request: RpcRequest, manager: &manager::SessionManager) -> Rpc
             session_id,
             agent_id,
         } => match manager.task_history(session_id.as_str(), &agent_id).await {
-            Some((task, messages)) => RpcResponse::TaskHistory {
-                task: Some(task),
-                messages,
+            Some(h) => RpcResponse::TaskHistory {
+                task: Some(h.task),
+                messages: h.messages,
+                descendants: h.descendants,
             },
             None => RpcResponse::TaskHistory {
                 task: None,
                 messages: Vec::new(),
+                descendants: Vec::new(),
             },
         },
         Req::SessionCompact { session_id, model } => {
@@ -442,6 +466,10 @@ async fn dispatch(request: RpcRequest, manager: &manager::SessionManager) -> Rpc
         }
         Req::McpReconcile { servers } => {
             manager.mcp_reconcile(servers).await;
+            RpcResponse::Ok
+        }
+        Req::DigestConfigure { enabled } => {
+            manager.digest_configure(enabled).await;
             RpcResponse::Ok
         }
         Req::McpStatus => RpcResponse::McpStatuses {

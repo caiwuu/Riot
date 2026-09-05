@@ -10,6 +10,8 @@ description = "会话 transcript 的落盘与重放（append-only JSONL）"
 riot-protocol = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# 摘录目录的项目键：路径哈希的前 8 位（见 digests::project_key）。
+sha2 = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 

@@ -770,6 +770,18 @@ pub struct AppConfig {
     /// 几十万文件的树拖进每次会话激活的 ACE 传播。
     #[serde(default)]
     pub sandbox_allow_read: Vec<String>,
+    /// 历史会话回忆：系统提示词把本项目的会话摘录目录指给模型，它能回答
+    /// 「上次那个问题最后怎么解决的」并给出跳转链接。
+    ///
+    /// 默认开。关掉后提示词不再提这个目录、目录里的总览（INDEX.md）收掉；
+    /// 每个会话自己的摘录**仍然维护** —— 它同时是压缩归档，模型压缩后靠它
+    /// 找回被总结掉的原文，那不是用户该关的东西。
+    #[serde(default = "default_true")]
+    pub session_recall: bool,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 /// 命令隔离的强度。
@@ -957,6 +969,7 @@ impl Default for AppConfig {
             subagent_model: String::new(),
             sandbox: SandboxMode::default(),
             sandbox_allow_read: Vec::new(),
+            session_recall: true,
         }
     }
 }
@@ -1274,13 +1287,14 @@ pub fn profiles_dir(config_path: &Path) -> PathBuf {
         .join("browser-profiles")
 }
 
-/// 所有会话的工件（截图原图、过大的工具结果、压缩归档的对话原文）都放在
-/// 这个目录下，一个会话一个子目录。
+/// 所有会话的工件（截图原图、过大的工具结果）都放在这个目录下，一个会话
+/// 一个子目录。（压缩后给模型翻的对话原文不在这里 —— 那是 `sessions/digests/`
+/// 下的会话摘录，见内核的 `digest` 模块。）
 ///
 /// `[约束]` 推导规则只能有这一份，理由同 [`profiles_dir`]：内核按它建目录
 /// 写文件，宿主删会话时按它删目录。以前这个推导只在内核的 Session 里，
 /// 宿主不知道它 —— 于是删会话从来不删工件，截图随着用过的会话数无上限
-/// 增长。压缩归档进来之后每个会话的这份还会更大。
+/// 增长。
 pub fn artifacts_root(config_path: &Path) -> PathBuf {
     config_path
         .parent()
@@ -1632,6 +1646,7 @@ fn migrate(old: LegacyConfig) -> AppConfig {
         subagent_model: String::new(),
         sandbox: SandboxMode::default(),
         sandbox_allow_read: Vec::new(),
+        session_recall: true,
     }
 }
 

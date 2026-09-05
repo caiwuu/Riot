@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-resend-turn"
+description = "Enables the resend_turn command without any pre-configured scope."
+commands.allow = ["resend_turn"]
+
+[[permission]]
+identifier = "deny-resend-turn"
+description = "Denies the resend_turn command without any pre-configured scope."
+commands.deny = ["resend_turn"]

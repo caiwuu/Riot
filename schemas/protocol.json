@@ -819,6 +819,13 @@
           "description": "它实际用的模型名（便宜档生效时和主模型不同）。",
           "type": "string"
         },
+        "parent": {
+          "description": "派它的那个子 agent。None = 主 agent 直接派的。界面据此把子子 agent\n缩进挂在父 agent 那行下面（嵌套，照 Cursor）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "started_at_ms": {
           "format": "uint64",
           "minimum": 0,
@@ -2520,6 +2527,45 @@
           "type": "object"
         },
         {
+          "description": "编辑一条用户提问并从它重新开始（Cursor 编辑气泡后发送的同款语义）：\n替换这条消息的文本，丢掉它之后的一切，再从它跑一轮。",
+          "properties": {
+            "method": {
+              "const": "turn.resend",
+              "type": "string"
+            },
+            "params": {
+              "properties": {
+                "config": {
+                  "$ref": "#/$defs/TurnConfig"
+                },
+                "message_id": {
+                  "description": "要改的用户消息 id。必须是活历史里的用户提问。",
+                  "type": "string"
+                },
+                "session_id": {
+                  "type": "string"
+                },
+                "text": {
+                  "description": "新文本。附件（图片、引用）原位保留，只换文字。",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session_id",
+                "message_id",
+                "text",
+                "config"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
           "description": "中断当前轮。",
           "properties": {
             "method": {
@@ -3021,6 +3067,31 @@
           "type": "object"
         },
         {
+          "description": "同步「历史会话回忆」开关（宿主从设置里读，内核不读配置文件）。\n启动时和每次保存设置后调用；第一次开启会让内核对账一遍摘录文件。",
+          "properties": {
+            "method": {
+              "const": "digest.configure",
+              "type": "string"
+            },
+            "params": {
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "enabled"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
           "properties": {
             "method": {
               "const": "permission.respond",
@@ -3412,6 +3483,14 @@
           "properties": {
             "data": {
               "properties": {
+                "descendants": {
+                  "default": [],
+                  "description": "它派出去的子 agent（含更深层）。它的会话里那些 Task 卡片靠这份\n认领自己的子 agent，画法和主对话一致。",
+                  "items": {
+                    "$ref": "#/$defs/BackgroundTaskView"
+                  },
+                  "type": "array"
+                },
                 "messages": {
                   "items": {
                     "$ref": "#/$defs/Message"
@@ -3794,6 +3873,30 @@
           "type": "string"
         }
       ]
+    },
+    "ScheduleDraft": {
+      "description": "前端表单手动创建一个任务的完整说法。\n\n和模型用的 [`ScheduleSpec`] 差在目标：模型只能说\"在这个会话 / 新会话\"\n（发起会话就是上下文），表单没有发起会话，目标得显式给出。",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/RunTargetSpec"
+        },
+        "when": {
+          "$ref": "#/$defs/WhenSpec"
+        }
+      },
+      "required": [
+        "name",
+        "prompt",
+        "when",
+        "target"
+      ],
+      "type": "object"
     },
     "SchedulePatch": {
       "description": "编辑任务的补丁（前端详情面板保存时用）。None = 那一项不动。",
@@ -4950,6 +5053,9 @@
     "rpc_response": {
       "$ref": "#/$defs/RpcResponse"
     },
+    "schedule_draft": {
+      "$ref": "#/$defs/ScheduleDraft"
+    },
     "schedule_patch": {
       "$ref": "#/$defs/SchedulePatch"
     },
@@ -4972,7 +5078,8 @@
     "scheduled_task",
     "missed_run",
     "schedule_run",
-    "schedule_patch"
+    "schedule_patch",
+    "schedule_draft"
   ],
   "title": "ProtocolRoot",
   "type": "object"

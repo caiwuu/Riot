@@ -54,6 +54,9 @@ const FILTER_DEBOUNCE_MS = 120;
 /** 每个会话记住的展开集合。key 是会话 id。 */
 const expandedBySession = new Map<string, Set<string>>();
 
+/** 已经响应过的 `filterFocus` 计数（原因见组件里那条 effect）。 */
+let handledFilterFocus = 0;
+
 /** 相对路径的所有祖先目录（不含自己、不含根）。`a/b/c.rs` → [`a`, `a/b`]。 */
 function ancestorsOf(rel: string): string[] {
   const out: string[] = [];
@@ -74,6 +77,8 @@ export function FileTree({
   refreshKey,
   onOpen,
   onContextMenu,
+  onPickFromDisk,
+  filterFocus,
 }: {
   sessionId: string;
   /** 项目根（绝对路径）。树的相对路径都拼在它上面。 */
@@ -84,6 +89,10 @@ export function FileTree({
   refreshKey: number;
   onOpen: (abs: string) => void;
   onContextMenu?: (e: React.MouseEvent, target: TreeTarget) => void;
+  /** 筛选框旁的"从磁盘打开"：系统选择框，树够不着的项目外文件走这里。 */
+  onPickFromDisk?: () => void;
+  /** 变一次就把焦点放进筛选框并全选（⌘P 快速打开）。 */
+  filterFocus?: number;
 }) {
   const [listings, setListings] = useState<Map<string, Listing>>(() => new Map());
   const [expanded, setExpanded] = useState<Set<string>>(
@@ -96,6 +105,7 @@ export function FileTree({
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<string[] | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const filterRef = useRef<HTMLInputElement>(null);
   /** 正在请求中的目录，防重复发。 */
   const inflight = useRef(new Set<string>());
   /** 上次已经滚到可见的那个 selected（相对路径）。同一个文件不反复滚。 */
@@ -105,6 +115,16 @@ export function FileTree({
   useEffect(() => {
     expandedBySession.set(sessionId, expanded);
   }, [sessionId, expanded]);
+
+  // ⌘P：焦点进筛选框、全选旧词直接覆盖着打。已处理过的计数记在模块级 ——
+  // 树是按会话重挂的，光比对 prop 变化的话，用户点"文件"标签把树挂出来
+  // 时会拿着上一次 ⌘P 留下的旧值再抢一次焦点。
+  useEffect(() => {
+    if (filterFocus === undefined || filterFocus <= handledFilterFocus) return;
+    handledFilterFocus = filterFocus;
+    filterRef.current?.focus();
+    filterRef.current?.select();
+  }, [filterFocus]);
 
   // 不做"卸载后丢弃过期结果"的守卫。`[约束]` 别用"卸载时计数器 +1、
   // 回来比对"那种写法：StrictMode 在开发模式下会把 effect 挂一遍、拆一遍、
@@ -375,6 +395,7 @@ export function FileTree({
       <div className="file-tree-filter">
         <SearchIcon />
         <input
+          ref={filterRef}
           type="text"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
@@ -401,6 +422,17 @@ export function FileTree({
         {filter ? (
           <button type="button" className="icon file-tree-clear" onClick={() => setFilter("")} title="清除">
             <ClearIcon />
+          </button>
+        ) : null}
+        {onPickFromDisk ? (
+          <button
+            type="button"
+            className="icon file-tree-disk"
+            onClick={onPickFromDisk}
+            title="从磁盘打开…（⌘O）"
+            aria-label="从磁盘打开"
+          >
+            <DiskOpenIcon />
           </button>
         ) : null}
       </div>
@@ -526,6 +558,33 @@ function ClearIcon() {
   return (
     <svg width="10" height="10" viewBox="0 0 16 16" fill="none" aria-hidden>
       <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/** "从磁盘打开"：一个文件夹，右下角带出一支箭头（往外走 = 出项目）。 */
+function DiskOpenIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M1.5 4a1 1 0 011-1h3l1.5 1.5h6a1 1 0 011 1V8"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+      />
+      <path
+        d="M1.5 4v8a1 1 0 001 1H8"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+      />
+      <path
+        d="M10.5 13.5h3.5v-3.5M14 13.5L10 9.5"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }

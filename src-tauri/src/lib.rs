@@ -140,6 +140,17 @@ async fn regenerate_turn(
     state.regenerate_turn(&session_id, &message_id).await
 }
 
+/// 编辑一条用户提问并从它重新开始：换文字、丢掉之后的一切、再跑一轮。
+#[tauri::command]
+async fn resend_turn(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    message_id: String,
+    text: String,
+) -> HostResult<()> {
+    state.resend_turn(&session_id, &message_id, &text).await
+}
+
 /// 手动压缩会话历史（`/compact`）。空闲时才能做；完成发 Compacted 事件。
 #[tauri::command]
 async fn session_compact(state: tauri::State<'_, AppState>, session_id: String) -> HostResult<()> {
@@ -220,6 +231,19 @@ async fn schedule_list(
     state: tauri::State<'_, AppState>,
 ) -> HostResult<Vec<riot_protocol::ScheduledTask>> {
     Ok(state.schedule_list().await)
+}
+
+/// 表单手动创建一个定时任务。模型那条路不走这里（内核经反向 RPC 调
+/// `schedule_create`，发起会话是上下文）。
+#[tauri::command]
+async fn schedule_create(
+    state: tauri::State<'_, AppState>,
+    draft: riot_protocol::ScheduleDraft,
+) -> HostResult<riot_protocol::ScheduledTask> {
+    state
+        .schedule_create_manual(draft)
+        .await
+        .map_err(HostError::Schedule)
 }
 
 /// 暂停 / 恢复一个定时任务。返回更新后的任务。
@@ -1343,6 +1367,7 @@ pub fn run() {
             subscribe_session,
             send_turn,
             regenerate_turn,
+            resend_turn,
             edit_message,
             delete_message,
             queue_list,
@@ -1357,6 +1382,7 @@ pub fn run() {
             search_files,
             list_dir,
             schedule_list,
+            schedule_create,
             schedule_set_enabled,
             schedule_update,
             schedule_delete,

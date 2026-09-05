@@ -180,6 +180,13 @@ mod tests {
         }
     }
 
+    /// 主循环的待办提醒按名字认 TodoWrite（riot-core 不能依赖这里，
+    /// 只能自己写一份）。两边漂移的话提醒永远不触发，而且没人会发现。
+    #[test]
+    fn 与主循环里的_todo_write_名字一致() {
+        assert_eq!(TODO_WRITE, riot_core::todo_nudge::TODO_WRITE);
+    }
+
     fn ctx(siblings: &[&str]) -> riot_protocol::tool::PromptContext {
         riot_protocol::tool::PromptContext {
             cwd: "/work".into(),

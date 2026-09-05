@@ -627,6 +627,21 @@ export type RpcRequest =
       };
     }
   | {
+      method: "turn.resend";
+      params: {
+        config: TurnConfig;
+        /**
+         * 要改的用户消息 id。必须是活历史里的用户提问。
+         */
+        message_id: string;
+        session_id: string;
+        /**
+         * 新文本。附件（图片、引用）原位保留，只换文字。
+         */
+        text: string;
+      };
+    }
+  | {
       method: "turn.interrupt";
       params: {
         /**
@@ -751,6 +766,12 @@ export type RpcRequest =
       method: "mcp.restart";
       params: {
         id: string;
+      };
+    }
+  | {
+      method: "digest.configure";
+      params: {
+        enabled: boolean;
       };
     }
   | {
@@ -914,6 +935,11 @@ export type RpcResponse =
     }
   | {
       data: {
+        /**
+         * 它派出去的子 agent（含更深层）。它的会话里那些 Task 卡片靠这份
+         * 认领自己的子 agent，画法和主对话一致。
+         */
+        descendants?: BackgroundTaskView[];
         messages: Message[];
         task?: BackgroundTaskView | null;
       };
@@ -1046,6 +1072,7 @@ export interface ProtocolRoot {
   rpc_notification: RpcNotification;
   rpc_request: RpcRequest;
   rpc_response: RpcResponse;
+  schedule_draft: ScheduleDraft;
   schedule_patch: SchedulePatch;
   schedule_run: ScheduleRun;
   scheduled_task: ScheduledTask;
@@ -1186,6 +1213,11 @@ export interface BackgroundTaskView {
    * 它实际用的模型名（便宜档生效时和主模型不同）。
    */
   model?: string;
+  /**
+   * 派它的那个子 agent。None = 主 agent 直接派的。界面据此把子子 agent
+   * 缩进挂在父 agent 那行下面（嵌套，照 Cursor）。
+   */
+  parent?: string | null;
   started_at_ms: number;
   status: BackgroundTaskStatus;
   /**
@@ -1513,6 +1545,18 @@ export interface ToolInfo {
 export interface RpcError {
   code: RpcErrorCode;
   message: string;
+}
+/**
+ * 前端表单手动创建一个任务的完整说法。
+ *
+ * 和模型用的 [`ScheduleSpec`] 差在目标：模型只能说"在这个会话 / 新会话"
+ * （发起会话就是上下文），表单没有发起会话，目标得显式给出。
+ */
+export interface ScheduleDraft {
+  name: string;
+  prompt: string;
+  target: RunTargetSpec;
+  when: WhenSpec;
 }
 /**
  * 编辑任务的补丁（前端详情面板保存时用）。None = 那一项不动。

@@ -87,6 +87,9 @@ const TaskCard = memo(function TaskCard({ tool }: { tool: Tool }) {
   const open = () => {
     if (agentId) openSubagent(agentId, title);
   };
+  // 它派出去的子 agent，缩进挂在它下面（照 Cursor 的树形）。只挂直接
+  // 孩子：孙子挂在孩子那一行下面，点进孩子的会话看。
+  const children = agentId ? tasks.filter((t) => t.parent === agentId) : [];
 
   return (
     <div className={`tool tool-${status} tool-task`}>
@@ -113,9 +116,67 @@ const TaskCard = memo(function TaskCard({ tool }: { tool: Tool }) {
       <div className="task-card-activity" title={activity}>
         {activity}
       </div>
+      {children.length > 0 ? (
+        <div className="task-card-children">
+          {children.map((c) => (
+            <ChildTaskRow key={c.id} task={c} tasks={tasks} depth={1} />
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 });
+
+/**
+ * 子 agent 派的子 agent：一行标题 · 模型，下面一行动作，再往下递归挂它
+ * 自己的孩子。整行可点，打开那个子 agent 的会话。
+ */
+function ChildTaskRow({
+  task,
+  tasks,
+  depth,
+}: {
+  task: BackgroundTaskView;
+  tasks: BackgroundTaskView[];
+  depth: number;
+}) {
+  const running = task.status === "running";
+  const icon = running ? "◐" : task.status === "completed" ? "✓" : "✕";
+  const activity = running
+    ? task.activity || "启动中…"
+    : `${task.status === "completed" ? "完成" : task.status === "cancelled" ? "已停止" : "失败"}${task.tool_uses ? ` · ${task.tool_uses} 步` : ""}`;
+  const grandchildren = tasks.filter((t) => t.parent === task.id);
+  return (
+    <div className={`task-child task-child-${task.status}`}>
+      <button
+        type="button"
+        className="task-child-head"
+        onClick={() => openSubagent(task.id, task.title)}
+        title="打开这个子 agent 的会话"
+      >
+        <span className={running ? "tool-icon tool-icon-spin" : "tool-icon"}>{icon}</span>
+        <span className="task-card-title">{task.title}</span>
+        <span className="task-card-model">{task.model}</span>
+        <span className="task-card-tags">
+          <span className="task-kind">{task.kind === "explore" ? "侦察" : "执行"}</span>
+        </span>
+        <span className="task-card-go" aria-hidden>
+          ›
+        </span>
+      </button>
+      <div className="task-card-activity" title={activity}>
+        {activity}
+      </div>
+      {grandchildren.length > 0 && depth < 3 ? (
+        <div className="task-card-children">
+          {grandchildren.map((g) => (
+            <ChildTaskRow key={g.id} task={g} tasks={tasks} depth={depth + 1} />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 const PlainToolCard = memo(function PlainToolCard({
   tool,

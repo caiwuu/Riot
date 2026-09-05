@@ -13,6 +13,7 @@ import remarkGfm from "remark-gfm";
 
 import { openInBrowser, openPath } from "../bridge";
 import { useTimedFlag } from "../hooks/useTimedFlag";
+import { openSession, sessionIdFromHref } from "../lib/sessionLink";
 import { AGENT_LINK_SCHEME, openSubagent } from "../lib/subagentLink";
 import { joinRoot, looksAbsPath } from "../pathDisplay";
 import { openFilePreview } from "./FilePreview";
@@ -257,8 +258,9 @@ export const Markdown = memo(function Markdown({
  * 打开 javascript: 那类注入面。
  */
 function keepFileUrls(url: string): string {
-  // `agent:` 是子 agent 链接（Task 工具让模型这么写），同样由 MdLink 接管。
-  return /^(file|agent):/i.test(url) ? url : defaultUrlTransform(url);
+  // `agent:` 是子 agent 链接（Task 工具让模型这么写），`riot:` 是历史会话
+  // 链接（系统提示词 past_sessions 一节），都由 MdLink 接管。
+  return /^(file|agent|riot):/i.test(url) ? url : defaultUrlTransform(url);
 }
 
 /**
@@ -342,27 +344,34 @@ function MdLink({
       openSubagent(target.value, label);
       return;
     }
+    if (target.kind === "session") {
+      if (!openSession(target.value)) flashErr(true);
+      return;
+    }
     openInBrowser(target.value).catch(() => flashErr(true));
   };
+
+  const chip = target.kind === "agent" || target.kind === "session";
+  const errText = target.kind === "session" ? "该会话已删除" : "打不开";
 
   return (
     <>
       <a
         href={target.href}
-        className={target.kind === "agent" ? "md-agent-link" : undefined}
-        title={err ? "打不开" : target.title}
+        className={chip ? `md-agent-link md-${target.kind}-link` : undefined}
+        title={err ? errText : target.title}
         onClick={onClick}
       >
-        {target.kind === "agent" ? (
+        {chip ? (
           <span className="md-agent-icon" aria-hidden>
-            ⑂
+            {target.kind === "agent" ? "⑂" : "↶"}
           </span>
         ) : null}
         {children}
       </a>
       {err ? (
         <span className="md-link-err" role="status">
-          打不开
+          {errText}
         </span>
       ) : null}
     </>
@@ -370,13 +379,16 @@ function MdLink({
 }
 
 type MdLinkTarget = {
-  kind: "url" | "file" | "agent";
+  kind: "url" | "file" | "agent" | "session";
   value: string;
   href: string;
   title: string;
 };
 
-/** 把模型写的 href 收成"打开网址"、"打开本地文件"或"打开子 agent 会话"。 */
+/**
+ * 把模型写的 href 收成"打开网址"、"打开本地文件"、"打开子 agent 会话"
+ * 或"跳到历史会话"。
+ */
 function resolveMdLink(href: string | undefined, label: string, root: string): MdLinkTarget | null {
   const raw = (href ?? "").trim();
 
@@ -385,6 +397,12 @@ function resolveMdLink(href: string | undefined, label: string, root: string): M
     const id = raw.slice(AGENT_LINK_SCHEME.length).trim();
     if (!id) return null;
     return { kind: "agent", value: id, href: raw, title: `打开子 agent ${id} 的会话` };
+  }
+
+  // `riot://session/ses_xxx`：历史会话（系统提示词 past_sessions 一节）。
+  const sessionId = sessionIdFromHref(raw);
+  if (sessionId) {
+    return { kind: "session", value: sessionId, href: raw, title: "切到这个会话" };
   }
 
   if (raw.startsWith("file://")) {

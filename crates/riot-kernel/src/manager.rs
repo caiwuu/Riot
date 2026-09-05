@@ -80,6 +80,8 @@ pub struct ResumeSnapshot {
 pub struct SessionManager {
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     transcripts: Arc<riot_store::Transcripts>,
+    /// 会话摘录写入器（跨会话回忆，见 [`crate::digest`]）。所有会话共享。
+    digests: Arc<crate::digest::DigestWriter>,
     /// 会话工件的根目录（见 [`crate::config::artifacts_root`]）。启动时算一次，
     /// 每个会话拿它开自己的子目录。
     artifacts_root: PathBuf,
@@ -96,9 +98,15 @@ impl SessionManager {
         sessions_dir: PathBuf,
         bridge: Arc<crate::bridge::HostBridge>,
     ) -> Self {
+        let transcripts = Arc::new(riot_store::Transcripts::new(&sessions_dir));
         Self {
             sessions: Mutex::new(HashMap::new()),
-            transcripts: Arc::new(riot_store::Transcripts::new(&sessions_dir)),
+            digests: Arc::new(crate::digest::DigestWriter::new(
+                sessions_dir,
+                Arc::clone(&transcripts),
+                Arc::new(riot_providers::watchdog::TokioClock),
+            )),
+            transcripts,
             artifacts_root: crate::config::artifacts_root(&crate::config::config_path()),
             mcp: Arc::new(riot_mcp::McpHub::new()),
             ids: Arc::new(NanoIdGenerator),
@@ -126,6 +134,16 @@ impl SessionManager {
             session_id: id.clone(),
             bridge: Arc::clone(&self.bridge),
         }));
+        session.attach_digests(Arc::clone(&self.digests));
+    }
+
+    /// 宿主同步「历史会话回忆」开关。第一次开启时顺带做一次启动对账
+    /// （后台、低优先级）。
+    pub async fn digest_configure(&self, enabled: bool) {
+        self.digests.set_enabled(enabled);
+        if enabled {
+            self.digests.reconcile().await;
+        }
     }
 
     fn now_ms() -> u64 {
@@ -253,17 +271,31 @@ impl SessionManager {
         &self,
         session_id: &str,
         agent_id: &riot_protocol::id::AgentId,
-    ) -> Option<(riot_protocol::task::BackgroundTaskView, Vec<Message>)> {
+    ) -> Option<crate::tasks::TaskHistory> {
         self.get(session_id).await?.task_history(agent_id.as_str())
     }
 
     pub async fn delete(&self, session_id: &str) {
-        if let Some(s) = self.sessions.lock().await.remove(session_id) {
+        let removed = self.sessions.lock().await.remove(session_id);
+        let id = SessionId::from_raw(session_id.to_owned());
+        // 摘录目录按项目分，删之前得知道项目根：活会话直接有；不活的从
+        // transcript 首行读。先读再删 transcript，顺序反了就找不到目录。
+        let root = match &removed {
+            Some(s) => Some(s.cwd.clone()),
+            None => self.transcripts.load_parts(&id).await.meta.map(|m| m.root),
+        };
+        if let Some(s) = &removed {
             s.abort_turn().await;
             s.close_log().await;
-            if let Err(e) = self.transcripts.remove(&s.id).await {
-                tracing::warn!(error = %e, "transcript 删除失败");
-            }
+        }
+        // 不在内存的会话也要删文件：没打开过就没有句柄，直接删是安全的。
+        // 以前这里只删活会话的，删一个没点开过的会话会把 transcript 留在
+        // 盘上，下次启动被索引收编回来 —— 用户看到的是"删了又冒出来"。
+        if let Err(e) = self.transcripts.remove(&id).await {
+            tracing::warn!(error = %e, "transcript 删除失败");
+        }
+        if let Some(root) = root {
+            self.digests.remove(&root, &id).await;
         }
     }
 
@@ -407,6 +439,22 @@ impl SessionManager {
             .await
     }
 
+    /// 编辑一条用户提问并从它重新开始：换文字、丢掉之后的一切、再跑一轮。
+    pub async fn resend(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        text: &str,
+        config: TurnConfig,
+    ) -> Result<(), String> {
+        let session = self.get(session_id).await.ok_or("会话不存在")?;
+        let (caps, limits) = self.setup_turn(&session, &config).await;
+        let sink = session.sink();
+        session
+            .resend_from(message_id, text, config.model, caps, sink, limits)
+            .await
+    }
+
     /// 手动压缩(/compact)。空闲时才能做,session 内部会拒绝并发。
     pub async fn compact(
         &self,
@@ -499,9 +547,19 @@ impl SessionManager {
         }
     }
 
+    /// 宿主改了标题。活会话记下来（顺带重写摘录）；不活的会话内存里没有，
+    /// 但摘录头部和 INDEX 里有它的名字 —— 直接从 transcript 回放重写一份。
     pub async fn set_title(&self, session_id: &str, title: Option<String>) {
-        if let Some(s) = self.get(session_id).await {
-            s.set_title(title).await;
+        match self.get(session_id).await {
+            Some(s) => s.set_title(title).await,
+            None => {
+                let id = SessionId::from_raw(session_id.to_owned());
+                // 清除手动名（None）时标题退回宿主索引里的自动名，
+                // write_from_disk 会自己去读；这里只把有值的传下去。
+                self.digests
+                    .write_from_disk(&id, title.filter(|t| !t.trim().is_empty()))
+                    .await;
+            }
         }
     }
 

@@ -3,13 +3,14 @@
  * 它们共用的开合/键盘导航逻辑（useDropdown）。从 App.tsx 拆出。
  */
 
-import { useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import type { PermissionMode, ProviderConfig } from "../bridge";
 import { Chevron } from "./Chevron";
-import { EyeIcon, PlanModeIcon } from "./icons";
+import { ConfirmDialog, type ConfirmRequest } from "./ConfirmDialog";
+import { AgentModeIcon, EyeIcon, MultitaskIcon, PlanModeIcon } from "./icons";
 
-const MODE_LABEL: Record<string, string> = {
+export const MODE_LABEL: Record<string, string> = {
   default: "每次询问",
   acceptEdits: "编辑放行",
   plan: "Plan",
@@ -18,8 +19,11 @@ const MODE_LABEL: Record<string, string> = {
   unattended: "无人值守",
 };
 
-/** 权限档位：执行前问多少。和「工作方式」分组展示，后端仍是同一个 PermissionMode。 */
-const PERMISSION_MODES = [
+/**
+ * 权限档位：执行前问多少。在顶栏的权限下拉里选。
+ * 后端把 plan 也收在 PermissionMode 里，但它是「工作方式」，不在这一列。
+ */
+export const PERMISSION_MODES = [
   "default",
   "acceptEdits",
   "auto",
@@ -27,8 +31,8 @@ const PERMISSION_MODES = [
   "unattended",
 ] as const satisfies readonly PermissionMode[];
 
-/** 菜单里跟在模式名后面的警示语。没有就是不需要提醒。 */
-const MODE_WARN: Record<string, string> = {
+/** 跟在权限档名后面的警示语。没有就是不需要提醒。 */
+export const MODE_WARN: Record<string, string> = {
   bypassPermissions: "风险自负",
   unattended: "含危险操作",
 };
@@ -37,6 +41,23 @@ const MODE_WARN: Record<string, string> = {
 export function isExecPermissionMode(m: PermissionMode): boolean {
   return (PERMISSION_MODES as readonly PermissionMode[]).includes(m);
 }
+
+/**
+ * 工作方式：agent 怎么干活。和权限档是两个维度 —— 权限管"做之前问不问"，
+ * 工作方式管"先想还是先做、自己做还是派人做"。互斥单选。
+ */
+export type WorkMode = "agent" | "plan" | "multitask";
+
+const WORK_MODES: { id: WorkMode; label: string; title: string }[] = [
+  { id: "agent", label: "Agent", title: "边看边做，按当前权限档直接执行。" },
+  { id: "plan", label: "Plan", title: "只读侦察并产出计划，批准后才动手。" },
+  {
+    id: "multitask",
+    label: "多任务",
+    title:
+      "主 agent 只协调，实质工作交给后台子 agent；委派完就结束回合，做完通知你。适合几分钟起的任务、边等边聊。",
+  },
+];
 
 /**
  * 每个会话的未发送草稿。挂在模块级：Chat 按会话 id 重挂载，组件内
@@ -98,12 +119,6 @@ export function useDropdown(open: boolean, setOpen: (v: boolean) => void) {
   return { rootRef, onKeyDown };
 }
 
-/**
- * 模式菜单：权限档位（单选）+ 工作方式（规划 / 多任务，互斥单选）。
- *
- * 选中态用 Cursor 同款右侧勾号。规划与多任务互斥；都不选时即普通 agent。
- * 后端仍把 plan 收在 PermissionMode 里；多任务是独立开关，Composer 里做互斥。
- */
 function MenuPickCheck({ active }: { active: boolean }) {
   return (
     <svg
@@ -130,12 +145,15 @@ function MenuPickCheck({ active }: { active: boolean }) {
 function ModeMenuItem({
   label,
   active,
+  icon,
   warn,
   title,
   onPick,
 }: {
   label: string;
   active: boolean;
+  /** 跟在名字前面的记号，和 pill 上的同一个。 */
+  icon?: ReactNode;
   warn?: string;
   title?: string;
   onPick: () => void;
@@ -150,7 +168,10 @@ function ModeMenuItem({
       onClick={onPick}
     >
       <span className="menu-pick-body">
-        <span className="menu-pick-label">{label}</span>
+        <span className="menu-pick-label">
+          {icon}
+          {label}
+        </span>
         {warn ? <span className="menu-warn">{warn}</span> : null}
       </span>
       <MenuPickCheck active={active} />
@@ -158,37 +179,61 @@ function ModeMenuItem({
   );
 }
 
+/**
+ * 工作方式的记号（Cursor 同款）：Agent 是 ∞，Plan 是清单，多任务是分叉。
+ * pill 和菜单项共用，换了方式一眼能对上。
+ */
+function WorkModeMark({ mode }: { mode: WorkMode }) {
+  if (mode === "plan") {
+    return (
+      <span className="pill-mark pill-plan" aria-hidden>
+        <PlanModeIcon />
+      </span>
+    );
+  }
+  if (mode === "multitask") {
+    return (
+      <span className="pill-mark pill-multitask" aria-hidden>
+        <MultitaskIcon />
+      </span>
+    );
+  }
+  return (
+    <span className="pill-mark pill-agent" aria-hidden>
+      <AgentModeIcon />
+    </span>
+  );
+}
+
+/**
+ * 工作方式菜单：Agent / Plan / 多任务，互斥单选，右侧勾号（Cursor 同款）。
+ *
+ * 只管工作方式，不管权限 —— 权限是"设一次长期不动"的，混进每条消息都
+ * 可能切的菜单里，每次切 Plan 都要扫过五个权限档。后端仍把 plan 收在
+ * PermissionMode 里，多任务是独立开关，两者的互斥在 Composer 里做。
+ */
 export function ModeMenu({
-  mode,
-  execMode = "default",
+  value,
   onChange,
-  multitask = false,
-  onMultitask,
+  canMultitask = true,
 }: {
-  mode: PermissionMode;
-  /** 规划模式下 pill 要报的权限档 —— 计划批准后按它执行。 */
-  execMode?: PermissionMode;
-  onChange: (m: PermissionMode) => void;
-  multitask?: boolean;
-  onMultitask?: (on: boolean) => void;
+  value: WorkMode;
+  onChange: (m: WorkMode) => void;
+  canMultitask?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const { rootRef, onKeyDown } = useDropdown(open, setOpen);
-  const planning = mode === "plan";
-  // 规划模式不是一档权限，pill 上仍报权限档 + 一个规划记号。写成「规划模式」
-  // 会把用户设的档位藏起来，而批准计划之后正是按那一档动手的。
-  const shown = planning ? execMode : mode;
-  // 危险模式常态化后不能和安全模式长得一样 —— pill 要一直带警示色
-  const danger = Boolean(MODE_WARN[shown]);
-  const label = MODE_LABEL[shown] ?? shown;
-  const tip = `${label}${danger ? `（${MODE_WARN[shown]}）` : ""}${planning ? " · 规划模式" : ""}${multitask ? " · 多任务" : ""}`;
+  const items = canMultitask ? WORK_MODES : WORK_MODES.filter((w) => w.id !== "multitask");
+  const cur = WORK_MODES.find((w) => w.id === value) ?? WORK_MODES[0]!;
 
   return (
     <div className="mode-menu" ref={rootRef} onKeyDown={onKeyDown}>
       <button
         type="button"
-        className={danger ? "pill picker-pill pill-danger" : "pill picker-pill"}
-        title={tip}
+        // Cursor 的做法：整个 pill 跟着模式换色，不只是图标。Agent 是常态，
+        // 保持默认灰；Plan 黄、多任务绿，扫一眼就知道现在在哪种方式里。
+        className={`pill picker-pill pill-mode-${value}`}
+        title={`工作方式：${cur.label}`}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen(!open)}
@@ -196,61 +241,101 @@ export function ModeMenu({
         {/* 对齐做在内层：WebKit 的 button 会套一层匿名盒，align-items
             落不到子项上，图标就贴着汉字上沿。span 没有这个问题。 */}
         <span className="picker-pill-row">
-          {danger ? <span className="pill-danger-dot" aria-hidden /> : null}
-          <span className="pick-label">{label}</span>
-          {planning ? (
-            <span className="pill-plan" aria-label="规划模式开着" title="规划模式">
-              <PlanModeIcon />
-            </span>
-          ) : null}
-          {multitask ? (
-            <span className="pill-multitask" aria-label="多任务模式开着" title="多任务模式">
-              ⑂
-            </span>
-          ) : null}
+          <WorkModeMark mode={value} />
+          <span className="pick-label">{cur.label}</span>
           <Chevron down open={open} />
         </span>
       </button>
       {open ? (
         <div className="menu" role="menu">
+          <div className="menu-group-title">工作方式</div>
+          {items.map((w) => (
+            <ModeMenuItem
+              key={w.id}
+              label={w.label}
+              active={w.id === value}
+              icon={<WorkModeMark mode={w.id} />}
+              title={w.title}
+              onPick={() => {
+                onChange(w.id);
+                setOpen(false);
+              }}
+            />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * 顶栏里跟在会话标题后面的权限下拉：既是状态也是唯一的切换入口。
+ *
+ * 危险档（全部放行 / 无人值守）常驻警示色和黄点，安全档淡灰 —— 它和
+ * 标题同一行，一直在视野里，开着无人值守不至于忘掉。菜单向下展开
+ * （输入框里那几个是向上）。无人值守要二次确认：它关掉的是最后一层
+ * 保护，不能一次点击就生效。
+ */
+export function PermissionMenu({
+  mode,
+  onChange,
+}: {
+  mode: PermissionMode;
+  onChange: (m: PermissionMode) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
+  const { rootRef, onKeyDown } = useDropdown(open, setOpen);
+  const label = MODE_LABEL[mode] ?? mode;
+  const warn = MODE_WARN[mode];
+
+  const pick = (m: PermissionMode) => {
+    setOpen(false);
+    if (m === mode) return;
+    if (m === "unattended") {
+      setConfirm({
+        title: "切到无人值守？",
+        body: "这个会话之后不会再有任何权限弹窗，包括危险操作。",
+        confirmLabel: "确认切换",
+        action: () => onChange(m),
+      });
+      return;
+    }
+    onChange(m);
+  };
+
+  return (
+    <div className="mode-menu" ref={rootRef} onKeyDown={onKeyDown}>
+      <button
+        type="button"
+        className={warn ? "pill picker-pill perm-flag pill-danger" : "pill picker-pill perm-flag"}
+        title={`权限：${label}${warn ? `（${warn}）` : ""}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+      >
+        <span className="picker-pill-row">
+          {warn ? <span className="pill-danger-dot" aria-hidden /> : null}
+          <span className="pick-label">{label}</span>
+          <Chevron down open={open} />
+        </span>
+      </button>
+      {open ? (
+        <div className="menu menu-down" role="menu">
           <div className="menu-group-title">权限</div>
           {PERMISSION_MODES.map((m) => (
             <ModeMenuItem
               key={m}
               label={MODE_LABEL[m] ?? m}
               {...(MODE_WARN[m] ? { warn: MODE_WARN[m] } : {})}
-              active={m === shown}
-              onPick={() => {
-                onChange(m);
-                setOpen(false);
-              }}
+              active={m === mode}
+              onPick={() => pick(m)}
             />
           ))}
-          <div className="menu-sep" role="separator" />
-          <div className="menu-group-title">工作方式</div>
-          <ModeMenuItem
-            label={MODE_LABEL.plan ?? "plan"}
-            active={planning}
-            title="只读侦察并产出计划，批准后才动手。再点一次退回权限档。"
-            onPick={() => {
-              // 和多任务一样是可开可关的：再点一次退回它进来前那一档权限。
-              onChange(planning ? execMode : "plan");
-              setOpen(false);
-            }}
-          />
-          {onMultitask ? (
-            <ModeMenuItem
-              label="多任务"
-              active={multitask}
-              title="主 agent 只协调，实质工作交给后台子 agent；委派完就结束回合，做完通知你。适合几分钟起的任务、边等边聊。"
-              onPick={() => {
-                onMultitask(!multitask);
-                setOpen(false);
-              }}
-            />
-          ) : null}
         </div>
       ) : null}
+      {/* portal：顶栏是窄条，遮罩要罩住整个窗口，不能就地渲染在它里面。 */}
+      {confirm ? <ConfirmDialog c={confirm} portal onClose={() => setConfirm(null)} /> : null}
     </div>
   );
 }

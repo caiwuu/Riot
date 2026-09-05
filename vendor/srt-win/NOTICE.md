@@ -9,7 +9,8 @@ Windows 沙箱的底层实现，从 Anthropic 的 `sandbox-runtime` 原样搬过
 | commit | `e5fb1b93ba61bab8e916bee7541860bbdaa612cf`（2026-08-25）|
 | 许可 | Apache-2.0（见同目录 `LICENSE`）|
 
-Riot 本体是 MIT，这个目录是 Apache-2.0。两者兼容，但**分发时这份 LICENSE
+Riot 本体是 PolyForm Noncommercial 1.0.0（见仓库根 `LICENSE`），
+这个目录是 Apache-2.0。第三方代码仍走原许可，但**分发时这份 LICENSE
 必须跟着走**，别在打包脚本里把 `vendor/` 过滤掉。
 
 ## 为什么是搬而不是依赖

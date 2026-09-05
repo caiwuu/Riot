@@ -88,6 +88,7 @@ fn initial() -> AgentState {
         max_output_tokens_override: None,
         stop_hook_blocks: 0,
         thinking: riot_protocol::ThinkingPolicy::Default,
+        tool_calls_since_todo: 0,
         transition: None,
     }
 }

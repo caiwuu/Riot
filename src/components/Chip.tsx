@@ -6,9 +6,9 @@
  * 的文件头（一句话：contenteditable 里 re-render 会冲掉光标）。
  */
 
-import { useContext } from "react";
+import { type CSSProperties, useContext } from "react";
 
-import { type ChipSeg, chipAttrs, chipClass } from "../lib/chips";
+import { type ChipSeg, chipAttrs, chipClass, chipVars } from "../lib/chips";
 import { isDirRef, joinRoot, looksAbsPath } from "../pathDisplay";
 import { openFilePreview } from "./FilePreview";
 import { ProjectRootContext } from "./Markdown";
@@ -29,11 +29,13 @@ export function Chip({
   title?: string;
 }) {
   const attrs = { ...chipAttrs(seg), ...(title ? { title } : {}) };
-  if (!onClick) return <span className={chipClass(seg.kind, "static")} {...attrs} />;
+  const style = chipVars(seg) as CSSProperties;
+  if (!onClick) return <span className={chipClass(seg.kind, "static")} style={style} {...attrs} />;
   return (
     <button
       type="button"
       className={chipClass(seg.kind, "static clickable")}
+      style={style}
       {...attrs}
       onClick={onClick}
     />

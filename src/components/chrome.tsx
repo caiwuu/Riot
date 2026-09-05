@@ -5,9 +5,10 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { browserScopeList, type SessionInfo } from "../bridge";
+import { browserScopeList, type PermissionMode, type SessionInfo } from "../bridge";
 import { Chevron } from "./Chevron";
 import { useEscLayer } from "./Modal";
+import { PermissionMenu } from "./pickers";
 
 /** Overlay 标题栏的红绿灯只在 macOS 占左上角。Windows / Linux 的窗口
  * 控件在右侧，左边不用让位。 */
@@ -68,7 +69,7 @@ export function SidebarReveal({
 
 /**
  * 主区顶部的工具栏（照 Codex）：左边收放侧栏，中间是当前会话的标题
- * （点开就是会话菜单），右边是会话设置。整条都是窗口拖拽区。
+ * （点开就是会话菜单）和权限下拉，右边是会话设置。整条都是窗口拖拽区。
  *
  * 侧栏开着时开关坐在侧栏顶栏（贴着自己管的那一栏）；收起后才出现在
  * 这条顶栏左端，否则没入口把它打开。终端和侧边面板的开关不在这里：
@@ -78,6 +79,8 @@ export function TopBar({
   sidebarOpen,
   onToggleSidebar,
   session,
+  permission,
+  onPermission,
   onSessionMenu,
   sessionCfgOpen,
   sessionCfgEnabled,
@@ -88,6 +91,11 @@ export function TopBar({
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
   session: SessionInfo | null;
+  /** 当前会话生效中的权限档。它是会话级状态，和标题、会话设置同一行；
+   *  放输入框工具栏会和"每条消息都可能切"的工作方式混成一类。 */
+  permission: PermissionMode | null;
+  /** 用户在顶栏下拉里选了新档。落地和回滚由 Composer 做。 */
+  onPermission: (m: PermissionMode) => void;
   onSessionMenu: (e: React.MouseEvent, s: SessionInfo) => void;
   sessionCfgOpen: boolean;
   /** 会话设置管的是单个会话的参数，没有会话时置灰。 */
@@ -112,6 +120,7 @@ export function TopBar({
           <Chevron down />
         </button>
       ) : null}
+      {session && permission ? <PermissionMenu mode={permission} onChange={onPermission} /> : null}
 
       <div className="tb-spacer" data-tauri-drag-region />
 

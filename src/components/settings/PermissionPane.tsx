@@ -18,7 +18,7 @@ import {
 import { FieldNumber } from "../FieldNumber";
 import { ResizableTextarea } from "../ResizableTextarea";
 import { Card, CardBlock, Group, Row } from "./layout";
-import { type AskConfirm, FormError, blurOnEnter } from "./shared";
+import { type AskConfirm, FormError, Switch, blurOnEnter } from "./shared";
 
 /** 和宿主侧 config::normalize 的夹紧区间保持一致。 */
 const MIN_TIMEOUT = 5;
@@ -393,7 +393,7 @@ export function PermissionPane({
     <>
       <Group
         title="新会话的默认权限"
-        desc="只影响之后创建的会话。当前会话的模式在输入框左下角切换。"
+        desc="只影响之后创建的会话。当前会话的权限在顶栏会话标题旁的下拉里切。"
       >
         <div className="mode-cards" role="radiogroup" aria-label="新会话的默认模式">
           {MODES.map((m) => (
@@ -532,6 +532,26 @@ export function PermissionPane({
                 {clamp.text}
               </span>
             ) : null}
+          </Row>
+        </Card>
+      </Group>
+
+      <Group title="记忆">
+        <Card>
+          <Row
+            title="历史会话回忆"
+            desc="让模型能翻本项目的其它会话：回答「上次那个问题最后怎么解决的」，并给出跳到那个会话的链接。摘录按项目分目录，存在 Riot 自己的数据目录里，不进项目。关掉后提示词里不再提它；每个会话自己的摘录仍会维护 —— 上下文压缩后模型靠它找回被总结掉的原文。摘录随会话一起删。"
+          >
+            <Switch
+              on={status.config.sessionRecall ?? true}
+              label="历史会话回忆"
+              onChange={(v) => {
+                setError("");
+                setConfig({ ...status.config, sessionRecall: v })
+                  .then(saved)
+                  .catch((e: unknown) => setError(String(e)));
+              }}
+            />
           </Row>
         </Card>
       </Group>

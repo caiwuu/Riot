@@ -31,7 +31,10 @@ import type { Item, TextItem } from "../hooks/useSession";
 import { useTimedFlag } from "../hooks/useTimedFlag";
 import {
   caretToEnd,
+  guardChipDeletes,
   handleChipKey,
+  IME_TAIL_MS,
+  insertLineBreak,
   normalizePads,
   readEditor,
   writeEditor,
@@ -377,6 +380,7 @@ export function Transcript({
   onAnswerChoice,
   onRegenerate,
   onEditEntry,
+  onResendEntry,
   onDeleteEntry,
 }: {
   sessionId: string;
@@ -405,6 +409,11 @@ export function Transcript({
   onRegenerate?: (itemId: string) => void;
   /** 上下文编辑：把这条气泡的文本换掉。false = 没改成，编辑框保留草稿。 */
   onEditEntry?: (item: TextItem, text: string) => Promise<boolean>;
+  /**
+   * 编辑后重发（只对用户气泡）：换字、丢掉之后的一切、从它再跑一轮。
+   * false = 没发出去，编辑框保留草稿。
+   */
+  onResendEntry?: (item: TextItem, text: string) => Promise<boolean>;
   /** 上下文删除：把这条气泡从历史里抹掉。 */
   onDeleteEntry?: (item: TextItem) => Promise<boolean>;
 }) {
@@ -772,6 +781,7 @@ export function Transcript({
                   mutateEnabled={!busy}
                   {...(onRegenerate ? { onRegenerate } : {})}
                   {...(onEditEntry ? { onEditEntry } : {})}
+                  {...(onResendEntry ? { onResendEntry } : {})}
                   {...(onDeleteEntry ? { onDeleteEntry: requestDelete } : {})}
                 />
               ) : (
@@ -833,14 +843,11 @@ export function Transcript({
         </div>
         {findOpen && armed ? <FindBar box={boxRef} onClose={() => setFindOpen(false)} /> : null}
       </main>
-      {/* 删除确认放在滚动容器**外**、shell 内：main 是倒排滚动容器、
-          内部 thread-col 带 transform，把 fixed 遮罩的包含块从视口改成了
-          滚动区，弹窗会偏移错位。挂到 shell 层用 absolute 罩住聊天区域，
-          既躲开那个包含块陷阱，又正好相对聊天区域居中（不盖侧栏）。 */}
+      {/* 删除确认 portal 到 body、遮罩盖整个窗口（和别处的确认框一样）。
+          就地渲染不行：main 是倒排滚动容器、内部 thread-col 带 transform，
+          会把 fixed 遮罩的包含块从视口改成滚动区，弹窗偏移错位。 */}
       {confirmDel ? (
-        <div className="transcript-confirm">
-          <ConfirmDialog c={confirmDel} onClose={() => setConfirmDel(null)} />
-        </div>
+        <ConfirmDialog c={confirmDel} portal onClose={() => setConfirmDel(null)} />
       ) : null}
       {/* 叠在滚动容器外面。倒排 flex 里 sticky + 负边距：WebKit 把按钮
           挤出视口（Mac 上看不见），Chromium 把它压扁（Windows 上不圆）。
@@ -882,6 +889,7 @@ export const Row = memo(function Row({
   regenEnabled,
   hydrate,
   onEditEntry,
+  onResendEntry,
   onDeleteEntry,
   mutateEnabled,
 }: {
@@ -892,6 +900,8 @@ export const Row = memo(function Row({
   hydrate?: boolean;
   /** 上下文编辑（见 Transcript 的同名 prop）。 */
   onEditEntry?: (item: TextItem, text: string) => Promise<boolean>;
+  /** 编辑后重发（见 Transcript 的同名 prop）。只有用户气泡用它。 */
+  onResendEntry?: (item: TextItem, text: string) => Promise<boolean>;
   /** 上下文删除。收到的是 Transcript 的确认包装 —— 点击先弹确认框。 */
   onDeleteEntry?: (item: TextItem) => void;
   /** 编辑/删除此刻可用（空闲）。生成中改历史会和正在写的轮子打架。 */
@@ -914,6 +924,15 @@ export const Row = memo(function Row({
                 if (ok) setEditing(false);
                 return ok;
               }}
+              {...(onResendEntry
+                ? {
+                    onResend: async (text: string) => {
+                      const ok = await onResendEntry(item, text);
+                      if (ok) setEditing(false);
+                      return ok;
+                    },
+                  }
+                : {})}
             />
           </div>
         );
@@ -1108,8 +1127,12 @@ function MsgTime({ at }: { at: number }) {
 /**
  * 消息的内联编辑框（上下文修改）。
  *
- * ⌘/Ctrl+Enter 保存、Esc 取消，和输入框同一套肌肉记忆。保存失败
- * （忙、消息已被压缩、内核拒绝）时编辑框留着 —— 草稿不能丢。
+ * 两种落法：
+ * - **发送**（只有用户气泡有，`onResend`）：换字、丢掉之后的一切、从这条
+ *   重新跑 —— Cursor 编辑气泡后回车的同款。⌘/Ctrl+Enter 走它，是主按钮。
+ * - **保存**：只改上下文里的原文，之后的对话不动。助手气泡只有这一种，
+ *   那时 ⌘/Ctrl+Enter 走它。
+ * Esc 取消。落不成（忙、消息已被压缩、内核拒绝）时编辑框留着 —— 草稿不能丢。
  *
  * 用户消息（`parseChips`）用和输入框同一套 contenteditable 块机械：
  * 文件引用、页面元素在编辑时也是色块，和气泡里看到的一致，而不是一串
@@ -1120,18 +1143,23 @@ function MsgEditor({
   initial,
   parseChips = false,
   onSave,
+  onResend,
   onCancel,
 }: {
   initial: string;
   parseChips?: boolean;
   onSave: (text: string) => Promise<boolean>;
+  onResend?: (text: string) => Promise<boolean>;
   onCancel: () => void;
 }) {
-  const [saving, setSaving] = useState(false);
+  /** 正在落哪一种；null = 空闲。两个按钮各自显示自己的进行中文案。 */
+  const [saving, setSaving] = useState<"save" | "resend" | null>(null);
   const [hasText, setHasText] = useState(!!initial.trim());
   const ref = useRef<HTMLDivElement>(null);
   // 中文 IME：组字中不能动 DOM（normalize 合并文本节点会打断组字）。
   const imeRef = useRef(false);
+  // 上一次 compositionend 的时刻，给贴块的原生删除判归属（见 IME_TAIL_MS）。
+  const imeEndAt = useRef(-Infinity);
 
   const read = () => (ref.current ? segsToPrompt(readEditor(ref.current)) : "");
 
@@ -1152,23 +1180,38 @@ function MsgEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const save = async () => {
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    return guardChipDeletes(
+      el,
+      () => imeRef.current || performance.now() - imeEndAt.current < IME_TAIL_MS,
+      refresh,
+    );
+    // refresh 只碰 ref 和 setState，没有会过期的闭包。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const commit = async (kind: "save" | "resend", op: (text: string) => Promise<boolean>) => {
     const text = read().trim();
     if (saving || !text) return;
-    setSaving(true);
+    setSaving(kind);
     try {
-      await onSave(text);
+      await op(text);
     } finally {
-      setSaving(false);
+      setSaving(null);
     }
   };
+  const save = () => commit("save", onSave);
+  // 主动作：有"发送"就是发送，否则是保存。快捷键和主按钮走同一个。
+  const primary = () => (onResend ? commit("resend", onResend) : save());
 
   return (
     <div className="msg-editor">
       <div
         ref={ref}
         className="msg-editbox"
-        contentEditable={!saving}
+        contentEditable={saving === null}
         suppressContentEditableWarning
         role="textbox"
         aria-multiline="true"
@@ -1177,6 +1220,7 @@ function MsgEditor({
           imeRef.current = true;
         }}
         onCompositionEnd={() => {
+          imeEndAt.current = performance.now();
           setTimeout(() => {
             imeRef.current = false;
           }, 0);
@@ -1188,20 +1232,23 @@ function MsgEditor({
           document.execCommand("insertText", false, e.clipboardData.getData("text/plain"));
         }}
         onKeyDown={(e) => {
-          if (
-            ref.current &&
-            !e.nativeEvent.isComposing &&
-            !imeRef.current &&
-            handleChipKey(e, ref.current)
-          ) {
-            e.preventDefault();
-            refresh();
-            return;
+          const el = ref.current;
+          // 输入法消费掉的键一律不碰（229 那一条的来历见 Composer 的同款注释）。
+          const imeKey = e.nativeEvent.isComposing || e.keyCode === 229 || imeRef.current;
+          // 块的键盘机械和输入框共用。这里回车就是换行（⌘/Ctrl+回车才是保存），
+          // 贴着块的那一下要自己插 —— 原因见 insertLineBreak。
+          if (el && !imeKey) {
+            const lineBreak = e.key === "Enter" && !e.metaKey && !e.ctrlKey;
+            if (handleChipKey(e, el) || (lineBreak && insertLineBreak(el))) {
+              e.preventDefault();
+              refresh();
+              return;
+            }
           }
           if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
             e.preventDefault();
-            void save();
-          } else if (e.key === "Escape" && !e.nativeEvent.isComposing) {
+            void primary();
+          } else if (e.key === "Escape" && !imeKey) {
             e.preventDefault();
             e.stopPropagation();
             onCancel();
@@ -1209,18 +1256,34 @@ function MsgEditor({
         }}
       />
       <div className="msg-editor-btns">
-        <span className="msg-editor-hint">保存后替换上下文里的原文，之后的对话按新内容走</span>
-        <button type="button" onClick={onCancel} disabled={saving}>
+        <span className="msg-editor-hint">
+          {onResend
+            ? "发送：从这条重新开始，之后的对话会被丢弃 · 保存：只改上下文里的原文"
+            : "保存后替换上下文里的原文，之后的对话按新内容走"}
+        </span>
+        <button type="button" onClick={onCancel} disabled={saving !== null}>
           取消
         </button>
         <button
           type="button"
-          className="msg-editor-save"
+          className={onResend ? undefined : "msg-editor-save"}
           onClick={() => void save()}
-          disabled={saving || !hasText}
+          disabled={saving !== null || !hasText}
+          title={onResend ? "只替换上下文里的原文，不重新生成" : undefined}
         >
-          {saving ? "保存中…" : "保存"}
+          {saving === "save" ? "保存中…" : "保存"}
         </button>
+        {onResend ? (
+          <button
+            type="button"
+            className="msg-editor-save"
+            onClick={() => void primary()}
+            disabled={saving !== null || !hasText}
+            title="从这条消息重新开始（⌘/Ctrl+Enter）"
+          >
+            {saving === "resend" ? "发送中…" : "发送"}
+          </button>
+        ) : null}
       </div>
     </div>
   );

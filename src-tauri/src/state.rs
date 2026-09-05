@@ -25,8 +25,8 @@ use riot_protocol::message::Message;
 use riot_protocol::permission::{PendingAsk, PermissionMode, PermissionResponse};
 use riot_protocol::rpc::{RpcRequest, RpcResponse};
 use riot_protocol::schedule::{
-    MissedRun, Repeat, RunTargetSpec, SchedulePatch, ScheduleRun, ScheduleRunPhase, ScheduleSpec,
-    ScheduledTask,
+    MissedRun, Repeat, RunTargetSpec, ScheduleDraft, SchedulePatch, ScheduleRun,
+    ScheduleRunPhase, ScheduleSpec, ScheduledTask, WhenSpec,
 };
 
 use crate::config::AppConfig;
@@ -68,6 +68,8 @@ pub struct TaskHistoryOut {
     /// None = 内核不认识这个 id（重启后旧 id 失效）。
     pub task: Option<riot_protocol::BackgroundTaskView>,
     pub messages: Vec<Message>,
+    /// 它派出去的子 agent（含更深层）。
+    pub descendants: Vec<riot_protocol::BackgroundTaskView>,
 }
 
 /// 侧边栏需要知道的会话信息。**不含历史内容** —— 列表要快，内容按需拉。
@@ -674,6 +676,14 @@ impl AppState {
                 .is_err()
             {
                 let id = SessionId::from_raw(session_id.to_owned());
+                // 摘录目录按项目分，root 从内存里的会话条目拿（transcript
+                // 马上要删，之后就读不到了）。
+                if let Some(root) = removed.as_ref().map(|m| m.root.clone()) {
+                    let digests = riot_store::digests::Digests::new(&self.0.sessions_dir);
+                    if let Err(e) = digests.remove(&root, &id).await {
+                        tracing::warn!(error = %e, "会话摘录删除失败");
+                    }
+                }
                 if let Err(e) = self.0.transcripts.remove(&id).await {
                     tracing::warn!(error = %e, "transcript 删除失败，磁盘上可能留下孤儿文件");
                 }
@@ -692,7 +702,7 @@ impl AppState {
         }
     }
 
-    /// 删掉一个会话的工件目录（截图原图、过大的工具结果、压缩归档的对话原文）。
+    /// 删掉一个会话的工件目录（截图原图、过大的工具结果）。
     ///
     /// `[约束]` 必须跟着会话一起删，理由同 [`Self::remove_browser_profile`]：
     /// 目录名就是会话 id，会话没了就没人会认领它。这一步以前是漏掉的 ——
@@ -761,7 +771,7 @@ impl AppState {
         self.gc_orphan_dirs(root, "浏览器 profile").await;
     }
 
-    /// 清掉没有会话认领的工件目录（截图、过大工具结果、压缩归档）。
+    /// 清掉没有会话认领的工件目录（截图、过大工具结果）。
     ///
     /// 和 [`Self::gc_browser_profiles`] 同一件事、同一个约束（恢复完成之后
     /// 才能调）。删会话不删工件这个漏洞存在了很久，存量孤儿比 profile 多
@@ -1091,6 +1101,37 @@ impl AppState {
         Ok(())
     }
 
+    /// 编辑一条用户提问并从它重新开始：换文字、丢掉之后的一切、再跑一轮。
+    /// 和 [`Self::regenerate_turn`] 同一套装配。
+    pub async fn resend_turn(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> HostResult<()> {
+        self.require_sink(session_id).await?;
+        self.ensure_hydrated(session_id).await?;
+        let sampling = {
+            let g = self.0.sessions.lock().await;
+            g.get(session_id).ok_or(HostError::NoSession)?.sampling
+        };
+        let config = self.config().await;
+        let mut model = config.resolve()?;
+        model.sampling = sampling.or(model.sampling);
+        let turn_config = self.build_turn_config(&config, model, session_id).await?;
+        self.kernel_call(RpcRequest::TurnResend {
+            session_id: sid(session_id),
+            message_id: message_id.to_owned(),
+            text: text.to_owned(),
+            config: Box::new(turn_config),
+        })
+        .await?;
+        if let Some(m) = self.0.sessions.lock().await.get_mut(session_id) {
+            m.busy = true;
+        }
+        Ok(())
+    }
+
     /// 把"此刻"的配置快照打包成随轮传给内核的 [`riot_protocol::TurnConfig`]。
     ///
     /// 内核不读 config.json / auth.json —— 模型端点(含明文 key)、联网/视觉
@@ -1318,7 +1359,15 @@ impl AppState {
             })
             .await?
         {
-            RpcResponse::TaskHistory { task, messages } => Ok(TaskHistoryOut { task, messages }),
+            RpcResponse::TaskHistory {
+                task,
+                messages,
+                descendants,
+            } => Ok(TaskHistoryOut {
+                task,
+                messages,
+                descendants,
+            }),
             _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
                 "task.history 回了意外的应答".into(),
             ))),
@@ -1599,6 +1648,16 @@ impl AppState {
         if let Err(e) = self.kernel_call(RpcRequest::McpReconcile { servers }).await {
             tracing::warn!(error = %e, "MCP 清单没送到内核");
         }
+        // 历史会话回忆的开关和 MCP 走同一个节拍：启动时、每次保存设置后。
+        // 内核第一次收到"开"会顺带对账一遍摘录文件。
+        if let Err(e) = self
+            .kernel_call(RpcRequest::DigestConfigure {
+                enabled: config.session_recall,
+            })
+            .await
+        {
+            tracing::warn!(error = %e, "历史会话回忆开关没送到内核");
+        }
     }
 
     /// 终端面板的句柄。Tauri 那边 `manage` 的和会话用的必须是同一份 ——
@@ -1655,16 +1714,69 @@ impl AppState {
             .session_root(origin_session)
             .await
             .map_err(|_| "发起会话不存在，创建不了定时任务。".to_owned())?;
+        let session_id = spec.in_this_session.then(|| origin_session.to_owned());
+        self.insert_schedule(
+            spec.name,
+            spec.prompt,
+            &spec.when,
+            session_id,
+            root.display().to_string(),
+        )
+        .await
+    }
+
+    /// 前端表单手动创建。目标显式给出（没有发起会话可以借用），校验规则
+    /// 和编辑面板的保存一致：会话得存在、项目目录得在盘上。
+    pub async fn schedule_create_manual(
+        &self,
+        draft: ScheduleDraft,
+    ) -> Result<ScheduledTask, String> {
+        let (session_id, root) = match draft.target {
+            RunTargetSpec::Session { id } => {
+                let root = self
+                    .session_root(&id)
+                    .await
+                    .map_err(|_| "指定的会话不存在（可能已被删除）。".to_owned())?;
+                (Some(id), root.display().to_string())
+            }
+            RunTargetSpec::NewSession { root } => {
+                if !std::path::Path::new(&root).is_dir() {
+                    return Err(format!("项目目录不存在：{root}"));
+                }
+                (None, root)
+            }
+        };
+        let name = draft.name.trim().to_owned();
+        if name.is_empty() {
+            return Err("任务名不能为空。".to_owned());
+        }
+        let prompt = draft.prompt.trim().to_owned();
+        if prompt.is_empty() {
+            return Err("提示词不能为空 —— 到点发出去的就是它。".to_owned());
+        }
+        self.insert_schedule(name, prompt, &draft.when, session_id, root)
+            .await
+    }
+
+    /// 两条创建路径共用的落表：解析时间、编 id、查上限、持久化、广播。
+    async fn insert_schedule(
+        &self,
+        name: String,
+        prompt: String,
+        when: &WhenSpec,
+        session_id: Option<String>,
+        root: String,
+    ) -> Result<ScheduledTask, String> {
         let now = crate::schedule::now_ms();
-        let (repeat, first_run) = crate::schedule::resolve_spec(&spec.when, now)?;
+        let (repeat, first_run) = crate::schedule::resolve_spec(when, now)?;
 
         let task = crate::schedule::PersistedTask {
             id: NanoIdGenerator.next_id("sch"),
-            name: spec.name,
-            prompt: spec.prompt,
+            name,
+            prompt,
             repeat,
-            session_id: spec.in_this_session.then(|| origin_session.to_owned()),
-            root: root.display().to_string(),
+            session_id,
+            root,
             enabled: true,
             next_run_ms: Some(first_run),
             last_run_ms: None,
@@ -2546,10 +2658,11 @@ mod tests {
         assert!(!dir.exists(), "会话删了 profile 还留着，缓存会无上限增长");
     }
 
-    /// 删会话必须连工件目录一起删（截图、过大工具结果、压缩归档的原文）。
+    /// 删会话必须连工件目录一起删（截图、过大工具结果）。
     ///
     /// 这一步以前是漏的：路径推导只在内核的 Session 里，宿主不知道它，
-    /// 截图随会话数无上限累积。压缩归档进来后每个会话的这份更大。
+    /// 截图随会话数无上限累积。测试里往目录放的文件名只是个占位，
+    /// 内容是什么无所谓。
     #[tokio::test]
     async fn 删除会话连工件目录一起删() {
         let state = state().await;
@@ -2784,6 +2897,82 @@ mod tests {
             .await
             .expect("指到活会话该成功");
         assert_eq!(updated.session_id.as_deref(), Some(s.id.as_str()));
+    }
+
+    /// 表单手动创建：目标显式给出，校验和编辑保存一致 —— 目录不存在、
+    /// 会话不存在、名字 / 提示词为空都拒绝；给对了就落表并按目标绑定。
+    #[tokio::test]
+    async fn 定时任务_表单手动创建校验目标并落表() {
+        let state = state().await;
+        let root = temp_ws("sched-manual");
+        let s = state.create_session(&root).await.expect("会话");
+
+        let draft = |name: &str, prompt: &str, target: riot_protocol::RunTargetSpec| {
+            riot_protocol::ScheduleDraft {
+                name: name.into(),
+                prompt: prompt.into(),
+                when: riot_protocol::WhenSpec::After { minutes: 60 },
+                target,
+            }
+        };
+        let new_in = |root: &str| riot_protocol::RunTargetSpec::NewSession { root: root.into() };
+
+        let err = state
+            .schedule_create_manual(draft("晨报", "给我晨报", new_in("/definitely/not/here")))
+            .await
+            .expect_err("目录不存在要拒绝");
+        assert!(err.contains("目录"), "{err}");
+
+        let err = state
+            .schedule_create_manual(draft(
+                "晨报",
+                "给我晨报",
+                riot_protocol::RunTargetSpec::Session { id: "s_ghost".into() },
+            ))
+            .await
+            .expect_err("会话不存在要拒绝");
+        assert!(err.contains("会话"), "{err}");
+
+        let err = state
+            .schedule_create_manual(draft("  ", "给我晨报", new_in(&root)))
+            .await
+            .expect_err("空名字要拒绝");
+        assert!(err.contains("任务名"), "{err}");
+
+        let err = state
+            .schedule_create_manual(draft("晨报", "  ", new_in(&root)))
+            .await
+            .expect_err("空提示词要拒绝");
+        assert!(err.contains("提示词"), "{err}");
+
+        let fresh = state
+            .schedule_create_manual(draft(" 晨报 ", "给我晨报", new_in(&root)))
+            .await
+            .expect("新会话目标该成功");
+        assert_eq!(fresh.name, "晨报", "名字要去掉首尾空白");
+        assert!(fresh.session_id.is_none());
+        assert_eq!(fresh.root, root);
+        assert!(fresh.enabled);
+        assert!(fresh.next_run_ms.is_some());
+
+        let bound = state
+            .schedule_create_manual(draft(
+                "跟进",
+                "再扫一次",
+                riot_protocol::RunTargetSpec::Session { id: s.id.clone() },
+            ))
+            .await
+            .expect("现有会话目标该成功");
+        assert_eq!(bound.session_id.as_deref(), Some(s.id.as_str()));
+        // 会话的根是规范化过的（macOS 上 /var → /private/var），按规范化后比。
+        let canon = std::fs::canonicalize(&root).expect("规范化");
+        assert_eq!(
+            std::path::Path::new(&bound.root),
+            canon,
+            "续跑任务的根也指向该会话的项目"
+        );
+
+        assert_eq!(state.schedule_list().await.len(), 2);
     }
 
     /// tick 的推进语义：到期任务在**开跑之前**推进 next_run。

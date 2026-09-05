@@ -91,10 +91,8 @@ export function Modal({
    * containment 那样改包含块，所以不会被壳裁掉，但**会**跟着淡）。留在
    * 壳里就会变成"看不见但还在、还吃点击"的一层。
    *
-   * `[约束]` 不能改成默认置真。对话流里的删除确认刻意就地渲染 —— 外面
-   * 套一层 `.transcript-confirm` 把全屏 fixed 遮罩改成相对聊天区的
-   * absolute，遮罩只罩对话列、不盖侧栏（见 styles.css 那处）。portal
-   * 出去那层作用域覆盖就没了。
+   * 住在带 transform / 滚动容器里的弹窗也得置真（对话流里的删除确认）：
+   * transform 会把 fixed 的包含块从视口改成那个元素，遮罩就只罩住一块。
    */
   portal?: boolean;
   /** 请求关闭（Esc / 点遮罩 / 关闭按钮共用一条路）。 */

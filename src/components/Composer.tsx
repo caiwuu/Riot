@@ -7,7 +7,7 @@
  * 这里只放 Composer 组件本身。
  */
 
-import { useEffect, useId, useRef, useState } from "react";
+import { Fragment, useEffect, useId, useRef, useState } from "react";
 
 import {
   type BackgroundTaskView,
@@ -36,7 +36,6 @@ import {
 } from "../bridge";
 import { type QueuedItem, type WithdrawnPrompt } from "../hooks/useSession";
 import {
-  SLASH_QUERY_RE,
   SLASH_SUBMIT_RE,
   type Seg,
   promoteLeadingCmd,
@@ -52,12 +51,15 @@ import {
 } from "../lib/contextWindow";
 import { type ChipSeg, isChipSeg } from "../lib/chips";
 import { registerFileDrop } from "../lib/fileDrag";
-import { asDirRef } from "../pathDisplay";
+import { asDirRef, basename, isDirRef, joinRoot, looksAbsPath, parentOf } from "../pathDisplay";
 import {
   caretToEnd,
   dropQueryAtCaret,
+  guardChipDeletes,
   handleChipKey,
+  IME_TAIL_MS,
   insertChipAtCaret,
+  insertLineBreak,
   normalizePads,
   queryAtCaret,
   readEditor,
@@ -65,11 +67,18 @@ import {
 } from "../lib/chipEditor";
 import { mergeSampling } from "../lib/sampling";
 import { Chevron } from "./Chevron";
-import { Chip, FileChip } from "./Chip";
-import { ConfirmDialog, type ConfirmRequest } from "./ConfirmDialog";
+import { FileIcon } from "./FileIcon";
+import { openFilePreview } from "./FilePreview";
 import { ContextRing } from "./ContextRing";
 import { ArrowUpIcon, PencilIcon, PlusIcon, StopIcon, TrashIcon } from "./icons";
-import { ModeMenu, Picker, type PickerSection, isExecPermissionMode, modelLabel } from "./pickers";
+import {
+  ModeMenu,
+  Picker,
+  type PickerSection,
+  type WorkMode,
+  isExecPermissionMode,
+  modelLabel,
+} from "./pickers";
 import { BackgroundTasksPanel } from "./TaskPanel";
 import { ShotViewer } from "./ToolCard";
 
@@ -87,6 +96,12 @@ const modeCache = new Map<string, PermissionMode>();
 const multitaskCache = new Map<string, boolean>();
 /** 进规划模式前记住的执行档，退出规划时恢复（例如切到多任务）。 */
 const execModeCache = new Map<string, PermissionMode>();
+
+/** 会话设置弹窗选的权限档。带序号：连选两次同一档也要能触发。 */
+export interface PermissionPick {
+  mode: PermissionMode;
+  seq: number;
+}
 
 /** 待发的一张图。`data` 是 base64，不含 `data:` 前缀。 */
 interface Shot {
@@ -165,6 +180,14 @@ function looksAbsolute(line: string): boolean {
  * 宁可问多了:一行以 `/` 开头的普通文字（shell 命令、注释）会白问一次
  * IPC，然后按文本粘贴，用户看不出区别。
  */
+/** 块后面默认跟的那一个空格：块和正文之间本来就该有一格，不让用户自己敲。 */
+const SPACE: Seg = { kind: "text", value: " " };
+
+/** 斜杠菜单的分组标题：技能一组，其余（内置 / 项目 / 全局命令）一组。 */
+function slashGroup(c: SlashCommand): "技能" | "命令" {
+  return c.source === "skill" ? "技能" : "命令";
+}
+
 function hasAttachment(dt: DataTransfer | null): boolean {
   if (!dt) return false;
   if (dt.files.length > 0 || dt.types.includes("Files")) return true;
@@ -322,6 +345,8 @@ export function Composer({
   withdrawn,
   onWithdrawnRestored,
   onOpenSettings,
+  permissionPick = null,
+  onPermissionChange,
   insertText,
   onInserted,
   armed = true,
@@ -360,6 +385,11 @@ export function Composer({
   withdrawn: WithdrawnPrompt | null;
   onWithdrawnRestored: () => void;
   onOpenSettings: () => void;
+  /** 会话设置弹窗里选的权限档。null = 没选过。真值仍归这里管：
+   *  规划模式下它只改"批准后按哪档执行"，不打断规划。 */
+  permissionPick?: PermissionPick | null;
+  /** 生效中的权限档变了（含宿主侧改的）。App 靠它给顶栏标记和弹窗喂当前值。 */
+  onPermissionChange?: (m: PermissionMode) => void;
   /** 外部要塞进来的一段文字（终端选中的输出）。null = 没有。 */
   insertText?: string | null;
   onInserted?: () => void;
@@ -373,6 +403,26 @@ export function Composer({
   const [mode, setMode] = useState<PermissionMode>(
     () => modeCache.get(sessionId) ?? initialMode,
   );
+  /**
+   * 生效中的权限档。mode 是权限档时就是它；mode 是 plan 时是进规划前那
+   * 一档 —— 批准计划后按它动手，权限标记和会话设置里显示的也是它。
+   */
+  const [execMode, setExecMode] = useState<PermissionMode>(
+    () =>
+      execModeCache.get(sessionId) ??
+      (isExecPermissionMode(initialMode) ? initialMode : "default"),
+  );
+  // mode 落在权限档上时它就是执行档；进 plan 后停在进来前那一档。
+  useEffect(() => {
+    if (!isExecPermissionMode(mode)) return;
+    setExecMode(mode);
+    execModeCache.set(sessionId, mode);
+  }, [mode, sessionId]);
+  const permChangeRef = useRef(onPermissionChange);
+  permChangeRef.current = onPermissionChange;
+  useEffect(() => {
+    permChangeRef.current?.(execMode);
+  }, [execMode]);
   const [multitask, setMultitask] = useState<boolean>(
     () => multitaskCache.get(sessionId) ?? initialMultitask,
   );
@@ -420,7 +470,6 @@ export function Composer({
     modeCache.set(sessionId, hostMode);
     void setPermissionMode(sessionId, hostMode).catch(() => {});
   }, [hostMode, sessionId]);
-  const [modeConfirm, setModeConfirm] = useState<ConfirmRequest | null>(null);
   /** 这个会话可用的斜杠命令 + 技能。每次挂载拉一次（用户加了 .md 切一下会话就有）。 */
   const [commands, setCommands] = useState<SlashCommand[]>([]);
   /** 补全菜单里高亮到第几条。 */
@@ -456,6 +505,8 @@ export function Composer({
    * 点不动，而用户明明看见自己放了东西进去。
    */
   const [chips, setChips] = useState<ChipSeg[]>([]);
+  /** 光标处还没敲完的 `/查询`（由 sync 算出来，和 `@` 一样认光标处那一段）。 */
+  const [slashAtCaret, setSlashAtCaret] = useState<string | undefined>(undefined);
   /** 拖/选进来失败的那一条。附件是"扔进去就走"的操作，不报的话用户以为成了。 */
   const [dropError, setDropError] = useState("");
   const [dragging, setDragging] = useState(false);
@@ -466,11 +517,24 @@ export function Composer({
   // 中文 IME：确认候选/上屏英文时，keydown(Enter) 常在 compositionend 之后到达，
   // 此时 nativeEvent.isComposing 已是 false，会被误当成发送。用 ref 盖住这一拍。
   const imeRef = useRef(false);
+  // 上一次 compositionend 的时刻。贴块的原生删除要按这个时间窗判归属
+  //（见 chipEditor 的 IME_TAIL_MS）—— imeRef 那个 setTimeout(0) 盖不住它。
+  const imeEndAt = useRef(-Infinity);
 
   /** 引用块挑出来的路径。发送时当附件递给宿主。 */
   const refs = chips.flatMap((s) => (s.kind === "ref" ? [s.value] : []));
-  /** 已经落成色块的那条命令/技能名。 */
-  const cmdName = chips.find((s) => s.kind === "cmd")?.value ?? null;
+  /**
+   * 已经落成色块的那条**命令**（可执行 / 可展开的那种）。
+   *
+   * 命令一条消息只能有一个、必须在头部：内置的当场执行，可展开的把整条
+   * 消息换成模板展开的结果，两条模板不可能同时"是这条消息"。普通技能不
+   * 受这个限制 —— 它只是把 `/名字` 原样放进正文让模型按需加载，一句话里
+   * 点名几个技能、放在哪里都成立，和文件引用一样是自由的块。
+   */
+  const runnable = (c: SlashCommand | undefined): boolean =>
+    c !== undefined && (c.source === "builtin" || c.expandInline);
+  const runnableName = (name: string) => runnable(commands.find((c) => c.name === name));
+  const cmdName = chips.find((s) => s.kind === "cmd" && runnableName(s.value))?.value ?? null;
   /** 编辑区里有东西吗。占位提示看它 —— 图在编辑区外面，不算。 */
   const hasInput = draft.trim().length > 0 || chips.length > 0;
   /** 能发出去吗。只附了图也是一条消息（"看这个截图"就是这么发的）。 */
@@ -596,7 +660,8 @@ export function Composer({
     if (!imeRef.current) normalizePads(el);
     let segs = readEditor(el);
     const known = new Set(commands.map((c) => c.name));
-    const promoted = promoteLeadingCmd(segs, known);
+    const exclusive = new Set(commands.filter(runnable).map((c) => c.name));
+    const promoted = promoteLeadingCmd(segs, known, exclusive);
     if (promoted) {
       writeEditor(el, promoted);
       caretToEnd(el);
@@ -606,12 +671,26 @@ export function Composer({
     const chipSegs = segs.filter(isChipSeg);
     setDraftRaw(text);
     setChips(chipSegs);
-    setMentionQuery(queryAtCaret(el));
+    setSlashAtCaret(queryAtCaret(el, "/"));
+    setMentionQuery(queryAtCaret(el, "@"));
     // 删光内容后浏览器常留一个 `<br>`，读出来是个 "\n"。当成有内容的话，
     // 占位提示不再出现、草稿缓存里也会存下一堆看不见的空行。
     if (text.trim() || chipSegs.length) drafts.set(sessionId, segs);
     else drafts.delete(sessionId);
   };
+
+  // 原生监听只挂一次，但 sync 每次渲染都是新闭包 —— 经 ref 取最新的。
+  const syncRef = useRef(sync);
+  syncRef.current = sync;
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    return guardChipDeletes(
+      el,
+      () => imeRef.current || performance.now() - imeEndAt.current < IME_TAIL_MS,
+      () => syncRef.current(),
+    );
+  }, []);
 
   /** 程序化改写编辑区内容（清空、回滚、撤回排队项）。 */
   const setContent = (segs: Seg[]) => {
@@ -620,22 +699,6 @@ export function Composer({
     writeEditor(el, segs);
     caretToEnd(el);
     sync();
-  };
-
-  /**
-   * 换掉文字、留下已有的块。
-   *
-   * `[约束]` 只在"整条文字都要被替换"时用（Esc 清掉半截 `/xxx`）。
-   * 别拿它做追加 —— 块会被重排到前面去，用户会看到自己刚插在句中的
-   * 引用莫名其妙跳到了句首。要在光标处加东西用 `insertChipAtCaret`。
-   */
-  const replaceText = (v: string) => {
-    const el = ref.current;
-    if (!el) return;
-    // 留下所有块。按 kind 逐个点名的写法每加一种块就漏一次 —— 元素块
-    // 就这么被吞过：取件之后按 Esc 收起半截 `/xxx`，绿块跟着没了。
-    const keep = readEditor(el).filter(isChipSeg);
-    setContent(v ? [{ kind: "text", value: v }, ...keep] : keep);
   };
 
   // 终端选中的那段输出：追加到现有草稿后面，不是替换。
@@ -657,10 +720,10 @@ export function Composer({
     // 文件就不重复挂 —— 连点两次不该出两个一样的块。
     const fileRef = decodeRefFromComposer(insertText);
     if (pick) {
-      setContent([...cur, { kind: "elem", value: pick.selector, label: pick.description }]);
+      setContent([...cur, { kind: "elem", value: pick.selector, label: pick.description }, SPACE]);
     } else if (fileRef) {
       if (!cur.some((s) => s.kind === "ref" && s.value === fileRef)) {
-        setContent([...cur, { kind: "ref", value: fileRef }]);
+        setContent([...cur, { kind: "ref", value: fileRef }, SPACE]);
       }
     } else {
       const prefix = segsText(cur).trim() ? "\n\n" : "";
@@ -698,33 +761,56 @@ export function Composer({
     ref.current?.focus();
   }, [armed]);
 
-  // 补全菜单只在"还没敲空格"时出：`/co` 出菜单，`/compact 参数` 不出 ——
-  // 后者用户已经选定命令在写参数了，菜单只会挡住视线。
-  const slashQuery = cmdName ? undefined : SLASH_QUERY_RE.exec(draft)?.[1];
+  // `/` 菜单和 `@` 一样认**光标处**那段没敲完的 token（行首或空白之后才
+  // 触发，`[块]/co` 不出、`[块] /co` 出）。敲了空格 token 就断了，菜单自然
+  // 收起 —— `/compact 参数` 是在写参数，菜单只会挡住视线。
+  // 已经有一个命令块时不再列命令（一条消息只能有一个，见 cmdName），技能
+  // 照常可选。
+  const slashQuery = slashAtCaret;
   const matches =
     slashQuery === undefined
       ? []
       : commands
           .filter((c) => c.name.toLowerCase().includes(slashQuery.toLowerCase()))
-          // 前缀匹配排在包含匹配前面（敲 `co` 时 `compact` 该在最上面）
+          .filter((c) => !(cmdName && runnable(c)))
+          // 技能和命令分两组（菜单里按组画标题，Cursor 同款），组内前缀匹配
+          // 排在包含匹配前面（敲 `co` 时 `compact` 该在最上面）。
           .sort((a, b) => {
             const q = slashQuery.toLowerCase();
+            const ag = slashGroup(a) === "技能" ? 0 : 1;
+            const bg = slashGroup(b) === "技能" ? 0 : 1;
             const ap = a.name.toLowerCase().startsWith(q) ? 0 : 1;
             const bp = b.name.toLowerCase().startsWith(q) ? 0 : 1;
-            return ap - bp || a.name.localeCompare(b.name);
+            return ag - bg || ap - bp || a.name.localeCompare(b.name);
           })
-          .slice(0, 8);
+          .slice(0, 10);
   const pick = Math.min(slashPick, Math.max(matches.length - 1, 0));
 
-  /** 选中一条命令/技能：收成色块，光标贴在块后面直接写参数。 */
+  /**
+   * 选中一条命令/技能，把光标处的 `/查询` 换成色块。
+   *
+   * 技能就地插入，和 `@` 选文件一个动作。命令归位到**头部**（一条消息只能
+   * 有一个，见 cmdName）：旧命令块被顶掉，正文和其余的块（文件、技能、
+   * 页面元素）原样跟在后面，光标落到末尾接着写参数。
+   */
   const chooseSlash = (c: SlashCommand) => {
     const el = ref.current;
     if (!el) return;
-    // 旧命令块被这一条顶掉，其余的块（文件、页面元素）都留着。
-    const keep = readEditor(el).filter((s) => isChipSeg(s) && s.kind !== "cmd");
-    setContent([{ kind: "cmd", value: c.name }, ...keep]);
-    setSlashPick(0);
     el.focus();
+    if (!runnable(c)) {
+      insertChipAtCaret(el, { kind: "cmd", value: c.name }, "/");
+    } else {
+      dropQueryAtCaret("/");
+      const rest = readEditor(el).filter((s) => !(s.kind === "cmd" && runnableName(s.value)));
+      // 剩下的只有空白（查询就是全部内容）就不留：命令块后面那一格由
+      // SPACE 补，再跟一段空白会多出一个空格。
+      const body = rest.some((s) => s.kind !== "text" || s.value.trim()) ? rest : [];
+      const first = body[0];
+      if (first?.kind === "text") body[0] = { kind: "text", value: first.value.replace(/^\s+/, "") };
+      setContent([{ kind: "cmd", value: c.name }, SPACE, ...body]);
+    }
+    setSlashPick(0);
+    sync();
   };
 
   // `@` 文件引用：认的是**光标处**那个没敲完的 token（由 sync 算出来），
@@ -767,6 +853,15 @@ export function Composer({
   const uid = useId().replace(/[^a-zA-Z0-9]/g, "");
   const menuId = `composer-menu-${uid}`;
   const optionId = (i: number) => `${menuId}-o${i}`;
+
+  // 键盘高亮跟着滚：命令菜单两行一条，十条装不进 max-height，↓ 到看不见的
+  // 那条时得把它带进视野。nearest 只在越界时滚，鼠标扫过不会跳。
+  useEffect(() => {
+    if (!menuKind) return;
+    document.getElementById(optionId(menuPick))?.scrollIntoView({ block: "nearest" });
+    // optionId 是纯函数，只依赖 menuId。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [menuKind, menuPick, menuId]);
   /** 输入框的可及名。`data-placeholder` 只是 CSS 伪元素，读屏取不到。 */
   const placeholder = busy
     ? "它正在做事…此刻发送会排队，当前任务完成后自动发出"
@@ -777,7 +872,7 @@ export function Composer({
     const el = ref.current;
     if (!el) return;
     el.focus();
-    insertChipAtCaret(el, { kind: "ref", value: p });
+    insertChipAtCaret(el, { kind: "ref", value: p }, "@");
     setFilePick(0);
     sync();
   };
@@ -798,18 +893,20 @@ export function Composer({
     //
     // 认不出的 `/xxx` 原样发出去 —— 用户可能真想跟模型说这个词。
     const sentSegsNow = ref.current ? readEditor(ref.current) : [];
-    const cmdSeg = sentSegsNow.find((s) => s.kind === "cmd");
+    // 只认可执行 / 可展开的那一个命令块；技能块是正文的一部分（见 cmdName）。
+    const cmdSeg = sentSegsNow.find((s) => s.kind === "cmd" && runnableName(s.value));
     const cmd = cmdSeg
       ? commands.find((c) => c.name === cmdSeg.value)
       : (() => {
           const slash = SLASH_SUBMIT_RE.exec(text);
           return slash ? commands.find((c) => c.name === slash[1]) : undefined;
         })();
-    if (cmd && (cmd.source === "builtin" || cmd.expandInline)) {
+    if (cmd && runnable(cmd)) {
+      // 参数 = 命令块之外的文字，技能块按 `/名字` 原位放回去。
       const args = cmdSeg
         ? sentSegsNow
-            .filter((s) => s.kind === "text")
-            .map((s) => s.value)
+            .filter((s) => s !== cmdSeg)
+            .map((s) => (s.kind === "text" ? s.value : s.kind === "cmd" ? `/${s.value}` : ""))
             .join("")
             .trim()
         : (SLASH_SUBMIT_RE.exec(text)?.[2] ?? "");
@@ -1139,12 +1236,6 @@ export function Composer({
 
   const applyMode = (m: PermissionMode) => {
     const prev = mode;
-    if (m === "plan" && isExecPermissionMode(prev)) {
-      execModeCache.set(sessionId, prev);
-    }
-    if (isExecPermissionMode(m)) {
-      execModeCache.set(sessionId, m);
-    }
     const seq = ++modeSeq.current;
     setMode(m);
     modeCache.set(sessionId, m);
@@ -1161,29 +1252,29 @@ export function Composer({
     });
   };
 
-  const changeMode = (m: PermissionMode) => {
-    if (m === "plan" && multitask) {
-      setMultitask(false);
-      multitaskCache.set(sessionId, false);
-      void setSessionMultitask(sessionId, false).catch(() => {});
-    }
-    // 无人值守关掉的是最后一层保护，不能一次点击就生效。
-    if (m === "unattended" && mode !== "unattended") {
-      setModeConfirm({
-        title: "切到无人值守？",
-        body: "这个会话之后不会再有任何权限弹窗，包括危险操作。",
-        confirmLabel: "确认切换",
-        action: () => applyMode(m),
-      });
+  /**
+   * 会话设置里选了权限档。无人值守的二次确认在弹窗那边做过了。
+   * 规划中只换"批准后按哪档执行"，不把人从规划里踢出去 —— 宿主此刻
+   * 仍是 plan，等批准计划时用户挑的档位会走 hostMode 回来。
+   */
+  const pickPermission = (m: PermissionMode) => {
+    if (mode === "plan") {
+      setExecMode(m);
+      execModeCache.set(sessionId, m);
       return;
     }
     applyMode(m);
   };
-
-  /** 规划模式下仍在生效的权限档：批准计划后按它动手，pill 上报的就是它。 */
-  const execMode: PermissionMode = isExecPermissionMode(mode)
-    ? mode
-    : (execModeCache.get(sessionId) ?? (isExecPermissionMode(initialMode) ? initialMode : "default"));
+  const pickPermRef = useRef(pickPermission);
+  pickPermRef.current = pickPermission;
+  // 挂载时已经在的那一次不算：Chat 被保活淘汰再挂回来，弹窗早关了，
+  // 那次选择早已落地 —— 再应用一遍会把之后宿主侧改过的档位顶掉。
+  const seenPick = useRef(permissionPick?.seq ?? 0);
+  useEffect(() => {
+    if (!permissionPick || permissionPick.seq === seenPick.current) return;
+    seenPick.current = permissionPick.seq;
+    pickPermRef.current(permissionPick.mode);
+  }, [permissionPick]);
 
   /** 开/关多任务。与规划模式互斥；宿主是权威，失败回滚显示。 */
   const changeMultitask = (on: boolean) => {
@@ -1197,6 +1288,28 @@ export function Composer({
       setMultitask(prev);
       multitaskCache.set(sessionId, prev);
     });
+  };
+
+  /** 三选一的工作方式。plan 住在宿主的 PermissionMode 里，多任务是独立开关。 */
+  const workMode: WorkMode = mode === "plan" ? "plan" : multitask ? "multitask" : "agent";
+  const changeWorkMode = (w: WorkMode) => {
+    if (w === workMode) return;
+    if (w === "plan") {
+      if (multitask) {
+        setMultitask(false);
+        multitaskCache.set(sessionId, false);
+        void setSessionMultitask(sessionId, false).catch(() => {});
+      }
+      applyMode("plan");
+      return;
+    }
+    if (w === "multitask") {
+      changeMultitask(true);
+      return;
+    }
+    // 回到普通 agent：从哪种方式退出就收哪一头。
+    if (mode === "plan") applyMode(execMode);
+    if (multitask) changeMultitask(false);
   };
 
   return (
@@ -1255,32 +1368,43 @@ export function Composer({
           编辑区，所以当前项靠它的 aria-activedescendant 指过来。 */}
       {matches.length > 0 ? (
         <div className="slash-menu" role="listbox" id={menuId} aria-label="斜杠命令">
-          {matches.map((c, i) => (
-            <button
-              type="button"
-              key={c.name}
-              id={optionId(i)}
-              role="option"
-              aria-selected={i === pick}
-              className={i === pick ? "slash-item active" : "slash-item"}
-              // mousedown 而不是 click：click 之前 textarea 先失焦，
-              // 焦点一跑菜单就关了，点击落空。
-              onMouseDown={(e) => {
-                e.preventDefault();
-                chooseSlash(c);
-              }}
-              onMouseEnter={() => setSlashPick(i)}
-            >
-              <Chip seg={{ kind: "cmd", value: c.name }} />
-              {c.argumentHint ? <span className="slash-hint">{c.argumentHint}</span> : null}
-              <span className="slash-desc">{c.description}</span>
-              {c.source !== "builtin" ? (
-                <span className="slash-src">
-                  {c.source === "skill" ? "技能" : c.source === "project" ? "项目" : "全局"}
-                </span>
-              ) : null}
-            </button>
-          ))}
+          {matches.map((c, i) => {
+            // 分组标题（Cursor 同款）：matches 已按组排好，组一换就画一个。
+            const group = slashGroup(c);
+            const prev = matches[i - 1];
+            const head = !prev || slashGroup(prev) !== group;
+            return (
+              <Fragment key={c.name}>
+                {head ? (
+                  <div className={i === 0 ? "slash-group" : "slash-group slash-group-next"} role="presentation">
+                    {group}
+                  </div>
+                ) : null}
+                <button
+                  type="button"
+                  id={optionId(i)}
+                  role="option"
+                  aria-selected={i === pick}
+                  className={i === pick ? "slash-item slash-cmd active" : "slash-item slash-cmd"}
+                  // mousedown 而不是 click：click 之前 textarea 先失焦，
+                  // 焦点一跑菜单就关了，点击落空。
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    chooseSlash(c);
+                  }}
+                  onMouseEnter={() => setSlashPick(i)}
+                >
+                  {/* 名字一行、说明一行。名字不画成色块：候选是"还没选"的
+                      东西，画成块会和输入框里已经选定的命令混在一起。 */}
+                  <span className="slash-cmd-head">
+                    <span className="slash-cmd-name">/{c.name}</span>
+                    {c.argumentHint ? <span className="slash-hint">{c.argumentHint}</span> : null}
+                  </span>
+                  <span className="slash-desc">{c.description}</span>
+                </button>
+              </Fragment>
+            );
+          })}
         </div>
       ) : null}
 
@@ -1288,25 +1412,31 @@ export function Composer({
           同一时刻只有一个在 DOM 里。 */}
       {fileMatches.length > 0 && matches.length === 0 ? (
         <div className="slash-menu" role="listbox" id={menuId} aria-label="文件引用">
-          {fileMatches.map((p, i) => (
-            <button
-              type="button"
-              key={p}
-              id={optionId(i)}
-              role="option"
-              aria-selected={i === fpick}
-              className={i === fpick ? "slash-item active" : "slash-item"}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                chooseFile(p);
-              }}
-              onMouseEnter={() => setFilePick(i)}
-            >
-              {/* 文件名在前、目录在后：一屏候选里先扫到的是名字。 */}
-              <FileChip path={p} />
-              <span className="slash-desc">{p}</span>
-            </button>
-          ))}
+          {fileMatches.map((p, i) => {
+            // 文件名在前、目录在后：一屏候选里先扫到的是名字。类型图标 +
+            // 名字 + 灰色目录（Cursor 的 @ 菜单同款）—— 候选是"还没选"的
+            // 东西，画成色块会和输入框里已经选定的引用混在一起。
+            const dir = parentOf(p);
+            return (
+              <button
+                type="button"
+                key={p}
+                id={optionId(i)}
+                role="option"
+                aria-selected={i === fpick}
+                className={i === fpick ? "slash-item slash-file active" : "slash-item slash-file"}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  chooseFile(p);
+                }}
+                onMouseEnter={() => setFilePick(i)}
+              >
+                <FileIcon path={p} />
+                <span className="slash-file-name">{basename(p)}</span>
+                {dir !== p ? <span className="slash-desc slash-file-dir">{dir}</span> : null}
+              </button>
+            );
+          })}
         </div>
       ) : null}
 
@@ -1369,6 +1499,15 @@ export function Composer({
           onKeyUp={sync}
           onMouseUp={sync}
           onBlur={sync}
+          // 点文件块打开预览抽屉（和气泡里的块一样）。mousedown 已经把光标
+          // 放到了块的一侧，预览在 click 上开，两件事互不影响。目录没有
+          // 单文件内容可预览，不响应。
+          onClick={(e) => {
+            const chip = (e.target as HTMLElement).closest?.(".chip[data-chip='ref']");
+            const path = chip instanceof HTMLElement ? chip.dataset["value"] : undefined;
+            if (!path || isDirRef(path)) return;
+            openFilePreview(looksAbsPath(path) ? path : joinRoot(workspace, path));
+          }}
           // 粘贴板里的图和文件直接收下。这是"看这个截图"最常用的发法 ——
           // 截完图 ⌘V 就完事，不用先存盘再选文件；在 Finder 里复制的文件
           // 同理，粘进来就是一个引用块。
@@ -1398,6 +1537,7 @@ export function Composer({
             imeRef.current = true;
           }}
           onCompositionEnd={() => {
+            imeEndAt.current = performance.now();
             // compositionend 与确认用的 Enter 可能跨到下一个宏任务，
             // microtask 不够，用 setTimeout(0) 盖住这一拍。
             setTimeout(() => {
@@ -1406,22 +1546,28 @@ export function Composer({
             sync();
           }}
           onKeyDown={(e) => {
-            // 色块当原子：退格一次整块删掉，方向键整块跳过。
-            // 交给浏览器的话，WebKit 会先把光标塞进块里（或先选中再删）。
-            if (
-              ref.current &&
-              !e.nativeEvent.isComposing &&
-              !imeRef.current &&
-              handleChipKey(e, ref.current)
-            ) {
-              e.preventDefault();
-              sync();
-              return;
+            const el = ref.current;
+            // 三个条件缺一不可，尤其 229：删掉最后一个拼音字母的那一记退格由
+            // 输入法消费 —— WebKit 先结束组字（compositionend），**再**派发这次
+            // keydown，此时 isComposing 已是 false，而 imeRef 的 setTimeout(0)
+            // 也常常正好在两条 IPC 消息之间翻掉。放过去就是"光标贴着块删拼音，
+            // 块没了"。keyCode 229 是 WebKit 给"已被输入法处理"的键打的唯一标记。
+            const imeKey = e.nativeEvent.isComposing || e.keyCode === 229 || imeRef.current;
+            if (el && !imeKey) {
+              // 色块当原子：退格一次整块删掉，方向键整块跳过。
+              // 交给浏览器的话，WebKit 会先把光标塞进块里（或先选中再删）。
+              // 贴着块的那一下换行同理，原因见 insertLineBreak。
+              const lineBreak = e.key === "Enter" && e.shiftKey;
+              if (handleChipKey(e, el) || (lineBreak && insertLineBreak(el))) {
+                e.preventDefault();
+                sync();
+                return;
+              }
             }
 
             // 补全菜单开着时，方向键和 Tab/Enter 归它用。
             const menu = menuKind;
-            if (menu && !e.nativeEvent.isComposing && !imeRef.current) {
+            if (menu && !imeKey) {
               const len = menu === "slash" ? matches.length : fileMatches.length;
               const move = menu === "slash" ? setSlashPick : setFilePick;
               if (e.key === "ArrowDown") {
@@ -1436,17 +1582,12 @@ export function Composer({
               }
               if (e.key === "Escape") {
                 e.preventDefault();
-                // 斜杠菜单：整条草稿就是那个命令，清掉即可。
-                // 文件菜单：正文还在，只把光标前那段 @ 抹掉收起菜单。
-                if (menu === "slash") {
-                  replaceText("");
-                } else {
-                  dropQueryAtCaret();
-                  sync();
-                }
+                // 正文还在，只把光标前那段 `/查询` / `@查询` 抹掉收起菜单。
+                dropQueryAtCaret(menu === "slash" ? "/" : "@");
+                sync();
                 return;
               }
-              if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && e.keyCode !== 229)) {
+              if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
                 e.preventDefault();
                 if (menu === "slash") {
                   const c = matches[pick];
@@ -1460,14 +1601,14 @@ export function Composer({
             }
             // 空输入时 Esc 中断当前轮 —— 想停不必去够那个停止按钮。
             // 有草稿时 Esc 留给"清空/退出引用"这类局部撤销，不误伤。
-            if (e.key === "Escape" && busy && !draft.trim() && !e.nativeEvent.isComposing) {
+            if (e.key === "Escape" && busy && !draft.trim() && !imeKey) {
               e.preventDefault();
               onStop();
               return;
             }
             // 敲空格且整段正好是一条已知命令：收成色块，别留下 `/compact ` 纯文字。
-            if (e.key === " " && !e.nativeEvent.isComposing && !imeRef.current) {
-              const typed = SLASH_QUERY_RE.exec(draft)?.[1];
+            if (e.key === " " && !imeKey) {
+              const typed = slashQuery;
               const exact = typed ? commands.find((c) => c.name === typed) : undefined;
               if (exact) {
                 e.preventDefault();
@@ -1475,14 +1616,7 @@ export function Composer({
                 return;
               }
             }
-            // 229 = IME 处理中的占位 keyCode，部分 WebView 上比 isComposing 更准
-            if (
-              e.key === "Enter" &&
-              !e.shiftKey &&
-              !e.nativeEvent.isComposing &&
-              e.keyCode !== 229 &&
-              !imeRef.current
-            ) {
+            if (e.key === "Enter" && !e.shiftKey && !imeKey) {
               e.preventDefault();
               submit();
             }
@@ -1500,13 +1634,7 @@ export function Composer({
             >
               <PlusIcon />
             </button>
-            <ModeMenu
-              mode={mode}
-              execMode={execMode}
-              onChange={changeMode}
-              multitask={multitask}
-              onMultitask={changeMultitask}
-            />
+            <ModeMenu value={workMode} onChange={changeWorkMode} />
             {/* 窄列藏起来：三个 pill 并排是挤的源头，换服务方/模型去设置里也能做。 */}
             <div className="composer-picks">
               <Picker
@@ -1596,9 +1724,6 @@ export function Composer({
           </div>
         </div>
       </form>
-      {modeConfirm ? (
-        <ConfirmDialog c={modeConfirm} onClose={() => setModeConfirm(null)} />
-      ) : null}
     </div>
   );
 }

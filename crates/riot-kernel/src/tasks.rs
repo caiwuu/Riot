@@ -47,6 +47,13 @@ struct Entry {
     view_from: usize,
 }
 
+/// 一个子 agent 的会话（[`BackgroundTasks::history`] 的返回）。
+pub struct TaskHistory {
+    pub task: BackgroundTaskView,
+    pub messages: Vec<Message>,
+    pub descendants: Vec<BackgroundTaskView>,
+}
+
 /// 续接一个子 agent 需要的东西。
 #[derive(Debug)]
 pub struct ResumeSource {
@@ -135,8 +142,9 @@ impl BackgroundTasks {
         }
     }
 
-    /// 一个子 agent 的会话：视图 + 界面该看的那段消息。None = 不认识。
-    pub fn history(&self, id: &str) -> Option<(BackgroundTaskView, Vec<Message>)> {
+    /// 一个子 agent 的会话：视图 + 界面该看的那段消息 + 它派出去的全部
+    /// 子 agent（含更深层，按登记顺序）。None = 不认识。
+    pub fn history(&self, id: &str) -> Option<TaskHistory> {
         let g = self.lock();
         let e = g.iter().find(|e| e.view.id.as_str() == id)?;
         let messages = e
@@ -144,7 +152,16 @@ impl BackgroundTasks {
             .as_ref()
             .map(|m| m[e.view_from.min(m.len())..].to_vec())
             .unwrap_or_default();
-        Some((e.view.clone(), messages))
+        let descendants = g
+            .iter()
+            .filter(|x| is_descendant_of(&g, &x.view, id))
+            .map(|x| x.view.clone())
+            .collect();
+        Some(TaskHistory {
+            task: e.view.clone(),
+            messages,
+            descendants,
+        })
     }
 
     /// 子 agent 结束。历史整份存下（续接用），并把太老的瘦身掉。
@@ -263,6 +280,21 @@ impl BackgroundTasks {
     }
 }
 
+/// 沿 parent 往上走，落在 `ancestor` 上的都算它的后代。层数有限（深度
+/// 计数器封顶），每条线性扫一遍就够。
+fn is_descendant_of<'a>(all: &'a [Entry], mut v: &'a BackgroundTaskView, ancestor: &str) -> bool {
+    while let Some(p) = &v.parent {
+        if p.as_str() == ancestor {
+            return true;
+        }
+        match all.iter().find(|x| &x.view.id == p) {
+            Some(px) => v = &px.view,
+            None => return false,
+        }
+    }
+    false
+}
+
 /// 子 agent 的完成通知：一条 user 消息，正文给模型，标记给界面。
 ///
 /// `report` 是子 agent 的最后一条回复（同步 Task 里原样作为 tool_result
@@ -331,6 +363,7 @@ mod tests {
             model: "m".into(),
             background,
             tool_use_id: riot_protocol::id::ToolUseId::from_raw(format!("tu_{id}")),
+            parent: None,
             status: BackgroundTaskStatus::Running,
             activity: String::new(),
             tool_uses: 0,
@@ -443,9 +476,13 @@ mod tests {
             2,
         );
         t.push_message(&AgentId::from_raw("fork"), msg("干活1"));
-        let (v, m) = t.history("fork").expect("认识它");
-        assert_eq!(v.status, BackgroundTaskStatus::Running);
-        let texts: Vec<String> = m.iter().map(|x| x.id().as_str().to_owned()).collect();
+        let h = t.history("fork").expect("认识它");
+        assert_eq!(h.task.status, BackgroundTaskStatus::Running);
+        let texts: Vec<String> = h
+            .messages
+            .iter()
+            .map(|x| x.id().as_str().to_owned())
+            .collect();
         assert_eq!(texts, ["分叉说明", "干活1"], "父历史不给界面");
 
         t.finish(
@@ -477,9 +514,33 @@ mod tests {
             ],
             0,
         );
-        let (_, m) = t.history("fork").unwrap();
-        assert_eq!(m.len(), 4, "续接后界面照样从分叉点看起：{m:?}");
+        let h = t.history("fork").unwrap();
+        assert_eq!(
+            h.messages.len(),
+            4,
+            "续接后界面照样从分叉点看起：{:?}",
+            h.messages
+        );
         assert!(t.history("nope").is_none());
+    }
+
+    /// 嵌套：子 agent 派的子 agent 记 parent；查父的会话时后代（含更深层）一并回来。
+    #[test]
+    fn 后代按parent链找齐() {
+        let t = BackgroundTasks::new(SessionSink::default());
+        start(&t, "a", true, CancellationToken::new());
+        let mut b = view("b", false);
+        b.parent = Some(AgentId::from_raw("a"));
+        t.start(b, Kind::Explore, CancellationToken::new(), vec![], 0);
+        let mut c = view("c", false);
+        c.parent = Some(AgentId::from_raw("b"));
+        t.start(c, Kind::Explore, CancellationToken::new(), vec![], 0);
+        start(&t, "other", false, CancellationToken::new());
+
+        let h = t.history("a").unwrap();
+        let ids: Vec<&str> = h.descendants.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, ["b", "c"], "孙子也算，无关的不算");
+        assert!(t.history("c").unwrap().descendants.is_empty());
     }
 
     /// 通知是一轮的起点（`is_user_prompt`），而且界面靠 meta 认出它。

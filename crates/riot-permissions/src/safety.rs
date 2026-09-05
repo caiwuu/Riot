@@ -424,6 +424,20 @@ mod tests {
         }
     }
 
+    /// 历史会话摘录在 Riot 的数据目录里（工作区之外）。系统提示词让模型
+    /// 去那里 Grep/Read —— 这条路要是撞上安全检查，每次回忆都弹一次窗，
+    /// 功能等于不存在。目录名里带 `sessions`、`digests`，都不该被当成敏感。
+    #[test]
+    fn 会话摘录目录读取不触发() {
+        for p in [
+            "/Users/u/Library/Application Support/riot/sessions/digests/Users-u-code-riot-1a2b3c4d/INDEX.md",
+            "/Users/u/Library/Application Support/riot/sessions/digests/Users-u-code-riot-1a2b3c4d/ses_x1.md",
+            "C:\\Users\\u\\AppData\\Roaming\\riot\\sessions\\digests\\D-work-proj-9f8e7d6c\\ses_x1.md",
+        ] {
+            assert_eq!(on_read(p), None, "{p}");
+        }
+    }
+
     #[test]
     fn 按路径分量匹配而不是子串() {
         // 误报比漏报更快消耗用户的注意力 —— 弹窗多了他就不看内容直接点

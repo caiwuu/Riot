@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { type BackgroundTaskView, type TaskHistory, taskCancel, taskHistory } from "../bridge";
 import { type Item, messagesToItems } from "../hooks/useSession";
+import { SubagentsContext } from "../lib/subagentLink";
 import { StopIcon } from "./icons";
 import { groupBlocks, ProcessGroup } from "./ProcessFold";
 import { kindLabel, statusLabel } from "./TaskPanel";
@@ -110,16 +111,19 @@ export function SubagentPanel({
             <div className="subagent-prompt-text">{prompt}</div>
           </div>
         ) : null}
-        <div className="transcript-list subagent-list">
-          {blocks.map((b) =>
-            b.kind === "row" ? (
-              <Row key={b.item.id} item={b.item} hydrate />
-            ) : (
-              <ProcessGroup key={b.id} items={b.items} live={b.live} />
-            ),
-          )}
-          {running && items.length === 0 ? <div className="msg notice">正在启动…</div> : null}
-        </div>
+        {/* 它派出去的子 agent 给它会话里的 Task 卡片认领（嵌套一层层点下去）。 */}
+        <SubagentsContext.Provider value={hist.descendants ?? []}>
+          <div className="transcript-list subagent-list">
+            {blocks.map((b) =>
+              b.kind === "row" ? (
+                <Row key={b.item.id} item={b.item} hydrate />
+              ) : (
+                <ProcessGroup key={b.id} items={b.items} live={b.live} />
+              ),
+            )}
+            {running && items.length === 0 ? <div className="msg notice">正在启动…</div> : null}
+          </div>
+        </SubagentsContext.Provider>
       </div>
     </div>
   );

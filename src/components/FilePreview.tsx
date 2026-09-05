@@ -260,6 +260,8 @@ export function FilePreviewPanel({
   refreshKey,
   onOpen,
   onTreeContextMenu,
+  onPickFromDisk,
+  filterFocus,
 }: {
   sessionId: string;
   /** 打开着的所有文件（绝对路径），即标签顺序。 */
@@ -280,6 +282,10 @@ export function FilePreviewPanel({
   /** 树里点了一个文件。 */
   onOpen: (abs: string) => void;
   onTreeContextMenu: (e: React.MouseEvent, target: TreeTarget) => void;
+  /** 树栏里"从磁盘打开"（系统选择框，能选项目外的文件）。 */
+  onPickFromDisk: () => void;
+  /** 变一次就把焦点放进树的筛选框（⌘P）。 */
+  filterFocus: number;
 }) {
   const [openErr, flashOpenErr] = useTimedFlag(false, 2000);
   const root = useContext(ProjectRootContext);
@@ -389,6 +395,8 @@ export function FilePreviewPanel({
                 refreshKey={refreshKey}
                 onOpen={onOpen}
                 onContextMenu={onTreeContextMenu}
+                onPickFromDisk={onPickFromDisk}
+                filterFocus={filterFocus}
               />
             </div>
           </>

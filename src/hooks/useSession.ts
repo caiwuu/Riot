@@ -27,6 +27,7 @@ import {
   queueRemove,
   queueTake,
   regenerateTurn,
+  resendTurn,
   respondPermission,
   sendTurn,
   subscribeSession,
@@ -1243,6 +1244,81 @@ export function useSession(
     [sessionId, mutateHistory],
   );
 
+  /**
+   * 编辑后重发（Cursor 编辑气泡后发送的同款）：换掉这条提问的文字，丢掉
+   * 它之后的一切，从它再跑一轮。返回 false = 没发出去（忙、消息没了、
+   * 内核拒绝），编辑框应保留草稿。
+   *
+   * 界面先按乐观结果画：截到这条、换字、进入忙碌 —— 和 `regenerate` 同一
+   * 套；失败拉快照回滚。
+   */
+  const resendEntry = useCallback(
+    async (item: TextItem, text: string): Promise<boolean> => {
+      if (busyRef.current) return false;
+      let messageId: string;
+      try {
+        const hist = await getHistory(sessionId);
+        if (hist.busy) return false;
+        const found = locateMessage(hist.messages, item);
+        if (!found) {
+          throw new Error("这条消息已经不在当前上下文里（可能已被压缩进摘要）。");
+        }
+        messageId = found;
+      } catch (e) {
+        setState((s) => ({
+          ...s,
+          items: [...s.items, { kind: "error", id: `err-${Date.now()}`, text: humanizeError(e) }],
+        }));
+        return false;
+      }
+      busyRef.current = true;
+      waitStartAt.set(sessionId, Date.now());
+      mutateQueued(() => []);
+      setState((s) => ({
+        ...s,
+        items: trimThroughEdited(s.items, item.id, text),
+        streaming: "",
+        thinking: "",
+        streamingPlan: null,
+        busy: true,
+        asks: [],
+        queued: [],
+      }));
+      try {
+        await resendTurn(sessionId, messageId, text);
+        return true;
+      } catch (e) {
+        waitStartAt.delete(sessionId);
+        busyRef.current = false;
+        try {
+          const hist = await getHistory(sessionId);
+          setState((s) => {
+            const restored = applyHistorySnap(s, hist);
+            return {
+              ...restored,
+              busy: false,
+              items: [
+                ...restored.items,
+                { kind: "error", id: `err-${Date.now()}`, text: humanizeError(e) },
+              ],
+            };
+          });
+        } catch {
+          setState((s) => ({
+            ...s,
+            busy: false,
+            items: [
+              ...s.items,
+              { kind: "error", id: `err-${Date.now()}`, text: humanizeError(e) },
+            ],
+          }));
+        }
+        return false;
+      }
+    },
+    [sessionId, mutateQueued, setState],
+  );
+
   /** 上下文删除：按轮成对删（这条气泡所属的提问连同全部回应）。 */
   const deleteEntry = useCallback(
     (item: TextItem) =>
@@ -1321,6 +1397,7 @@ export function useSession(
     answer,
     regenerate,
     editEntry,
+    resendEntry,
     deleteEntry,
     queueDelete,
     queueEdit,
@@ -1578,6 +1655,16 @@ function textsOverlap(a: string, b: string): boolean {
 /** 界面条目 id（`msg_xxx-t` / `msg_xxx-t3`）→ 内核消息 id。 */
 function assistantMessageId(itemId: string): string {
   return itemId.replace(/-t\d*$/, "");
+}
+
+/** 截到这条用户气泡（含）并换掉它的文字，之后的一切丢掉。找不到就原样返回。 */
+function trimThroughEdited(items: Item[], userItemId: string, text: string): Item[] {
+  const at = items.findIndex((it) => it.id === userItemId);
+  if (at < 0) return items;
+  const kept = items.slice(0, at + 1);
+  const target = kept[at];
+  if (target?.kind === "user") kept[at] = { ...target, text };
+  return kept;
 }
 
 /** 丢掉这条助手回复及之后的一切，保留到它前面那条用户气泡。 */

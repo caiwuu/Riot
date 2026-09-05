@@ -6,16 +6,20 @@
  *   现有会话 + 会话选择器）、频率（重复 / 时间）都可编辑，有改动时
  *   顶部出现「保存」，失败变「重试保存」。
  *
- * 创建的主入口仍在对话里 ——「创建」和建议只是把开头替用户写好、
- * 送回输入框。行上的「…」菜单复用 App 的全局 ContextMenu。
+ * 创建有两条路，「创建」按钮弹菜单让用户选：**手动创建**在右侧栏（详情
+ * 面板的位置）展开一张表单（[`ScheduleCreatePanel`]，字段和详情同一套）；
+ * **让 Riot 创建**把开头替用户写好、送回输入框，由对话里的 agent 接手。
+ * 建议走的是后一条。行上的「…」菜单复用 App 的全局 ContextMenu。
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   type MissedRun,
+  type RunTargetSpec,
   type SchedulePatch,
   type ScheduledTask,
+  scheduleCreate,
   scheduleSetEnabled,
   scheduleUpdate,
   type SessionInfo,
@@ -117,8 +121,8 @@ export function SchedulesPage({
   onMenu: (e: React.MouseEvent, t: ScheduledTask) => void;
   /** 右键 / … 菜单正对着的行。菜单在文档别处，行要靠这个保住 hover。 */
   menuAnchor?: string | null;
-  /** 右上「创建」：回到会话、把开头写进输入框。 */
-  onCreate: () => void;
+  /** 右上「创建」：App 在点击处弹出「手动创建 / 让 Riot 创建」菜单。 */
+  onCreate: (e: React.MouseEvent) => void;
   /** 清掉一次性已经跑完的任务。 */
   onClearDone: () => void;
   /** 点一条建议：回到会话、把整段模板写进输入框。 */
@@ -156,7 +160,7 @@ export function SchedulesPage({
         <div className="sp-inner">
           <div className="sp-head">
             <h2>定时任务</h2>
-            <p className="sp-sub">让 Riot 到点自动跑一轮 —— 在对话里说时间和要做的事就能创建</p>
+            <p className="sp-sub">让 Riot 到点自动跑一轮 —— 手动填表创建，或在对话里说时间和要做的事</p>
           </div>
 
           <input
@@ -189,9 +193,10 @@ export function SchedulesPage({
               >
                 清理已完成
               </button>
-              <button className="sp-create" onClick={onCreate}>
+              <button className="sp-create" onClick={onCreate} aria-haspopup="menu">
                 <PlusIcon />
                 创建
+                <Chevron down open={false} />
               </button>
             </div>
           </div>
@@ -560,6 +565,184 @@ function buildWhen(choice: RepeatChoice, time: string, onceAt: string): WhenSpec
   if (choice === "daily") return { kind: "daily", time };
   if (choice === "weekdays") return { kind: "weekdays", time };
   return { kind: "weekly", weekday: Number(choice.slice(1)), time };
+}
+
+/* ── 手动创建 ───────────────────────────────── */
+
+/**
+ * 手动创建的表单。渲染在**详情面板同一个位置**（App 的系统右侧栏），
+ * 壳、字段、间距都和 [`ScheduleDetail`] 一样 —— 建完选中新任务，面板
+ * 原地换成详情，用户眼里是同一块地方从"填"变成了"看"。
+ *
+ * 提交交给宿主校验 —— 时间格式、目录是否存在、会话是否还在都在那边判，
+ * 错误原文就是给人看的一句话，直接摆在表单底部。默认值挑"最像会填的"：
+ * 每天 09:00、新会话、当前项目。一次性任务的时刻留空让日期选择器自己
+ * 落到"明天 9 点"。
+ */
+export function ScheduleCreatePanel({
+  width,
+  sessions,
+  projects,
+  defaultRoot,
+  onClose,
+  onCreated,
+}: {
+  /** 和详情面板同一个宽度（用户拖出来的值，真值在 App）。 */
+  width: number;
+  sessions: SessionInfo[];
+  projects: string[];
+  /** 「新会话」默认绑定的项目：活跃会话的根，没有就项目列表第一个。 */
+  defaultRoot: string | null;
+  onClose: () => void;
+  /** 建成了。调用方刷新列表、选中它。 */
+  onCreated: (t: ScheduledTask) => void;
+}) {
+  const [name, setName] = useState("");
+  const [prompt, setPrompt] = useState("");
+  const [runIn, setRunIn] = useState<"new" | "session">("new");
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [root, setRoot] = useState(defaultRoot ?? projects[0] ?? "");
+  const [choice, setChoice] = useState<RepeatChoice>("daily");
+  const [time, setTime] = useState("09:00");
+  const [onceAt, setOnceAt] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const canSubmit =
+    name.trim() !== "" &&
+    prompt.trim() !== "" &&
+    (runIn === "new" ? root !== "" : sessionId !== null) &&
+    (choice !== "once" || onceAt.trim() !== "");
+
+  const submit = async () => {
+    if (!canSubmit || busy) return;
+    const target: RunTargetSpec =
+      runIn === "session" && sessionId
+        ? { kind: "session", id: sessionId }
+        : { kind: "new_session", root };
+    setBusy(true);
+    setError(null);
+    try {
+      const t = await scheduleCreate({
+        name: name.trim(),
+        prompt: prompt.trim(),
+        when: buildWhen(choice, time, onceAt),
+        target,
+      });
+      onCreated(t);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="sp-detail" style={{ width }} aria-label="创建定时任务">
+      <div className="sp-d-head">
+        <span className="sp-d-status">新任务</span>
+        <span className="sp-d-space" />
+        <button
+          className="sp-create sp-d-save"
+          disabled={!canSubmit || busy}
+          onClick={() => void submit()}
+        >
+          {busy ? "创建中…" : "创建"}
+        </button>
+        <button className="row-btn" onClick={onClose} title="取消" aria-label="取消创建">
+          <CloseIcon />
+        </button>
+      </div>
+
+      <input
+        className="sp-d-name"
+        autoFocus
+        value={name}
+        onChange={(e) => setName(e.currentTarget.value)}
+        placeholder="任务名"
+        aria-label="任务名"
+        spellCheck={false}
+      />
+
+      <ResizableTextarea
+        className="preset-body-input"
+        value={prompt}
+        onChange={(e) => setPrompt(e.currentTarget.value)}
+        rows={6}
+        placeholder="到点发给 Riot 的话。像写给未来的自己：把背景说全，那时不一定有现在的上下文。"
+        aria-label="到点发出的提示词"
+        spellCheck={false}
+      />
+
+      <div className="sp-d-caption">详情</div>
+      <div className="sp-d-group">
+        <div className="sp-d-row">
+          <span>运行于</span>
+          <FieldSelect
+            className="sp-d-field"
+            value={runIn}
+            onChange={(v) => setRunIn(v as "new" | "session")}
+            options={[
+              { value: "new", label: "新会话" },
+              { value: "session", label: "现有会话" },
+            ]}
+          />
+        </div>
+        {runIn === "session" ? (
+          <div className="sp-d-row">
+            <span>会话</span>
+            <SessionPicker sessions={sessions} value={sessionId} onPick={setSessionId} />
+          </div>
+        ) : (
+          <div className="sp-d-row">
+            <span>项目</span>
+            <FieldSelect
+              className="sp-d-field"
+              value={root}
+              onChange={setRoot}
+              menuMinWidth={220}
+              options={projects.map((p) => ({ value: p, label: basename(p) }))}
+            />
+          </div>
+        )}
+      </div>
+
+      <div className="sp-d-caption">频率</div>
+      <div className="sp-d-group">
+        <div className="sp-d-row">
+          <span>重复</span>
+          <FieldSelect
+            className="sp-d-field"
+            value={choice}
+            onChange={(v) => setChoice(v as RepeatChoice)}
+            options={[
+              { value: "once", label: "一次性" },
+              { value: "daily", label: "每天" },
+              { value: "weekdays", label: "工作日" },
+              ...WEEKDAY_NAMES.map((w, i) => ({ value: `w${i + 1}`, label: `每${w}` })),
+            ]}
+          />
+        </div>
+        {choice === "once" ? (
+          <div className="sp-d-row">
+            <span>时刻</span>
+            <DateTimePicker className="sp-d-field" value={onceAt} onChange={setOnceAt} />
+          </div>
+        ) : (
+          <div className="sp-d-row">
+            <span>时间</span>
+            <TimePicker className="sp-d-field" value={time} onChange={setTime} />
+          </div>
+        )}
+      </div>
+
+      {error ? (
+        <div className="sp-d-error" role="alert">
+          {error}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 /**

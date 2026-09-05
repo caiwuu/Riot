@@ -76,6 +76,7 @@ import { useAppUpdate } from "./hooks/useAppUpdate";
 import { useBrowserPanel } from "./hooks/useBrowserPanel";
 import { newPresetId } from "./lib/prompts";
 import { inheritedSampling } from "./lib/sampling";
+import { subscribeSessionOpen } from "./lib/sessionLink";
 import { SubagentsContext, subscribeSubagentOpen } from "./lib/subagentLink";
 import { Transcript, transcriptView } from "./components/Transcript";
 import {
@@ -93,11 +94,16 @@ import {
   type WorkbenchState,
   type WorkbenchTab,
 } from "./components/Workbench";
-import { isDoneSchedule, ScheduleDetail, SchedulesPage } from "./components/SchedulesPage";
+import {
+  isDoneSchedule,
+  ScheduleCreatePanel,
+  ScheduleDetail,
+  SchedulesPage,
+} from "./components/SchedulesPage";
 import { Sidebar } from "./components/Sidebar";
 import { SlidePanel, usePresence } from "./components/SlidePanel";
 import { Welcome } from "./components/Welcome";
-import { Composer, forgetComposerSession } from "./components/Composer";
+import { Composer, type PermissionPick, forgetComposerSession } from "./components/Composer";
 import {
   FolderIcon,
   RiotMark,
@@ -314,6 +320,9 @@ export function App() {
   const [missedSchedules, setMissedSchedules] = useState<MissedRun[]>([]);
   /** 创建定时任务的开场白。走 Composer 的 insertText 通道。 */
   const [schedSnippet, setSchedSnippet] = useState<string | null>(null);
+  /** 手动创建定时任务的表单在右侧栏展开着。和 selectedSchedule 互斥 ——
+   *  两者占的是同一块地方。 */
+  const [schedCreating, setSchedCreating] = useState(false);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
   /** 目录已不在磁盘上、等用户决定怎么处理的那个项目。 */
@@ -334,6 +343,14 @@ export function App() {
   const lastPreview = useRef<string | null>(null);
   const [showTerm, setShowTerm] = useState(false);
   const [showSessionCfg, setShowSessionCfg] = useState(false);
+  /**
+   * 每个会话生效中的权限档，由 Composer 上报。SessionInfo.mode 是宿主侧
+   * 的 PermissionMode，规划中它是 "plan"，而弹窗要显示的是"批准后按哪档
+   * 执行" —— 那个值只有 Composer 知道。
+   */
+  const [execModes, setExecModes] = useState<Record<string, PermissionMode>>({});
+  /** 会话设置弹窗选的权限档，送去给 Composer 落地。 */
+  const [permPick, setPermPick] = useState<{ id: string; pick: PermissionPick } | null>(null);
   /** 递增一次，改动面板重新比对一次。轮次结束时推一下。 */
   const [changesRev, setChangesRev] = useState(0);
   /** 用户从终端选中、要交给模型的一段输出。塞进输入框而不是直接发送 ——
@@ -445,6 +462,19 @@ export function App() {
   // effect 依赖它 —— 等于每渲染一次就把 window 的 keydown 解绑重绑一次。
   const projects = useMemo(() => projectList ?? [], [projectList]);
   const activeSession = sessions.find((s) => s.id === active) ?? null;
+  /** 当前会话生效中的权限档，顶栏标记和会话设置弹窗共用。Composer 还没
+   *  上报时退到宿主侧的值；那时它是 plan 的话说明还没有人记得进规划前
+   *  那一档，按最严的算。 */
+  const activePermission: PermissionMode | null = activeSession
+    ? (execModes[activeSession.id] ??
+      (activeSession.mode === "plan" ? "default" : activeSession.mode))
+    : null;
+  /** 顶栏下拉选了新档 → 排给当前会话的 Composer 落地。 */
+  const pickPermission = (m: PermissionMode) => {
+    if (!activeSession) return;
+    const id = activeSession.id;
+    setPermPick((prev) => ({ id, pick: { mode: m, seq: (prev?.pick.seq ?? 0) + 1 } }));
+  };
   const update = useAppUpdate(!booting && !bootError);
   const updateNotice = update.banner;
 
@@ -554,13 +584,19 @@ export function App() {
     setWb((prev) => ({ ...prev, open: true }));
   }, []);
 
-  /** 系统文件选择框 → 预览标签。空状态行、"+"菜单和 ⌘P 共用这一条。
+  /** 系统文件选择框 → 预览标签。文件树的"从磁盘打开"按钮和 ⌘O 共用这一条。
+   *  和文件树的区别只有一点：能打开项目外的文件。
    *  openFilePreview 自带分流：可预览的开成标签，图片开大图，其余访达定位。 */
   const pickAndPreview = useCallback(() => {
     void pickFiles().then((paths) => {
       for (const p of paths) openFilePreview(p);
     });
   }, []);
+
+  /** 每按一次 ⌘P 加一。文件树看到它变了就把焦点放进筛选框。计数而不是
+   *  布尔：树可能还没挂载（"文件"标签是这一下才开的），用布尔的话得再
+   *  写一手"用完复位"的往返。 */
+  const [treeFilterFocus, setTreeFilterFocus] = useState(0);
 
   /** 预览头部的树开关。 */
   const toggleTree = useCallback(() => {
@@ -643,6 +679,18 @@ export function App() {
         openTab({ kind: "subagent", agentId, title }),
       ),
     [openTab],
+  );
+  // 历史会话：回答里的 `riot://session/<id>` 链接。会话已删就告诉链接
+  // "没切成"，它自己提示 —— 点了没反应比一句"已删除"糟得多。
+  useEffect(
+    () =>
+      subscribeSessionOpen((id) => {
+        if (!sessions.some((s) => s.id === id)) return false;
+        setActive(id);
+        setSchedulePage(false);
+        return true;
+      }),
+    [sessions],
   );
   /** 子 agent 面板拉到真名后改标签上的字（打开时可能只知道 id）。 */
   const retitleSubagent = useCallback((agentId: string, title: string) => {
@@ -1033,7 +1081,17 @@ export function App() {
           else openTab({ kind: "files" });
           return;
         case "p":
-          // ⌘P 打开文件进预览。必须拦下 —— webview 的默认行为是打印。
+          // ⌘P 快速打开（VS Code 同键）：开出文件树、光标落进筛选框，
+          // 直接敲文件名。必须拦下 —— webview 的默认行为是打印。
+          if (e.shiftKey) return;
+          e.preventDefault();
+          if (!activeSession) return;
+          openTab({ kind: "files" });
+          setTreeFilterFocus((n) => n + 1);
+          return;
+        case "o":
+          // ⌘O 系统文件选择框（各类应用"打开…"的通用键）。项目里的文件
+          // 走 ⌘P 更快，这条留给项目外的文件。
           if (e.shiftKey) return;
           e.preventDefault();
           if (activeSession) pickAndPreview();
@@ -1091,6 +1149,11 @@ export function App() {
     forgetComposerSession(id);
     closeSessionTerminals(id);
     workbenchBySession.current.delete(id);
+    setExecModes((prev) => {
+      if (!(id in prev)) return prev;
+      const { [id]: _gone, ...rest } = prev;
+      return rest;
+    });
   };
 
   const doDeleteSession = async (id: string) => {
@@ -1331,6 +1394,28 @@ export function App() {
     setSchedulePage(false);
   };
 
+  /** 任务页「创建」按钮的菜单：手动填表，或交给对话里的 agent。
+   *  后者需要一个活跃会话把话送进去，没有就不列。 */
+  const scheduleCreateMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const entries: MenuState["entries"] = [
+      {
+        label: "手动创建…",
+        action: () => {
+          setSelectedSchedule(null);
+          setSchedCreating(true);
+        },
+      },
+    ];
+    if (activeSession) {
+      entries.push({
+        label: "让 Riot 创建",
+        action: () => scheduleCompose("帮我设一个定时任务："),
+      });
+    }
+    setMenu({ x: e.clientX, y: e.clientY, anchor: "schedule:create", entries });
+  };
+
   /** 错过补跑：立即跑一次并把这条错过消掉。 */
   const rerunMissed = (m: MissedRun) => {
     settleMissed(m.taskId);
@@ -1367,7 +1452,6 @@ export function App() {
         },
         { label: "Git 改动", action: () => openTab({ kind: "changes" }) },
         { label: "文件", action: () => openTab({ kind: "files" }) },
-        { label: "打开文件…", action: pickAndPreview },
       ],
     });
   };
@@ -1400,6 +1484,8 @@ export function App() {
   const selSchedule = schedulePage
     ? (schedules.find((t) => t.id === selectedSchedule) ?? null)
     : null;
+  /** 右侧栏归定时任务：看详情，或填创建表单。 */
+  const schedRailOpen = selSchedule !== null || (schedulePage && schedCreating);
   /** 窗口级分栏开关。钉在 .shell 右上角，不进顶栏 / 抽屉文档流。 */
   const windowControls = (
     <WindowControls
@@ -1451,6 +1537,7 @@ export function App() {
               // 进菜单不记住上次打开的详情，每次都从列表开始。
               collapseDrawer();
               setSelectedSchedule(null);
+              setSchedCreating(false);
               setSchedulePage(true);
             }}
             schedulesActive={schedulePage}
@@ -1491,6 +1578,8 @@ export function App() {
             sidebarOpen={sidebarVisual}
             onToggleSidebar={toggleSidebar}
             session={activeSession}
+            permission={activePermission}
+            onPermission={pickPermission}
             onSessionMenu={sessionMenu}
             sessionCfgOpen={showSessionCfg}
             sessionCfgEnabled={activeSession !== null}
@@ -1524,12 +1613,16 @@ export function App() {
                 schedules={schedules}
                 missed={missedSchedules}
                 selected={selectedSchedule}
-                onSelect={setSelectedSchedule}
+                onSelect={(id) => {
+                  // 点开一条任务的详情就把创建表单收掉：同一块地方。
+                  if (id) setSchedCreating(false);
+                  setSelectedSchedule(id);
+                }}
                 sidebarOpen={sidebarVisual}
                 onToggleSidebar={toggleSidebar}
                 onMenu={scheduleMenu}
                 menuAnchor={menu?.anchor ?? null}
-                onCreate={() => scheduleCompose("帮我设一个定时任务：")}
+                onCreate={scheduleCreateMenu}
                 onClearDone={() => {
                   const done = schedules.filter(isDoneSchedule);
                   if (done.length === 0) return;
@@ -1575,6 +1668,10 @@ export function App() {
                       initialMultitask={s.multitask}
                       onConfig={setConfig}
                       onOpenSettings={() => setShowSettings(true)}
+                      permissionPick={permPick?.id === s.id ? permPick.pick : null}
+                      onPermissionChange={(m) =>
+                        setExecModes((prev) => (prev[s.id] === m ? prev : { ...prev, [s.id]: m }))
+                      }
                       onFirstMessage={onFirstMessage}
                       onSessionEmptied={onSessionEmptied}
                       onAgentBrowser={() => {
@@ -1671,9 +1768,9 @@ export function App() {
           一个标签的内容 —— 并排铺开会把对话挤成一条缝。宽度所有标签
           共享，拖过一次全都记住。
 
-          任务页前台时这个位置归定时任务详情（进入任务页时工作台已被
-          收起，见侧栏的 onSchedules）。 */}
-      {selSchedule ? (
+          任务页前台时这个位置归定时任务（详情或创建表单；进入任务页时
+          工作台已被收起，见侧栏的 onSchedules）。 */}
+      {schedRailOpen ? (
         <Resizer
           axis="x"
           onStart={() => {
@@ -1703,7 +1800,7 @@ export function App() {
       <SlidePanel
         axis="x"
         className="rail"
-        open={selSchedule !== null}
+        open={schedRailOpen}
         size={schedDetailW}
         keepMounted
       >
@@ -1723,10 +1820,26 @@ export function App() {
               setSchedulePage(false);
             }}
           />
+        ) : schedulePage && schedCreating ? (
+          <ScheduleCreatePanel
+            width={schedDetailW}
+            sessions={sessions}
+            projects={projects}
+            defaultRoot={activeSession?.root ?? null}
+            onClose={() => setSchedCreating(false)}
+            onCreated={(t) => {
+              // 宿主也会广播 schedule_changed，这里先把新任务放进列表并
+              // 选中：面板原地从表单换成它的详情，不用等那一拍。
+              setSchedules((prev) => [...prev.filter((x) => x.id !== t.id), t]);
+              setSchedCreating(false);
+              setSelectedSchedule(t.id);
+              reloadSchedules();
+            }}
+          />
         ) : null}
       </SlidePanel>
 
-      {!selSchedule && drawerVisible && activeSession ? (
+      {!schedRailOpen && drawerVisible && activeSession ? (
         <Resizer
           axis="x"
           onStart={() => {
@@ -1787,7 +1900,6 @@ export function App() {
                 onChanges={() => openTab({ kind: "changes" })}
                 onBrowser={() => openTab({ kind: "browser" })}
                 onFiles={() => openTab({ kind: "files" })}
-                onOpenFile={pickAndPreview}
               />
             ) : null}
             {/* 浏览器和改动只在前台时挂载：浏览器切走要停帧流（宿主
@@ -1845,6 +1957,8 @@ export function App() {
                 refreshKey={changesRev}
                 onOpen={openFromTree}
                 onTreeContextMenu={treeMenu}
+                onPickFromDisk={pickAndPreview}
+                filterFocus={treeFilterFocus}
               />
             ) : null}
           </div>
@@ -1919,6 +2033,8 @@ function Chat({
   initialMultitask = false,
   onConfig,
   onOpenSettings,
+  permissionPick,
+  onPermissionChange,
   onFirstMessage,
   onSessionEmptied,
   onAgentBrowser,
@@ -1943,6 +2059,10 @@ function Chat({
   initialMultitask?: boolean;
   onConfig: (s: ConfigStatus) => void;
   onOpenSettings: () => void;
+  /** 会话设置弹窗选的权限档，透传给 Composer。 */
+  permissionPick: PermissionPick | null;
+  /** Composer 上报生效中的权限档。 */
+  onPermissionChange: (m: PermissionMode) => void;
   onFirstMessage: (sessionId: string, text: string) => void;
   /** 撤回把会话清空了。侧栏那句自动标题该跟着撤。 */
   onSessionEmptied?: (sessionId: string) => void;
@@ -2074,6 +2194,8 @@ function Chat({
       withdrawn={session.withdrawn}
       onWithdrawnRestored={session.clearWithdrawn}
       onOpenSettings={onOpenSettings}
+      permissionPick={permissionPick}
+      onPermissionChange={onPermissionChange}
       insertText={insertText ?? null}
       armed={visible}
       {...(onInserted ? { onInserted } : {})}
@@ -2145,6 +2267,7 @@ function Chat({
             armed={visible}
             onRegenerate={session.regenerate}
             onEditEntry={session.editEntry}
+            onResendEntry={session.resendEntry}
             onDeleteEntry={session.deleteEntry}
             {...(planAsk ? { planAsk } : {})}
             {...(choiceAsk ? { choiceAsk } : {})}

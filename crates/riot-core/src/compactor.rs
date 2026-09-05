@@ -149,6 +149,9 @@ pub struct Layered {
     ids: std::sync::Arc<dyn riot_protocol::id::IdGenerator>,
     /// 本轮的取消令牌（子令牌）。用户按停止时总结请求跟着断。
     cancel: tokio_util::sync::CancellationToken,
+    /// 这个会话的摘录文件（宿主维护）。给了，重档的续接消息就指路过去，
+    /// 让模型能翻回刚被总结掉的原文；主循环自己不写它。
+    archive: Option<std::path::PathBuf>,
 }
 
 impl Layered {
@@ -166,7 +169,14 @@ impl Layered {
             shape,
             ids,
             cancel,
+            archive: None,
         }
+    }
+
+    /// 告诉续接消息去哪里找原文（见 [`crate::summarize::continuation_message`]）。
+    pub fn with_archive(mut self, archive: Option<std::path::PathBuf>) -> Self {
+        self.archive = archive;
+        self
     }
 }
 
@@ -205,11 +215,13 @@ impl Compactor for Layered {
             Ok(text) => {
                 // 反应式路径没有宿主能力，记忆和工作集不在这里重注 ——
                 // 那是宿主主动压缩的事。这里保命优先：先让请求能发出去。
+                // 摘录路径倒是能给：文件由宿主在收到 Compacted 事件时重写，
+                // 模型要到下一步才可能去读它。
                 let msg = crate::summarize::continuation_message(
                     &text,
                     Vec::new(),
                     Vec::new(),
-                    None,
+                    self.archive.as_deref(),
                     self.ids.message_id(),
                 );
                 let mut out = Vec::with_capacity(1 + messages.len() - split);

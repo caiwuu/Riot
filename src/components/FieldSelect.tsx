@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { Chevron } from "./Chevron";
@@ -52,11 +52,13 @@ export function FieldSelect({
     const below = window.innerHeight - r.bottom - gap - 8;
     const above = r.top - gap - 8;
     const up = below < 160 && above > below;
+    // 这是菜单的**下限**宽度：触发框可以很窄（行内下拉里就一个"每天"），
+    // 选项按 max-content 自己撑开，绝不折行。撑开后若顶出右缘，
+    // 由下面的 layout effect 量了实际宽度再往左收。
     const width = Math.min(
       window.innerWidth - 16,
       Math.max(r.width, menuMinWidth ?? 0),
     );
-    // 菜单比按钮宽时仍贴左边；贴出窗口就往左收。
     const left = Math.min(r.left, window.innerWidth - width - 8);
     setBox({
       top: up ? r.top - gap : r.bottom + gap,
@@ -66,6 +68,15 @@ export function FieldSelect({
       up,
     });
   }, [menuMinWidth]);
+
+  // 菜单比预估的下限宽（选项比触发框长）时把它往左挪回窗口内。
+  useLayoutEffect(() => {
+    const el = menuRef.current;
+    if (!open || !box || !el) return;
+    const w = el.getBoundingClientRect().width;
+    const overflow = box.left + w - (window.innerWidth - 8);
+    if (overflow > 0) el.style.left = `${Math.max(8, box.left - overflow)}px`;
+  }, [open, box]);
 
   useEffect(() => {
     if (!open) return;
@@ -118,7 +129,9 @@ export function FieldSelect({
               role="listbox"
               style={{
                 left: box.left,
-                width: box.width,
+                minWidth: box.width,
+                width: "max-content",
+                maxWidth: window.innerWidth - 16,
                 maxHeight: box.maxH,
                 ...(box.up
                   ? { bottom: window.innerHeight - box.top }

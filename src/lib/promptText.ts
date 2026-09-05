@@ -24,8 +24,7 @@ export type Seg =
   | { kind: "elem"; value: string; label: string };
 
 /** 斜杠名：字母数字、中文、冒号命名空间。名字里不含 `/`，免得把 /usr/bin 认成命令。 */
-const SLASH_CH = String.raw`[\w\p{L}\p{N}:-]`;
-export const SLASH_QUERY_RE = new RegExp(`^/(${SLASH_CH}*)$`, "u");
+export const SLASH_CH = String.raw`[\w\p{L}\p{N}:-]`;
 export const SLASH_LEAD_RE = new RegExp(`^/(${SLASH_CH}+)(\\s)([\\s\\S]*)$`, "u");
 export const SLASH_SUBMIT_RE = new RegExp(`^/(${SLASH_CH}+)\\s*([\\s\\S]*)$`, "u");
 export const SLASH_HEAD_RE = new RegExp(`^/(${SLASH_CH}+)(?=\\s|$)`, "u");
@@ -62,15 +61,26 @@ export function segsToPrompt(segs: Seg[]): string {
     .join("");
 }
 
-/** 把开头的 `/已知命令 ` 收成色块。已经有块、或名字还不完整，原样返回。 */
-export function promoteLeadingCmd(segs: Seg[], known: Set<string>): Seg[] | null {
-  if (segs.some((s) => s.kind === "cmd")) return null;
+/**
+ * 把开头的 `/已知名字 ` 收成色块。名字还不完整，原样返回。
+ *
+ * `exclusive` 是"一条消息只能有一个"的那类名字（可执行 / 可展开的命令）：
+ * 已经有一个这样的块时不再收第二个。技能不在其中，几个都行。
+ */
+export function promoteLeadingCmd(
+  segs: Seg[],
+  known: Set<string>,
+  exclusive: Set<string>,
+): Seg[] | null {
   const first = segs[0];
   if (first?.kind !== "text") return null;
   const m = SLASH_LEAD_RE.exec(first.value);
   const [, name, gap, rest] = m ?? [];
   if (name === undefined || gap === undefined || rest === undefined) return null;
   if (!known.has(name)) return null;
+  if (exclusive.has(name) && segs.some((s) => s.kind === "cmd" && exclusive.has(s.value))) {
+    return null;
+  }
   return [{ kind: "cmd", value: name }, { kind: "text", value: gap + rest }, ...segs.slice(1)];
 }
 

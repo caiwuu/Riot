@@ -205,10 +205,10 @@ pub async fn summarize_history(
 /// `memory` 是重新注入的记忆附件（压缩把带着记忆的首条消息一起吞了，
 /// 不重注的话项目约定就此消失）；`restored` 是工作集文件。
 ///
-/// `archive` 是被压掉的原文落成的文件（[`crate::archive`]）。给了就在
-/// 续接消息里指路：总结是有损的，模型要报错原文、具体路径、用户某句话
-/// 的时候，有地方可查比靠猜好。宿主写不出文件时传 None，措辞退回
-/// "只有总结"。
+/// `archive` 是这个会话的摘录文件（[`crate::archive`] 渲染、宿主维护的
+/// 整段对话原文，含刚被压掉的部分）。给了就在续接消息里指路：总结是有
+/// 损的，模型要报错原文、具体路径、用户某句话的时候，有地方可查比靠猜
+/// 好。宿主没有摘录（没装配 / 单元测试）时传 None，措辞退回"只有总结"。
 pub fn continuation_message(
     summary: &str,
     memory: Vec<Attachment>,
@@ -219,13 +219,14 @@ pub fn continuation_message(
     let mut content: Vec<UserContent> = memory.into_iter().map(UserContent::Attachment).collect();
     let archive_note = match archive {
         Some(p) => format!(
-            "\n\nThe **verbatim** text of the compacted conversation is saved at `{}`, one \
-             `## [index] role` section per message, with tool results kept only up to their \
-             first lines. When you need a detail the summary does not carry — the exact wording \
-             of an error, a specific path, command output, precisely how the user phrased \
-             something — search it with Grep or Read a line range. Do NOT guess at it, and do \
-             NOT read the whole file in: it is the history you just compacted, so reading it \
-             back undoes the compaction.",
+            "\n\nThe **verbatim** text of this whole conversation, including the part just \
+             compacted, is saved at `{}`: one `## [n] role (message-id) time` section per \
+             message, tool results cut to their first few KB. When you need a detail the summary \
+             does not carry — the exact wording of an error, a specific path, command output, \
+             precisely how the user phrased something — Grep it for the keyword, then Read a \
+             small line range around the hit. Do NOT guess at it, and do NOT read the whole \
+             file in: it is the history you just compacted, so reading it back undoes the \
+             compaction.",
             p.display()
         ),
         None => String::new(),
@@ -503,7 +504,7 @@ mod tests {
             "总结",
             Vec::new(),
             Vec::new(),
-            Some(std::path::Path::new("/art/s1/history.md")),
+            Some(std::path::Path::new("/data/digests/proj-1a2b/s1.md")),
             MessageId::from_raw("m1"),
         );
         let Message::User { content, .. } = &m else {
@@ -512,7 +513,7 @@ mod tests {
         let UserContent::Text { text } = &content[0] else {
             panic!("文本")
         };
-        assert!(text.contains("/art/s1/history.md"), "{text}");
+        assert!(text.contains("/data/digests/proj-1a2b/s1.md"), "{text}");
         assert!(
             text.contains("Grep") && text.contains("Do NOT guess at it"),
             "要教模型怎么用：搜关键词，别整份读：{text}"

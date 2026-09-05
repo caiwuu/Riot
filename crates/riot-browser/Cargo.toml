@@ -8,7 +8,7 @@
 name = "riot-browser"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "PolyForm-Noncommercial-1.0.0"
 rust-version = "1.88"
 description = "跑 CEF 的浏览器宿主子进程。主应用通过 stdio 驱动它。"
 publish = false

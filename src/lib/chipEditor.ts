@@ -7,10 +7,10 @@
 //! React 一 re-render 就冲掉光标，进不来。
 //!
 //! 行为总纲：**块的光标行为和一个字符完全一致**。落点恰好在块两侧、
-//! 方向键一步跨块、退格一次删整块、真实空格是普通字符。
+//! 方向键一步跨块、退格一次删整块、真实空格是普通字符、换行一次换一行。
 
-import { type ChipSeg, chipAttrs, chipClass, chipSegFromEl } from "./chips";
-import type { Seg } from "./promptText";
+import { type ChipSeg, chipAttrs, chipClass, chipSegFromEl, chipVars } from "./chips";
+import { SLASH_CH, type Seg } from "./promptText";
 
 /**
  * 造一个块。`contenteditable=false` 让它在编辑器里是一个整体。
@@ -26,6 +26,7 @@ function chipEl(seg: ChipSeg): HTMLElement {
   for (const [k, v] of Object.entries(chipAttrs(seg))) {
     if (v !== undefined) span.setAttribute(k, v);
   }
+  for (const [k, v] of Object.entries(chipVars(seg))) span.style.setProperty(k, v);
   return bindChip(span);
 }
 
@@ -69,25 +70,75 @@ function caretIn(root: HTMLElement): { node: Node; offset: number } | null {
 }
 
 /**
- * 光标停在 root 边界（node 是编辑区本身、offset 是子节点序号）时安置进
- * 旁边的文本节点，返回安置后的位置。
+ * 光标不停在守卫**前面**，停在它后面。返回跳过守卫之后的偏移。
  *
- * root 边界光标是各种怪行为的温床：`caretToEnd` 和原生删除都会留下它，
- * 而 WebKit 对紧挨 `contenteditable=false` 元素的边界位置做归一化时常跳
- * 到块的**另一侧** —— 表现是删掉块右边的空格后光标瞬移到块左边。文本
- * 节点内的位置没有这个歧义。
+ * 守卫前后在语义上是同一个位置，对渲染却不是。WebKit 在 Cocoa 上走
+ * CoreText 整形，U+FEFF 这类 default-ignorable 字符会被并进**前一个字母的
+ * 字形簇**；簇内部的光标位置 WebKit 按比例插值来画（那是给连字准备的）。
+ * 光标停在守卫前面、这时打字，字就长在"字母 + 守卫"这个簇里，光标落在
+ * 簇的 1/2 处 —— 画在字母正中间。平时看不到是因为 `normalizePads` 一有
+ * 真实字符就把守卫剥了；输入法组字期间不能动 DOM，拼音就一直顶着守卫。
+ * 光标停在守卫后面，打进去的字永远跟在守卫**之后**，光标始终在簇边界上。
+ * Slate 的零宽占位同样是 U+FEFF，踩的是同一个坑。
+ */
+function afterPads(text: string, offset: number): number {
+  let o = offset;
+  while (o < text.length && text[o] === PAD) o++;
+  return o;
+}
+
+/**
+ * 把光标安置到一个没有歧义的位置，返回安置后的位置：
+ *
+ * 1. 停在 root 边界（node 是编辑区本身、offset 是子节点序号）时进旁边的
+ *    文本节点。root 边界光标是各种怪行为的温床：`caretToEnd` 和原生删除都
+ *    会留下它，而 WebKit 对紧挨 `contenteditable=false` 元素的边界位置做
+ *    归一化时常跳到块的**另一侧** —— 表现是删掉块右边的空格后光标瞬移到
+ *    块左边。文本节点内的位置没有这个歧义。
+ * 2. 停在守卫前面时挪到守卫后面（原因见 [`afterPads`]）。
  */
 function settleCaret(root: HTMLElement): { node: Node; offset: number } | null {
-  const cur = caretIn(root);
-  if (!cur || cur.node !== root) return cur;
-  const prev = root.childNodes[cur.offset - 1];
-  const next = root.childNodes[cur.offset];
-  if (prev?.nodeType === Node.TEXT_NODE) {
-    setCaret(prev, (prev.nodeValue ?? "").length);
-  } else if (next?.nodeType === Node.TEXT_NODE) {
-    setCaret(next, 0);
+  let cur = caretIn(root);
+  if (!cur) return null;
+  if (cur.node === root) {
+    const prev = root.childNodes[cur.offset - 1];
+    const next = root.childNodes[cur.offset];
+    if (prev?.nodeType === Node.TEXT_NODE) {
+      setCaret(prev, (prev.nodeValue ?? "").length);
+    } else if (next?.nodeType === Node.TEXT_NODE) {
+      setCaret(next, 0);
+    }
+    cur = caretIn(root);
+    if (!cur) return null;
   }
-  return caretIn(root);
+  if (cur.node.nodeType === Node.TEXT_NODE) {
+    const o = afterPads(cur.node.nodeValue ?? "", cur.offset);
+    if (o !== cur.offset) {
+      setCaret(cur.node, o);
+      cur = caretIn(root);
+    }
+  }
+  return cur;
+}
+
+/**
+ * 块后面那个空行要不要留一个停靠位。
+ *
+ * pre-wrap 下换行是一个真实的 `\n` 字符，而编辑区**末尾**的 `\n` 不生成
+ * 行盒 —— 空行画不出来，光标也停不上去。浏览器自己那套占位（段末再补一个
+ * `\n`）在块旁边是坏的（见 [`insertLineBreak`]），这一格于是由守卫顶上，
+ * 和块两侧的守卫是同一件事：给光标一个真实的渲染盒。
+ *
+ * 只认"块后面全是换行"这一种。中间夹着真实文字时（`chip` + `abc\n`）行盒
+ * 由那段文字撑着，浏览器的占位也判得对，再垫一个守卫反而会把它那个**不可见
+ * 的**收尾换行变成一个看得见的空行 —— 退格删掉换行后空行还赖着不走。
+ */
+function needsTailPad(node: Node, root: HTMLElement): boolean {
+  return (
+    node === root.lastChild &&
+    isChip(node.previousSibling) &&
+    /^\n+$/.test((node.nodeValue ?? "").replace(PAD_RE, ""))
+  );
 }
 
 /**
@@ -96,7 +147,7 @@ function settleCaret(root: HTMLElement): { node: Node; offset: number } | null {
  * 1. 相邻文本节点已合并、空文本节点已删（`root.normalize()`）；
  * 2. 块的某一侧没有文本节点时，垫一个只含 PAD 的守卫节点；
  * 3. 有真实字符的文本节点里不留 PAD（真实字符本身就是落点，混着守卫
- *    只会多出一个"按一下没动静"的幽灵光标位）。
+ *    只会多出一个"按一下没动静"的幽灵光标位）—— 例外见 [`needsTailPad`]。
  *
  * 每次 sync 都跑：退格、剪切、原生删除都可能把守卫吃掉或留下孤儿，
  * 逐个调用点去补漏就是当初 elem 块被吞的老路。IME 组字中**不要**调 ——
@@ -113,11 +164,12 @@ export function normalizePads(root: HTMLElement) {
     const stripped = v.replace(PAD_RE, "");
     if (stripped) {
       // 混进真实文字的守卫剥掉，光标位按剥掉的字符数回退。
+      const want = needsTailPad(node, root) ? stripped + PAD : stripped;
       const before =
         cur && cur.node === node ? (v.slice(0, cur.offset).match(PAD_RE) ?? []).length : 0;
-      node.nodeValue = stripped;
+      node.nodeValue = want;
       if (cur && cur.node === node) {
-        setCaret(node, Math.min(cur.offset - before, stripped.length));
+        setCaret(node, Math.min(cur.offset - before, want.length));
       }
     } else if (isChip(node.previousSibling) || isChip(node.nextSibling)) {
       // 名正言顺的守卫，收敛成单个字符。
@@ -149,6 +201,16 @@ export function normalizePads(root: HTMLElement) {
     }
   }
 
+  // 上面那轮只碰已经含 PAD 的节点，块后面新换的那一行还是光的。
+  const tail = root.lastChild;
+  if (
+    tail?.nodeType === Node.TEXT_NODE &&
+    !(tail.nodeValue ?? "").includes(PAD) &&
+    needsTailPad(tail, root)
+  ) {
+    tail.nodeValue += PAD;
+  }
+
   settleCaret(root);
 }
 
@@ -169,7 +231,8 @@ function skipEmpty(node: Node | null, dir: 1 | -1): Node | null {
   return n;
 }
 
-/** 光标放到块右侧。落点必须是**非空**文本节点，空节点画不出光标（见 PAD）。 */
+/** 光标放到块右侧。落点必须是**非空**文本节点，空节点画不出光标（见 PAD）；
+ *  有守卫时停在守卫**后面**（见 afterPads）。 */
 function placeCaretAfter(chip: HTMLElement) {
   let next = chip.nextSibling;
   if (!next || next.nodeType !== Node.TEXT_NODE) {
@@ -178,7 +241,7 @@ function placeCaretAfter(chip: HTMLElement) {
   } else if (!(next.nodeValue ?? "").length) {
     next.nodeValue = PAD;
   }
-  setCaret(next, 0);
+  setCaret(next, afterPads(next.nodeValue ?? "", 0));
 }
 
 /** 光标放到块左侧。同上，守卫字符保证有真实落点。 */
@@ -289,23 +352,72 @@ function atGuardWall(root: HTMLElement, dir: 1 | -1): boolean {
  * 做归一化，而且常常归一化到块的**另一侧**：删掉块右边的空格，光标瞬移
  * 到块左边，下一次退格被当成顶墙吃掉 —— 块怎么都删不掉。自己删、自己
  * 放光标，归一化根本不参与。只接管边界上这一个字符，其余仍归原生。
+ *
+ * "贴着块"看的是删完之后光标的**两侧**，不只是删除方向那一侧：`11|` 后面
+ * 跟着块，退格删掉第二个 1 之后文本节点空了，光标贴着**右边**的块 ——
+ * 同一个归一化，光标跑到块右边去。早先只看删除方向，这一种就漏了。
  */
 function deleteBesideChip(root: HTMLElement, dir: 1 | -1): boolean {
   const cur = settleCaret(root);
   if (!cur || cur.node.nodeType !== Node.TEXT_NODE) return false;
   const text = cur.node.nodeValue ?? "";
-  const at = dir === -1 ? cur.offset - 1 : cur.offset;
+  // 要删的是光标旁边第一个**真实**字符，守卫不算（光标停在守卫后面，
+  // 退格方向上紧挨着的可能就是守卫）。
+  let at = dir === -1 ? cur.offset - 1 : cur.offset;
+  while (at >= 0 && at < text.length && text[at] === PAD) at += dir;
   if (at < 0 || at >= text.length) return false;
-  // 删掉这个字符后，光标和块之间只剩守卫 —— 这才是归一化会出错的边界。
-  const rest = dir === -1 ? text.slice(0, at) : text.slice(at + 1);
-  if (rest.replace(PAD_RE, "") !== "") return false;
-  const beside =
-    dir === -1
-      ? skipEmpty(cur.node.previousSibling, -1)
-      : skipEmpty(cur.node.nextSibling, 1);
-  if (!isChip(beside)) return false;
+  // 删掉这个字符后，光标和某一侧的块之间只剩守卫 —— 这才是归一化会出错的边界。
+  const leftBare = text.slice(0, at).replace(PAD_RE, "") === "";
+  const rightBare = text.slice(at + 1).replace(PAD_RE, "") === "";
+  const touchesChip =
+    (leftBare && isChip(skipEmpty(cur.node.previousSibling, -1))) ||
+    (rightBare && isChip(skipEmpty(cur.node.nextSibling, 1)));
+  if (!touchesChip) return false;
   (cur.node as Text).deleteData(at, 1);
   setCaret(cur.node, at);
+  normalizePads(root);
+  return true;
+}
+
+/**
+ * 贴着块的那一次换行自己插。处理了就返回 true，没处理的交回浏览器。
+ *
+ * pre-wrap 下换行是一个真实的 `\n` 字符，而编辑区末尾的 `\n` 不生成行盒，
+ * 所以浏览器插换行时会在**段末**再补一个 `\n` 当占位（占位后面没东西，
+ * 不可见）。它判断"段末"看的是可视位置，而紧挨 `contenteditable=false`
+ * 元素的位置一律被算作段末 —— 于是块旁边这一下两头都是坏的：
+ *
+ * - 光标在块**前面**：占位照补，可它后面还跟着块，不再是不可见的收尾，
+ *   而是**多出来的一整个空行**。一次换两行，退一次格只回得到中间那行 ——
+ *   看着就是"光标回不到上一行"。
+ * - 光标在块**后面**：守卫字符（U+FEFF）让它以为后面还有内容、不是段末，
+ *   占位不补，空行没有行盒 —— 换行看上去根本没发生。
+ *
+ * 自己插就没有这个歧义：一个 `\n`，一次一行，新空行的落点由守卫顶上
+ * （见 [`needsTailPad`]）。只接管贴着块的这一下，其余仍归原生 —— 和
+ * [`deleteBesideChip`] 是同一个取舍。
+ *
+ * `[约束]` 不能改走 `execCommand("insertText", …, "\n")`。它在 WebKit /
+ * Blink 里都不是"插一个字符"：TypingCommand 按 `\n` 切段，走的正是上面
+ * 那条 insertParagraphSeparator —— 内容会被包进 `<div>`，块首当其冲。
+ */
+export function insertLineBreak(root: HTMLElement): boolean {
+  if (!adjacentChip(root, "before") && !adjacentChip(root, "after")) return false;
+  const cur = settleCaret(root);
+  if (!cur) return false;
+  if (cur.node.nodeType === Node.TEXT_NODE) {
+    (cur.node as Text).insertData(cur.offset, "\n");
+    setCaret(cur.node, cur.offset + 1);
+  } else if (cur.node === root) {
+    // root 边界光标（`settleCaret` 安置不进文本节点时）：自己造一个。
+    const nl = document.createTextNode("\n");
+    root.insertBefore(nl, root.childNodes[cur.offset] ?? null);
+    setCaret(nl, 1);
+  } else {
+    // 光标落进了块内部。这里的 offset 是块里的序号，拿它当落点会插错
+    // 地方 —— 这一下交回浏览器。
+    return false;
+  }
   normalizePads(root);
   return true;
 }
@@ -345,6 +457,94 @@ export function handleChipKey(
   return false;
 }
 
+/** 这次原生删除的目标区间会碰到的块。没碰到、或浏览器不给区间时是 null。 */
+function chipInTargetRanges(e: InputEvent, root: HTMLElement): HTMLElement | null {
+  for (const r of e.getTargetRanges()) {
+    const range = document.createRange();
+    range.setStart(r.startContainer, r.startOffset);
+    range.setEnd(r.endContainer, r.endOffset);
+    for (const chip of Array.from(root.children)) {
+      if (isChip(chip) && range.intersectsNode(chip)) return chip;
+    }
+  }
+  return null;
+}
+
+/**
+ * compositionend 之后多长时间内，贴着块的原生删除仍按"输入法的键"处理。
+ *
+ * 这是"行内原子节点 + 输入法"这个经典问题的经典解法（ProseMirror 的
+ * `inOrNearComposition` 用的就是 500ms）。结束组字的那一键在 WebKit 里的
+ * 顺序是：输入法先处理 → compositionend → **然后**这一键的 keydown / 默认
+ * 动作才到页面。所以"刚结束组字"和"这一键的后续"之间隔的是一次 IPC 往返，
+ * 不是零 —— 靠 `setTimeout(0)` 翻标志位盖不住，得看时间窗。
+ *
+ * 窗口只影响"贴着块的原生删除"这一种输入：正常退格在 keydown 层就被接管，
+ * 走不到这里；组完字后 500ms 内要删的也是刚上屏的字，不贴块。
+ */
+export const IME_TAIL_MS = 500;
+
+/**
+ * 原生删除落地前的最后一道闸：会碰到块的删除一律不交给浏览器。
+ *
+ * [`handleChipKey`] 在 keydown 层拦不全 —— 属于输入法的退格是放过的（拦了
+ * 会打断组字），可输入法在缓冲区删空、或它自己的光标停在拼音最前面时会把
+ * 这记退格**放行**给 WebKit 执行，而 WebKit 对紧挨光标的 `contenteditable=false`
+ * 元素默认整块删掉：块右边直接打拼音再退格，块就没了。到这一步只有
+ * beforeinput 还来得及。
+ *
+ * `imeActive` 说这次删除属于输入法时只拦不删：那一记本来就不该删除任何
+ * 东西（拼音已经由输入法删掉了）。不属于时（触控板手势、辅助功能之类不经
+ * keydown 的删除）按 handleChipKey 的规矩整块拿掉。
+ *
+ * `[约束]` `imeActive` 必须把 compositionend 之后的 [`IME_TAIL_MS`] 算进去，
+ * 不能只看组字中的标志位 —— 原因见那个常量。早先只看标志位，标志位在
+ * compositionend 和这次 beforeinput 之间翻掉，这里就亲手把块删了。
+ *
+ * 只认 `deleteContent{Backward,Forward}`。输入法自己收缩拼音走的是
+ * `insertCompositionText` / `deleteCompositionText`，不会碰到这里。
+ *
+ * `[约束]` 必须挂原生监听。React 的 `onBeforeInput` 是用 keypress/textInput
+ * 拼出来的兼容层，删除根本不会触发它。
+ */
+export function guardChipDeletes(
+  root: HTMLElement,
+  imeActive: () => boolean,
+  onChange: () => void,
+): () => void {
+  const onBeforeInput = (e: InputEvent) => {
+    const side =
+      e.inputType === "deleteContentBackward"
+        ? "before"
+        : e.inputType === "deleteContentForward"
+          ? "after"
+          : null;
+    if (!side) return;
+    const chip = chipInTargetRanges(e, root) ?? adjacentChip(root, side);
+    if (!chip) return;
+    e.preventDefault();
+    if (imeActive()) return;
+    removeChip(chip);
+    onChange();
+  };
+  root.addEventListener("beforeinput", onBeforeInput);
+  return () => root.removeEventListener("beforeinput", onBeforeInput);
+}
+
+/**
+ * 这个元素的边界算不算一个换行。
+ *
+ * 只有块级的才算。WebKit / Blink 在块旁边原生删除时会就地包一层保留样式的
+ * `<span>`（`font-family: inherit` 之类的空样式，看不出来），把它也当成换行
+ * 的话，草稿里凭空多一行 —— 发出去就是消息里多一个空行。
+ *
+ * 脱离文档的编辑区拿不到计算样式（`display` 是空串），按块级算 —— 和这条
+ * 规则出现之前的行为一致。
+ */
+function isBlockBox(el: HTMLElement): boolean {
+  return !getComputedStyle(el).display.startsWith("inline");
+}
+
 /** 把编辑区的 DOM 读成段落序列。 */
 export function readEditor(el: HTMLElement): Seg[] {
   const out: Seg[] = [];
@@ -367,8 +567,8 @@ export function readEditor(el: HTMLElement): Seg[] {
           push({ kind: "text", value: "\n" });
         } else {
           // 浏览器在换行/粘贴时会包一层 div。除了第一层，块级元素的
-          // 边界就是一个换行。
-          if (depth > 0 || !first) push({ kind: "text", value: "\n" });
+          // 边界就是一个换行（行内壳不算，见 isBlockBox）。
+          if ((depth > 0 || !first) && isBlockBox(child)) push({ kind: "text", value: "\n" });
           walk(child, depth + 1);
         }
       }
@@ -401,64 +601,92 @@ export function caretToEnd(el: HTMLElement) {
   settleCaret(el);
 }
 
-/** 光标前那个还没敲完的 `@查询`。没有就是 undefined（菜单不出）。 */
-export function queryAtCaret(el: HTMLElement): string | undefined {
+/** 补全菜单的触发符：`@` 文件、`/` 命令和技能。 */
+export type Trigger = "@" | "/";
+
+/**
+ * 光标前那段还没敲完的 `触发符查询`。只在行首或空白之后触发（Cursor 同款）：
+ * 邮箱、`a@b`、`/usr/bin` 这类写法里的符号不该弹菜单。第 1 组是触发前那个
+ * 字符（行首为空），第 2 组是查询。
+ */
+const TRIGGER_RE: Record<Trigger, RegExp> = {
+  "@": /(^|\s)@([^\s@]*)$/,
+  "/": new RegExp(`(^|\\s)/(${SLASH_CH}*)$`, "u"),
+};
+
+/**
+ * 光标所在文本节点里光标之前的内容，去掉守卫。
+ *
+ * 节点开头不等于行首：前面还挂着块（`[块]@`）的话，块和 `@` 之间没有空格，
+ * 不算"行首"—— 垫一个非空白字符让 `^` 匹配不上。
+ */
+function textBeforeCaret(el: HTMLElement, node: Text, offset: number): string {
+  const before = (node.nodeValue ?? "").slice(0, offset).replace(PAD_RE, "");
+  return node.previousSibling && node.parentNode === el ? `x${before}` : before;
+}
+
+/** 光标前那个还没敲完的 `@查询` / `/查询`。没有就是 undefined（菜单不出）。 */
+export function queryAtCaret(el: HTMLElement, trigger: Trigger): string | undefined {
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0) return undefined;
   const r = sel.getRangeAt(0);
   if (!el.contains(r.startContainer) || r.startContainer.nodeType !== Node.TEXT_NODE) {
     return undefined;
   }
-  const before = (r.startContainer.nodeValue ?? "").slice(0, r.startOffset);
-  // 边界规则与内核一致：中文后面直接敲 `@` 也要出菜单（"读下@" 是中文
-  // 用户的常态写法，要求先打个空格等于让他们用不了这个菜单）。
-  return /(?:^|[^A-Za-z0-9._%+-])@([^\s@]*)$/.exec(before)?.[1];
+  return TRIGGER_RE[trigger].exec(
+    textBeforeCaret(el, r.startContainer as Text, r.startOffset),
+  )?.[2];
 }
 
 /**
- * 在光标处把 `@查询` 换成一个块。
+ * 在光标处插一个块，块后面补一个空格，光标停在空格后面。给了 `trigger`
+ * 就先把光标前那段 `触发符查询` 吃掉（菜单选中就是"把查询换成块"）。
  *
- * 光标贴在块的右缘，接着打字就是正常续写，不用再点一下输入框。
- * 不自动补空格 —— 空格是内容，要不要由用户自己敲；文件引用后面直接跟
- * 中文也没事，`mentionToken` 认不回裸写法时会落引号形式。
+ * 空格是给接着打字用的：块和正文之间本来就该有一格，让用户自己敲等于
+ * 每次都多按一下。后面已经有空白（插在句子中间）就不重复补。
  */
-export function insertChipAtCaret(el: HTMLElement, seg: ChipSeg) {
+export function insertChipAtCaret(el: HTMLElement, seg: ChipSeg, trigger?: Trigger) {
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0) {
     el.appendChild(chipEl(seg));
+    el.appendChild(document.createTextNode(" "));
     normalizePads(el);
     caretToEnd(el);
     return;
   }
+  if (trigger) dropQueryAtCaret(trigger);
   const range = sel.getRangeAt(0);
-  const node = range.startContainer;
-  if (node.nodeType === Node.TEXT_NODE) {
-    const before = (node.nodeValue ?? "").slice(0, range.startOffset);
-    const m = /(^|[^A-Za-z0-9._%+-])@[^\s@]*$/.exec(before);
-    if (m) {
-      const cut = before.length - (m[0].length - (m[1]?.length ?? 0));
-      (node as Text).deleteData(cut, range.startOffset - cut);
-      range.setStart(node, cut);
-      range.collapse(true);
-    }
-  }
   const chip = chipEl(seg);
   range.insertNode(chip);
   // 先补守卫再放光标：块插在句首/句尾时两侧都要有停靠位。
   normalizePads(el);
   placeCaretAfter(chip);
+  const cur = caretIn(el);
+  if (!cur || cur.node.nodeType !== Node.TEXT_NODE) return;
+  const text = cur.node as Text;
+  const rest = (text.nodeValue ?? "").slice(cur.offset).replace(PAD_RE, "");
+  if (/^\s/.test(rest)) {
+    // 后面本来就有空白，光标跳到它后面即可。
+    setCaret(text, cur.offset + 1);
+  } else {
+    text.insertData(cur.offset, " ");
+    setCaret(text, cur.offset + 1);
+  }
+  normalizePads(el);
 }
 
-/** 去掉光标前那段 `@查询`（Esc 收起文件菜单时用）。 */
-export function dropQueryAtCaret() {
+/** 去掉光标前那段 `触发符查询`（Esc 收起菜单、菜单选中换成块时用）。 */
+export function dropQueryAtCaret(trigger: Trigger) {
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0) return;
   const range = sel.getRangeAt(0);
   const node = range.startContainer;
   if (node.nodeType !== Node.TEXT_NODE) return;
   const before = (node.nodeValue ?? "").slice(0, range.startOffset);
-  const m = /@[^\s@]*$/.exec(before);
+  const m = TRIGGER_RE[trigger].exec(before);
   if (!m) return;
-  const cut = before.length - m[0].length;
+  // 第 1 组是触发前那个字符（空白），留下；只删 `符号 + 查询`。
+  const cut = before.length - (m[0].length - (m[1]?.length ?? 0));
   (node as Text).deleteData(cut, range.startOffset - cut);
+  setCaret(node, cut);
 }

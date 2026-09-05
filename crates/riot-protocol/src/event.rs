@@ -417,6 +417,7 @@ mod tests {
                     model: "m".into(),
                     background: true,
                     tool_use_id: ToolUseId::from_raw("u1"),
+                    parent: None,
                     status: crate::task::BackgroundTaskStatus::Running,
                     activity: "→ Grep".into(),
                     tool_uses: 1,

@@ -79,4 +79,4 @@ Riot 默认不信任工具，也不把执行权交给远端。
 
 ## 许可
 
-以 [MIT 许可](LICENSE) 开源发布。
+采用 [PolyForm Noncommercial 1.0.0](LICENSE)：个人与非营利用途可自由使用、修改和分发；商业使用需另行授权。

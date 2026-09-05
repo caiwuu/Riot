@@ -62,6 +62,10 @@ pub struct BackgroundTaskView {
     /// 把它开出来的那次 Task 调用。卡片靠它认领自己的子 agent。
     #[serde(default)]
     pub tool_use_id: crate::id::ToolUseId,
+    /// 派它的那个子 agent。None = 主 agent 直接派的。界面据此把子子 agent
+    /// 缩进挂在父 agent 那行下面（嵌套，照 Cursor）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<AgentId>,
     pub status: BackgroundTaskStatus,
     /// 最近一行活动（正在调哪个工具、刚说的第一句话）。面板上滚动显示。
     pub activity: String,

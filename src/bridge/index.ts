@@ -29,6 +29,8 @@ import type {
   PermissionMode,
   PermissionResponse,
   QueuedSummary as GeneratedQueuedSummary,
+  RunTargetSpec,
+  ScheduleDraft,
   SchedulePatch,
   ScheduleRun,
   ScheduledTask,
@@ -47,6 +49,8 @@ export type {
   PermissionAsk,
   PermissionMode,
   PermissionResponse,
+  RunTargetSpec,
+  ScheduleDraft,
   SchedulePatch,
   ScheduleRun,
   ScheduledTask,
@@ -328,6 +332,12 @@ export interface AppConfig {
    * 需要谁填谁；macOS 读本就全开，用不上。老配置可能没有这个字段。
    */
   sandboxAllowRead?: string[];
+  /**
+   * 历史会话回忆：系统提示词把本项目的会话摘录目录指给模型。关掉只影响
+   * "翻别的会话"；每个会话自己的摘录照常维护（压缩归档靠它）。
+   * 默认开。老配置可能没有这个字段（缺 = 开）。
+   */
+  sessionRecall?: boolean;
 }
 
 export type SandboxMode = "workspaceWrite" | "workspaceWriteNoNet" | "off";
@@ -454,6 +464,14 @@ export function sendTurn(
 /** 丢掉这条助手回复及其后的一切，从它前面那条用户消息再跑一轮。 */
 export function regenerateTurn(sessionId: string, messageId: string): Promise<void> {
   return invoke("regenerate_turn", { sessionId, messageId }, T_SLOW);
+}
+
+/**
+ * 编辑一条用户提问并从它重新开始（Cursor 编辑气泡后发送的同款）：换掉
+ * 它的文字、丢掉它之后的一切、再跑一轮。附件（图片、引用）原位保留。
+ */
+export function resendTurn(sessionId: string, messageId: string, text: string): Promise<void> {
+  return invoke("resend_turn", { sessionId, messageId, text }, T_SLOW);
 }
 
 /**
@@ -615,6 +633,8 @@ export function taskCancel(sessionId: string, agentId: string): Promise<boolean>
 export interface TaskHistory {
   task: BackgroundTaskView | null;
   messages: Message[];
+  /** 它派出去的子 agent（含更深层）。它会话里的 Task 卡片靠这份认领。 */
+  descendants: BackgroundTaskView[];
 }
 
 /**
@@ -1478,6 +1498,11 @@ export async function notify(title: string, body: string): Promise<void> {
 /** 全部定时任务，next_run 近的在前。 */
 export async function scheduleList(): Promise<ScheduledTask[]> {
   return invoke("schedule_list");
+}
+
+/** 表单手动创建。宿主校验并返回新任务；时间给错了错误信息里带当前时刻。 */
+export async function scheduleCreate(draft: ScheduleDraft): Promise<ScheduledTask> {
+  return invoke("schedule_create", { draft });
 }
 
 /** 暂停 / 恢复。返回更新后的任务（恢复会重算下次运行）。 */

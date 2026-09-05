@@ -14,6 +14,7 @@
 //! Composer 的编辑器机械（光标、退格、方向键）和 Transcript 的渲染都不用动
 //! —— 它们只认 `data-chip`，不认具体是哪一种。
 
+import { iconFor } from "../components/FileIcon";
 import { basename, isDirRef } from "../pathDisplay";
 import type { Seg } from "./promptText";
 
@@ -90,7 +91,20 @@ export interface ChipAttrs {
   "data-value": string;
   "data-label": string;
   "data-extra"?: string;
+  /** 文件引用按类型显示的 seti 字形（见 FileIcon）。CSS 用 `attr()` 取到
+   *  `::before` 里 —— 块内不能有子节点，图标只能走伪元素。目录没有。 */
+  "data-glyph"?: string;
   title: string;
+}
+
+/**
+ * 块上的内联 CSS 变量。和 [`chipAttrs`] 分开给：字形的颜色 `attr()` 拿不到
+ * （WebKit 的 attr() 只能用在 content 里），只能走自定义属性；而 React 的
+ * style 是对象、`setAttribute` 那边是字符串，两条渲染路径各自落地。
+ */
+export function chipVars(seg: ChipSeg): Record<`--${string}`, string> {
+  if (seg.kind !== "ref" || isDirRef(seg.value)) return {};
+  return { "--chip-glyph-color": iconFor(seg.value).color };
 }
 
 /**
@@ -120,11 +134,13 @@ function chipExtra(seg: ChipSeg): string | null {
 
 export function chipAttrs(seg: ChipSeg): ChipAttrs {
   const extra = chipExtra(seg);
+  const glyph = seg.kind === "ref" && !isDirRef(seg.value) ? iconFor(seg.value).ch : null;
   return {
     "data-chip": seg.kind,
     "data-value": seg.value,
     "data-label": chipLabel(seg),
     ...(extra === null ? {} : { "data-extra": extra }),
+    ...(glyph === null ? {} : { "data-glyph": glyph }),
     title: chipTitle(seg),
   };
 }

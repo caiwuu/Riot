@@ -25,6 +25,8 @@
 //! clippy 的禁用清单（FileSystem trait）是给内核逻辑做黄金回放用的；持久化层
 //! 正是那个抽象的"真实一侧"，mock 它没有意义。测试用临时目录注入路径。
 
+pub mod digests;
+
 use std::io::BufRead as _;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -146,7 +148,8 @@ impl Transcripts {
         &self.dir
     }
 
-    fn path_of(&self, id: &SessionId) -> PathBuf {
+    /// 一个会话的 transcript 文件路径。公开给摘录对账比 mtime 用。
+    pub fn path_of(&self, id: &SessionId) -> PathBuf {
         // id 是 nanoid（URL-safe 字符集），直接当文件名是安全的。
         self.dir.join(format!("{}.jsonl", id.as_str()))
     }
@@ -423,6 +426,13 @@ pub struct SessionLog {
 }
 
 impl SessionLog {
+    /// 打开这个句柄时给的元数据。注意对**已存在**的文件它不一定等于首行
+    /// 里的那份（恢复会话时调用方并不知道原始创建时刻）—— 要准确的值
+    /// 读 [`Transcripts::load_parts`] 返回的 meta。
+    pub fn meta(&self) -> &TranscriptMeta {
+        &self.meta
+    }
+
     fn sender(&self) -> &mpsc::UnboundedSender<Cmd> {
         self.tx.get_or_init(|| {
             let (tx, rx) = mpsc::unbounded_channel();

@@ -177,12 +177,10 @@ export function WorkbenchEmpty({
   onChanges,
   onBrowser,
   onFiles,
-  onOpenFile,
 }: {
   onChanges: () => void;
   onBrowser: () => void;
   onFiles: () => void;
-  onOpenFile: () => void;
 }) {
   return (
     <div className="wb-empty">
@@ -206,13 +204,6 @@ export function WorkbenchEmpty({
         </span>
         <span className="wb-empty-label">文件</span>
         <kbd className="wb-empty-kbd">⌘⇧E</kbd>
-      </button>
-      <button type="button" className="wb-empty-item" onClick={onOpenFile}>
-        <span className="wb-empty-icon">
-          <FileDocIcon />
-        </span>
-        <span className="wb-empty-label">打开文件…</span>
-        <kbd className="wb-empty-kbd">⌘P</kbd>
       </button>
     </div>
   );

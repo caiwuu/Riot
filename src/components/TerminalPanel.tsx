@@ -800,28 +800,24 @@ function CloseIcon() {
   );
 }
 
-/** 把选中的输出送去输入框。 */
-/** 共享给 agent：一个从方框里指出去的箭头。 */
+/** 共享给 agent：一只眼睛 —— 开关管的是"agent 看得见这个终端吗"，
+ *  不是把什么东西送出去。方框带箭头那种是"在外部打开"的通用记号，
+ *  放在这里会被读成"弹到新窗口"。 */
 function ShareIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
       <path
-        d="M9.5 2.5H13v3.5M13 2.5L8 7.5"
+        d="M1.6 8s2.5-4.6 6.4-4.6S14.4 8 14.4 8s-2.5 4.6-6.4 4.6S1.6 8 1.6 8z"
         stroke="currentColor"
         strokeWidth="1.4"
-        strokeLinecap="round"
         strokeLinejoin="round"
       />
-      <path
-        d="M12 9.5v3a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1h3"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-      />
+      <circle cx="8" cy="8" r="2" stroke="currentColor" strokeWidth="1.4" />
     </svg>
   );
 }
 
+/** 把选中的输出送去输入框。 */
 function SendUpIcon() {
   return (
     <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden>

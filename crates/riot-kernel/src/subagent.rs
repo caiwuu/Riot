@@ -41,19 +41,29 @@
 //!
 //! # 递归：深度计数器 ⭐
 //!
-//! 普通子 agent 的注册表里**没有 Task 工具**，递归在结构上就不存在
-//! （CC 的教训清单："子 agent 能再 spawn 子 agent → 无限递归"）。
+//! CC 的教训清单里有一条"子 agent 能再 spawn 子 agent → 无限递归"。这里
+//! 不靠提示词劝，靠 [`TaskTool::depth`]：
 //!
-//! 分叉是例外：它必须带 Task 工具 —— 工具清单是请求形状的一部分，少一个
-//! 工具前缀缓存就全失（~100k 的上下文重算一遍），而缓存正是分叉比"重述
-//! 上下文"划算的全部理由。所以分叉里的 Task 工具**同名、同 schema、同
-//! 描述**，只是 [`TaskTool::depth`] 为 1：它照常能开同步子 agent（分叉
-//! 内部再拆几个侦察并行是合理的），但拒绝 `resume: "self"` —— 分叉的
-//! 分叉在结构上到不了。这仍然是结构性保证，不靠提示词劝。
+//! - 主 agent 的 Task 是深度 0。它派出的 `general-purpose` 子 agent 和分叉
+//!   拿到深度 1 的 Task —— 同名、同 schema、同描述，只是运行时不同：能开
+//!   **同步**子 agent，拒绝 `resume: "self"`，后台请求降成同步。
+//! - 深度 1 的 Task 派出去的子 agent 清单里**没有 Task**。两层到顶，
+//!   结构上封死。
+//! - `explore` 任何时候都没有 Task：只读侦察再拆一层没有意义，便宜档的
+//!   账单还会翻倍。
 //!
-//! `[约束]` 分叉内的 Task 只能同步跑。后台任务的完成通知投递到**会话**
-//! 的队列，而分叉不是会话、没有队列 —— 它开的后台任务跑完了没人会被
-//! 唤醒。
+//! 给子 agent Task 的理由（Cursor 同款）：一个 worker 拿到"扒一遍这几个
+//! 目录"这种活，自己判断可以拆成两条独立线各派一个侦察并行，比主 agent
+//! 预先想好拆法更准。分叉必须带 Task 还有另一个理由：工具清单是请求形状
+//! 的一部分，少一个工具前缀缓存就全失（~100k 的上下文重算一遍），而缓存
+//! 正是分叉比"重述上下文"划算的全部理由。
+//!
+//! `[约束]` 深度 1 的 Task 只能同步跑。后台任务的完成通知投递到**会话**
+//! 的队列，而子 agent 不是会话、没有队列 —— 它开的后台任务跑完了没人会
+//! 被唤醒。
+//!
+//! 子 agent 派的子 agent 在登记表里记 `parent`，界面把它们缩进挂在父 agent
+//! 那行下面（照 Cursor 的树形）。
 //!
 //! # 结果与可观测性
 //!
@@ -251,19 +261,31 @@ struct Input {
 
 pub struct TaskTool {
     deps: SubagentDeps,
-    /// 0 = 主 agent 的 Task；1 = 分叉出的子 agent 里的 Task（见模块文档
-    /// 「递归：深度计数器」）。
+    /// 0 = 主 agent 的 Task；1 = 子 agent（分叉的、`general-purpose` 的）
+    /// 里的 Task（见模块文档「递归：深度计数器」）。
     depth: u8,
+    /// 这份 Task 住在哪个子 agent 里。它派出去的子 agent 登记时记上，界面
+    /// 据此画成树。None = 主 agent 的那份。
+    parent: Option<AgentId>,
 }
 
 impl TaskTool {
     pub fn new(deps: SubagentDeps) -> Self {
-        Self { deps, depth: 0 }
+        Self {
+            deps,
+            depth: 0,
+            parent: None,
+        }
     }
 
-    /// 分叉里用的那份：同名同形，只是不能再分叉、不能开后台。
-    pub fn forked(deps: SubagentDeps) -> Self {
-        Self { deps, depth: 1 }
+    /// 子 agent 里用的那份：同名同形，只是不能再分叉、不能开后台，
+    /// 派出去的子 agent 清单里不再有 Task（深度到此为止）。
+    pub fn nested(deps: SubagentDeps, parent: AgentId) -> Self {
+        Self {
+            deps,
+            depth: 1,
+            parent: Some(parent),
+        }
     }
 }
 
@@ -342,11 +364,11 @@ fn kind_of(input: &serde_json::Value) -> Kind {
         .unwrap_or(Kind::GeneralPurpose)
 }
 
-/// 各类型的工具集。
+/// 各类型的工具集（不含 Task —— 那份按深度由 `build_job` 决定加不加，
+/// 见模块文档「递归：深度计数器」）。
 ///
-/// `[约束]` 两个清单里都没有 Task —— 递归要在结构上不存在，不能靠
-/// 提示词劝。也没有 TodoWrite（子 agent 的清单父会话看不见，白记）、
-/// Browser*（浏览器是会话级独占资源，并发子 agent 抢一个面板会打架）。
+/// 没有 TodoWrite（子 agent 的清单父会话看不见，白记）、Browser*（浏览器
+/// 是会话级独占资源，并发子 agent 抢一个面板会打架）。
 ///
 /// `Fork` 不走这里：它的工具是父的那一套（见 [`TaskHost::fork_job`]）。
 fn tools_for(kind: Kind) -> Vec<Arc<dyn Tool>> {
@@ -382,12 +404,19 @@ fn tools_for(kind: Kind) -> Vec<Arc<dyn Tool>> {
 /// 刻意**不注入** AGENTS.md：那份东西是给"在这个项目里写代码"的人看的，
 /// 而侦察档只汇报。CC 源码注释说 Explore 省掉 CLAUDE.md 一项每周省
 /// 5–15 G token —— 这里的省法一样，只是它从一开始就没接进来。
-fn system_prompt_for(kind: Kind, cwd: &std::path::Path, flavor: crate::prompt::Flavor) -> String {
-    use crate::prompt::{OUTPUT_LANGUAGE, REPORTING_RESULTS, Sections};
+fn system_prompt_for(
+    kind: Kind,
+    model: &str,
+    cwd: &std::path::Path,
+    flavor: crate::prompt::Flavor,
+) -> String {
+    use crate::prompt::{OUTPUT_LANGUAGE, REPORTING_RESULTS, Sections, powered_by};
 
+    // 侦察档可能走便宜档模型，和主 agent 不是同一个 —— 名字要报自己的。
+    let identity = |base: &str| format!("{base} {}", powered_by(model));
     let mut s = Sections::new(flavor);
     match kind {
-        Kind::Explore => s.push("agent_identity", EXPLORE_IDENTITY).push(
+        Kind::Explore => s.push("agent_identity", identity(EXPLORE_IDENTITY)).push(
             "operating_rules",
             "- Read-only. NEVER modify a file and NEVER run anything with side effects. The \
              delegator let you in on the understanding that this is read-only reconnaissance; a \
@@ -396,15 +425,17 @@ fn system_prompt_for(kind: Kind, cwd: &std::path::Path, flavor: crate::prompt::F
              closely at the hits. Searching one pattern at a time is the single biggest waste of \
              time in this kind of task.",
         ),
-        Kind::GeneralPurpose | Kind::Fork => s.push("agent_identity", WORKER_IDENTITY).push(
-            "operating_rules",
-            "- Look before you touch: Read a file before you edit it, use Grep to find the \
+        Kind::GeneralPurpose | Kind::Fork => {
+            s.push("agent_identity", identity(WORKER_IDENTITY)).push(
+                "operating_rules",
+                "- Look before you touch: Read a file before you edit it, use Grep to find the \
              place. An error you introduce from a guess is harder for the delegator to spot than \
              for you, because they never saw the code you were guessing about.\n\
              - Do only what the task description asks; NEVER extend the scope on your own. The \
              delegator cannot see your process, so an unrequested change is one they have no way \
              to review — and it makes them doubt the parts you got right.",
-        ),
+            )
+        }
     };
 
     s.push("reporting_results", REPORTING_RESULTS)
@@ -845,13 +876,24 @@ impl TaskTool {
         };
         let max_turns = kind.max_turns(self.deps.max_turns);
 
+        let mut tools = tools_for(kind);
+        // 嵌套：主 agent 派的 `general-purpose` 子 agent 也拿到 Task（深度 1），
+        // 它判断"这活可以拆"时能自己派同步的侦察 —— 不用主 agent 预先想好拆法
+        // （Cursor 同款）。再往下一层没有：深度 1 的 Task 派出去的清单里不加。
+        // `explore` 不给：只读侦察再拆一层没有意义，便宜档的账单还会翻倍。
+        if self.depth == 0 && kind == Kind::GeneralPurpose {
+            tools.push(Arc::new(TaskTool::nested(
+                self.deps.clone(),
+                agent_id.clone(),
+            )));
+        }
         // 后台任务的权限弹窗要带归属：弹出来时父轮次多半已经结束，用户
         // 得知道是谁想干这件事。同步的不贴 —— 弹窗就出现在转着圈的 Task
         // 卡片旁边，归属不言自明。
         let tools = if background {
-            Attributed::wrap_all(tools_for(kind), &format!("后台任务「{title}」"))
+            Attributed::wrap_all(tools, &format!("后台任务「{title}」"))
         } else {
-            tools_for(kind)
+            tools
         };
         let prompt_ctx = PromptContext {
             cwd: self.deps.cwd.clone(),
@@ -905,13 +947,14 @@ impl TaskTool {
             })
         });
 
+        let system = system_prompt_for(kind, &model, &self.deps.cwd, self.deps.flavor);
         Ok(Job {
             agent_id,
             kind,
             title,
             provider,
             model,
-            system: system_prompt_for(kind, &self.deps.cwd, self.deps.flavor),
+            system,
             tools: Arc::new(scheduler),
             messages,
             max_turns,
@@ -1145,6 +1188,7 @@ impl Tool for TaskTool {
             model: model.clone(),
             background,
             tool_use_id: ctx.tool_use_id.clone(),
+            parent: self.parent.clone(),
             status: BackgroundTaskStatus::Running,
             activity: "启动".into(),
             tool_uses: 0,
@@ -1499,11 +1543,11 @@ mod tests {
         assert!(text.contains("150 tokens"), "用量脚注要在：{text}");
         assert!(text.contains("resume="), "脚注要告诉模型能续接：{text}");
 
-        // 子 agent 的请求不该带 Task 工具（递归在结构上不存在）
+        // 侦察子 agent 的请求不该带 Task 工具（只读再拆一层没意义）
         let reqs = provider.requests();
         assert!(
             reqs[0].tools.iter().all(|t| t.name != "Task"),
-            "子 agent 的工具清单里不能有 Task"
+            "explore 的工具清单里不能有 Task"
         );
         assert!(
             reqs[0].tools.iter().any(|t| t.name == "Read"),
@@ -1532,15 +1576,18 @@ mod tests {
     fn 子_agent_和主_agent_共用汇报分节() {
         let main = crate::prompt::system_prompt(&crate::prompt::SystemPromptInput {
             cwd: std::path::Path::new("/w"),
+            model: "main-model",
             today: "2026年8月",
             python_venv: None,
             extra: None,
             has_hooks: false,
+            digests_dir: None,
             flavor: crate::prompt::Flavor::Anthropic,
         });
         for kind in [Kind::Explore, Kind::GeneralPurpose] {
             let sub = system_prompt_for(
                 kind,
+                "sub-model",
                 std::path::Path::new("/w"),
                 crate::prompt::Flavor::Anthropic,
             );
@@ -1566,11 +1613,28 @@ mod tests {
     fn 子_agent_的分节外壳跟着厂商走() {
         let md = system_prompt_for(
             Kind::Explore,
+            "m",
             std::path::Path::new("/w"),
             crate::prompt::Flavor::OpenAiCompatible,
         );
         assert!(md.contains("## agent_identity"));
         assert!(!md.contains("<agent_identity>"));
+    }
+
+    /// 子 agent 报的是**自己**的模型名：侦察档走便宜档时和主 agent 不是
+    /// 同一个模型，用户点开子 agent 的记录问"你是什么模型"，答主模型就错了。
+    #[test]
+    fn 子_agent_身份句里是自己的模型() {
+        let sub = system_prompt_for(
+            Kind::Explore,
+            "cheap-model",
+            std::path::Path::new("/w"),
+            crate::prompt::Flavor::Anthropic,
+        );
+        assert!(
+            sub.contains("powered by the model `cheap-model`"),
+            "身份句要带自己的模型 id：{sub}"
+        );
     }
 
     #[tokio::test]
@@ -1852,13 +1916,67 @@ mod tests {
         assert!(error_for_model.contains("没有叫"), "{error_for_model}");
     }
 
-    /// 深度计数器：分叉里的 Task 拒绝再分叉，后台请求被降成同步。
+    /// 嵌套两层到顶：主 agent 派的 general-purpose 有 Task，它再派的没有。
+    /// 派出去的子 agent 登记 parent。
+    #[tokio::test]
+    async fn 嵌套_general_purpose有task_下一层没有_登记parent() {
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            vec![ProviderEvent::Message(assistant("第一层"))],
+            vec![ProviderEvent::Message(assistant("第二层"))],
+        ]));
+        let d = deps(Arc::clone(&provider));
+        let tasks = Arc::clone(&d.tasks);
+        let top = TaskTool::new(d.clone());
+        let (c, _rx) = ctx();
+        let out = top
+            .call(
+                serde_json::json!({ "description": "一层", "prompt": "干活", "subagent_type": "general-purpose" }),
+                c,
+            )
+            .await;
+        model_text(&out);
+        let reqs = provider.requests();
+        assert!(
+            reqs[0].tools.iter().any(|t| t.name == "Task"),
+            "general-purpose 子 agent 要有 Task"
+        );
+        let top_id = tasks.snapshot()[0].id.clone();
+        assert!(
+            tasks.snapshot()[0].parent.is_none(),
+            "主 agent 派的没有 parent"
+        );
+
+        let nested = TaskTool::nested(d, top_id.clone());
+        let (c, _rx) = ctx();
+        let out = nested
+            .call(
+                serde_json::json!({ "description": "二层", "prompt": "再干", "subagent_type": "general-purpose" }),
+                c,
+            )
+            .await;
+        model_text(&out);
+        let reqs = provider.requests();
+        assert!(
+            reqs[1].tools.iter().all(|t| t.name != "Task"),
+            "第二层派出去的清单里不能再有 Task"
+        );
+        let snap = tasks.snapshot();
+        let child = snap.iter().find(|v| v.title == "二层").expect("登记了");
+        assert_eq!(child.parent.as_ref(), Some(&top_id), "记 parent");
+        assert_eq!(
+            tasks.history(top_id.as_str()).unwrap().descendants.len(),
+            1,
+            "查父的会话带上后代"
+        );
+    }
+
+    /// 深度计数器：子 agent 里的 Task 拒绝再分叉，后台请求被降成同步。
     #[tokio::test]
     async fn 分叉里不能再分叉_后台降成同步() {
         let provider = Arc::new(ScriptedProvider::new(vec![vec![ProviderEvent::Message(
             assistant("同步跑完"),
         )]]));
-        let tool = TaskTool::forked(deps(Arc::clone(&provider)));
+        let tool = TaskTool::nested(deps(Arc::clone(&provider)), AgentId::from_raw("agt_p"));
 
         let (c, _rx) = ctx();
         let out = tool
