@@ -68,10 +68,10 @@ MUTANTS = [
         "gate",
         "gate.rs",
         """        if !reason.yields_to_bypass() {
-            return None;
+            return RaceOutcome::Pending;
         }""",
         """        if false {
-            return None;
+            return RaceOutcome::Pending;
         }""",
         "Auto 模式下小模型能自动放行写 SSH 密钥 / shell 启动脚本 —— 判危器成了绕过分层免疫的后门",
     ),

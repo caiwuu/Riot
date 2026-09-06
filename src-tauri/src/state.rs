@@ -3337,7 +3337,9 @@ mod tests {
             .expect("现有会话目标该成功");
         assert_eq!(bound.session_id.as_deref(), Some(s.id.as_str()));
         // 会话的根是规范化过的（macOS 上 /var → /private/var），按规范化后比。
-        let canon = std::fs::canonicalize(&root).expect("规范化");
+        // Windows 上还要剥掉 `\\?\`：围栏给出的根是剥过的，两边形式不一致时
+        // 按组件比较（VerbatimDisk ≠ Disk）永远不相等。
+        let canon = crate::fence::strip_verbatim(std::fs::canonicalize(&root).expect("规范化"));
         assert_eq!(
             std::path::Path::new(&bound.root),
             canon,

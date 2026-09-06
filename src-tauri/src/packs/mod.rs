@@ -49,6 +49,10 @@ const MANIFEST_URL: &str = "https://raw.githubusercontent.com/caiwuu/riot-pkg/ma
 /// 整个吸进进程（见 [`crate::gui_env`]，那份黑名单只挡十几个 key），于是
 /// `.zshrc` 里一行 export 就换掉了整个包源 —— 装进来的是几百 MB 会被执行
 /// 的二进制。sha256 校验在这里帮不上忙:哈希值写在被换掉的那份清单里。
+///
+/// 连常量本身都只在 debug 下存在 —— release 里没有任何读它的地方，留着就是
+/// `dead_code`，而 CI 带 `-D warnings`。
+#[cfg(debug_assertions)]
 const MANIFEST_URL_ENV: &str = "RIOT_PACKS_MANIFEST_URL";
 
 fn manifest_url() -> String {
