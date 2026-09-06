@@ -270,6 +270,7 @@ pub async fn dispatch(
         "browser_input" => {
             ok(crate::browser_input(st, a.take("sessionId")?, a.take("input")?).await)
         }
+        "browser_selection" => ok(crate::browser_selection(st, a.take("sessionId")?).await),
         "browser_pick" => {
             ok(crate::browser_pick(st, a.take("sessionId")?, a.take("x")?, a.take("y")?).await)
         }

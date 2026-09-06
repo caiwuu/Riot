@@ -20,7 +20,41 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use riot_protocol::schedule::{MissedRun, Repeat, ScheduledTask, WhenSpec};
+use riot_protocol::schedule::{MissedRun, Repeat, ScheduleRunRecord, ScheduledTask, WhenSpec};
+
+/// 每个任务保留的运行历史条数。"每五分钟"一天就是近三百次，全留着
+/// schedules.json 会一路涨；最近这些足够回答"最近几次跑成了没"。
+pub const MAX_RUNS: usize = 50;
+
+/// 间隔重复的最小间隔（分钟）。tick 周期是 20 秒，1 分钟能准时到点；
+/// 更密就是在烧模型调用，而且列表里的"下次运行"永远显示"1 分钟内"。
+pub const MIN_EVERY_MINUTES: u32 = 1;
+
+/// 一次执行的存储记录。字段全 `default`，和 [`PersistedTask`] 同一条
+/// 向后兼容约束。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedRun {
+    pub started_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl PersistedRun {
+    fn to_view(&self) -> ScheduleRunRecord {
+        ScheduleRunRecord {
+            started_at_ms: self.started_at_ms,
+            started_at_local: local_text(self.started_at_ms),
+            session_id: self.session_id.clone(),
+            finished_at_ms: self.finished_at_ms,
+            error: self.error.clone(),
+        }
+    }
+}
 
 /// 存储结构。字段全部 `default` —— 加载老文件不能因缺字段整体失败
 /// （和 PersistedSession 同一条向后兼容约束）。
@@ -44,9 +78,44 @@ pub struct PersistedTask {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_session_id: Option<String>,
     pub created_at_ms: u64,
+    /// 运行历史，新的在前，最多 [`MAX_RUNS`] 条。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<PersistedRun>,
 }
 
 impl PersistedTask {
+    /// 记一次开跑（或开跑即失败）。新的插在最前，超出上限的从尾部掐掉。
+    /// 顺手维护 `last_run_ms` / `last_session_id` —— 它们是历史的头一条
+    /// 的投影，两处分开写迟早对不上。
+    pub fn push_run(&mut self, started_at_ms: u64, session_id: Option<String>, error: Option<String>) {
+        self.last_run_ms = Some(started_at_ms);
+        if session_id.is_some() {
+            self.last_session_id = session_id.clone();
+        }
+        self.runs.insert(
+            0,
+            PersistedRun {
+                started_at_ms,
+                session_id,
+                finished_at_ms: error.is_some().then_some(started_at_ms),
+                error,
+            },
+        );
+        self.runs.truncate(MAX_RUNS);
+    }
+
+    /// 把某个会话上**还没结束**的那次运行标成跑完。按会话找而不是拿头一条：
+    /// 续跑型任务用同一个会话，run_now 又能和到点运行撞在一起。
+    pub fn finish_run(&mut self, session_id: &str, finished_at_ms: u64) {
+        if let Some(r) = self
+            .runs
+            .iter_mut()
+            .find(|r| r.finished_at_ms.is_none() && r.session_id.as_deref() == Some(session_id))
+        {
+            r.finished_at_ms = Some(finished_at_ms);
+        }
+    }
+
     /// 给前端 / 模型的视图：附上现算的本地时间文字。
     pub fn to_view(&self) -> ScheduledTask {
         ScheduledTask {
@@ -63,6 +132,7 @@ impl PersistedTask {
             last_run_local: self.last_run_ms.map(local_text),
             last_session_id: self.last_session_id.clone(),
             created_at_ms: self.created_at_ms,
+            runs: self.runs.iter().map(PersistedRun::to_view).collect(),
         }
     }
 }
@@ -155,6 +225,16 @@ pub fn resolve_spec(when: &WhenSpec, now_ms: u64) -> Result<(Repeat, u64), Strin
             let m = (*minutes).min(60 * 24 * 366) as u64;
             Ok((Repeat::Once, now_ms + m * 60_000))
         }
+        WhenSpec::Every { minutes } => {
+            if *minutes < MIN_EVERY_MINUTES {
+                return Err(format!("every 的 minutes 至少是 {MIN_EVERY_MINUTES}。"));
+            }
+            // 和 after 同一个封顶：超过一年的间隔多半是单位写错了。
+            let m = (*minutes).min(60 * 24 * 366);
+            let repeat = Repeat::Every { minutes: m };
+            let first = next_run(&repeat, now_ms).ok_or_else(|| "间隔算不出下一次。".to_owned())?;
+            Ok((repeat, first))
+        }
         WhenSpec::Daily { time } => {
             let repeat = Repeat::Daily { time: time.clone() };
             let first = next_run(&repeat, now_ms).ok_or_else(|| bad_time(time))?;
@@ -191,6 +271,11 @@ pub fn next_run(repeat: &Repeat, after_ms: u64) -> Option<u64> {
 
     let (time, want_day): (&str, fn(chrono::Weekday) -> bool) = match repeat {
         Repeat::Once => return None,
+        // 间隔从"上一次到点"往后数，不对齐墙钟：每 5 分钟就是 5 分钟后，
+        // 不管现在是几点几分。
+        Repeat::Every { minutes } => {
+            return after_ms.checked_add(u64::from(*minutes).checked_mul(60_000)?);
+        }
         Repeat::Daily { time } => (time, |_| true),
         Repeat::Weekdays { time } => (time, |w| {
             !matches!(w, chrono::Weekday::Sat | chrono::Weekday::Sun)
@@ -504,6 +589,7 @@ mod tests {
                 last_run_ms: None,
                 last_session_id: None,
                 created_at_ms: 1,
+                runs: Vec::new(),
             }],
         };
         save(dir.path(), &book).expect("保存");
@@ -535,7 +621,57 @@ mod tests {
             last_run_ms: None,
             last_session_id: None,
             created_at_ms: 1,
+            runs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn 间隔重复_从上一次到点往后数() {
+        let repeat = Repeat::Every { minutes: 5 };
+        let now = ms(2026, 9, 2, 12, 3);
+        assert_eq!(next_run(&repeat, now), Some(now + 5 * 60_000), "不对齐墙钟");
+
+        let (r, first) = resolve_spec(&WhenSpec::Every { minutes: 5 }, now).expect("每 5 分钟");
+        assert_eq!(r, repeat);
+        assert_eq!(first, now + 5 * 60_000, "首次在一个间隔之后");
+        assert!(resolve_spec(&WhenSpec::Every { minutes: 0 }, now).is_err());
+    }
+
+    #[test]
+    fn 启动对账_间隔任务错过要封顶计数() {
+        // 关机一天的"每 5 分钟"：错过两百多次，计数封顶在 60 别空转；
+        // next_run 推到 now + 间隔，不能开机就补跑。
+        let now = ms(2026, 9, 5, 12, 0);
+        let mut tasks = vec![task(Repeat::Every { minutes: 5 }, Some(ms(2026, 9, 4, 12, 0)))];
+        let (missed, dirty) = reconcile_on_start(&mut tasks, now);
+        assert!(dirty);
+        assert_eq!(missed[0].count, 60);
+        assert_eq!(tasks[0].next_run_ms, Some(now + 5 * 60_000));
+        assert!(tasks[0].enabled);
+    }
+
+    #[test]
+    fn 运行历史_新的在前_超上限掐尾_跑完按会话认() {
+        let mut t = task(Repeat::Every { minutes: 5 }, Some(1));
+        for i in 0..(MAX_RUNS as u64 + 5) {
+            t.push_run(i, Some(format!("s{i}")), None);
+        }
+        assert_eq!(t.runs.len(), MAX_RUNS, "超出上限的老记录要掐掉");
+        assert_eq!(t.runs[0].started_at_ms, MAX_RUNS as u64 + 4, "新的在前");
+        assert_eq!(t.last_run_ms, Some(MAX_RUNS as u64 + 4));
+        assert_eq!(t.last_session_id.as_deref(), Some("s54"));
+
+        // 只有对应会话上那条没结束的被标成跑完，别的不动。
+        t.finish_run("s53", 999);
+        let done = t.runs.iter().find(|r| r.session_id.as_deref() == Some("s53")).expect("有");
+        assert_eq!(done.finished_at_ms, Some(999));
+        assert!(t.runs[0].finished_at_ms.is_none(), "最新那次还在跑");
+
+        // 开跑即失败：没会话、error 有值、当场算结束。
+        t.push_run(1000, None, Some("建不了会话".into()));
+        assert_eq!(t.runs[0].error.as_deref(), Some("建不了会话"));
+        assert_eq!(t.runs[0].finished_at_ms, Some(1000));
+        assert_eq!(t.last_session_id.as_deref(), Some("s54"), "失败没会话，last_session 不动");
     }
 
     #[test]

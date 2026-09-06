@@ -47,6 +47,7 @@ import type {
   ScheduleDraft,
   SchedulePatch,
   ScheduleRun,
+  ScheduleRunRecord,
   ScheduledTask,
   ThinkingEffort,
   ThinkingPolicy as GeneratedThinkingPolicy,
@@ -67,6 +68,7 @@ export type {
   ScheduleDraft,
   SchedulePatch,
   ScheduleRun,
+  ScheduleRunRecord,
   ScheduledTask,
   WhenSpec,
 };
@@ -1124,7 +1126,9 @@ export type BrowserInput =
    *  拖拽选字、拖滑块、双击选词。clickCount 让双击/三击成立。 */
   | { kind: "down"; x: number; y: number; button: string; clickCount: number }
   | { kind: "up"; x: number; y: number; button: string; clickCount: number }
-  | { kind: "move"; x: number; y: number }
+  /** `button` 是此刻按着的键。拖动期间必须带 —— Blink 收到"没按键"的移动
+   *  会把按下状态清掉，拖选、拖滑块在第一下移动就断。 */
+  | { kind: "move"; x: number; y: number; button?: string }
   /** 两个轴都要发。页面通常比面板宽，只发 deltaY 的话右边那截永远看不到。 */
   | { kind: "scroll"; x: number; y: number; deltaX: number; deltaY: number }
   | { kind: "text"; text: string }
@@ -1297,6 +1301,11 @@ export function browserResize(
 
 export function browserInput(sessionId: string, input: BrowserInput): Promise<void> {
   return invoke("browser_input", { sessionId, input });
+}
+
+/** 页面里当前选中的文本。没选是空串。面板的"复制"用它把选区取回本侧。 */
+export function browserSelection(sessionId: string): Promise<string> {
+  return invoke<string>("browser_selection", { sessionId });
 }
 
 /** 面板取件的结果：用户在面板里点中的那个元素。 */

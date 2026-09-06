@@ -20,7 +20,8 @@ import { BrowserIcon, DiffIcon, FileDocIcon, FolderIcon } from "./icons";
  *  browser 在标签栏上展开成一组页面标签，但在状态里始终是一项 ——
  *  页面的增删是宿主的事，工作台只关心"浏览器开没开"。
  *  files 是项目文件树的"落脚点"：树本身是预览面板的一栏（见 FilePreview），
- *  这个标签让它在一个文件都没开的时候也有地方待。 */
+ *  这个标签让它在一个文件都没开的时候也有地方待。正看着它时开出的第一个
+ *  预览会原位接管这枚标签（见 App.openTab），不留一枚永远空着的"文件"。 */
 export type WorkbenchTab =
   | { kind: "browser" }
   | { kind: "changes" }

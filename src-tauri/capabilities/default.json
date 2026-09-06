@@ -66,6 +66,7 @@
     "allow-browser-watch-tabs",
     "allow-browser-resize",
     "allow-browser-input",
+    "allow-browser-selection",
     "allow-browser-pick",
     "allow-browser-pick-hover",
     "allow-browser-pick-clear",

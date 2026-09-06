@@ -52,6 +52,7 @@ const COMMANDS: &[&str] = &[
     "browser_watch_tabs",
     "browser_resize",
     "browser_input",
+    "browser_selection",
     "browser_pick",
     "browser_pick_hover",
     "browser_pick_clear",

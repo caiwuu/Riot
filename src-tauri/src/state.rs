@@ -2113,6 +2113,7 @@ impl AppState {
             last_run_ms: None,
             last_session_id: None,
             created_at_ms: now,
+            runs: Vec::new(),
         };
 
         {
@@ -2342,7 +2343,9 @@ impl AppState {
                 });
             }
             Err(msg) => {
+                // 失败已经由 run_schedule_inner 记进历史（它知道有没有会话）。
                 tracing::warn!(task = %task.id, error = %msg, "定时任务没跑成");
+                self.emit_schedule_changed();
                 self.notify_os("定时任务没跑成", &format!("「{}」：{msg}", task.name));
                 self.emit_schedule(ScheduleRun {
                     task_id: task.id,
@@ -2355,6 +2358,21 @@ impl AppState {
         }
     }
 
+    /// 开跑即失败（还没有会话）：记一条失败历史。用户打开详情要能看到
+    /// "昨晚那次为什么没跑"，而不是只有一条系统通知一闪而过。
+    async fn record_failed_run(&self, task_id: &str, msg: &str, pause: bool) {
+        let mut g = self.0.schedules.lock().await;
+        if let Some(t) = g.tasks.iter_mut().find(|t| t.id == task_id) {
+            t.push_run(crate::schedule::now_ms(), None, Some(msg.to_owned()));
+            if pause {
+                t.enabled = false;
+            }
+            self.persist_schedules(&g);
+        }
+    }
+
+    /// 失败一律先记进历史再返回 —— 三条失败路径各自知道有没有会话，
+    /// 放在这里记比让调用方猜准确。
     async fn run_schedule_inner(
         &self,
         task: &crate::schedule::PersistedTask,
@@ -2365,20 +2383,21 @@ impl AppState {
                 if self.require_session(sid).await.is_err() {
                     // 续跑目标没了：暂停任务等用户处置，而不是每到点都
                     // 失败一次 —— 那会变成一个循环报错的闹钟。
-                    let mut g = self.0.schedules.lock().await;
-                    if let Some(t) = g.tasks.iter_mut().find(|t| t.id == task.id) {
-                        t.enabled = false;
-                        self.persist_schedules(&g);
-                    }
-                    return Err("它要续跑的会话已被删除，任务已暂停。".to_owned());
+                    let msg = "它要续跑的会话已被删除，任务已暂停。";
+                    self.record_failed_run(&task.id, msg, true).await;
+                    return Err(msg.to_owned());
                 }
                 sid.clone()
             }
             None => {
-                let info = self
-                    .create_session(&task.root)
-                    .await
-                    .map_err(|e| format!("建不了会话：{e}"))?;
+                let info = match self.create_session(&task.root).await {
+                    Ok(info) => info,
+                    Err(e) => {
+                        let msg = format!("建不了会话：{e}");
+                        self.record_failed_run(&task.id, &msg, false).await;
+                        return Err(msg);
+                    }
+                };
                 // 标题 = 任务名 + 日期。custom_title 一并挡住了"第一句话
                 // 变标题"—— 不然侧栏里全是一模一样的 prompt 开头。
                 let date = crate::schedule::local_text(crate::schedule::now_ms());
@@ -2395,18 +2414,31 @@ impl AppState {
             let mut g = self.0.schedules.lock().await;
             g.running.insert(session_id.clone(), task.id.clone());
             if let Some(t) = g.tasks.iter_mut().find(|t| t.id == task.id) {
-                t.last_run_ms = Some(crate::schedule::now_ms());
-                t.last_session_id = Some(session_id.clone());
+                t.push_run(crate::schedule::now_ms(), Some(session_id.clone()), None);
                 self.persist_schedules(&g);
             }
         }
+        self.emit_schedule_changed();
 
         if let Err(e) = self
             .submit_turn(&session_id, &task.prompt, Vec::new(), Vec::new())
             .await
         {
-            self.0.schedules.lock().await.running.remove(&session_id);
-            return Err(format!("轮子没起来：{e}"));
+            let msg = format!("轮子没起来：{e}");
+            // 刚记的那条"在跑"要改成失败，不然它会一直挂着"还在跑"。
+            let mut g = self.0.schedules.lock().await;
+            g.running.remove(&session_id);
+            if let Some(t) = g.tasks.iter_mut().find(|t| t.id == task.id)
+                && let Some(r) = t
+                    .runs
+                    .iter_mut()
+                    .find(|r| r.finished_at_ms.is_none() && r.session_id.as_deref() == Some(&session_id))
+            {
+                r.finished_at_ms = Some(crate::schedule::now_ms());
+                r.error = Some(msg.clone());
+                self.persist_schedules(&g);
+            }
+            return Err(msg);
         }
         Ok(session_id)
     }
@@ -2418,16 +2450,20 @@ impl AppState {
             let Some(task_id) = g.running.remove(session_id) else {
                 return;
             };
-            let name = g
-                .tasks
-                .iter()
-                .find(|t| t.id == task_id)
-                .map(|t| t.name.clone())
-                .unwrap_or_else(|| task_id.clone());
+            let now = crate::schedule::now_ms();
+            let name = g.tasks.iter_mut().find(|t| t.id == task_id).map(|t| {
+                t.finish_run(session_id, now);
+                t.name.clone()
+            });
+            if name.is_some() {
+                self.persist_schedules(&g);
+            }
+            let name = name.unwrap_or_else(|| task_id.clone());
             (task_id, name)
         };
         let (task_id, name) = claimed;
         tracing::info!(task = %task_id, session = %session_id, "定时任务跑完了");
+        self.emit_schedule_changed();
         self.notify_os("定时任务完成", &format!("「{name}」跑完了，回来看看结果。"));
         self.emit_schedule(ScheduleRun {
             task_id,

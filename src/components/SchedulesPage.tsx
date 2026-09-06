@@ -18,6 +18,7 @@ import {
   type MissedRun,
   type RunTargetSpec,
   type SchedulePatch,
+  type ScheduleRunRecord,
   type ScheduledTask,
   scheduleCreate,
   scheduleSetEnabled,
@@ -44,11 +45,20 @@ const TABS: { id: Filter; label: string }[] = [
 
 const WEEKDAY_NAMES = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 
+/** "每 N 分钟"：整小时 / 整天的说成小时 / 天，念着顺。 */
+function everyText(minutes: number): string {
+  if (minutes % 1440 === 0) return `每 ${minutes / 1440} 天`;
+  if (minutes % 60 === 0) return `每 ${minutes / 60} 小时`;
+  return `每 ${minutes} 分钟`;
+}
+
 function repeatText(t: ScheduledTask): string {
   const r = t.repeat;
   switch (r.kind) {
     case "once":
       return "一次性";
+    case "every":
+      return everyText(r.minutes);
     case "daily":
       return `每天 ${r.time}`;
     case "weekdays":
@@ -310,13 +320,23 @@ function StatusRing({ t }: { t: ScheduledTask }) {
 
 /* ── 详情面板 ───────────────────────────────── */
 
-/** 重复选项的扁平表示："once"/"daily"/"weekdays"/"w1".."w7"。 */
-type RepeatChoice = "once" | "daily" | "weekdays" | `w${number}`;
+/** 重复选项的扁平表示："once"/"every"/"daily"/"weekdays"/"w1".."w7"。 */
+type RepeatChoice = "once" | "every" | "daily" | "weekdays" | `w${number}`;
+
+const REPEAT_OPTIONS = [
+  { value: "once", label: "一次性" },
+  { value: "every", label: "每隔…" },
+  { value: "daily", label: "每天" },
+  { value: "weekdays", label: "工作日" },
+  ...WEEKDAY_NAMES.map((w, i) => ({ value: `w${i + 1}`, label: `每${w}` })),
+];
 
 function choiceOf(t: ScheduledTask): RepeatChoice {
   switch (t.repeat.kind) {
     case "once":
       return "once";
+    case "every":
+      return "every";
     case "daily":
       return "daily";
     case "weekdays":
@@ -330,6 +350,52 @@ function timeOf(t: ScheduledTask): string {
   const r = t.repeat;
   if (r.kind === "daily" || r.kind === "weekdays" || r.kind === "weekly") return r.time;
   return "09:00";
+}
+
+/** 间隔的表单表示：数值 + 单位。整小时的任务用小时显示，不然 120 分钟看着别扭。 */
+type Interval = { n: string; unit: "min" | "hour" };
+
+function intervalOf(t: ScheduledTask): Interval {
+  if (t.repeat.kind !== "every") return { n: "30", unit: "min" };
+  const m = t.repeat.minutes;
+  return m % 60 === 0 ? { n: String(m / 60), unit: "hour" } : { n: String(m), unit: "min" };
+}
+
+/** 表单的间隔 → 分钟数。非法（空、非数字、≤0）返回 null。 */
+function intervalMinutes(iv: Interval): number | null {
+  const n = Number(iv.n);
+  if (!Number.isInteger(n) || n <= 0) return null;
+  return iv.unit === "hour" ? n * 60 : n;
+}
+
+/** 频率组里"间隔"那一行：数值输入 + 单位下拉。 */
+function IntervalRow({ value, onChange }: { value: Interval; onChange: (v: Interval) => void }) {
+  return (
+    <div className="sp-d-row">
+      <span>间隔</span>
+      <span className="sp-d-interval">
+        <input
+          className="sp-d-input sp-d-interval-n"
+          type="number"
+          min={1}
+          step={1}
+          inputMode="numeric"
+          value={value.n}
+          onChange={(e) => onChange({ ...value, n: e.currentTarget.value })}
+          aria-label="间隔数值"
+        />
+        <FieldSelect
+          className="sp-d-field"
+          value={value.unit}
+          onChange={(u) => onChange({ ...value, unit: u as Interval["unit"] })}
+          options={[
+            { value: "min", label: "分钟" },
+            { value: "hour", label: "小时" },
+          ]}
+        />
+      </span>
+    </div>
+  );
 }
 
 /**
@@ -364,12 +430,22 @@ export function ScheduleDetail({
   const [root, setRoot] = useState(task.root);
   const [choice, setChoice] = useState<RepeatChoice>(() => choiceOf(task));
   const [time, setTime] = useState(() => timeOf(task));
+  const [every, setEvery] = useState<Interval>(() => intervalOf(task));
   const [onceAt, setOnceAt] = useState(task.nextRunLocal ?? "");
   const [saving, setSaving] = useState(false);
   const [saveFailed, setSaveFailed] = useState(false);
 
   const done = isDoneSchedule(task);
   const status = task.enabled ? "活跃" : done ? "已完成" : "已暂停";
+
+  /** 频率相对任务当前值动过没有。三种形态各看自己那一项。 */
+  const whenChanged =
+    choice !== choiceOf(task) ||
+    (choice === "once"
+      ? onceAt.trim() !== (task.nextRunLocal ?? "")
+      : choice === "every"
+        ? intervalMinutes(every) !== (task.repeat.kind === "every" ? task.repeat.minutes : null)
+        : time !== timeOf(task));
 
   /** 各字段相对任务当前值有没有动过。保存成功后 task 更新，dirty 自动消失。 */
   const dirty = useMemo(() => {
@@ -379,11 +455,8 @@ export function ScheduleDetail({
     if (runIn !== wasRunIn) return true;
     if (runIn === "session" && sessionId !== (task.sessionId ?? null)) return true;
     if (runIn === "new" && root !== task.root) return true;
-    if (choice !== choiceOf(task)) return true;
-    if (choice !== "once" && time !== timeOf(task)) return true;
-    if (choice === "once" && onceAt.trim() !== (task.nextRunLocal ?? "")) return true;
-    return false;
-  }, [task, name, prompt, runIn, sessionId, root, choice, time, onceAt]);
+    return whenChanged;
+  }, [task, name, prompt, runIn, sessionId, root, whenChanged]);
 
   const save = async () => {
     const patch: SchedulePatch = {};
@@ -403,12 +476,13 @@ export function ScheduleDetail({
       }
     }
 
-    const whenChanged =
-      choice !== choiceOf(task) ||
-      (choice !== "once" && time !== timeOf(task)) ||
-      (choice === "once" && onceAt.trim() !== (task.nextRunLocal ?? ""));
     if (whenChanged) {
-      patch.when = buildWhen(choice, time, onceAt);
+      const when = buildWhen(choice, time, onceAt, every);
+      if (!when) {
+        onError("间隔不对", "「每隔」的数值要是大于 0 的整数。");
+        return;
+      }
+      patch.when = when;
     }
 
     setSaving(true);
@@ -531,12 +605,7 @@ export function ScheduleDetail({
             className="sp-d-field"
             value={choice}
             onChange={(v) => setChoice(v as RepeatChoice)}
-            options={[
-              { value: "once", label: "一次性" },
-              { value: "daily", label: "每天" },
-              { value: "weekdays", label: "工作日" },
-              ...WEEKDAY_NAMES.map((w, i) => ({ value: `w${i + 1}`, label: `每${w}` })),
-            ]}
+            options={REPEAT_OPTIONS}
           />
         </div>
         {choice === "once" ? (
@@ -544,6 +613,8 @@ export function ScheduleDetail({
             <span>时刻</span>
             <DateTimePicker className="sp-d-field" value={onceAt} onChange={setOnceAt} />
           </div>
+        ) : choice === "every" ? (
+          <IntervalRow value={every} onChange={setEvery} />
         ) : (
           <div className="sp-d-row">
             <span>时间</span>
@@ -552,16 +623,86 @@ export function ScheduleDetail({
         )}
       </div>
 
-      {task.lastRunLocal ? (
-        <div className="sp-d-foot">上次运行 {task.lastRunLocal}</div>
-      ) : null}
+      <RunHistory runs={task.runs ?? []} sessions={sessions} onOpenSession={onOpenSession} />
     </div>
   );
 }
 
-/** 表单选择 → 协议的时间说法。 */
-function buildWhen(choice: RepeatChoice, time: string, onceAt: string): WhenSpec {
+/**
+ * 运行历史（Codex 的「运行历史记录」同款）：每次到点执行一行 —— 状态点、
+ * 时刻、会话、相对时间。点行跳到那次运行的会话看结果。
+ *
+ * 这是"一个周期任务反复跑"的另一半：任务列表里只有一条，跑过哪几次、
+ * 哪次失败了，都在这里。
+ */
+function RunHistory({
+  runs,
+  sessions,
+  onOpenSession,
+}: {
+  runs: ScheduleRunRecord[];
+  sessions: SessionInfo[];
+  onOpenSession: (id: string) => void;
+}) {
+  if (runs.length === 0) return null;
+  return (
+    <>
+      <div className="sp-d-caption">运行历史</div>
+      <div className="sp-d-group sp-runs">
+        {runs.map((r) => {
+          const state = r.error ? "failed" : r.finishedAtMs ? "ok" : "running";
+          const session = r.sessionId ? sessions.find((s) => s.id === r.sessionId) : undefined;
+          // 会话还在就能点过去；已删（或开跑就失败没会话）只展示。
+          const canOpen = Boolean(session);
+          const title = r.error ?? (state === "running" ? "还在跑" : "已完成");
+          return (
+            <button
+              key={`${r.startedAtMs}:${r.sessionId ?? ""}`}
+              className={canOpen ? "sp-run" : "sp-run static"}
+              disabled={!canOpen}
+              onClick={() => r.sessionId && onOpenSession(r.sessionId)}
+              title={title}
+            >
+              <span className={`sp-run-dot ${state}`} aria-label={title} />
+              <span className="sp-run-text">
+                <span className="sp-run-when">{r.startedAtLocal}</span>
+                {session ? (
+                  <span className="sp-run-session">{session.title ?? "新会话"}</span>
+                ) : r.error ? (
+                  <span className="sp-run-session err">{r.error}</span>
+                ) : null}
+              </span>
+              <span className="sp-run-ago">{agoText(r.startedAtMs)}</span>
+            </button>
+          );
+        })}
+      </div>
+    </>
+  );
+}
+
+/** "多久之前"：分钟 / 小时 / 天，再远给日期。 */
+function agoText(ms: number): string {
+  const d = Date.now() - ms;
+  if (d < 60_000) return "刚刚";
+  if (d < 3_600_000) return `${Math.round(d / 60_000)} 分钟前`;
+  if (d < 86_400_000) return `${Math.round(d / 3_600_000)} 小时前`;
+  if (d < 30 * 86_400_000) return `${Math.round(d / 86_400_000)} 天前`;
+  return new Date(ms).toLocaleDateString();
+}
+
+/** 表单选择 → 协议的时间说法。间隔非法时返回 null，调用方提示。 */
+function buildWhen(
+  choice: RepeatChoice,
+  time: string,
+  onceAt: string,
+  interval: Interval,
+): WhenSpec | null {
   if (choice === "once") return { kind: "once", at: onceAt.trim() };
+  if (choice === "every") {
+    const minutes = intervalMinutes(interval);
+    return minutes === null ? null : { kind: "every", minutes };
+  }
   if (choice === "daily") return { kind: "daily", time };
   if (choice === "weekdays") return { kind: "weekdays", time };
   return { kind: "weekly", weekday: Number(choice.slice(1)), time };
@@ -604,18 +745,21 @@ export function ScheduleCreatePanel({
   const [root, setRoot] = useState(defaultRoot ?? projects[0] ?? "");
   const [choice, setChoice] = useState<RepeatChoice>("daily");
   const [time, setTime] = useState("09:00");
+  const [every, setEvery] = useState<Interval>({ n: "30", unit: "min" });
   const [onceAt, setOnceAt] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const when = buildWhen(choice, time, onceAt, every);
   const canSubmit =
     name.trim() !== "" &&
     prompt.trim() !== "" &&
     (runIn === "new" ? root !== "" : sessionId !== null) &&
-    (choice !== "once" || onceAt.trim() !== "");
+    (choice !== "once" || onceAt.trim() !== "") &&
+    when !== null;
 
   const submit = async () => {
-    if (!canSubmit || busy) return;
+    if (!canSubmit || busy || !when) return;
     const target: RunTargetSpec =
       runIn === "session" && sessionId
         ? { kind: "session", id: sessionId }
@@ -626,7 +770,7 @@ export function ScheduleCreatePanel({
       const t = await scheduleCreate({
         name: name.trim(),
         prompt: prompt.trim(),
-        when: buildWhen(choice, time, onceAt),
+        when,
         target,
       });
       onCreated(t);
@@ -715,12 +859,7 @@ export function ScheduleCreatePanel({
             className="sp-d-field"
             value={choice}
             onChange={(v) => setChoice(v as RepeatChoice)}
-            options={[
-              { value: "once", label: "一次性" },
-              { value: "daily", label: "每天" },
-              { value: "weekdays", label: "工作日" },
-              ...WEEKDAY_NAMES.map((w, i) => ({ value: `w${i + 1}`, label: `每${w}` })),
-            ]}
+            options={REPEAT_OPTIONS}
           />
         </div>
         {choice === "once" ? (
@@ -728,6 +867,8 @@ export function ScheduleCreatePanel({
             <span>时刻</span>
             <DateTimePicker className="sp-d-field" value={onceAt} onChange={setOnceAt} />
           </div>
+        ) : choice === "every" ? (
+          <IntervalRow value={every} onChange={setEvery} />
         ) : (
           <div className="sp-d-row">
             <span>时间</span>

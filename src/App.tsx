@@ -563,13 +563,27 @@ export function App() {
   const openTab = useCallback((tab: WorkbenchTab) => {
     setWb((prev) => {
       const id = tabId(tab);
-      const exists = prev.tabs.some((t) => tabId(t) === id);
-      return {
-        ...prev,
-        tabs: exists ? prev.tabs : [...prev.tabs, tab],
-        active: id,
-        open: true,
-      };
+      if (prev.tabs.some((t) => tabId(t) === id)) {
+        return { ...prev, active: id, open: true };
+      }
+      // 正看着"文件"标签（树 + 占位）时开出第一个预览：预览原位接管这个
+      // 标签，而不是在它旁边再开一个。否则那枚"文件"永远空着 —— 用户是
+      // 从树里点过来的，树钉在预览旁边继续用，占位页没有存在的必要了。
+      // 想要回到"只有树"的形态，⌘⇧E / "+"菜单随时能再开一枚。
+      if (
+        tab.kind === "preview" &&
+        prev.active === "files" &&
+        prev.tabs.some((t) => t.kind === "files")
+      ) {
+        return {
+          ...prev,
+          tabs: prev.tabs.map((t) => (t.kind === "files" ? tab : t)),
+          active: id,
+          open: true,
+          tree: true,
+        };
+      }
+      return { ...prev, tabs: [...prev.tabs, tab], active: id, open: true };
     });
   }, []);
 

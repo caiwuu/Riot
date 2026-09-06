@@ -118,9 +118,17 @@ pub enum Input {
         button: String,
         click_count: i64,
     },
+    /// 鼠标移动。`button` 是此刻**按着**的键（没按就不带）。
+    ///
+    /// `[约束]` 拖动期间必须带。Blink 收到一条"没按键"的移动会直接把
+    /// 按下状态清掉（`MouseEventManager::HandleMouseDraggedEvent`），于是
+    /// 按住拖动选字、拖滑块在第一下移动时就断了 —— 现象是"点得到、选不中"。
+    /// 给模型用的 `ops::drag_between` 一直是带着的，面板转发也得带。
     Move {
         x: f64,
         y: f64,
+        #[serde(default)]
+        button: Option<String>,
     },
     /// 滚轮。两个轴都要带。
     ///
@@ -874,6 +882,18 @@ impl HostBrowser {
             }))
     }
 
+    /// 页面里当前选中的文本。没选就是空串。
+    ///
+    /// 面板的"复制"靠它：页面在另一个进程里渲染，⌘C 落在面板的 webview
+    /// 上，得把选区文本取回来写进**面板这一侧**的剪贴板 —— 网页版远程
+    /// 用手机看的时候，宿主机的剪贴板对用户毫无意义。
+    pub async fn selection_text(&self) -> Result<String, BrowserUnavailable> {
+        let (b, id) = self.active().await?;
+        ops::selection_text(Tab { browser: &b, id })
+            .await
+            .map_err(|e| BrowserUnavailable(e.to_string()))
+    }
+
     /// 取件模式的悬停高亮:把蓝框移到光标下的元素上。高频调用（跟着
     /// 鼠标动），前端做了节流。
     pub async fn pick_hover(&self, x: f64, y: f64) -> Result<(), BrowserUnavailable> {
@@ -942,10 +962,22 @@ impl HostBrowser {
                     "button": button, "clickCount": click_count,
                 }),
             )],
-            Input::Move { x, y } => vec![(
-                "Input.dispatchMouseEvent",
-                serde_json::json!({ "type": "mouseMoved", "x": x, "y": y }),
-            )],
+            Input::Move { x, y, button } => {
+                let mut ev = serde_json::json!({ "type": "mouseMoved", "x": x, "y": y });
+                if let Some(b) = button {
+                    // `buttons` 是位掩码（左 1、右 2、中 4），和 `button` 一起给：
+                    // 前者供页面的 `event.buttons`，后者供 Blink 的拖拽判定。
+                    let mask = match b.as_str() {
+                        "left" => 1,
+                        "right" => 2,
+                        "middle" => 4,
+                        _ => 0,
+                    };
+                    ev["button"] = serde_json::json!(b);
+                    ev["buttons"] = serde_json::json!(mask);
+                }
+                vec![("Input.dispatchMouseEvent", ev)]
+            }
             Input::Scroll {
                 x,
                 y,
@@ -2375,6 +2407,8 @@ mod tests {
         let cases = json!([
             { "kind": "click", "x": 10.0, "y": 20.0, "button": "left" },
             { "kind": "move", "x": 10.0, "y": 20.0 },
+            // 拖动中的移动带着按住的键；不带是"悬停"，两种都得认。
+            { "kind": "move", "x": 10.0, "y": 20.0, "button": "left" },
             { "kind": "scroll", "x": 10.0, "y": 20.0, "deltaX": 0.0, "deltaY": -120.0 },
             { "kind": "text", "text": "你好" },
             { "kind": "compose", "text": "ni" },

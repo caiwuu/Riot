@@ -80,8 +80,10 @@ impl Tool for ScheduleTool {
          这句话只是空话。\n\
          \n\
          时间怎么给（when 参数）：\n\
-         - `{\"kind\":\"after\",\"minutes\":90}` —— 90 分钟后跑一次。\
+         - `{\"kind\":\"after\",\"minutes\":90}` —— 90 分钟后跑**一次**。\
            **拿不准当前日期时间就用这个**，相对时间不会错。\n\
+         - `{\"kind\":\"every\",\"minutes\":5}` —— **每隔** 5 分钟跑一次，周期性。\
+           「每五分钟提醒我喝水」「每两小时盯一下」都用它。\n\
          - `{\"kind\":\"once\",\"at\":\"2026-09-01 15:30\"}` —— 指定本地时间跑一次。\
            时间已过会被拒绝并告诉你现在几点，照着改就行。\n\
          - `{\"kind\":\"daily\",\"time\":\"08:00\"}` / `{\"kind\":\"weekdays\",...}` —— \
@@ -89,11 +91,18 @@ impl Tool for ScheduleTool {
          - `{\"kind\":\"weekly\",\"weekday\":5,\"time\":\"16:00\"}` —— 每周五 16:00\
            （1=周一 … 7=周日）。\n\
          \n\
+         **周期性的事只建一个任务。**「每 N 分钟」用 every，不要在每次跑完之后\
+         再建一个 after N 分钟的一次性任务 —— 那样列表里会堆出一串同名任务。\
+         定时任务到点跑的那一轮里，**不要再创建同一件事的任务**：它自己就会\
+         按周期继续跑。每次运行都记在任务的运行历史里，用户看得到。\n\
+         \n\
          in_this_session 怎么选：\n\
          - true：到点在**当前会话**接着跑，上下文都在。适合「这个话题下午\
            再跟进一次」这类一次性跟进。\n\
          - false（默认）：每次新开会话。适合周期性简报 —— 每次独立成篇，\
            不把一个会话越堆越长。\n\
+         - 分钟级的 every（喝水提醒、盯一个状态）**用 true**：每次新开会话\
+           的话，侧栏一天会多出上百个同名会话。\n\
          \n\
          prompt 要自带全部背景：新会话里没有现在的上下文，写清楚做什么、\
          看哪里、产出什么。续跑的任务可以短一些，但也要点明是接着什么说。\n\
@@ -240,6 +249,7 @@ fn render_line(t: &ScheduledTask) -> String {
     use riot_protocol::schedule::Repeat;
     let repeat = match &t.repeat {
         Repeat::Once => "一次性".to_owned(),
+        Repeat::Every { minutes } => every_text(*minutes),
         Repeat::Daily { time } => format!("每天 {time}"),
         Repeat::Weekdays { time } => format!("工作日 {time}"),
         Repeat::Weekly { weekday, time } => format!("每{} {time}", weekday_name(*weekday)),
@@ -254,6 +264,17 @@ fn render_line(t: &ScheduledTask) -> String {
         None => "每次新开会话",
     };
     format!("{repeat}，{next}，{target}。")
+}
+
+/// "每 N 分钟"：整小时 / 整天的说成小时 / 天，念着顺。
+fn every_text(minutes: u32) -> String {
+    if minutes.is_multiple_of(1440) {
+        format!("每 {} 天", minutes / 1440)
+    } else if minutes.is_multiple_of(60) {
+        format!("每 {} 小时", minutes / 60)
+    } else {
+        format!("每 {minutes} 分钟")
+    }
 }
 
 fn weekday_name(d: u8) -> &'static str {
@@ -301,6 +322,7 @@ mod tests {
             last_run_local: None,
             last_session_id: None,
             created_at_ms: 1,
+            runs: Vec::new(),
         }
     }
 

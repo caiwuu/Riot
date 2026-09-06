@@ -30,6 +30,11 @@ use serde::{Deserialize, Serialize};
 pub enum Repeat {
     /// 只跑一次，跑完自动停用。
     Once,
+    /// 每隔 `minutes` 分钟跑一次（从上一次到点算）。
+    ///
+    /// "每五分钟提醒我喝水"是**一个**任务反复跑，不是每跑完再建一个
+    /// 五分钟后的一次性任务 —— 后者会在列表里堆出一串。
+    Every { minutes: u32 },
     /// 每天 `time`（本地时间 "HH:MM"）。
     Daily { time: String },
     /// 周一到周五的 `time`。
@@ -49,6 +54,8 @@ pub enum WhenSpec {
     Once { at: String },
     /// 一次性，从现在起 `minutes` 分钟后。
     After { minutes: u32 },
+    /// 周期性，每隔 `minutes` 分钟。首次在 `minutes` 分钟后。
+    Every { minutes: u32 },
     /// 每天 "HH:MM"。
     Daily { time: String },
     /// 工作日 "HH:MM"。
@@ -140,6 +147,30 @@ pub struct ScheduledTask {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_session_id: Option<String>,
     pub created_at_ms: u64,
+    /// 运行历史，新的在前。宿主只留最近若干条（见宿主的上限）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<ScheduleRunRecord>,
+}
+
+/// 运行历史里的一条：这个任务的某一次执行。
+///
+/// 周期任务是**一个**任务反复跑，"跑过哪几次、哪次失败了"得有地方看 ——
+/// 没有它，用户只能靠侧栏里一串同名会话回忆。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleRunRecord {
+    pub started_at_ms: u64,
+    /// `started_at_ms` 的本地时间文字（宿主现算）。
+    pub started_at_local: String,
+    /// 这次跑在哪个会话里。开跑就失败（建不了会话）时没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// 跑完的时刻。None = 还在跑（或 App 中途退出，没等到结束）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at_ms: Option<u64>,
+    /// 失败原因。Some = 这次没跑成。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// 启动时发现的错过运行（上次 App 没开着，到点没跑成）。
@@ -247,5 +278,16 @@ mod tests {
         );
         assert!(t.session_id.is_none());
         assert!(t.next_run_ms.is_none());
+        assert!(t.runs.is_empty(), "老 JSON 没有 runs 字段，得当空历史");
+    }
+
+    #[test]
+    fn 间隔重复走_every_标签() {
+        let r = Repeat::Every { minutes: 5 };
+        let v = serde_json::to_value(&r).expect("序列化");
+        assert_eq!(v["kind"], "every");
+        assert_eq!(v["minutes"], 5);
+        let back: Repeat = serde_json::from_value(v).expect("往返");
+        assert_eq!(back, r);
     }
 }

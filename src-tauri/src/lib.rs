@@ -970,6 +970,17 @@ async fn browser_pick(
     b.pick_at(x, y).await.map_err(HostError::Browser)
 }
 
+/// 页面里当前选中的文本。面板的"复制"用：页面在另一个进程里，选区得
+/// 取回来写进面板这一侧的剪贴板（网页版远程时那才是用户手里的剪贴板）。
+#[tauri::command]
+async fn browser_selection(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+) -> HostResult<String> {
+    let b = state.panel_browser(&session_id).await?;
+    b.selection_text().await.map_err(HostError::Browser)
+}
+
 /// 取件模式下鼠标移动:把高亮框移到光标下的元素上。前端已节流。
 #[tauri::command]
 async fn browser_pick_hover(
@@ -1466,6 +1477,7 @@ pub fn run() {
             browser_watch_tabs,
             browser_resize,
             browser_input,
+            browser_selection,
             browser_pick,
             browser_pick_hover,
             browser_pick_clear,

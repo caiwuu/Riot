@@ -913,6 +913,34 @@ pub async fn focused_editable(tab: Tab<'_>) -> Result<bool, BrowserError> {
     Ok(r["result"]["value"].as_bool().unwrap_or(false))
 }
 
+/// 页面里当前选中的文本。没选就是空串。
+///
+/// 输入框里的选区要单独取：`getSelection()` 对 `<input>`/`<textarea>` 内部
+/// 的选区在 Chromium 上能给出文本，但那是实现细节而非规范保证，按
+/// `selectionStart/End` 切 `value` 更稳。跨域 iframe 里的选区拿不到 ——
+/// 那是同源策略，不是 bug。
+pub async fn selection_text(tab: Tab<'_>) -> Result<String, BrowserError> {
+    let r = tab
+        .cdp(
+            "Runtime.evaluate",
+            json!({
+                "expression": "(() => { \
+                    const e = document.activeElement; \
+                    if (e && (e.tagName === 'INPUT' || e.tagName === 'TEXTAREA') \
+                        && typeof e.selectionStart === 'number' \
+                        && e.selectionEnd > e.selectionStart) { \
+                        return e.value.slice(e.selectionStart, e.selectionEnd); \
+                    } \
+                    const s = window.getSelection && window.getSelection(); \
+                    return s ? String(s) : ''; \
+                })()",
+                "returnByValue": true,
+            }),
+        )
+        .await?;
+    Ok(r["result"]["value"].as_str().unwrap_or("").to_owned())
+}
+
 /// 全选聚焦元素里的内容。配合 insertText 实现"替换原值"——
 /// insertText 走的是 IME 提交路径，会把选区整个换成新文本。
 pub async fn select_all(tab: Tab<'_>) -> Result<(), BrowserError> {

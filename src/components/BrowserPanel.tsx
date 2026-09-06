@@ -13,6 +13,7 @@ import {
   browserPickHover,
   browserReload,
   browserResize,
+  browserSelection,
   closeBrowser,
   encodePickForComposer,
   openBrowser,
@@ -292,7 +293,11 @@ export function BrowserPanel({
    * 桌面比例、面板是竖条，contain 会居中留边 —— 按元素框算的话，留边
    * 越宽点击偏得越多。
    */
-  const toPage = useCallback((e: React.MouseEvent): { x: number; y: number; s: number } | null => {
+  const toPage = useCallback((e: { clientX: number; clientY: number }): {
+    x: number;
+    y: number;
+    s: number;
+  } | null => {
     const canvas = canvasRef.current;
     const size = frameSize.current;
     if (!canvas || !size || !size.w || !size.h) return null;
@@ -326,7 +331,7 @@ export function BrowserPanel({
    * 按下/抬起/按键不合并 —— 它们是离散动作，丢一个语义就变了。
    */
   const pending = useRef<{
-    move?: { x: number; y: number };
+    move?: { x: number; y: number; button?: string };
     scroll?: { x: number; y: number; deltaX: number; deltaY: number };
   }>({});
   const flushTimer = useRef<number | undefined>(undefined);
@@ -344,7 +349,7 @@ export function BrowserPanel({
     }
     const p = pending.current;
     pending.current = {};
-    if (p.move) send({ kind: "move", x: p.move.x, y: p.move.y });
+    if (p.move) send({ kind: "move", ...p.move });
     if (p.scroll) send({ kind: "scroll", ...p.scroll });
   }, [send]);
 
@@ -370,6 +375,20 @@ export function BrowserPanel({
   /** 取件的这一下 mousedown 已经消费掉了，别让紧跟的 mouseup 作为裸抬起
    *  转发给页面（取件时没发过 down，孤零零一个 up 语义不对）。 */
   const pickedDown = useRef(false);
+  /**
+   * 正在进行的单指拖动。手机上手指滑动只产生 touch 事件，不产生 wheel ——
+   * 这里把它折成滚轮增量走同一条 scroll 通道，页面才会跟着滚。
+   * `moved` 记录有没有越过点按抖动阈值：没越过的是点按，交给浏览器合成
+   * 的 mousedown/mouseup（现有链路），这里不插手。
+   */
+  const touch = useRef<{ id: number; x: number; y: number; moved: boolean } | null>(null);
+  /**
+   * 此刻按着的鼠标键（面板坐标系里的 down 之后、up 之前）。移动事件要带上
+   * 它页面才认拖动（见 bridge 的 `move` 说明）。同时记住最后一个页面坐标：
+   * 手指/鼠标拖出面板再松开时，抬起落不到面板上，得在那个位置补一个 up，
+   * 否则页面停在"按住"态 —— 下一次点击变成拖选的延续。
+   */
+  const held = useRef<{ button: string; x: number; y: number } | null>(null);
   const scheduleHover = useCallback(() => {
     if (hoverRaf.current !== undefined) return;
     hoverRaf.current = requestAnimationFrame(() => {
@@ -399,6 +418,46 @@ export function BrowserPanel({
     },
     [],
   );
+
+  // 拖出面板再松手：抬起落在别处，面板的 onMouseUp 收不到。这里在 window
+  // 上兜一手，按最后一个页面坐标补一个 up。面板内的抬起先经 React 根节点
+  // 处理、把 held 清掉，到这儿已经是 null，不会发两次。
+  useEffect(() => {
+    const onUp = (e: MouseEvent) => {
+      const h = held.current;
+      if (!h) return;
+      held.current = null;
+      flushInputs();
+      send({ kind: "up", x: h.x, y: h.y, button: mouseButton(e.button), clickCount: 1 });
+    };
+    window.addEventListener("mouseup", onUp);
+    return () => window.removeEventListener("mouseup", onUp);
+  }, [flushInputs, send]);
+
+  /**
+   * 把页面里选中的文本复制到**面板这一侧**的剪贴板。⌘C / Ctrl+C 走这里。
+   *
+   * `[约束]` 剪贴板写入必须在用户手势的同一个调用栈里**同步发起**。选区
+   * 文本要跨进程去取，等它回来再 writeText，WebKit 已经不认这是用户
+   * 手势（NotAllowedError）。给 ClipboardItem 传一个 Promise 能两全：
+   * 写入同步发起，内容异步到位。Promise 一拒绝写入就整体作废、剪贴板
+   * 原样不动 —— 页面里什么都没选时靠这条避免把用户剪贴板清空。
+   * 不支持 ClipboardItem 的环境退回 writeText（那时手势约束通常也松）。
+   */
+  const copySelection = useCallback(() => {
+    const text = browserSelection(sessionId).then((t) => {
+      if (!t) throw new Error("empty");
+      return t;
+    });
+    // 没选中（text 拒绝）或写不进剪贴板都静默：和原生浏览器里对着空选区
+    // 按 ⌘C 一样，什么都不发生。
+    if (typeof ClipboardItem !== "undefined" && navigator.clipboard?.write) {
+      const blob = text.then((t) => new Blob([t], { type: "text/plain" }));
+      void navigator.clipboard.write([new ClipboardItem({ "text/plain": blob })]).catch(() => {});
+    } else {
+      void text.then((t) => navigator.clipboard.writeText(t)).catch(() => {});
+    }
+  }, [sessionId]);
 
   const go = async () => {
     const url = normalize(address);
@@ -603,11 +662,13 @@ export function BrowserPanel({
           const p = toPage(e);
           if (p) {
             flushInputs(); // 攒着的移动要排在按下前面，拖拽起点才不偏
+            const button = mouseButton(e.button);
+            held.current = { button, x: p.x, y: p.y };
             send({
               kind: "down",
               x: p.x,
               y: p.y,
-              button: mouseButton(e.button),
+              button,
               clickCount: e.detail || 1,
             });
           }
@@ -623,7 +684,10 @@ export function BrowserPanel({
             pickedDown.current = false;
             return;
           }
-          const p = toPage(e);
+          // 松在留边上（toPage 给 null）也得把 up 送出去，否则页面停在按住态：
+          // 退回按下时记的最后一个页面坐标。
+          const p = toPage(e) ?? held.current;
+          held.current = null;
           if (p) {
             flushInputs(); // 拖拽的最后一段移动要先落地，抬起的位置才对
             send({
@@ -652,7 +716,13 @@ export function BrowserPanel({
           }
           const p = toPage(e);
           if (p) {
-            pending.current.move = { x: p.x, y: p.y }; // 只留最新位置
+            const h = held.current;
+            if (h) {
+              h.x = p.x;
+              h.y = p.y;
+            }
+            // 只留最新位置。按着键时带上它，页面才把这串移动当拖动。
+            pending.current.move = h ? { x: p.x, y: p.y, button: h.button } : { x: p.x, y: p.y };
             scheduleFlush();
           }
         }}
@@ -663,7 +733,7 @@ export function BrowserPanel({
         onWheel={(e) => {
           // 两个轴都转发，不自己判断方向。macOS 上按住 shift 滚轮时
           // 系统已经把量放进了 deltaX，这里再换一次就换回去了。
-          const p = toPage(e as unknown as React.MouseEvent);
+          const p = toPage(e);
           if (p) {
             const prev = pending.current.scroll;
             // `[约束]` 滚轮增量必须按 contain 缩放折到页面坐标。
@@ -680,6 +750,50 @@ export function BrowserPanel({
             };
             scheduleFlush();
           }
+        }}
+        // 手机：单指拖动 = 滚动。`.browser-view` 上有 touch-action: none，
+        // 外壳页面不会跟着平移/缩放，所以这里不需要 preventDefault（React
+        // 把 touch 监听注册成 passive，想拦也拦不住）。点按不在这儿处理：
+        // 手指没怎么动就抬起时，浏览器会合成 mousedown/mouseup，走上面的
+        // 鼠标链路；一旦滑过阈值，浏览器就不再合成点击，两边不会打架。
+        onTouchStart={(e) => {
+          if (pickMode || e.touches.length !== 1) {
+            touch.current = null;
+            return;
+          }
+          const t = e.touches[0];
+          if (!t) return;
+          touch.current = { id: t.identifier, x: t.clientX, y: t.clientY, moved: false };
+        }}
+        onTouchMove={(e) => {
+          const cur = touch.current;
+          if (!cur) return;
+          const t = Array.from(e.changedTouches).find((c) => c.identifier === cur.id);
+          if (!t) return;
+          const dx = t.clientX - cur.x;
+          const dy = t.clientY - cur.y;
+          if (!cur.moved && Math.hypot(dx, dy) < TOUCH_SLOP) return;
+          cur.moved = true;
+          cur.x = t.clientX;
+          cur.y = t.clientY;
+          const p = toPage(t);
+          if (!p) return;
+          // 手指往上滑是想看下面的内容，即页面往下滚：增量取反。
+          // 和滚轮一样按 contain 缩放折到页面坐标（见 onWheel 的说明）。
+          const prev = pending.current.scroll;
+          pending.current.scroll = {
+            x: p.x,
+            y: p.y,
+            deltaX: (prev?.deltaX ?? 0) - dx / p.s,
+            deltaY: (prev?.deltaY ?? 0) - dy / p.s,
+          };
+          scheduleFlush();
+        }}
+        onTouchEnd={() => {
+          touch.current = null;
+        }}
+        onTouchCancel={() => {
+          touch.current = null;
         }}
       >
         {/*
@@ -729,6 +843,13 @@ export function BrowserPanel({
             // 组字期间的按键属于输入法：回车是"选定候选"、退格是"删拼音"。
             // 一并转给页面的话，回车会把表单提前提交掉。
             if (e.nativeEvent.isComposing) return;
+            // ⌘C / Ctrl+C：复制的是**页面里**的选区，不是这个空 textarea。
+            // 默认行为会拿 textarea 的空内容去覆盖剪贴板，得拦掉。
+            if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "c") {
+              e.preventDefault();
+              copySelection();
+              return;
+            }
             // 普通字符不在这儿发 —— 它们会变成 input 事件，那条路连中文、
             // emoji 和粘贴一起管了。
             if (FUNCTION_KEYS.has(e.key)) {
@@ -782,6 +903,13 @@ const MIN_VIEWPORT = 80;
 
 /** 尺寸稳定多久之后才同步。拖动过程中每一帧都发的话，页面会一直在重排。 */
 const RESIZE_QUIET_MS = 120;
+
+/**
+ * 手指移动多少 CSS 像素之前仍算点按，不当滚动。手指落下时天然会抖一两个
+ * 像素，没有这道阈值的话每次点按都会先把页面挪一下。8px 是各平台触控
+ * 系统常用的量级。
+ */
+const TOUCH_SLOP = 8;
 
 /** 视口模式:自适应＝跟着面板尺寸走，Web＝按桌面宽度渲染再缩放显示。 */
 type ViewMode = "fit" | "web";

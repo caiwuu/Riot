@@ -1021,6 +1021,10 @@ export type WhenSpec =
       minutes: number;
     }
   | {
+      kind: "every";
+      minutes: number;
+    }
+  | {
       kind: "daily";
       time: string;
     }
@@ -1043,6 +1047,10 @@ export type ScheduleRunPhase = "started" | "done";
 export type Repeat =
   | {
       kind: "once";
+    }
+  | {
+      kind: "every";
+      minutes: number;
     }
   | {
       kind: "daily";
@@ -1617,7 +1625,36 @@ export interface ScheduledTask {
    */
   root: string;
   /**
+   * 运行历史，新的在前。宿主只留最近若干条（见宿主的上限）。
+   */
+  runs?: ScheduleRunRecord[];
+  /**
    * Some = 到点在这个会话里续跑；None = 每次新开会话。
    */
   sessionId?: string | null;
+}
+/**
+ * 运行历史里的一条：这个任务的某一次执行。
+ *
+ * 周期任务是**一个**任务反复跑，"跑过哪几次、哪次失败了"得有地方看 ——
+ * 没有它，用户只能靠侧栏里一串同名会话回忆。
+ */
+export interface ScheduleRunRecord {
+  /**
+   * 失败原因。Some = 这次没跑成。
+   */
+  error?: string | null;
+  /**
+   * 跑完的时刻。None = 还在跑（或 App 中途退出，没等到结束）。
+   */
+  finishedAtMs?: number | null;
+  /**
+   * 这次跑在哪个会话里。开跑就失败（建不了会话）时没有。
+   */
+  sessionId?: string | null;
+  /**
+   * `started_at_ms` 的本地时间文字（宿主现算）。
+   */
+  startedAtLocal: string;
+  startedAtMs: number;
 }
