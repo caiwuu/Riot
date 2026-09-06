@@ -29,9 +29,37 @@ pub trait HostCallHandler: Send + Sync {
     async fn handle(&self, req: HostRequest) -> HostResponse;
 }
 
-/// 前端事件出口表:session_id → 最新的 Channel。窗口刷新会 attach 新的,
-/// 旧 channel 发送失败即自然淘汰。
-type Sinks = Arc<Mutex<HashMap<String, Channel<AgentEvent>>>>;
+/// 前端事件出口表:session_id → 观看者 → Channel。
+///
+/// 一个会话可以同时有多个观看者(桌面窗口 + 手机上的网页版),每个观看者
+/// 各自一条出口;同一观看者重新订阅会替换自己那条(窗口刷新)。发送失败的
+/// 出口(网页连接断了)在分发时顺手摘掉。
+type Sinks = Arc<Mutex<HashMap<String, HashMap<String, Channel<AgentEvent>>>>>;
+
+/// 把一条事件发给会话的每个观看者,发不出去的出口当场摘掉。
+///
+/// 摘掉是必要的:远程连接断开后那条 Channel 的 send 会一直失败,留着只是
+/// 每条事件白克隆一份;而桌面 webview 的 Channel 永不报错,不受影响。
+fn fan_out(viewers: &mut HashMap<String, Channel<AgentEvent>>, event: AgentEvent) {
+    if viewers.len() == 1 {
+        // 单观看者是常态,省掉一次 clone。
+        let (viewer, ch) = viewers.iter().next().expect("非空");
+        if ch.send(event).is_err() {
+            let dead = viewer.clone();
+            viewers.remove(&dead);
+        }
+        return;
+    }
+    let mut dead = Vec::new();
+    for (viewer, ch) in viewers.iter() {
+        if ch.send(event.clone()).is_err() {
+            dead.push(viewer.clone());
+        }
+    }
+    for v in dead {
+        viewers.remove(&v);
+    }
+}
 
 /// 事件流里宿主自己也要消费的那几件事。
 ///
@@ -204,14 +232,28 @@ impl KernelClient {
         }
     }
 
-    /// 挂上一个会话的前端事件出口。
-    pub async fn attach_sink(&self, session_id: &str, ch: Channel<AgentEvent>) {
-        self.sinks.lock().await.insert(session_id.to_owned(), ch);
+    /// 挂上一个会话的前端事件出口。同一观看者再挂就是替换。
+    pub async fn attach_sink(&self, session_id: &str, viewer: &str, ch: Channel<AgentEvent>) {
+        self.sinks
+            .lock()
+            .await
+            .entry(session_id.to_owned())
+            .or_default()
+            .insert(viewer.to_owned(), ch);
     }
 
-    /// 摘掉一个会话的事件出口(删会话时)。
+    /// 摘掉一个会话的全部事件出口(删会话时)。
     pub async fn detach_sink(&self, session_id: &str) {
         self.sinks.lock().await.remove(session_id);
+    }
+
+    /// 摘掉一个观看者在所有会话上的出口(远程连接断开时)。
+    pub async fn detach_viewer(&self, viewer: &str) {
+        let mut g = self.sinks.lock().await;
+        g.retain(|_, viewers| {
+            viewers.remove(viewer);
+            !viewers.is_empty()
+        });
     }
 
     /// 四步关闭序列(转发给 [`Kernel::shutdown`])。App 退出时调。
@@ -293,10 +335,10 @@ fn spawn_dispatch(
                             }
                             let ready = coalescers.entry(sid.clone()).or_default().push(event);
                             if !ready.is_empty() {
-                                let sinks = sinks.lock().await;
-                                if let Some(ch) = sinks.get(&sid) {
+                                let mut sinks = sinks.lock().await;
+                                if let Some(viewers) = sinks.get_mut(&sid) {
                                     for e in ready {
-                                        let _ = ch.send(e);
+                                        fan_out(viewers, e);
                                     }
                                 }
                             }
@@ -316,10 +358,10 @@ fn spawn_dispatch(
                         }
                     }
                     if !due.is_empty() {
-                        let sinks = sinks.lock().await;
+                        let mut sinks = sinks.lock().await;
                         for (sid, e) in due {
-                            if let Some(ch) = sinks.get(&sid) {
-                                let _ = ch.send(e);
+                            if let Some(viewers) = sinks.get_mut(&sid) {
+                                fan_out(viewers, e);
                             }
                         }
                     }
@@ -334,22 +376,25 @@ fn spawn_dispatch(
         // 是 UI 永远转圈。先吐掉累积中的增量再发 Done,顺序反了 UI 会看到
         // "结束之后又来了半句话"。
         dead.store(true, std::sync::atomic::Ordering::SeqCst);
-        let sinks_now = sinks.lock().await;
-        for (sid, ch) in sinks_now.iter() {
+        let mut sinks_now = sinks.lock().await;
+        for (sid, viewers) in sinks_now.iter_mut() {
             if let Some(c) = coalescers.get_mut(sid)
                 && let Some(e) = c.tick()
             {
-                let _ = ch.send(e);
+                fan_out(viewers, e);
             }
-            let _ = ch.send(AgentEvent::Done {
-                reason: TerminalReason::Error {
-                    error: AgentError::Internal {
-                        message: "内核进程意外退出,这一轮的运行状态已丢失。\
-                                  下一条消息会自动重启内核。"
-                            .to_owned(),
+            fan_out(
+                viewers,
+                AgentEvent::Done {
+                    reason: TerminalReason::Error {
+                        error: AgentError::Internal {
+                            message: "内核进程意外退出,这一轮的运行状态已丢失。\
+                                      下一条消息会自动重启内核。"
+                                .to_owned(),
+                        },
                     },
                 },
-            });
+            );
             let _ = host_tx.send(HostNotice::Done {
                 session_id: sid.clone(),
             });

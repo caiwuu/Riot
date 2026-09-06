@@ -6,6 +6,7 @@ import "@xterm/xterm/css/xterm.css";
 
 import {
   type TermEvent,
+  onHostReconnect,
   termAttach,
   termBusy,
   termClose,
@@ -304,6 +305,28 @@ export function TerminalPanel({
     return () => cancelAnimationFrame(raf);
   }, [visible, state.active]);
 
+  // 网页版重连：每个已落地的终端重新挂上去。宿主的 attach 会把输出缓冲
+  // 整段回放，所以先 reset 屏幕再挂 —— 否则断线前已经画着的内容会再叠
+  // 一遍。用户自己开的 shell 和模型起的服务都在宿主那边活着，这里只是
+  // 重新接上出口。
+  useEffect(
+    () =>
+      onHostReconnect(() => {
+        for (const inst of instances.current.values()) {
+          if (inst.disposed || inst.hostId == null || !inst.onEvent) continue;
+          const id = inst.hostId;
+          inst.term.reset();
+          termAttach(id, inst.onEvent)
+            .then(() => void termResize(id, inst.term.cols, inst.term.rows).catch(() => {}))
+            .catch(() => {
+              if (inst.disposed) return;
+              inst.term.write("\r\n\x1b[31m重连后接不上这个终端，它可能已经退出了。\x1b[0m\r\n");
+            });
+        }
+      }),
+    [],
+  );
+
   // 聚焦只跟"打开面板/切标签"走，不跟高度走 —— 用户在输入框打字时
   // 拖终端分隔线，焦点不该被抢过来。
   //
@@ -349,6 +372,7 @@ export function TerminalPanel({
       ro: new ResizeObserver(() => scheduleFit(inst)),
       fitTimer: 0,
       disposed: false,
+      onEvent: null,
     };
     instances.current.set(tab.uid, inst);
 
@@ -416,6 +440,7 @@ export function TerminalPanel({
         closeRef.current(tab.uid, { hostDead: true });
       }
     };
+    inst.onEvent = onEvent;
 
     // 模型起的服务已经在宿主那边跑着了：挂上去接住后续输出，顺便回放
     // 它已经打出来的那些。不是新开一个 shell。
@@ -682,6 +707,11 @@ interface Inst {
    * 推数据，而 onEvent 闭包持有的是 term 本身，不查 Map。
    */
   disposed: boolean;
+  /**
+   * 宿主事件的处理函数。留在实例上是为了网页版重连后能用同一个回调重新
+   * `termAttach` —— 那时旧通道已经作废，输出得从新通道进来。
+   */
+  onEvent: ((ev: TermEvent) => void) | null;
 }
 
 /**

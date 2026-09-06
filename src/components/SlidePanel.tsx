@@ -93,7 +93,10 @@ export function SlidePanel({
   const body = live ? children : present ? last.current : null;
 
   return (
-    <div className={cls} style={shellStyle}>
+    // data-open 给移动端样式用：窄屏上壳不再靠宽度开合，而是整块
+    // 浮在主区上面平移进出（见 styles.css 的 @media (max-width: 720px)），
+    // 那套规则要能读到"开着还是关着"。
+    <div className={cls} style={shellStyle} data-open={open ? "" : undefined}>
       <div className="slide-panel-inner" style={innerStyle}>
         {body}
       </div>

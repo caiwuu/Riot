@@ -100,6 +100,9 @@ const COMMANDS: &[&str] = &[
     "schedule_run_now",
     "schedule_missed",
     "schedule_ack_missed",
+    "remote_status",
+    "remote_rotate_token",
+    "browse_dirs",
 ];
 
 fn main() {

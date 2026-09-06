@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-remote-status"
+description = "Enables the remote_status command without any pre-configured scope."
+commands.allow = ["remote_status"]
+
+[[permission]]
+identifier = "deny-remote-status"
+description = "Denies the remote_status command without any pre-configured scope."
+commands.deny = ["remote_status"]

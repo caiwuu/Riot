@@ -19,6 +19,7 @@ import {
   decodeRefFromComposer,
   existingDirs,
   hasActiveKey,
+  host,
   type ImageInput,
   type PermissionMode,
   pickFiles,
@@ -1164,6 +1165,8 @@ export function Composer({
   // 新的闭包，直接进依赖数组会让拖放订阅跟着输入框的每一次输入重建。
   const dropRef = useRef(takePaths);
   dropRef.current = takePaths;
+  const filesRef = useRef(takeFiles);
+  filesRef.current = takeFiles;
   useEffect(() => {
     if (!armed) {
       setDragging(false);
@@ -1184,6 +1187,10 @@ export function Composer({
       setDragging(false);
       if (e.paths.length) {
         void dropRef.current(e.paths);
+      } else if (e.files.length) {
+        // 网页版：拖进来的是这台设备上的 File，没有宿主机路径。图片直接
+        // 读内容；别的由 takeFiles 说清为什么收不了。
+        void filesRef.current(e.files);
       } else {
         setDropError(
           "拖进来的东西在磁盘上没有对应文件（多半是从网页里直接拖的图）。" +
@@ -1192,6 +1199,27 @@ export function Composer({
       }
     });
   }, [armed]);
+
+  /** 网页版的「+」：浏览器自己的文件选择器，只收图片（见 pickAttachments）。 */
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const onFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = "";
+    if (files.length) void takeFiles(files);
+  };
+
+  /**
+   * 「+」按钮：桌面弹系统对话框拿路径；浏览器里没有宿主机的路径可拿，
+   * 改用 <input type=file> 直接读内容 —— 只对图片有意义，非图片文件的
+   * 内容要进对话只能靠宿主按路径读，网页上请用 @ 引用。
+   */
+  const pickAttachments = () => {
+    if (host.nativePaths) {
+      void pickFiles().then(takePaths).catch(() => {});
+      return;
+    }
+    fileInputRef.current?.click();
+  };
 
   // 从文件树拖过来的那条。走的是自己那套 pointer 拖拽（原因见 lib/fileDrag），
   // 但收件和系统拖放共用 takePaths —— 给的都是绝对路径，图片进附件、其余
@@ -1628,12 +1656,22 @@ export function Composer({
             <button
               type="button"
               className="composer-icon"
-              onClick={() => void pickFiles().then(takePaths).catch(() => {})}
-              title="附加图片或文件"
+              onClick={pickAttachments}
+              title={host.nativePaths ? "附加图片或文件" : "附加图片（文件请用 @ 引用）"}
               aria-label="附加图片或文件"
             >
               <PlusIcon />
             </button>
+            {host.nativePaths ? null : (
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                hidden
+                onChange={onFileInput}
+              />
+            )}
             <ModeMenu value={workMode} onChange={changeWorkMode} />
             {/* 窄列藏起来：三个 pill 并排是挤的源头，换服务方/模型去设置里也能做。 */}
             <div className="composer-picks">

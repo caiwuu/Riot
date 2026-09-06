@@ -173,7 +173,7 @@ mod tests {
     async fn 读不了不是自己起的终端() {
         let terms = Terminals::default();
         let (ch, _probe) = crate::term::testing::probe();
-        let his = terms.open(None, 80, 24, ch).expect("用户开一个终端");
+        let his = terms.open(None, 80, 24, "webview:main", ch).expect("用户开一个终端");
         let h = HostTerminal::new(terms.clone(), std::env::temp_dir(), "s1".into());
 
         let err = h.read(his, 10).await.expect_err("不该给读");
@@ -234,7 +234,7 @@ mod tests {
     async fn 用户共享的终端能读但不能停() {
         let terms = Terminals::default();
         let (ch, _probe) = crate::term::testing::probe();
-        let his = terms.open(None, 80, 24, ch).expect("用户开一个终端");
+        let his = terms.open(None, 80, 24, "webview:main", ch).expect("用户开一个终端");
 
         let h = HostTerminal::new(terms.clone(), std::env::temp_dir(), "s1".into());
 
@@ -295,7 +295,7 @@ mod tests {
         let terms = Terminals::default();
         // 用户自己开的那个：模型不该看见。
         let (ch, _) = crate::term::testing::probe();
-        let mine_not = terms.open(None, 80, 24, ch).expect("开终端");
+        let mine_not = terms.open(None, 80, 24, "webview:main", ch).expect("开终端");
 
         let h = HostTerminal::new(terms.clone(), std::env::temp_dir(), "s1".into());
         // 命令按 shell 方言走:Windows 的默认 shell 是 PowerShell，没有

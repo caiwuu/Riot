@@ -143,7 +143,7 @@ async fn 完整链路_建会话_跑轮_done_事件回流() {
         .expect("建会话(纯宿主,不需要内核)");
 
     let (ch, saw_done) = done_probe();
-    assert!(state.attach_sink(info.id.clone(), 1, ch).await);
+    assert!(state.attach_sink("webview:main", info.id.clone(), 1, ch).await);
 
     // 这一步会:惰性水合(session.resume)→ 打包 TurnConfig → turn.submit
     // → 内核跑轮 → 401 → Done{Error} 经 event.agent 回流。

@@ -1,5 +1,5 @@
 /**
- * Bridge 层 —— 前端与 Tauri 宿主之间唯一的通道。
+ * Bridge 层 —— 前端与宿主之间唯一的通道。
  *
  * [约束] 这是整个 `src/` 里唯一允许 import `@tauri-apps/api` 的目录。
  * 其余代码只能 import 本模块导出的函数。违反这条会让前端无法在浏览器里
@@ -8,9 +8,23 @@
  * 这条约束由 eslint 强制，见 eslint.config.js：静态 import 归
  * no-restricted-imports，`await import(...)` 归 no-restricted-syntax ——
  * 只配前者的话，逃逸会从动态那半漏过去（曾漏进过一处系统通知）。
+ *
+ * 命令与通道走 `transport/`（桌面是 Tauri IPC，浏览器是 WebSocket），
+ * 本文件不直接碰 `@tauri-apps/api/core`。仍直接 import 的只剩桌面独有的
+ * 插件（对话框、打开文件、窗口、拖放），每一处都带浏览器里的替代实现。
  */
 
-import { Channel, type InvokeArgs, invoke as tauriInvoke } from "@tauri-apps/api/core";
+import {
+  type HostChannel,
+  type LinkStatus,
+  TransportDisconnected,
+  host,
+  transport,
+  webTransport,
+} from "./transport";
+
+export { host, TransportDisconnected };
+export type { LinkStatus };
 
 import type {
   AgentEvent,
@@ -123,10 +137,10 @@ const NO_DEADLINE = null;
  */
 function invoke<T>(
   command: string,
-  args?: InvokeArgs,
+  args?: Record<string, unknown>,
   timeoutMs: number | null = T_FAST,
 ): Promise<T> {
-  const call = tauriInvoke<T>(command, args);
+  const call = transport.invoke<T>(command, args);
   if (timeoutMs === null) return call;
   return new Promise<T>((resolve, reject) => {
     const timer = window.setTimeout(
@@ -338,7 +352,22 @@ export interface AppConfig {
    * 默认开。老配置可能没有这个字段（缺 = 开）。
    */
   sessionRecall?: boolean;
+  /**
+   * 远程访问（网页版）。老配置可能没有这个字段（缺 = 关）。令牌不在
+   * 配置里，看 `remoteStatus()`。
+   */
+  remote?: RemoteConfig;
 }
+
+/** 远程访问服务的配置，对应宿主 `config::RemoteConfig`。 */
+export interface RemoteConfig {
+  enabled: boolean;
+  /** `loopback` 只听 127.0.0.1（配隧道 / 代理）；`lan` 听所有网卡。 */
+  bind: "loopback" | "lan";
+  port: number;
+}
+
+export const DEFAULT_REMOTE: RemoteConfig = { enabled: false, bind: "loopback", port: 7823 };
 
 export type SandboxMode = "workspaceWrite" | "workspaceWriteNoNet" | "off";
 
@@ -416,7 +445,7 @@ export function subscribeSession(
 ): Subscription {
   let active = true;
   const epoch = ++subscribeEpoch;
-  const channel = new Channel<AgentEvent>();
+  const channel: HostChannel<AgentEvent> = transport.channel<AgentEvent>();
   channel.onmessage = (event) => {
     if (active) onEvent(event);
   };
@@ -676,6 +705,11 @@ export function readFileBytes(path: string): Promise<ArrayBuffer> {
  * 截断。
  */
 export async function pickFiles(imagesOnly = false): Promise<string[]> {
+  if (!host.nativePaths) {
+    // 浏览器里选到的是这台设备的文件，没有宿主机上的路径。图片那条路
+    // 由 Composer 用 <input type=file> 直接读内容走；引用文件请用 @。
+    throw new Error("网页版不能选服务器上的文件，请在输入框里用 @ 引用它。");
+  }
   const { open } = await import("@tauri-apps/plugin-dialog");
   // 分开写而不是塞一个 undefined：tsconfig 开了 exactOptionalPropertyTypes，
   // 显式的 undefined 和"不传"是两件事。
@@ -977,7 +1011,7 @@ export function packsInstall(
   id: string,
   onProgress: (p: PackProgress) => void,
 ): Promise<void> {
-  const channel = new Channel<PackProgress>();
+  const channel: HostChannel<PackProgress> = transport.channel<PackProgress>();
   channel.onmessage = onProgress;
   // 不设期限：几十上百兆的下载 + 解压 + 自检，慢网上十几分钟都可能。
   // 进度有自己的通道，卡没卡从进度条上看得出来，不需要期限来兜。
@@ -1142,7 +1176,7 @@ export function openBrowser(
   // 帧是二进制:8 字节小端头（宽、高，各 u32）+ JPEG 字节，和宿主的
   // browser_open 对齐。不走 JSON —— 每帧几百 KB 的 base64 要在主线程上
   // JSON.parse，正是滚动时和输入事件抢时间的那一刀。
-  const channel = new Channel<ArrayBuffer>();
+  const channel: HostChannel<ArrayBuffer> = transport.channel<ArrayBuffer>();
   channel.onmessage = (buf) => {
     if (!active) return;
     const head = new DataView(buf);
@@ -1220,7 +1254,7 @@ export function browserSelectTab(sessionId: string, tab: number): Promise<PanelS
  */
 export function watchBrowserTabs(sessionId: string, onChange: () => void): () => void {
   let live = true;
-  const channel = new Channel<boolean>();
+  const channel: HostChannel<boolean> = transport.channel<boolean>();
   channel.onmessage = () => {
     if (live) onChange();
   };
@@ -1372,7 +1406,7 @@ export function termOpen(
   rows: number,
   onEvent: (ev: TermEvent) => void,
 ): Promise<number> {
-  const channel = new Channel<TermEvent>();
+  const channel: HostChannel<TermEvent> = transport.channel<TermEvent>();
   channel.onmessage = onEvent;
   return invoke<number>("term_open", { root, cols, rows, onEvent: channel });
 }
@@ -1412,7 +1446,7 @@ export function termList(): Promise<TermSummary[]> {
  * 用户眼前。
  */
 export function termAttach(id: number, onEvent: (ev: TermEvent) => void): Promise<void> {
-  const channel = new Channel<TermEvent>();
+  const channel: HostChannel<TermEvent> = transport.channel<TermEvent>();
   channel.onmessage = onEvent;
   return invoke("term_attach", { id, onEvent: channel });
 }
@@ -1437,8 +1471,12 @@ export function termBusy(id: number): Promise<boolean> {
   return invoke<boolean>("term_busy", { id });
 }
 
+/** 网页版里没有"这台机器"可打开。所有本地打开类操作统一用这句拒绝。 */
+const NO_LOCAL_OPEN = "网页版无法在这台设备上打开服务器上的文件。";
+
 /** 在系统文件管理器（访达/资源管理器）里显示这个目录。 */
 export async function revealInFinder(path: string): Promise<void> {
+  if (!host.openLocal) throw new Error(NO_LOCAL_OPEN);
   const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
   await revealItemInDir(path);
 }
@@ -1459,6 +1497,7 @@ export async function openInDefaultApp(path: string): Promise<void> {
 
 /** 用系统默认应用打开路径。失败会抛，调用方自己决定怎么告诉用户。 */
 export async function openPath(path: string): Promise<void> {
+  if (!host.openLocal) throw new Error(NO_LOCAL_OPEN);
   // opener 插件是分离式启动，目标不存在它也报成功。先自己查一遍，
   // 让"文件不存在"成为看得见的失败，而不是点了没反应。
   if (!(await invoke<boolean>("path_exists", { path }))) {
@@ -1468,8 +1507,15 @@ export async function openPath(path: string): Promise<void> {
   await open(path);
 }
 
-/** 用系统浏览器打开网址。失败会抛。 */
+/** 用系统浏览器打开网址。失败会抛。浏览器里就是开个新标签。 */
 export async function openInBrowser(url: string): Promise<void> {
+  if (!host.openLocal) {
+    // noopener：新页面拿不到 window.opener，别让外站摸到这个页面。
+    if (!window.open(url, "_blank", "noopener,noreferrer")) {
+      throw new Error("浏览器拦住了新窗口，请允许弹出窗口后重试。");
+    }
+    return;
+  }
   const { openUrl } = await import("@tauri-apps/plugin-opener");
   await openUrl(url);
 }
@@ -1482,6 +1528,15 @@ export async function openInBrowser(url: string): Promise<void> {
  */
 export async function notify(title: string, body: string): Promise<void> {
   try {
+    if (!host.nativeWindow) {
+      // 浏览器的通知 API。非安全上下文（http://192.168.…）下多半不可用，
+      // 静默跳过和桌面上被拒绝是同一种结局。
+      if (typeof Notification === "undefined") return;
+      let perm = Notification.permission;
+      if (perm === "default") perm = await Notification.requestPermission();
+      if (perm === "granted") new Notification(title, { body });
+      return;
+    }
     const { isPermissionGranted, requestPermission, sendNotification } = await import(
       "@tauri-apps/plugin-notification"
     );
@@ -1539,23 +1594,7 @@ export async function scheduleAckMissed(): Promise<void> {
  * （后台新会话要马上出现在侧栏）和任务面板。
  */
 export function subscribeScheduleRuns(cb: (run: ScheduleRun) => void): () => void {
-  let stopped = false;
-  let unlisten: (() => void) | undefined;
-  void (async () => {
-    try {
-      const { listen } = await import("@tauri-apps/api/event");
-      unlisten = await listen<ScheduleRun>("schedule_run", (e) => {
-        if (!stopped) cb(e.payload);
-      });
-      if (stopped) unlisten();
-    } catch {
-      // 不在 Tauri 里（纯浏览器、组件测试）就没有定时任务。
-    }
-  })();
-  return () => {
-    stopped = true;
-    unlisten?.();
-  };
+  return listenGlobal<ScheduleRun>("schedule_run", cb);
 }
 
 /**
@@ -1563,27 +1602,125 @@ export function subscribeScheduleRuns(cb: (run: ScheduleRun) => void): () => voi
  * 不订阅它的话，侧栏要等到任务首次运行才看得见刚创建的任务。
  */
 export function subscribeScheduleChanges(cb: () => void): () => void {
+  return listenGlobal<unknown>("schedule_changed", () => cb());
+}
+
+/**
+ * 会话表变更（创建 / 删除 / 改名 / 标题 / 忙碌 / 项目列表）。
+ *
+ * 桌面窗口和网页版是同一宿主的两个观看者 —— 一端新建的会话另一端要
+ * 立刻出现在侧栏。没有这条的话，另一端只能等到重启或忙碌轮询碰巧
+ * 跑一次。收到后调 listSessions（顺带 getConfig，项目分组也在那里）。
+ */
+export function subscribeSessionsChanges(cb: () => void): () => void {
+  return listenGlobal<unknown>("sessions_changed", () => cb());
+}
+
+/** 全局事件订阅的公共形状：同步返回退订函数，订阅本身异步落地。 */
+function listenGlobal<T>(event: string, cb: (payload: T) => void): () => void {
   let stopped = false;
   let unlisten: (() => void) | undefined;
-  void (async () => {
-    try {
-      const { listen } = await import("@tauri-apps/api/event");
-      unlisten = await listen("schedule_changed", () => {
-        if (!stopped) cb();
-      });
-      if (stopped) unlisten();
-    } catch {
-      // 不在 Tauri 里就没有定时任务。
-    }
-  })();
+  void transport
+    .listen<T>(event, (p) => {
+      if (!stopped) cb(p);
+    })
+    .then((off) => {
+      unlisten = off;
+      if (stopped) off();
+    })
+    .catch(() => {
+      // 监听挂不上（组件测试里没有宿主）就没有这类事件。
+    });
   return () => {
     stopped = true;
     unlisten?.();
   };
 }
 
-/** 弹系统的目录选择框。`defaultPath` 指定起始目录（如会话根）。 */
+/**
+ * 与宿主的连接状态。桌面永远是 open；浏览器里会在断线 / 重连 / 要令牌
+ * 之间切。立刻用当前状态回调一次。
+ */
+export function subscribeHostLink(cb: (s: LinkStatus) => void): () => void {
+  return transport.onStatus(cb);
+}
+
+/**
+ * 连接**重新**建立了。宿主侧绑在旧连接上的一切（会话事件出口、终端
+ * 出口、浏览器面板）已随旧连接作废，订阅方要重新订阅、按快照对账。
+ * 桌面永不触发。
+ */
+export function onHostReconnect(cb: () => void): () => void {
+  return transport.onReconnect(cb);
+}
+
+/** 浏览器里：用一枚令牌（重新）连接宿主。桌面里无操作。 */
+export function remoteSetToken(token: string): void {
+  webTransport?.setToken(token);
+}
+
+/** 浏览器里：忘掉令牌并断开。桌面里无操作。 */
+export function remoteClearToken(): void {
+  webTransport?.clearToken();
+}
+
+/**
+ * 浏览器里：上一次被宿主拒绝的原因（"令牌不对"、"尝试太频繁"），给令牌
+ * 表单显示。没被拒过、或被拒后又成功连上过就是 null。桌面里永远 null。
+ */
+export function remoteDeniedReason(): string | null {
+  return webTransport?.deniedReason() ?? null;
+}
+
+/** 远程访问服务的状态（设置页）。 */
+export interface RemoteStatus {
+  enabled: boolean;
+  running: boolean;
+  bind: "loopback" | "lan";
+  port: number;
+  listenAddr: string | null;
+  urls: string[];
+  loginUrl: string | null;
+  qrSvg: string | null;
+  token: string | null;
+  connections: number;
+  error: string | null;
+}
+
+export function remoteStatus(): Promise<RemoteStatus> {
+  return invoke<RemoteStatus>("remote_status");
+}
+
+/** 换一枚新令牌。旧链接和二维码即刻作废。返回新令牌。 */
+export function remoteRotateToken(): Promise<string> {
+  return invoke<string>("remote_rotate_token");
+}
+
+/** 宿主机的一层目录（网页版的目录选择器用）。 */
+export interface DirBrowse {
+  path: string;
+  parent: string | null;
+  entries: { name: string; path: string }[];
+  error: string | null;
+  /** 请求的路径不存在，这次列的是退回去的家目录；值是原路径，界面要说明。 */
+  missing: string | null;
+}
+
+/** 列出宿主机上 `path` 的子目录。不传从家目录开始。 */
+export function browseDirs(path?: string | null): Promise<DirBrowse> {
+  return invoke<DirBrowse>("browse_dirs", { path: path ?? null });
+}
+
+/**
+ * 弹系统的目录选择框。`defaultPath` 指定起始目录（如会话根）。
+ *
+ * 只在桌面可用。浏览器里没有宿主机的目录对话框 —— 那边走
+ * `useDirectoryPicker`（应用内的目录选择器，底层是 `browseDirs`）。
+ */
 export async function pickDirectory(defaultPath?: string): Promise<string | null> {
+  if (!host.nativePaths) {
+    throw new Error("网页版请使用应用内的目录选择器。");
+  }
   const { open } = await import("@tauri-apps/plugin-dialog");
   const picked = await open({
     directory: true,
@@ -1628,21 +1765,32 @@ export function clipboardPaths(): Promise<string[]> {
   return invoke<string[]>("clipboard_paths");
 }
 
-/** 拖到窗口上的那一批文件。`paths` 空 = 拖来的东西在磁盘上没有文件。 */
+/**
+ * 拖到窗口上的那一批文件。
+ *
+ * 桌面：`paths` 是宿主机上的路径，`files` 空。
+ * 浏览器：没有路径可言，`files` 是拖进来的 `File`（只在 drop 时有）——
+ * 图片能直接读内容进附件条，别的文件没法变成引用，由 Composer 说明。
+ * `paths` 和 `files` 都空 = 拖来的东西不是文件。
+ */
 export interface DragDrop {
   kind: "enter" | "over" | "leave" | "drop";
   paths: string[];
+  files: File[];
 }
 
 /**
  * 窗口级的文件拖放（整个窗口都是落点，不只是输入框那一条）。
  *
- * 走 Tauri 的原生拖放事件而不是 HTML5 的 `ondrop`:后者给的 `File` 没有
+ * 桌面走 Tauri 的原生拖放事件而不是 HTML5 的 `ondrop`:后者给的 `File` 没有
  * 磁盘路径，非图片文件就没法变成引用。代价是 webview 里的 HTML5 拖放事件
  * 全被原生层吃掉 —— 从浏览器直接拖一张图（磁盘上没有那个文件）这条路
  * 断了，那种图改用复制粘贴，见 `clipboardPaths`。
+ *
+ * 浏览器里正好反过来：只有 HTML5 那条路，只有 `File`。
  */
 export function subscribeDragDrop(cb: (e: DragDrop) => void): () => void {
+  if (!host.nativePaths) return subscribeHtmlDragDrop(cb);
   let stopped = false;
   let unlisten: (() => void) | undefined;
   void (async () => {
@@ -1651,11 +1799,15 @@ export function subscribeDragDrop(cb: (e: DragDrop) => void): () => void {
       unlisten = await getCurrentWebview().onDragDropEvent((e) => {
         if (stopped) return;
         const p = e.payload;
-        cb({ kind: p.type, paths: p.type === "enter" || p.type === "drop" ? p.paths : [] });
+        cb({
+          kind: p.type,
+          paths: p.type === "enter" || p.type === "drop" ? p.paths : [],
+          files: [],
+        });
       });
       if (stopped) unlisten();
     } catch {
-      // 不在 Tauri 里（纯浏览器、组件测试）就没有拖放。
+      // 不在 Tauri 里（组件测试）就没有拖放。
     }
   })();
   return () => {
@@ -1664,8 +1816,51 @@ export function subscribeDragDrop(cb: (e: DragDrop) => void): () => void {
   };
 }
 
+/** HTML5 拖放，整个 window 是落点。enter/leave 用计数配对：子元素之间移动会连发 enter/leave。 */
+function subscribeHtmlDragDrop(cb: (e: DragDrop) => void): () => void {
+  let depth = 0;
+  const hasFiles = (e: DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes("Files");
+  const onEnter = (e: DragEvent) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    depth += 1;
+    if (depth === 1) cb({ kind: "enter", paths: [], files: [] });
+  };
+  const onOver = (e: DragEvent) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+    cb({ kind: "over", paths: [], files: [] });
+  };
+  const onLeave = (e: DragEvent) => {
+    if (!hasFiles(e)) return;
+    depth = Math.max(0, depth - 1);
+    if (depth === 0) cb({ kind: "leave", paths: [], files: [] });
+  };
+  const onDrop = (e: DragEvent) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    depth = 0;
+    cb({ kind: "drop", paths: [], files: Array.from(e.dataTransfer?.files ?? []) });
+  };
+  window.addEventListener("dragenter", onEnter);
+  window.addEventListener("dragover", onOver);
+  window.addEventListener("dragleave", onLeave);
+  window.addEventListener("drop", onDrop);
+  return () => {
+    window.removeEventListener("dragenter", onEnter);
+    window.removeEventListener("dragover", onOver);
+    window.removeEventListener("dragleave", onLeave);
+    window.removeEventListener("drop", onDrop);
+  };
+}
+
 /** 窗口标题跟随当前项目 —— 多开窗口时用户靠标题分辨哪个是哪个。 */
 export async function setWindowTitle(title: string): Promise<void> {
+  if (!host.nativeWindow) {
+    document.title = title;
+    return;
+  }
   const { getCurrentWindow } = await import("@tauri-apps/api/window");
   await getCurrentWindow().setTitle(title);
 }
@@ -1678,6 +1873,8 @@ export async function setWindowTitle(title: string): Promise<void> {
  * 单独的 fullscreen 事件，resize 覆盖进/出全屏。
  */
 export function subscribeFullscreen(cb: (full: boolean) => void): () => void {
+  // 浏览器里没有红绿灯要让位，一律按"不是全屏"处理。
+  if (!host.nativeWindow) return () => {};
   let stopped = false;
   let unlisten: (() => void) | undefined;
   void (async () => {
@@ -1707,6 +1904,8 @@ export function subscribeFullscreen(cb: (full: boolean) => void): () => void {
  * 只有 Tauri 层这个事件可靠。
  */
 export function subscribeWindowFocus(cb: (focused: boolean) => void): () => void {
+  // 浏览器里只有 DOM 的 focus 事件，调用方已经在听它了。
+  if (!host.nativeWindow) return () => {};
   let stopped = false;
   let unlisten: (() => void) | undefined;
   void (async () => {

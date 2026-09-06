@@ -42,7 +42,7 @@
 
 - **不做 CLI 产品**。内核是独立进程,但它的对外接口是 JSON-RPC,不是给人用的命令行。保留一个 `--stdio` 调试入口即可。
 - **不做 Team / 常驻 Coordinator 进程**。多 agent 的运行时原语到"后台子 agent + 完成通知 + 续接 + 自我分叉"为止;"主 agent 只协调"的多任务模式是这些原语之上的**提示词层**开关(见 §7.6),不是另一个进程或角色。
-- **不做云端执行**。所有 agent 跑在本地。
+- **不做云端执行**。所有 agent 跑在本地。远程访问(`docs/REMOTE_ACCESS.md`)不是云端执行:它只是让主人从浏览器里操作**自己这台机器上**正在跑的 Riot。
 - **不追求 Linux 首发**。macOS 优先,Windows 次之,Linux 看 WebView 情况再说。
 
 ### 1.3 这份设计对实现者的核心要求
@@ -1718,6 +1718,8 @@ Composer 发出去的标记和 Transcript 画回来的块靠同一份规则对�
 一侧就地写解析是在制造"发出去的引用画不回来"这类错位。
 
 `[约束]` **组件里不允许出现 `invoke(...)` 或 `listen(...)`。**全部走 `bridge/`。这层抽象是以后换宿主(Tauri → Electron 或反之)的唯一保险,一旦被绕过就失效了。
+
+这层保险已经兑现过一次:bridge 之下是 `bridge/transport/`(`invoke` + `channel` + `listen` 三样),桌面窗口里由 Tauri IPC 实现,浏览器里由 WebSocket 实现 —— 同一份界面在手机浏览器里跑起来,组件一行没改。宿主侧对应的是 `src-tauri/src/remote/`,设计见 `docs/REMOTE_ACCESS.md`。
 
 这条由 `eslint.config.js` 机器强制,`pnpm lint` 在 CI 的 contract job 里跑。**两条规则缺一不可**:`no-restricted-imports` 只看静态 `import ... from`,而实际漏进来的那次是 `await import("@tauri-apps/plugin-notification")`——动态那半要靠 `no-restricted-syntax` 的 `ImportExpression` 选择器。在 lint 接上之前这里只有一句注释,而 `bridge/index.ts` 的文件头甚至已经写着"由 eslint 强制"——那个配置文件当时并不存在。
 

@@ -23,6 +23,7 @@ import {
   getHistory,
   interrupt as interruptSession,
   isIpcTimeout,
+  onHostReconnect,
   queueList,
   queueRemove,
   queueTake,
@@ -918,6 +919,14 @@ export function useSession(
       void ensureLive({ catchUp: true });
     });
 
+    // 网页版：WebSocket 重连之后，宿主那头绑在旧连接上的出口已经作废，
+    // 而断线期间的事件一条都没收到 —— 必须重订阅并按快照对账。桌面
+    // 永不触发。不看 lastHeardAt：断线本身就是"该对账"的充分理由。
+    const unlistenReconnect = onHostReconnect(() => {
+      if (cancelled) return;
+      void ensureLive({ catchUp: true });
+    });
+
     const watchdog = window.setInterval(() => {
       if (cancelled) return;
       if (!busyRef.current && !compactingRef.current) return;
@@ -933,6 +942,7 @@ export function useSession(
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("focus", onWindowFocus);
       unlistenFocus();
+      unlistenReconnect();
       window.clearInterval(watchdog);
       if (rafId.current) cancelAnimationFrame(rafId.current);
     };
@@ -1891,6 +1901,10 @@ function applyMessage(s: SessionState, event: Extract<AgentEvent, { type: "messa
       items.push(notice);
       return { ...s, items };
     }
+    // 合成续接摘要：分割线已经说明"上面被压缩了"，不画成用户气泡。
+    if (msg.meta?.synthetic && msg.content.some((c) => c.type === "text")) {
+      return { ...s, items };
+    }
     for (const c of msg.content) {
       if (c.type === "tool_result") {
         // 找到对应的工具卡片填结果。倒着找 —— 同一个工具在一次会话里
@@ -1908,8 +1922,37 @@ function applyMessage(s: SessionState, event: Extract<AgentEvent, { type: "messa
           };
         }
       } else if (c.type === "text") {
-        // 用户消息在 send 时已经乐观插入过了，这里跳过避免重复。
-        // 内核合成的消息（如取消提示）不会走 text 这一支。
+        // 用户正文。发送端已经乐观插过一条 `local-*`；其它观看者（网页版）
+        // 没有那条，必须靠事件流补上 —— 以前这里整支跳过，另一端就只看
+        // 得见助手回复。
+        if (items.some((it) => it.kind === "user" && it.id === msg.id)) {
+          continue;
+        }
+        const images = msg.content.flatMap((x) =>
+          x.type === "attachment" && (x.kind === "image" || x.kind === "described_image")
+            ? [`data:${x.media_type};base64,${x.data}`]
+            : [],
+        );
+        const files = msg.content.flatMap((x) =>
+          x.type === "attachment" && x.kind === "user_file" ? [x.path] : [],
+        );
+        const bubble: Extract<Item, { kind: "user" }> = {
+          kind: "user",
+          id: msg.id,
+          text: c.text,
+          ...(images.length ? { images } : {}),
+          ...(files.length ? { files } : {}),
+          ...stampOf(msg.meta),
+        };
+        // 乐观气泡：正文相同的 `local-*` 换成正式 id，避免同一句话两张卡。
+        const localAt = items.findIndex(
+          (it) => it.kind === "user" && it.id.startsWith("local-") && it.text === c.text,
+        );
+        if (localAt >= 0) {
+          items[localAt] = bubble;
+        } else {
+          items.push(bubble);
+        }
       }
     }
     return { ...s, items };

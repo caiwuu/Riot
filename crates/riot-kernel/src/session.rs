@@ -3199,14 +3199,21 @@ impl Session {
                 let sent_at_ms = clock.now_ms();
                 // 占位先立起来 —— 底下压缩和转述都是模型调用，这段时间里切走
                 // 再切回来必须还看得见自己刚发的话（见 `pending_user`）。
-                *self.pending_user.lock().await = Some(Message::User {
+                let pending = Message::User {
                     id: user_id.clone(),
                     content: crate::content::pending_user_content(&input),
                     meta: MessageMeta {
                         created_at_ms: Some(sent_at_ms),
                         ..Default::default()
                     },
-                });
+                };
+                *self.pending_user.lock().await = Some(pending.clone());
+                // `[约束]` 必须立刻推给前端。发送端自己靠乐观气泡，但其它
+                // 观看者（网页版 / 另一窗口）只听事件流 —— 不推的话它们
+                // 只能看到助手回复，用户那句永远不出现。定稿版（带记忆/
+                // 环境注入）只进历史给模型看，不重推：界面要的是用户发了
+                // 什么，不是模型收到了什么。
+                let _ = sink.send(AgentEvent::Message(pending));
 
                 self.proactive_compact(
                     &provider,

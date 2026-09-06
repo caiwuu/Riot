@@ -22,12 +22,14 @@ mod gui_env;
 pub use askpass::run_client as run_askpass;
 pub use gui_env::print_process_env;
 
+pub mod dir_browse;
 pub mod env_probe;
 pub mod kernel;
 pub mod packs;
 pub mod pasteboard;
 pub mod persist;
 pub mod preview;
+pub mod remote;
 pub mod schedule;
 pub mod state;
 pub mod term;
@@ -96,17 +98,42 @@ type HostResult<T> = Result<T, HostError>;
 ///
 /// `Channel` 实现了 `Clone` 且是 `Send + Sync`，所以能存进 `State` 让后台任务
 /// 长期持有 —— 不必局限在这次调用内。这正是 token 流需要的模式。
+///
+/// 带 `webview` 参数是为了知道**谁**在订阅：桌面窗口是一个观看者，每条远程
+/// 连接是另一个（见 `remote` 模块）。事件广播给同一会话的所有观看者。
 #[tauri::command]
 async fn subscribe_session(
     state: tauri::State<'_, AppState>,
+    webview: tauri::Webview,
     session_id: String,
     epoch: u64,
     on_event: Channel<AgentEvent>,
 ) -> HostResult<()> {
-    if !state.attach_sink(session_id.clone(), epoch, on_event).await {
+    subscribe_session_as(
+        &state,
+        &state::webview_viewer(webview.label()),
+        session_id,
+        epoch,
+        on_event,
+    )
+    .await
+}
+
+/// 观看者无关的实现，桌面命令和远程分发都走这里。
+async fn subscribe_session_as(
+    state: &AppState,
+    viewer: &str,
+    session_id: String,
+    epoch: u64,
+    on_event: Channel<AgentEvent>,
+) -> HostResult<()> {
+    if !state
+        .attach_sink(viewer, session_id.clone(), epoch, on_event)
+        .await
+    {
         // 不当错误报。前端那次订阅本来就已经被自己弃用了，
         // 弹一条"订阅失败"只会把用户引向一个不存在的问题。
-        tracing::debug!(session_id, epoch, "忽略过期的订阅");
+        tracing::debug!(session_id, epoch, viewer, "忽略过期的订阅");
     }
     Ok(())
 }
@@ -552,6 +579,7 @@ async fn check_update(app: tauri::AppHandle) -> HostResult<update::UpdateInfo> {
 
 #[tauri::command]
 async fn set_config(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     mut config: config::AppConfig,
 ) -> HostResult<config::ConfigStatus> {
@@ -566,7 +594,40 @@ async fn set_config(
     // MCP 连接对齐新配置。reconcile 只 diff + 起连接任务，不等握手，
     // 不会拖慢保存按钮；进度由设置页轮询 mcp_status 看。
     state.reconcile_mcp().await;
+    // 远程访问服务对齐新配置（开关、端口、绑定）。
+    app.state::<remote::Remote>()
+        .inner()
+        .apply(&app, &config.remote)
+        .await;
     Ok(config::ConfigStatus::of(config))
+}
+
+/// 远程访问的运行状态：在不在听、地址、令牌、二维码。设置页用。
+#[tauri::command]
+async fn remote_status(app: tauri::AppHandle) -> HostResult<remote::RemoteStatus> {
+    let cfg = app.state::<AppState>().inner().config().await;
+    Ok(app
+        .state::<remote::Remote>()
+        .inner()
+        .status(&cfg.remote)
+        .await)
+}
+
+/// 换一枚远程访问令牌。旧链接和旧二维码即刻作废，已经连着的不掉线。
+///
+/// `[约束]` 令牌不进日志 —— 这个函数体内不允许有 tracing 调用。
+#[tauri::command]
+async fn remote_rotate_token(app: tauri::AppHandle) -> HostResult<String> {
+    app.state::<remote::Remote>()
+        .inner()
+        .rotate_token()
+        .map_err(HostError::Config)
+}
+
+/// 给网页版的目录选择器翻宿主机的目录。桌面窗口用系统对话框，不走这里。
+#[tauri::command]
+async fn browse_dirs(path: Option<String>) -> HostResult<dir_browse::DirBrowse> {
+    Ok(dir_browse::browse(path).await)
 }
 
 /// MCP 服务器的连接状态（设置页轮询它显示状态点和工具数）。
@@ -726,50 +787,31 @@ async fn set_api_key(
 /// 的 base64 序列化一遍、在 JS 主线程上 `JSON.parse` 一遍 —— 界面主线程
 /// 同时还要处理输入和渲染，滚动时正是它们在互相挤兑。Raw 通道在 Tauri
 /// 里走 fetch 取回，JS 拿到的直接是 ArrayBuffer，两次解析都省掉。
+///
+/// 多个观看者（桌面 + 网页）同时看同一个面板时画面按观看者扇出，最后一个
+/// 关掉的才真正停编码 —— 实现在 [`AppState::browser_open_for`]。
 #[tauri::command]
 async fn browser_open(
     state: tauri::State<'_, AppState>,
+    webview: tauri::Webview,
     session_id: String,
     on_frame: Channel<tauri::ipc::InvokeResponseBody>,
 ) -> HostResult<browser::access::PanelState> {
-    let b = state.panel_browser(&session_id).await?;
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<browser::access::Frame>();
-
-    // 帧从 tokio 通道转到 Tauri 的 Channel。中间这一跳是必要的:
-    // Channel 不是 Clone 到处传的东西，而帧的产生方在另一个任务里。
-    tokio::spawn(async move {
-        while let Some(mut f) = rx.recv().await {
-            // 只推最新的一帧。通道是无界的，前端一旦消化得慢，积压的
-            // 每一帧都还要过一遍 webview —— 追着播放旧帧只会让画面越来
-            // 越落后于手上的操作。滚动要的是"跟手"，不是"一帧不落"。
-            while let Ok(newer) = rx.try_recv() {
-                f = newer;
-            }
-            let mut buf = Vec::with_capacity(8 + f.data.len());
-            buf.extend_from_slice(&f.width.to_le_bytes());
-            buf.extend_from_slice(&f.height.to_le_bytes());
-            buf.extend_from_slice(&f.data);
-            if on_frame
-                .send(tauri::ipc::InvokeResponseBody::Raw(buf))
-                .is_err()
-            {
-                break; // 前端不听了
-            }
-        }
-    });
-
-    b.start_screencast(tx).await.map_err(HostError::Browser)?;
-    b.state().await.map_err(HostError::Browser)
+    state
+        .browser_open_for(&state::webview_viewer(webview.label()), &session_id, on_frame)
+        .await
 }
 
 /// 关闭面板。停止编码 —— 没人看的时候继续推是白烧 CPU 和电。
 #[tauri::command]
-async fn browser_close(state: tauri::State<'_, AppState>, session_id: String) -> HostResult<()> {
-    // 会话已经没了也算成功:用户关窗口时两件事同时发生，报错没有意义。
-    if let Ok(b) = state.panel_browser(&session_id).await {
-        b.stop_screencast().await;
-    }
-    Ok(())
+async fn browser_close(
+    state: tauri::State<'_, AppState>,
+    webview: tauri::Webview,
+    session_id: String,
+) -> HostResult<()> {
+    state
+        .browser_close_for(&state::webview_viewer(webview.label()), &session_id)
+        .await
 }
 
 /// 地址栏跳转。用户自己输的，不问权限 —— 但 scheme 要过白名单，
@@ -867,20 +909,17 @@ async fn browser_select_tab(
 #[tauri::command]
 async fn browser_watch_tabs(
     state: tauri::State<'_, AppState>,
+    webview: tauri::Webview,
     session_id: String,
     on_change: Channel<bool>,
 ) -> HostResult<()> {
-    let b = state.panel_browser(&session_id).await?;
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-    tokio::spawn(async move {
-        while rx.recv().await.is_some() {
-            if on_change.send(true).is_err() {
-                break; // 前端不听了
-            }
-        }
-    });
-    b.watch_tabs(tx).await;
-    Ok(())
+    state
+        .browser_watch_tabs_for(
+            &state::webview_viewer(webview.label()),
+            &session_id,
+            on_change,
+        )
+        .await
 }
 
 /// 面板尺寸变了。视口跟着变 —— 比例对不上时画面周围会留出黑边。
@@ -968,13 +1007,20 @@ async fn browser_pick_clear(
 #[tauri::command]
 async fn term_open(
     terms: tauri::State<'_, term::Terminals>,
+    webview: tauri::Webview,
     root: Option<String>,
     cols: u16,
     rows: u16,
     on_event: Channel<term::TermEvent>,
 ) -> HostResult<u32> {
     terms
-        .open(root, cols, rows, on_event)
+        .open(
+            root,
+            cols,
+            rows,
+            &state::webview_viewer(webview.label()),
+            on_event,
+        )
         .map_err(HostError::Term)
 }
 
@@ -1019,10 +1065,13 @@ async fn term_list(terms: tauri::State<'_, term::Terminals>) -> HostResult<Vec<t
 #[tauri::command]
 async fn term_attach(
     terms: tauri::State<'_, term::Terminals>,
+    webview: tauri::Webview,
     id: u32,
     on_event: Channel<term::TermEvent>,
 ) -> HostResult<()> {
-    terms.attach(id, on_event).map_err(HostError::Term)
+    terms
+        .attach(&state::webview_viewer(webview.label()), id, on_event)
+        .map_err(HostError::Term)
 }
 
 /// 把一个终端交给模型看 / 收回来。
@@ -1133,6 +1182,9 @@ async fn add_project(state: tauri::State<'_, AppState>, path: String) -> HostRes
         tracing::warn!(error = %e, "项目列表没能写进配置");
     }
     state.set_config(config).await;
+    // 项目表变了：另一端（网页版 / 另一窗口）要重拉 config.projects，
+    // 否则侧栏看不到新加的项目分组。
+    state.notify_sessions_changed();
     Ok(root)
 }
 
@@ -1361,6 +1413,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(state)
         .manage(terminals)
+        .manage(remote::Remote::default())
         // [约束] invoke_handler 只能调用一次。调多次只有最后一次生效，
         // 而且是静默失败 —— 前面注册的命令全部变成 "command not found"。
         .invoke_handler(tauri::generate_handler![
@@ -1457,6 +1510,9 @@ pub fn run() {
             test_connection,
             test_search_backend,
             list_models,
+            remote_status,
+            remote_rotate_token,
+            browse_dirs,
         ])
         // 启动时把 MCP 连接对齐配置。放 setup 里而不是 restore：
         // spawn 连接任务要求 runtime 已经起来，restore 跑在那之前。
@@ -1489,6 +1545,17 @@ pub fn run() {
                 // 或者直接拷贝了一份包目录进来，都靠这一步兜住。
                 sync_packs_into_config(&state).await;
                 state.reconcile_mcp().await;
+            });
+            // 远程访问：配置里开着就监听。放 setup 而不是 restore：起
+            // 服务要 runtime，而且要等 AppHandle 挂好（连接要用它取 state）。
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let cfg = handle.state::<AppState>().inner().config().await;
+                handle
+                    .state::<remote::Remote>()
+                    .inner()
+                    .apply(&handle, &cfg.remote)
+                    .await;
             });
             // 顺手收掉没人认领的浏览器 profile 和工件目录。同样放 setup：
             // 要在会话表恢复完之后才能判断谁是孤儿，而且删目录要 spawn_blocking。

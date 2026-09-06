@@ -17,6 +17,7 @@ import {
   PackageIcon,
   PlugIcon,
   ProviderIcon,
+  RemoteIcon,
   ShieldIcon,
   SkillIcon,
   TerminalIcon,
@@ -29,6 +30,7 @@ import { PacksPane } from "./settings/PacksPane";
 import { PermissionPane } from "./settings/PermissionPane";
 import { PromptsPane } from "./settings/PromptsPane";
 import { ProviderPane } from "./settings/ProviderPane";
+import { RemotePane } from "./settings/RemotePane";
 import { SkillsPane } from "./settings/SkillsPane";
 import { WebPane } from "./settings/WebPane";
 import type { LeaveGuard } from "./settings/shared";
@@ -58,6 +60,7 @@ type Tab =
   | "skills"
   | "commands"
   | "hooks"
+  | "remote"
   | "about";
 
 interface TabDef {
@@ -157,6 +160,13 @@ const NAV: { group: string; tabs: TabDef[] }[] = [
   {
     group: "应用",
     tabs: [
+      {
+        id: "remote",
+        label: "远程访问",
+        icon: RemoteIcon,
+        title: "远程访问",
+        desc: "在手机或另一台电脑的浏览器里用同一个 Riot。开关、监听范围、登录二维码和令牌。",
+      },
       {
         id: "about",
         label: "关于",
@@ -337,6 +347,14 @@ export function Settings({
               ) : null}
               {tab === "hooks" ? (
                 <HooksPane status={status} activeRoot={activeRoot ?? null} />
+              ) : null}
+              {tab === "remote" ? (
+                <RemotePane
+                  status={status}
+                  onStatus={onStatus}
+                  onSaved={flashSaved}
+                  askConfirm={setConfirm}
+                />
               ) : null}
               {tab === "about" ? (
                 <AboutPane

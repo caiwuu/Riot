@@ -5,14 +5,15 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { browserScopeList, type PermissionMode, type SessionInfo } from "../bridge";
+import { browserScopeList, host, type PermissionMode, type SessionInfo } from "../bridge";
 import { Chevron } from "./Chevron";
 import { useEscLayer } from "./Modal";
 import { PermissionMenu } from "./pickers";
 
 /** Overlay 标题栏的红绿灯只在 macOS 占左上角。Windows / Linux 的窗口
- * 控件在右侧，左边不用让位。 */
-export const IS_MAC = navigator.userAgent.includes("Mac");
+ * 控件在右侧，左边不用让位。浏览器里没有红绿灯 —— 哪怕是 Mac 上的
+ * Safari，标题栏归浏览器管，页面左上角是空的。 */
+export const IS_MAC = host.nativeWindow && navigator.userAgent.includes("Mac");
 import {
   GearIcon,
   PanelBottomIcon,

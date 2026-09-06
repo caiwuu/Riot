@@ -2,7 +2,16 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover：网页版在全面屏手机上铺到底，安全区由 CSS 的
+         env(safe-area-inset-*) 让开。interactive-widget=resizes-content：
+         软键盘弹起时缩视口而不是盖住输入框（Chrome Android）。 -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="theme-color" content="#181818" />
     <!-- CSS 解析前就告诉引擎这是深色页面，省掉冷启动的白闪一帧 -->
     <meta name="color-scheme" content="dark" />
     <title>Riot</title>

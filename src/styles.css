@@ -213,9 +213,22 @@ body,
 }
 
 /* macOS 系统 overlay 条太亮，而 ::-webkit-scrollbar 一写颜色就会打成
-   classic 常驻槽。原生条藏掉，滑块改由 .riot-osb 画（main.tsx）。 */
-html[data-vibrancy='mac'] *::-webkit-scrollbar {
+   classic 常驻槽。原生条藏掉，滑块改由 .riot-osb 画（main.tsx）。
+
+   网页版（Chromium / 手机浏览器）走同一条路。Chromium 的 classic 滚动条
+   **占布局宽度**：diff 块、改动列表这些嵌套滚动区各留一道 8px 的槽，槽是
+   透明的、露出底下深色的底，在带底色的 diff 行旁边就是一条黑柱，看着像
+   内容被截掉了一截。藏掉原生条、用同一套 overlay 滑块，网页和 macOS
+   桌面才长得一样。 */
+html[data-vibrancy='mac'] *::-webkit-scrollbar,
+html[data-host='web'] *::-webkit-scrollbar {
   display: none;
+}
+
+@supports (-moz-appearance: none) {
+  html[data-host='web'] * {
+    scrollbar-width: none;
+  }
 }
 
 .riot-osb {
@@ -924,6 +937,183 @@ html[data-resizing] .slide-panel {
   margin-bottom: 16px;
 }
 
+/* ── 网页版：连接门与状态条 ─────────────────── */
+
+/* 令牌输入屏。复用 .boot-fail 的居中窄栏，只加一点节奏。 */
+.remote-login {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.remote-login .booting-logo {
+  margin-bottom: 8px;
+}
+
+.remote-login h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.remote-login .hint {
+  margin: 0;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.remote-login form input {
+  font-family: 'Riot Mono', monospace;
+}
+
+/* 重连提示。压在页面最上沿，不占文档流：应用得留在原地，输入框里
+   正在打的字不能丢。 */
+.link-banner {
+  position: fixed;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border: 1px solid var(--warn-border);
+  border-radius: 999px;
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-size: 12.5px;
+  box-shadow: 0 4px 18px #00000066;
+}
+
+.link-banner .booting-spinner {
+  width: 12px;
+  height: 12px;
+  border-width: 1.5px;
+  border-top-color: var(--warn);
+}
+
+/* 浏览器里没有原生标题栏：Tauri 的 Overlay 标题栏给红绿灯留的顶部
+   内边距在这里是一截空白。 */
+html[data-host='web'] body {
+  overscroll-behavior: none;
+}
+
+/* ── 设置 → 远程访问 ─────────────────────────── */
+
+.remote-connect {
+  display: flex;
+  gap: 18px;
+  align-items: flex-start;
+  padding: 14px 16px;
+}
+
+.remote-qr {
+  flex: none;
+  width: 180px;
+  height: 180px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.remote-links {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.remote-links .path {
+  word-break: break-all;
+}
+
+.remote-links input {
+  font-family: 'Riot Mono', monospace;
+  font-size: 12px;
+}
+
+.remote-notes {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.remote-notes li + li {
+  margin-top: 6px;
+}
+
+@media (max-width: 720px) {
+  .remote-connect {
+    flex-direction: column;
+    align-items: center;
+  }
+}
+
+/* ── 网页版的目录选择器 ───────────────────────── */
+
+.modal.dir-picker {
+  width: min(560px, calc(100vw - 32px));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dir-picker-path {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 0 16px;
+}
+
+.dir-picker-path input {
+  flex: 1;
+  min-width: 0;
+  font-family: 'Riot Mono', monospace;
+  font-size: 12px;
+}
+
+.dir-picker-list {
+  max-height: min(48vh, 420px);
+  overflow-y: auto;
+  margin: 0 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-side);
+  padding: 4px;
+}
+
+.dir-picker-list .hint,
+.dir-picker-list .test-result {
+  margin: 10px 12px;
+}
+
+.dir-picker-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+  cursor: default;
+}
+
+.dir-picker-entry:hover {
+  background: var(--bg-hover);
+}
+
+.dir-picker-icon {
+  color: var(--text-faint);
+  width: 10px;
+}
+
 /* ── 侧边栏 ─────────────────────────────────── */
 
 /* 宽度由内联样式给（用户拖出来的值），这里只管别被压扁。
@@ -1011,6 +1201,12 @@ html[data-resizing] .slide-panel {
 .smooth-fold {
   display: grid;
   grid-template-rows: 0fr;
+  /* `[约束]` 列要写成 minmax(0, 1fr)，不能留默认的 auto。Chromium（网页版、
+     Windows 的 WebView2）给 auto 列的最小尺寸是内容的 min-content：会话
+     标题是 nowrap 的，最长那条有多宽，整列就撑多宽 —— 侧栏里的项目行
+     跟着被撑到几百像素，右端的「+」和「⋯」被挤出侧栏，标题也不再省略
+     而是被硬裁。WKWebView 恰好不这么算，所以 macOS 桌面上看不出来。 */
+  grid-template-columns: minmax(0, 1fr);
   min-height: 0;
   /* `[约束]` 上面的 min-height:0 是过渡要的（flex/grid 的自动最小尺寸会
      顶住 0fr，收不拢），代价是这个盒子丢了 flex item 的内容保底 —— 放进
@@ -1035,6 +1231,9 @@ html[data-resizing] .slide-panel {
 .smooth-fold-inner {
   overflow: clip;
   min-height: 0;
+  /* 同上：grid item 的自动最小宽度也要关掉，否则列再怎么 minmax(0, …)
+     也会被 item 的 min-content 顶开。 */
+  min-width: 0;
 }
 
 .project.collapsed {
@@ -6070,6 +6269,8 @@ button.ta-resize-grip:hover:not(:disabled),
   padding: 4px 0 6px;
   max-height: 42vh;
   overflow-y: auto;
+  /* 同 .change-diff：到头不回弹。 */
+  overscroll-behavior: none;
 }
 
 /* 设置页的选择列表：竖排行，名字截断，超高滚动。MCP 服务器和提示词
@@ -8568,6 +8769,19 @@ button.field-slider-state:hover {
   overflow-x: auto;
   max-height: 460px;
   overflow-y: auto;
+  /* 一列网格，列宽 = max(容器宽, 全部 hunk 里最长那行)。这样每个 hunk 都
+     和**整个 diff 里**最宽的那个一样宽，横向一滚右边是齐的。之前各 hunk
+     各自 max-content，只有最长的那个撑到底，横向滚过去时短 hunk 的底色
+     在半路断掉，右侧露出一条深色竖边，看着像内容被裁了。 */
+  display: grid;
+  /* 写成 minmax(max-content, 100%) 而不是反过来：网格的轨道先取下限、再靠
+     剩余空间长到上限，而滚动容器里长行的"剩余空间"是负的 —— 下限写 100%
+     的话轨道永远停在容器宽，长行溢出轨道，hunk 还是没被撑开。下限写
+     max-content，长行时轨道就是最长行；短行时上限 100% 把它拉满容器。 */
+  grid-template-columns: minmax(max-content, 100%);
+  /* 滚到头不回弹，也不把滚动接力给外面的对话流。这块住在输入框上方，
+     不像思考过程那样嵌在对话流里，不需要接力（对比 .shell 那处的取舍）。 */
+  overscroll-behavior: none;
 }
 
 /* 改动条自己就是 bg-card 底，diff 块换一档底色才看得出边界。 */
@@ -8595,11 +8809,10 @@ button.field-slider-state:hover {
   background-color: var(--scrollbar-thumb);
 }
 
-/* hunk 跟最长那一行一样宽，下面每行再 100% 铺满 —— 否则短行的
-   底色只铺到自己的字，横向一滚右边就断成一条竖边。 */
+/* hunk 的宽度由 .change-diff 的网格列给（全 diff 最宽那行），下面每行再
+   100% 铺满 —— 否则短行的底色只铺到自己的字，横向一滚右边就断成一条竖边。 */
 .hunk {
-  width: max-content;
-  min-width: 100%;
+  min-width: 0;
 }
 
 .hunk-head,
@@ -9845,4 +10058,291 @@ button.field-slider-state:hover {
   font-size: 12px;
   color: var(--text-dim);
   text-align: center;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * 窄屏（手机）布局
+ *
+ * 断点 720px 和 hooks/useIsMobile.ts 的 MOBILE_QUERY 是同一个数：
+ * 布局在这里切，行为（默认收起、选完自动收起、遮罩）在那里切。
+ *
+ * 思路不是重排一套界面，而是把三列结构里的两侧改成**浮层**：
+ * - 侧栏：从左边滑进来盖在对话上，点遮罩或选中会话就收；
+ * - 右侧面板（工作台 / 任务详情）：整屏盖上来，靠原来那组分栏开关关；
+ * - 主区（顶栏 / 对话 / 输入框 / 终端）独占整屏宽。
+ * SlidePanel 在桌面上靠改壳的宽度开合，内联样式给的数；这里用 !important
+ * 把宽度钉死、改成 transform 平移，`data-open` 说开没开。
+ * ══════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* 浮层面板：压过面板内浮层（--z-panel）和 pill 菜单（--z-menu），
+     让弹窗（--z-modal）和右键菜单压过它。 */
+  --z-sheet: 60;
+}
+
+@media (max-width: 720px) {
+  /* 手机浏览器的地址栏会伸缩，100% 不一定等于可见高度；dvh 跟着变。 */
+  html,
+  body,
+  #root {
+    height: 100dvh;
+  }
+
+  /* ── 侧栏：左侧抽屉 ── */
+  .slide-panel.side {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: var(--z-sheet);
+    width: min(85vw, 320px) !important;
+    transform: translateX(-100%);
+    transition: transform var(--dur-panel) var(--ease-panel);
+    box-shadow: none;
+    overflow: visible;
+  }
+
+  .slide-panel.side[data-open] {
+    transform: none;
+    box-shadow: 12px 0 40px rgba(0, 0, 0, 0.45);
+  }
+
+  .slide-panel.side .slide-panel-inner,
+  .slide-panel.side .sidebar {
+    width: 100% !important;
+  }
+
+  .sidebar {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: calc(10px + env(safe-area-inset-bottom));
+  }
+
+  .mobile-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: calc(var(--z-sheet) - 1);
+    background: rgba(0, 0, 0, 0.45);
+  }
+
+  /* 侧栏开着时顶栏不用给它让位：它是浮层，不挤主区。 */
+  .tb-traffic.show {
+    width: 28px;
+  }
+
+  /* ── 右侧面板：整屏浮层 ── */
+  .slide-panel.rail {
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-sheet);
+    width: 100vw !important;
+    transform: translateX(100%);
+    transition: transform var(--dur-panel) var(--ease-panel);
+  }
+
+  .slide-panel.rail[data-open] {
+    transform: none;
+  }
+
+  .slide-panel.rail::before {
+    display: none;
+  }
+
+  .slide-panel.rail .slide-panel-inner,
+  .slide-panel.rail .drawer,
+  .slide-panel.rail .sp-detail {
+    width: 100% !important;
+    max-width: none;
+    min-width: 0;
+  }
+
+  /* 分栏开关钉在窗口右上角，要压得住浮上来的面板 —— 它是关掉面板的
+     唯一入口。 */
+  .win-controls.docked {
+    position: fixed;
+    z-index: calc(var(--z-sheet) + 1);
+    top: env(safe-area-inset-top);
+  }
+
+  /* ── 拖拽分隔线：手机上没有可拖的东西 ── */
+  .rz {
+    display: none;
+  }
+
+  /* ── 顶栏 ── */
+  .topbar,
+  .traffic-space,
+  .settings-head,
+  .wb-tabs {
+    padding-top: env(safe-area-inset-top);
+    box-sizing: content-box;
+  }
+
+  .tb-title {
+    max-width: 60%;
+  }
+
+  /* ── 输入区 ── */
+  /* 16px 以下的输入框 iOS 会在聚焦时把整页放大，退出后不复原。 */
+  .composer-input {
+    font-size: 16px;
+    line-height: 1.5;
+    max-height: 32vh;
+  }
+
+  /* 安全区在普通浏览器（非全屏 PWA、Android）里是 0，只用它当底距会让
+     输入框贴到屏幕边上；基础间距要保留，安全区只往上叠。 */
+  .composer-dock {
+    padding-bottom: calc(10px + env(safe-area-inset-bottom));
+  }
+
+  /* 用户气泡在窄屏上可以更宽一点：85% 留出的那截空白在手机上是浪费。 */
+  .msg.user {
+    max-width: 92%;
+  }
+
+  /* ── 弹窗 ── */
+  .modal-backdrop {
+    padding: 12px;
+    padding-top: max(12px, env(safe-area-inset-top));
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+
+  .modal {
+    width: 100%;
+    max-height: calc(100dvh - 24px);
+    border-radius: 14px;
+  }
+
+  /* ── 设置页：左列变顶部横向标签条 ── */
+  .settings-page {
+    flex-direction: column;
+  }
+
+  .settings-side {
+    width: 100% !important;
+    flex-shrink: 0;
+    padding: 0 10px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .settings-nav {
+    flex: none;
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+    gap: 4px;
+    padding: 0 0 8px;
+    scrollbar-width: none;
+  }
+
+  .settings-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .settings-nav-group {
+    flex-direction: row;
+    gap: 4px;
+  }
+
+  .settings-nav-label {
+    display: none;
+  }
+
+  .settings-tab {
+    white-space: nowrap;
+    height: 32px;
+    padding: 0 12px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+  }
+
+  .settings-tab.active {
+    border-color: var(--border-strong);
+  }
+
+  .settings-body-top {
+    display: none;
+  }
+
+  /* 整页变成上下排布之后正文列是纵向 flex 子项，得允许它缩到剩余高度，
+     否则它按内容撑高、滚动落到整页上而不是 .settings-scroll 里。 */
+  .settings-body {
+    min-height: 0;
+  }
+
+  .settings-scroll {
+    padding: 4px 14px calc(72px + env(safe-area-inset-bottom));
+  }
+
+  .pane-head {
+    padding-top: 14px;
+  }
+
+  /* 设置行：名字在上、控件在下，一列到底。右列硬塞的话输入框只剩一条缝。 */
+  .set-row:not(.stack) {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .set-row:not(.stack) .set-row-text {
+    min-width: 0;
+    flex: none;
+  }
+
+  .set-row:not(.stack) .set-row-ctl {
+    min-width: 0;
+    flex: none;
+    justify-content: flex-start;
+  }
+
+  .set-row:not(.stack) .set-row-ctl > input,
+  .set-row:not(.stack) .set-row-ctl > .field-select,
+  .set-row:not(.stack) .set-row-ctl > textarea,
+  .set-row:not(.stack) .set-row-ctl > .input-with-btn {
+    width: 100%;
+    max-width: none;
+  }
+
+  /* 开关这类小控件仍然靠右，别孤零零贴在左边。 */
+  .set-row:not(.stack) .set-row-ctl:has(> .switch) {
+    justify-content: flex-end;
+  }
+
+  .input-with-btn {
+    flex-wrap: wrap;
+  }
+
+  /* ── 终端面板 ── */
+  .term-panel {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  /* ── 连接门 / 登录屏 ── */
+  .boot-fail {
+    padding: 48px 20px;
+  }
+}
+
+/* 触屏：没有悬停，藏着等 hover 的行内小键要直接露出来；点击目标放大。 */
+@media (hover: none) and (pointer: coarse) {
+  .row-btn,
+  .project-head .row-btn,
+  .thread .row-btn {
+    opacity: 0.55;
+  }
+
+  .tb-btn {
+    width: 34px;
+    height: 34px;
+  }
+
+  .thread,
+  .project-head {
+    min-height: 36px;
+  }
+
+  .settings-tab {
+    height: 36px;
+  }
 }

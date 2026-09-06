@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-remote-rotate-token"
+description = "Enables the remote_rotate_token command without any pre-configured scope."
+commands.allow = ["remote_rotate_token"]
+
+[[permission]]
+identifier = "deny-remote-rotate-token"
+description = "Denies the remote_rotate_token command without any pre-configured scope."
+commands.deny = ["remote_rotate_token"]

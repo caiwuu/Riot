@@ -778,10 +778,83 @@ pub struct AppConfig {
     /// 找回被总结掉的原文，那不是用户该关的东西。
     #[serde(default = "default_true")]
     pub session_recall: bool,
+    /// 远程访问（网页版）：宿主开一个 HTTP + WebSocket 服务，浏览器里的
+    /// 同一套界面经它操作这台机器上的 Riot。令牌不在这里，见
+    /// [`REMOTE_TOKEN_KEY`]。
+    #[serde(default)]
+    pub remote: RemoteConfig,
 }
 
 const fn default_true() -> bool {
     true
+}
+
+/// 远程访问服务的配置。
+///
+/// `[约束]` 令牌**不进** `config.json`。它和 API key 同一性质（拿到就能
+/// 以你的身份在这台机器上跑命令），走同一份 `auth.json`（0600）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteConfig {
+    /// 开着就监听。默认关 —— 这是一扇能远程执行命令的门，必须由用户亲手开。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 监听哪个地址。
+    #[serde(default)]
+    pub bind: RemoteBind,
+    /// 端口。默认取一个不常用的高位端口，撞车再改。
+    #[serde(default = "default_remote_port")]
+    pub port: u16,
+}
+
+impl Default for RemoteConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: RemoteBind::default(),
+            port: default_remote_port(),
+        }
+    }
+}
+
+/// 远程服务监听的地址范围。
+///
+/// `[取舍]` 只给两档，不让用户填任意 IP：填错 IP 的表现是"开了却连不上"，
+/// 而且解释起来要讲网卡。两档已经覆盖两种真实用法 —— 本机回环给 SSH 隧道 /
+/// Tailscale Serve / 反向代理接，局域网给同一个 Wi-Fi 下的手机直连。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RemoteBind {
+    /// 只听 127.0.0.1。外面进不来，要靠隧道或代理转进来。
+    #[default]
+    Loopback,
+    /// 听所有网卡（0.0.0.0），同一局域网的设备能直连。
+    Lan,
+}
+
+const fn default_remote_port() -> u16 {
+    7823
+}
+
+/// 远程访问令牌在 `auth.json` 里的键。
+///
+/// 同名环境变量优先（无头部署、CI 里不想落盘时用），见 [`load_secret`]。
+pub const REMOTE_TOKEN_KEY: &str = "RIOT_REMOTE_TOKEN";
+
+/// 读一个非 API key 的秘密（比如远程访问令牌）：环境变量优先，其次 `auth.json`。
+///
+/// 空串当没有 —— 界面上"清空"就是删除。
+pub fn load_secret(name: &str) -> Option<String> {
+    #[allow(clippy::disallowed_methods)]
+    if let Ok(v) = std::env::var(name)
+        && !v.trim().is_empty()
+    {
+        return Some(v.trim().to_owned());
+    }
+    load_auth(&auth_path())
+        .get(name)
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
 }
 
 /// 命令隔离的强度。
@@ -970,6 +1043,7 @@ impl Default for AppConfig {
             sandbox: SandboxMode::default(),
             sandbox_allow_read: Vec::new(),
             session_recall: true,
+            remote: RemoteConfig::default(),
         }
     }
 }
@@ -1647,6 +1721,7 @@ fn migrate(old: LegacyConfig) -> AppConfig {
         sandbox: SandboxMode::default(),
         sandbox_allow_read: Vec::new(),
         session_recall: true,
+        remote: RemoteConfig::default(),
     }
 }
 

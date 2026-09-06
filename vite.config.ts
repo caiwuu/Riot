@@ -37,8 +37,26 @@ export default defineConfig({
   ],
   clearScreen: false,
   server: {
+    // 必须听 127.0.0.1：Tailscale Serve 会把目标规范成 127.0.0.1，而 Node
+    // 默认只绑 [::1] 时 Serve 连不上 → 502 空响应，iOS Safari 会把它存成
+    // 「document.txt」下载。tauri.conf.json 的devUrl 也改成 127.0.0.1。
+    host: "127.0.0.1",
     port: 1420,
     strictPort: true,
+    // Tailscale Serve / 反代进来时 Host 是 `macbook-….ts.net`，Vite 默认只
+    // 放行 localhost，会直接 403。前导点 = 该后缀下所有子域。
+    allowedHosts: [".ts.net", "localhost", "127.0.0.1"],
+    // 网页版开发：打开 http://127.0.0.1:1420，/ws 反代到宿主远程服务。
+    // 端口改了用 RIOT_REMOTE_PORT。
+    proxy: {
+      "/ws": {
+        target: `ws://127.0.0.1:${process.env.RIOT_REMOTE_PORT ?? "7823"}`,
+        ws: true,
+        // 保留浏览器给的 Host（127.0.0.1:1420 或 *.ts.net），宿主按
+        // Origin == Host / RIOT_REMOTE_ALLOWED_ORIGINS 做来源校验。
+        changeOrigin: false,
+      },
+    },
     fs: {
       // @file-viewer 链接到本地 fork（见 pnpm-workspace.yaml 的 overrides），
       // 它的 Worker / WASM 用 import.meta.url 相对定位，真实路径在工作区

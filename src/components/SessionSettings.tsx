@@ -6,13 +6,13 @@ import {
   type SessionInfo,
   type ThinkingPolicy,
   detectVenvs,
-  pickDirectory,
   setSessionPythonVenv,
   setSessionSampling,
   setSessionSystemPrompt,
   setSessionThinking,
 } from "../bridge";
 import { findPreset, presetLabel, presetSummary } from "../lib/prompts";
+import { useDirectoryPicker } from "./DirPicker";
 import {
   type SamplingDraft,
   SAMPLING_FIELDS,
@@ -159,9 +159,10 @@ export function SessionSettings({
     }
   };
 
+  const dirPicker = useDirectoryPicker();
   const pickVenv = async () => {
     // 从会话根打开：venv 几乎总在项目里，从家目录翻过去纯属折磨。
-    const dir = await pickDirectory(session.root);
+    const dir = await dirPicker.pick(session.root);
     if (!dir) return;
     setVenv(dir);
     await commitVenv(dir);
@@ -377,6 +378,7 @@ export function SessionSettings({
 
           {error ? <p className="form-error">{error}</p> : null}
         </div>
+        {dirPicker.element}
     </Modal>
   );
 }

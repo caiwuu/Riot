@@ -113,6 +113,9 @@
     "allow-schedule-delete",
     "allow-schedule-run-now",
     "allow-schedule-missed",
-    "allow-schedule-ack-missed"
+    "allow-schedule-ack-missed",
+    "allow-remote-status",
+    "allow-remote-rotate-token",
+    "allow-browse-dirs"
   ]
 }

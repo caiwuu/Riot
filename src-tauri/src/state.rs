@@ -116,6 +116,29 @@ struct Sink {
     epoch: u64,
 }
 
+/// 一个会话的浏览器面板此刻有哪些观看者。
+///
+/// 帧走 `Channel<InvokeResponseBody>`(二进制),标签变更走 `Channel<bool>`
+/// (一声 ping);两张表分开是因为前端分两次订阅、退订时机也不同。
+#[derive(Default)]
+struct PanelHub {
+    frames: HashMap<String, Channel<tauri::ipc::InvokeResponseBody>>,
+    tabs: HashMap<String, Channel<bool>>,
+    /// 推流任务在跑。第一个观看者进来时起,最后一个走时停。
+    streaming: bool,
+    /// 第几条推流。每次起流加一;扇出任务和"迟到的停"都拿它认自己那条,
+    /// 旧的一律不动新的(见 [`AppState::start_stream`])。
+    epoch: u64,
+    /// 起停互斥。起和停各自要"看一眼登记、再对浏览器发命令",两步之间
+    /// 不能插进对方 —— 表锁不能跨 await 拿着,所以另配一把。
+    gate: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// 桌面窗口自己作为观看者的 id。远程连接用 `remote:<连接号>`。
+pub fn webview_viewer(label: &str) -> String {
+    format!("webview:{label}")
+}
+
 /// 注册表里的一个会话:UI 元数据 + 会话设置。**宿主是这些字段的权威。**
 ///
 /// 拆进程后这里没有 `Session` 本体 —— 运行时(历史、轮子、队列)在内核
@@ -164,9 +187,14 @@ struct Inner {
     transcripts: Arc<riot_store::Transcripts>,
     /// 内核 RPC 客户端。会话运行时全在它背后的内核进程里。
     kernel: KernelClient,
-    /// session_id → 事件出口。同一会话重复订阅取 epoch 最大的那个 ——
-    /// 一个会话在 UI 上只有一个视图。
-    sinks: Mutex<HashMap<String, Sink>>,
+    /// session_id → 观看者 → 事件出口登记。同一观看者重复订阅取 epoch
+    /// 最大的那个;不同观看者(桌面窗口、各个远程连接)各有一条,事件
+    /// 广播给所有人。
+    sinks: Mutex<HashMap<String, HashMap<String, Sink>>>,
+    /// 浏览器面板的观看者表。画面帧和标签变更从 HostBrowser 出来只有一份,
+    /// 这里按观看者扇出;最后一个观看者离开才真正停推流。见
+    /// [`AppState::browser_open_for`]。
+    panel_hubs: Mutex<HashMap<String, PanelHub>>,
     /// session_id → 登记的会话。
     ///
     /// [约束] 每个会话在创建时绑定自己的项目根，之后不变。没有全局
@@ -225,6 +253,7 @@ impl Inner {
             sessions_dir,
             config_path,
             sinks: Mutex::default(),
+            panel_hubs: Mutex::default(),
             sessions: Mutex::default(),
             config: Mutex::default(),
             seq: AtomicU64::default(),
@@ -345,11 +374,14 @@ impl AppState {
                         if let Some(m) = state.0.sessions.lock().await.get_mut(&session_id) {
                             m.busy = true;
                         }
+                        // busy 不进索引，但侧栏指示点要跨观看者跟上。
+                        state.emit_sessions_changed();
                     }
                     HostNotice::Done { session_id } => {
                         if let Some(m) = state.0.sessions.lock().await.get_mut(&session_id) {
                             m.busy = false;
                         }
+                        state.emit_sessions_changed();
                         // 这轮结束可能是某个定时任务跑完了：认领、通知、广播。
                         state.finish_schedule_run(&session_id).await;
                     }
@@ -390,6 +422,7 @@ impl AppState {
                         // 跑着的定时任务也随内核没了。不清的话那些 Done
                         // 永远不来，认领表里的条目就永远挂着。
                         state.0.schedules.lock().await.running.clear();
+                        state.emit_sessions_changed();
                     }
                 }
             }
@@ -444,16 +477,22 @@ impl AppState {
     /// 切走再切回来却能看到完整回复。
     ///
     /// 返回 `false` 表示这次订阅因为过期被忽略了。
+    ///
+    /// `viewer` 是谁在看:桌面窗口一个 id,每条远程连接各一个。epoch 只在
+    /// **同一观看者**内比较 —— 桌面和网页各自从零计数,跨着比没有意义。
     pub async fn attach_sink(
         &self,
+        viewer: &str,
         session_id: String,
         epoch: u64,
         channel: Channel<AgentEvent>,
     ) -> bool {
         let mut g = self.0.sinks.lock().await;
-        if let Some(cur) = g.get(&session_id)
+        if let Some(cur) = g.get(&session_id).and_then(|v| v.get(viewer))
             && cur.epoch > epoch
         {
+            // 不在这里 or_default 建空表:被拒的订阅不该让 require_sink
+            // 以为"有人在听"。
             return false;
         }
         // `[约束]` 正在跑的轮子也要换到新 channel 上。
@@ -461,9 +500,285 @@ impl AppState {
         // 分发点在 KernelClient 的 sinks 表(事件从内核 stdout 流进来时
         // 现查),换表即换出口 —— 不换的话这一轮剩下的事件(包括结束)
         // 全发给没人听的旧 channel,界面就永远停在"它正在做事"。
-        self.0.kernel.attach_sink(&session_id, channel).await;
-        g.insert(session_id, Sink { epoch });
+        self.0.kernel.attach_sink(&session_id, viewer, channel).await;
+        g.entry(session_id)
+            .or_default()
+            .insert(viewer.to_owned(), Sink { epoch });
         true
+    }
+
+    /// 一个观看者走了(远程连接断开):摘掉它在所有会话、终端、浏览器面板
+    /// 上的出口。桌面窗口不调这个 —— 它活到进程结束。
+    ///
+    /// 不摘的话,断掉的连接留下的 Channel 会让 `require_sink` 继续认为
+    /// "有人在听",而浏览器面板的推流也不会因为最后一个人走了而停下。
+    pub async fn detach_viewer(&self, viewer: &str) {
+        {
+            let mut g = self.0.sinks.lock().await;
+            g.retain(|_, viewers| {
+                viewers.remove(viewer);
+                !viewers.is_empty()
+            });
+        }
+        self.0.kernel.detach_viewer(viewer).await;
+        self.0.terminals.detach_viewer(viewer);
+
+        // 浏览器面板:这个观看者关掉的那些会话里,谁成了空场就停推流。
+        let orphaned: Vec<String> = {
+            let mut hubs = self.0.panel_hubs.lock().await;
+            let mut out = Vec::new();
+            for (sid, hub) in hubs.iter_mut() {
+                hub.frames.remove(viewer);
+                hub.tabs.remove(viewer);
+                if hub.frames.is_empty() && hub.streaming {
+                    out.push(sid.clone());
+                }
+            }
+            out
+        };
+        for sid in orphaned {
+            self.stop_stream_if_idle(&sid).await;
+        }
+    }
+
+    /// 起这个会话的推流:开一条帧通道、起扇出任务、让浏览器开始 screencast。
+    ///
+    /// `[约束]` 全程拿着会话的 `gate`,和 [`Self::stop_stream_if_idle`] 互斥。
+    /// 没有这把锁时踩过一个真实的竞态:手机端断线重连,旧连接的
+    /// `detach_viewer` 判定"没人看了"后**放开表锁**再去停推流,而新连接的
+    /// `browser_open_for` 恰好挤在中间把推流起了起来 —— 随后那次迟到的
+    /// stop 把它掐掉,`frames` 被清空、扇出任务悄悄退出,可 `streaming`
+    /// 还挂着 true。之后每个观看者进来都走"已经在推、补一帧"那条路,而
+    /// 根本没有流可补,面板永远停在「浏览器启动中…」。
+    ///
+    /// 扇出任务本身也自愈:帧通道被浏览器那头放掉(进程重开、别处停了流)
+    /// 时,它把 `streaming` 收回 false;还有人在看就立刻重起一条。
+    ///
+    /// 返回装箱的 future:扇出任务里会再调一次自己(自愈重起),async fn
+    /// 直接递归会让 future 类型无限嵌套,编译器也判不出 Send。
+    fn start_stream<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = HostResult<()>> + Send + 'a>> {
+        Box::pin(self.start_stream_inner(session_id))
+    }
+
+    async fn start_stream_inner(&self, session_id: &str) -> HostResult<()> {
+        let b = self.panel_browser(session_id).await?;
+        let gate = self.panel_gate(session_id).await;
+        let _g = gate.lock().await;
+
+        let epoch = {
+            let mut hubs = self.0.panel_hubs.lock().await;
+            let hub = hubs.entry(session_id.to_owned()).or_default();
+            if hub.streaming {
+                // 排队等锁的时候别人已经起好了。
+                return Ok(());
+            }
+            if hub.frames.is_empty() {
+                // 等锁期间观看者全走了,没必要对着空处编码。
+                return Ok(());
+            }
+            hub.streaming = true;
+            hub.epoch += 1;
+            hub.epoch
+        };
+
+        let (tx, mut rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::browser::access::Frame>();
+        let state = self.clone();
+        let sid = session_id.to_owned();
+        // 帧从 tokio 通道转到各观看者的 Channel。中间这一跳是必要的:
+        // 帧的产生方在浏览器进程那头的读循环里,不认识观看者。
+        tokio::spawn(async move {
+            while let Some(mut f) = rx.recv().await {
+                // 只推最新的一帧。通道是无界的,前端一旦消化得慢,积压的
+                // 每一帧都还要过一遍 webview —— 追着播放旧帧只会让画面越来
+                // 越落后于手上的操作。滚动要的是"跟手",不是"一帧不落"。
+                while let Ok(newer) = rx.try_recv() {
+                    f = newer;
+                }
+                let mut buf = Vec::with_capacity(8 + f.data.len());
+                buf.extend_from_slice(&f.width.to_le_bytes());
+                buf.extend_from_slice(&f.height.to_le_bytes());
+                buf.extend_from_slice(&f.data);
+                let mut hubs = state.0.panel_hubs.lock().await;
+                let Some(hub) = hubs.get_mut(&sid) else { return };
+                if hub.epoch != epoch {
+                    // 已经有更新的一条流接手,这条是旧的,安静退出。
+                    return;
+                }
+                let mut dead = Vec::new();
+                for (v, ch) in hub.frames.iter() {
+                    if ch
+                        .send(tauri::ipc::InvokeResponseBody::Raw(buf.clone()))
+                        .is_err()
+                    {
+                        dead.push(v.clone());
+                    }
+                }
+                for v in dead {
+                    hub.frames.remove(&v);
+                }
+                if hub.frames.is_empty() {
+                    // 所有出口都死了(连接全断)。停推流,别对着空处编码。
+                    drop(hubs);
+                    state.stop_stream_if_idle(&sid).await;
+                    return;
+                }
+            }
+            // 帧通道被浏览器那头放掉了:进程重开、或别处调了 stop。这条流
+            // 已经死了,登记要跟上,否则下一个观看者会被当成"已经在推"。
+            let restart = {
+                let mut hubs = state.0.panel_hubs.lock().await;
+                match hubs.get_mut(&sid) {
+                    Some(hub) if hub.epoch == epoch => {
+                        hub.streaming = false;
+                        !hub.frames.is_empty()
+                    }
+                    _ => false,
+                }
+            };
+            if restart {
+                // 还有人在看:重起一条。失败只记日志 —— 观看者下一次
+                // open/resize 还会再试。
+                if let Err(e) = state.start_stream(&sid).await {
+                    tracing::warn!(error = %e, "浏览器推流断了,重起失败");
+                }
+            }
+        });
+
+        if let Err(e) = b.start_screencast(tx).await {
+            let mut hubs = self.0.panel_hubs.lock().await;
+            if let Some(hub) = hubs.get_mut(session_id)
+                && hub.epoch == epoch
+            {
+                hub.streaming = false;
+            }
+            return Err(HostError::Browser(e));
+        }
+        Ok(())
+    }
+
+    /// 没人看了就停推流。拿着会话的 `gate` 再复核一次 —— 等锁期间可能
+    /// 有新观看者把流起了起来,那就什么都不做。
+    async fn stop_stream_if_idle(&self, session_id: &str) {
+        let gate = self.panel_gate(session_id).await;
+        let _g = gate.lock().await;
+        {
+            let mut hubs = self.0.panel_hubs.lock().await;
+            let Some(hub) = hubs.get_mut(session_id) else { return };
+            if !hub.frames.is_empty() || !hub.streaming {
+                return;
+            }
+            hub.streaming = false;
+        }
+        // 会话已经没了也算成功:用户关窗口时两件事同时发生,报错没有意义。
+        if let Ok(b) = self.panel_browser(session_id).await {
+            b.stop_screencast().await;
+        }
+    }
+
+    /// 会话推流起停的互斥锁。从表里克隆出来再拿,别在表锁里 await。
+    async fn panel_gate(&self, session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut hubs = self.0.panel_hubs.lock().await;
+        Arc::clone(&hubs.entry(session_id.to_owned()).or_default().gate)
+    }
+
+    /// 浏览器面板:这个观看者开始看画面。回标签栏状态(理由见 lib.rs 的
+    /// `browser_open`)。
+    ///
+    /// 第一个观看者进来才真的起 screencast;之后进来的加进扇出表,再让
+    /// 浏览器补发一帧,免得静态页面上新观看者一直黑着。
+    /// 帧格式:8 字节小端头(宽、高,各 u32,CSS 像素)+ JPEG 字节。
+    pub async fn browser_open_for(
+        &self,
+        viewer: &str,
+        session_id: &str,
+        on_frame: Channel<tauri::ipc::InvokeResponseBody>,
+    ) -> HostResult<crate::browser::access::PanelState> {
+        let b = self.panel_browser(session_id).await?;
+        let already = {
+            let mut hubs = self.0.panel_hubs.lock().await;
+            let hub = hubs.entry(session_id.to_owned()).or_default();
+            hub.frames.insert(viewer.to_owned(), on_frame);
+            hub.streaming
+        };
+
+        if already {
+            // 推流已经在跑:新来的这位要等页面自己变化才会收到第一帧,
+            // 静态页面上就是一直黑着。补发一帧,让它立刻有画面 —— 手机端
+            // 重连时桌面多半还开着面板,走的正是这条路。
+            b.refresh_screencast().await;
+        } else if let Err(e) = self.start_stream(session_id).await {
+            let mut hubs = self.0.panel_hubs.lock().await;
+            if let Some(hub) = hubs.get_mut(session_id) {
+                hub.frames.remove(viewer);
+            }
+            return Err(e);
+        }
+        b.state().await.map_err(HostError::Browser)
+    }
+
+    /// 浏览器面板:这个观看者不看了。最后一个走的才真的停编码。
+    pub async fn browser_close_for(&self, viewer: &str, session_id: &str) -> HostResult<()> {
+        let check = {
+            let mut hubs = self.0.panel_hubs.lock().await;
+            match hubs.get_mut(session_id) {
+                Some(hub) => {
+                    hub.frames.remove(viewer);
+                    hub.frames.is_empty() && hub.streaming
+                }
+                None => false,
+            }
+        };
+        if check {
+            self.stop_stream_if_idle(session_id).await;
+        }
+        Ok(())
+    }
+
+    /// 浏览器面板:订阅标签清单变更。重新订阅替换自己那条;不设退订(理由
+    /// 见 lib.rs 的 `browser_watch_tabs`),观看者走了由 `detach_viewer` 收。
+    pub async fn browser_watch_tabs_for(
+        &self,
+        viewer: &str,
+        session_id: &str,
+        on_change: Channel<bool>,
+    ) -> HostResult<()> {
+        let b = self.panel_browser(session_id).await?;
+        let need_start = {
+            let mut hubs = self.0.panel_hubs.lock().await;
+            let hub = hubs.entry(session_id.to_owned()).or_default();
+            let first = hub.tabs.is_empty();
+            hub.tabs.insert(viewer.to_owned(), on_change);
+            first
+        };
+        if need_start {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+            let state = self.clone();
+            let sid = session_id.to_owned();
+            tokio::spawn(async move {
+                while rx.recv().await.is_some() {
+                    let mut hubs = state.0.panel_hubs.lock().await;
+                    let Some(hub) = hubs.get_mut(&sid) else { break };
+                    let mut dead = Vec::new();
+                    for (v, ch) in hub.tabs.iter() {
+                        if ch.send(true).is_err() {
+                            dead.push(v.clone());
+                        }
+                    }
+                    for v in dead {
+                        hub.tabs.remove(&v);
+                    }
+                    if hub.tabs.is_empty() {
+                        break; // 没人听了;下一个订阅者会重起一条
+                    }
+                }
+            });
+            b.watch_tabs(tx).await;
+        }
+        Ok(())
     }
 
     pub async fn config(&self) -> AppConfig {
@@ -664,6 +979,9 @@ impl AppState {
     pub async fn delete_session(&self, session_id: &str) {
         let removed = self.0.sessions.lock().await.remove(session_id);
         self.0.sinks.lock().await.remove(session_id);
+        // 面板观看者表也一起摘:浏览器句柄下面会 Drop,留着的 Channel 再也
+        // 收不到帧,而推流转发任务看到 hub 不在了会自己退出。
+        self.0.panel_hubs.lock().await.remove(session_id);
         if removed.is_some() {
             self.0.kernel.detach_sink(session_id).await;
             // 内核侧删除:中断轮子、关 transcript 句柄、删文件。内核不在
@@ -878,6 +1196,15 @@ impl AppState {
         if let Err(e) = crate::persist::save(&self.0.sessions_dir, &index) {
             tracing::warn!(error = %e, "会话索引没能写盘，重启后列表可能不完整");
         }
+        // 落盘之后通知所有观看者（桌面窗口 + 网页版）重拉列表。
+        // 创建 / 删除 / 改名 / 自动标题 / 模式设置都经过这里；busy 不落盘，
+        // 另见 spawn_host_bridge 里 Started / Done。
+        self.emit_sessions_changed();
+    }
+
+    /// 项目表变了、但未必动过会话索引时（比如加了一个空项目）也要喊一声。
+    pub fn notify_sessions_changed(&self) {
+        self.emit_sessions_changed();
     }
 
     /// 把项目从列表移除，并关闭它下面所有会话。
@@ -904,6 +1231,10 @@ impl AppState {
         for id in &doomed {
             self.delete_session(id).await;
         }
+        // 没有会话的空项目被移除时，上面一次 persist 都不会跑 —— 仍要通知
+        // 观看者重拉 config.projects。有会话时 delete_session 已经发过，
+        // 多发一次无害（前端 listSessions / getConfig 幂等）。
+        self.emit_sessions_changed();
         doomed
     }
 
@@ -2128,6 +2459,17 @@ impl AppState {
         }
     }
 
+    /// 广播"会话表变了"（创建 / 删除 / 改名 / 标题 / 忙碌）。网页版和桌面
+    /// 窗口靠它重拉侧栏 —— 没有这条的话，一端新建的会话另一端永远看不见，
+    /// 除非重启。前端自己操作后也会收到一次，多拉一遍列表无害。
+    fn emit_sessions_changed(&self) {
+        let Some(app) = self.0.app.get() else { return };
+        use tauri::Emitter;
+        if let Err(e) = app.emit("sessions_changed", ()) {
+            tracing::debug!(error = %e, "sessions_changed 事件没发出去");
+        }
+    }
+
     /// 广播定时任务的运行事件（全局 emit）。低频、无会话归属，不走
     /// 会话的 Channel —— 前端拿它刷新侧栏和任务面板。
     fn emit_schedule(&self, run: ScheduleRun) {
@@ -2495,17 +2837,47 @@ mod tests {
         let (old_ch, _) = probe();
 
         // 新的先落地，旧的后落地 —— 正是会出问题的那个顺序
-        assert!(state.attach_sink(id.clone(), 2, new_ch).await);
+        assert!(state.attach_sink("webview:main", id.clone(), 2, new_ch).await);
         assert!(
-            !state.attach_sink(id.clone(), 1, old_ch).await,
+            !state.attach_sink("webview:main", id.clone(), 1, old_ch).await,
             "epoch 更小的订阅必须被拒绝"
         );
 
         // 反方向也要成立，否则切走再切回来就再也收不到事件了。
         let (newer, _) = probe();
         assert!(
-            state.attach_sink(id.clone(), 3, newer).await,
+            state.attach_sink("webview:main", id.clone(), 3, newer).await,
             "更新的订阅要能顶掉旧的"
+        );
+    }
+
+    #[tokio::test]
+    async fn 不同观看者的订阅序号互不干扰() {
+        // 桌面窗口和手机网页各自从 1 开始计 epoch。要是跨观看者比较，
+        // 桌面已经订到 epoch 40 的会话，手机第一次订阅（epoch 1）就会被
+        // 当成"迟到的旧订阅"丢掉 —— 手机上永远收不到事件。
+        let state = state().await;
+        let id = state
+            .create_session(&temp_ws("viewers"))
+            .await
+            .expect("会话")
+            .id;
+
+        let (desk, _) = probe();
+        let (phone, _) = probe();
+        assert!(state.attach_sink("webview:main", id.clone(), 40, desk).await);
+        assert!(
+            state.attach_sink("remote:1", id.clone(), 1, phone).await,
+            "另一个观看者的首次订阅不能被桌面的序号压住"
+        );
+
+        // 观看者走了只摘它自己的出口，会话对桌面仍然"有人在听"。
+        state.detach_viewer("remote:1").await;
+        assert!(state.require_sink(&id).await.is_ok());
+        state.detach_viewer("webview:main").await;
+        assert!(
+            state.require_sink(&id).await.is_err(),
+            "最后一个观看者走了，会话就没有出口了"
         );
     }
 

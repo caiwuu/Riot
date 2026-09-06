@@ -76,11 +76,11 @@ struct Term {
     /// Unix 上永远是 `Some`。
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
-    /// 前端的事件出口。
+    /// 前端的事件出口，按观看者（桌面窗口、各条远程连接）分别一条。
     ///
-    /// `None` 是常态而不是异常：模型起的服务不该等着用户打开面板才开始
+    /// 空表是常态而不是异常：模型起的服务不该等着用户打开面板才开始
     /// 跑。那段时间输出只进缓冲，面板打开时用 [`Terminals::attach`] 补上。
-    sink: Mutex<Option<Channel<TermEvent>>>,
+    sinks: Mutex<HashMap<String, Channel<TermEvent>>>,
     /// 输出缓冲。模型靠它读，前端重新挂上来时靠它回放。
     buf: Mutex<Vec<u8>>,
     title: String,
@@ -95,6 +95,27 @@ struct Term {
     shared: std::sync::atomic::AtomicBool,
     /// 起它的会话（模型经 spawn 起的服务才有）。见 [`TermSummary::owner`]。
     owner: Option<String>,
+}
+
+impl Term {
+    /// 一段新输出：进缓冲，再发给每个观看者。
+    ///
+    /// `[约束]` 两步在**同一把出口锁**里。[`Terminals::attach`] 也是拿着出口锁
+    /// 读缓冲、登记出口 —— 于是任何一条出口对任何一段输出，要么在回放里
+    /// 见到一次，要么在广播里见到一次，不会漏也不会重。分开锁的话，attach
+    /// 挤在"进缓冲"和"广播"之间就会收到两遍。
+    fn push_and_broadcast(&self, bytes: &[u8]) {
+        let mut sinks = self.sinks.lock().expect("出口锁");
+        push_capped(&mut self.buf.lock().expect("缓冲锁"), bytes);
+        let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+        self.broadcast(&mut sinks, TermEvent::Data { data });
+    }
+
+    /// 发给每个观看者；发不出去的出口（远程连接断了、窗口关了）当场摘掉，
+    /// 进程继续跑 —— 下次挂上来还能接着看。
+    fn broadcast(&self, sinks: &mut HashMap<String, Channel<TermEvent>>, ev: TermEvent) {
+        sinks.retain(|_, s| s.send(ev.clone()).is_ok());
+    }
 }
 
 /// 所有终端的注册表。`Clone` 是浅拷贝（内部是 `Arc`），和 `AppState` 同款。
@@ -117,9 +138,18 @@ impl Terminals {
         root: Option<String>,
         cols: u16,
         rows: u16,
+        viewer: &str,
         sink: Channel<TermEvent>,
     ) -> Result<u32, String> {
-        self.start(root, None, "终端".to_owned(), Some(sink), cols, rows, None)
+        self.start(
+            root,
+            None,
+            "终端".to_owned(),
+            Some((viewer.to_owned(), sink)),
+            cols,
+            rows,
+            None,
+        )
     }
 
     /// 起一条长期命令，跑在用户看得见的终端里。立刻返回 id，不等它结束。
@@ -158,7 +188,7 @@ impl Terminals {
         root: Option<String>,
         command: Option<String>,
         title: String,
-        sink: Option<Channel<TermEvent>>,
+        sink: Option<(String, Channel<TermEvent>)>,
         cols: u16,
         rows: u16,
         owner: Option<String>,
@@ -214,7 +244,7 @@ impl Terminals {
             writer: Mutex::new(writer),
             master: Mutex::new(Some(pty.master)),
             child: Mutex::new(child),
-            sink: Mutex::new(sink),
+            sinks: Mutex::new(sink.into_iter().collect()),
             buf: Mutex::new(Vec::new()),
             title,
             command,
@@ -260,18 +290,9 @@ impl Terminals {
                         if bytes.is_empty() {
                             continue;
                         }
-                        push_capped(&mut term.buf.lock().expect("缓冲锁"), &bytes);
                         // 前端不在（面板没开）就只进缓冲。这不是错误 ——
                         // 服务照跑，等面板挂上来再回放。
-                        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                        let sink = term.sink.lock().expect("出口锁").clone();
-                        if let Some(s) = sink
-                            && s.send(TermEvent::Data { data }).is_err()
-                        {
-                            // 出口废了（窗口关了）。摘掉它，进程继续跑 ——
-                            // 下次挂上来还能接着看。
-                            *term.sink.lock().expect("出口锁") = None;
-                        }
+                        term.push_and_broadcast(&bytes);
                     }
                 }
             }
@@ -284,9 +305,7 @@ impl Terminals {
                 let _ = t.child.lock().expect("child 锁").wait();
             }
             // 前端收到后关掉对应标签。它不听了也无所谓 —— send 失败没有下文。
-            if let Some(s) = term.sink.lock().expect("出口锁").as_ref() {
-                let _ = s.send(TermEvent::Exit);
-            }
+            term.broadcast(&mut term.sinks.lock().expect("出口锁"), TermEvent::Exit);
         });
 
         // `[约束]` Windows 还要盯着子进程本身。ConPTY 的读端在子进程退出后
@@ -342,8 +361,11 @@ impl Terminals {
     ///
     /// 面板重新打开、或者模型在面板没开时起了服务，都走这里。回放是
     /// 一次性的一大块 —— xterm 自己会把它渲染成正确的屏幕。
-    pub fn attach(&self, id: u32, sink: Channel<TermEvent>) -> Result<(), String> {
+    pub fn attach(&self, viewer: &str, id: u32, sink: Channel<TermEvent>) -> Result<(), String> {
         let t = self.get(id)?;
+        // 回放和登记在同一把出口锁里，和读线程的 push_and_broadcast 对齐：
+        // 否则挤在"进缓冲"和"广播"之间的 attach 会把同一段输出收两遍。
+        let mut sinks = t.sinks.lock().expect("出口锁");
         let backlog = t.buf.lock().expect("缓冲锁").clone();
         if !backlog.is_empty() {
             let data = base64::engine::general_purpose::STANDARD.encode(&backlog);
@@ -353,8 +375,24 @@ impl Terminals {
         if !t.running.load(std::sync::atomic::Ordering::Relaxed) {
             let _ = sink.send(TermEvent::Exit);
         }
-        *t.sink.lock().expect("出口锁") = Some(sink);
+        sinks.insert(viewer.to_owned(), sink);
         Ok(())
+    }
+
+    /// 一个观看者走了（远程连接断开）：摘掉它在所有终端上的出口。
+    /// 终端本身照跑 —— 它跟应用走，不跟任何一个观看者走。
+    pub fn detach_viewer(&self, viewer: &str) {
+        let terms: Vec<Arc<Term>> = self
+            .0
+            .map
+            .lock()
+            .expect("终端表锁")
+            .values()
+            .cloned()
+            .collect();
+        for t in terms {
+            t.sinks.lock().expect("出口锁").remove(viewer);
+        }
     }
 
     /// 所有终端的概况，按 id 升序。前端重建标签栏、模型找自己的服务都用它。
@@ -839,7 +877,7 @@ mod tests {
         let terms = Terminals::default();
         let (ch, got) = probe();
         let id = terms
-            .open(Some(std::env::temp_dir().display().to_string()), 80, 24, ch)
+            .open(Some(std::env::temp_dir().display().to_string()), 80, 24, "webview:main", ch)
             .expect("开终端");
 
         // Windows 上 ConPTY 的光标查询由宿主应答（见 DsrFilter），
@@ -866,7 +904,7 @@ mod tests {
     fn 关闭后再写会报错而不是恐慌() {
         let terms = Terminals::default();
         let (ch, _got) = probe();
-        let id = terms.open(None, 80, 24, ch).expect("开终端");
+        let id = terms.open(None, 80, 24, "webview:main", ch).expect("开终端");
 
         terms.close(id);
         assert!(
@@ -881,7 +919,7 @@ mod tests {
     fn shell_退出后自动摘表并广播_exit() {
         let terms = Terminals::default();
         let (ch, got) = probe();
-        let id = terms.open(None, 80, 24, ch).expect("开终端");
+        let id = terms.open(None, 80, 24, "webview:main", ch).expect("开终端");
 
         // 等提示符:应答光标查询（宿主做，见 DsrFilter）之前 shell 不收输入。
         #[cfg(windows)]

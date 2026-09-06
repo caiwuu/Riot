@@ -6,6 +6,7 @@ import {
   type TabInfo,
   watchBrowserTabs,
 } from "../bridge";
+import { useHostReconnectTick } from "./useHostLink";
 
 /** 面板刚起、宿主还没回状态时的样子。 */
 export const EMPTY_PANEL: PanelState = { tabs: [], active: 0 };
@@ -27,6 +28,8 @@ export const EMPTY_PANEL: PanelState = { tabs: [], active: 0 };
  */
 export function useBrowserPanel(sessionId: string | null, enabled: boolean) {
   const [panel, setPanel] = useState<PanelState>(EMPTY_PANEL);
+  // 网页版重连后宿主那条 watch 通道已作废，effect 靠它重跑一遍重新订阅。
+  const reconnectTick = useHostReconnectTick();
 
   /** 覆盖整个状态。轮询、标签操作的回值、openBrowser 的首推都走这里。 */
   const apply = useCallback((s: PanelState) => {
@@ -70,7 +73,7 @@ export function useBrowserPanel(sessionId: string | null, enabled: boolean) {
       window.clearInterval(timer);
       unwatch();
     };
-  }, [sessionId, enabled, apply]);
+  }, [sessionId, enabled, apply, reconnectTick]);
 
   return { panel, apply, patchTab };
 }

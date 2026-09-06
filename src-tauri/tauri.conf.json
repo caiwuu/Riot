@@ -7,7 +7,7 @@
 
   "build": {
     "beforeDevCommand": "node scripts/stage-kernel.mjs debug && pnpm dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://127.0.0.1:1420",
     "beforeBuildCommand": "node scripts/stage-kernel.mjs release && node scripts/stage-browser.mjs && pnpm build",
     "frontendDist": "../dist"
   },

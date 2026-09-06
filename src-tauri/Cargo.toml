@@ -65,6 +65,15 @@ zstd.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 similar = { version = "3.1.2", default-features = false, features = ["text", "inline"] }
 tauri-plugin-notification = "2.3.3"
+# 远程访问（网页版）的 HTTP + WebSocket 服务，见 src/remote/。
+# 只开 ws：静态资源和握手用 axum 自带的路由就够，不引 tower-http。
+axum = { version = "0.8", features = ["ws"] }
+# 远程访问令牌的随机源。rand::random 被 clippy 禁了（内核要确定性），
+# 宿主层显式走 OsRng 并注明理由。
+rand = "0.9"
+# 设置页里把远程地址画成二维码，手机扫一下就进 —— 让人抄一串 43 位令牌
+# 是不现实的。纯 Rust、无 image 特性，只出 SVG。
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 [target.'cfg(windows)'.dependencies]
 # Windows 沙箱的底层实现（vendored，见 vendor/srt-win/NOTICE.md）。宿主这里

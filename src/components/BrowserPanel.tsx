@@ -17,6 +17,7 @@ import {
   encodePickForComposer,
   openBrowser,
 } from "../bridge";
+import { useHostReconnectTick } from "../hooks/useHostLink";
 
 /**
  * 内置浏览器面板。
@@ -182,6 +183,8 @@ export function BrowserPanel({
     [paint],
   );
 
+  // 网页版重连后帧通道已作废：靠它把 open/close 这一对重跑一遍。
+  const reconnectTick = useHostReconnectTick();
   useEffect(() => {
     // 第三个参数让标签组在浏览器就绪的那一刻就填上，不用等下一次定时同步 ——
     // 浏览器起来本身就要一秒，再叠一个轮询间隔就是两秒的空白。
@@ -191,9 +194,9 @@ export function BrowserPanel({
       // 只停宿主的 JPEG 编码 —— 没人看的时候继续推是白烧 CPU。
       // 浏览器进程和标签页都留着：收起面板 ≠ 关浏览器，切去看一眼
       // 改动再切回来，页面还是原样。
-      void closeBrowser(sessionId);
+      void closeBrowser(sessionId).catch(() => {});
     };
-  }, [sessionId, onPanel, onFrame]);
+  }, [sessionId, onPanel, onFrame, reconnectTick]);
 
   /**
    * 让页面的视口和画面区一样大、一样清晰。
@@ -274,7 +277,8 @@ export function BrowserPanel({
       media?.removeEventListener("change", onDensity);
       window.clearTimeout(timer);
     };
-  }, [sessionId, viewMode]);
+    // reconnectTick：重连后宿主可能重起了推流，尺寸要再推一次（`last` 归零）。
+  }, [sessionId, viewMode, reconnectTick]);
 
   /**
    * DOM 坐标 → 页面坐标。

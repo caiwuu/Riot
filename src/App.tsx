@@ -23,7 +23,6 @@ import {
   notify,
   type PermissionMode,
   openInBrowser,
-  pickDirectory,
   pickFiles,
   probeDirs,
   type MissedRun,
@@ -43,6 +42,7 @@ import {
   subscribeFullscreen,
   subscribeScheduleChanges,
   subscribeScheduleRuns,
+  subscribeSessionsChanges,
   turnNudge,
 } from "./bridge";
 import { BrowserPanel } from "./components/BrowserPanel";
@@ -51,6 +51,7 @@ import { SessionChangesBar } from "./components/SessionChangesBar";
 import { ScopePanel } from "./components/ScopePanel";
 import { SessionSettings } from "./components/SessionSettings";
 import { ConfirmDialog, type ConfirmRequest } from "./components/ConfirmDialog";
+import { useDirectoryPicker } from "./components/DirPicker";
 import {
   FilePreviewPanel,
   ImageLightboxHost,
@@ -74,6 +75,7 @@ import {
 } from "./hooks/useSession";
 import { useAppUpdate } from "./hooks/useAppUpdate";
 import { useBrowserPanel } from "./hooks/useBrowserPanel";
+import { isMobileNow, useIsMobile } from "./hooks/useIsMobile";
 import { newPresetId } from "./lib/prompts";
 import { inheritedSampling } from "./lib/sampling";
 import { subscribeSessionOpen } from "./lib/sessionLink";
@@ -361,13 +363,27 @@ export function App() {
   const [pickSnippet, setPickSnippet] = useState<string | null>(null);
   /** 最近看过的会话 id（LRU）。这些 Chat 卸不掉，切回去是显示/隐藏。 */
   const [kept, setKept] = useState<string[]>([]);
+  /** 窄屏（手机）。侧栏和右侧面板在这档下都是浮层，行为跟着改：
+   *  默认收起、选中会话后自动收起、点遮罩收起。 */
+  const isMobile = useIsMobile();
+  // 窄屏上侧栏是盖在对话上的抽屉，开着就看不见对话 —— 起步一律收起，
+  // 不读桌面上记住的偏好。
   const [sidebarOpen, setSidebarOpen] = useState(
-    () => localStorage.getItem(LS.sidebarOpen) !== "0",
+    () => !isMobileNow() && localStorage.getItem(LS.sidebarOpen) !== "0",
   );
   /** 侧栏壳真正改宽度的那一拍。顶栏让位跟这个走，不能跟 sidebarOpen。 */
   const [sidebarVisual, setSidebarVisual] = useState(
-    () => localStorage.getItem(LS.sidebarOpen) !== "0",
+    () => !isMobileNow() && localStorage.getItem(LS.sidebarOpen) !== "0",
   );
+  // 旋转 / 拉窄跨过阈值那一刻收起侧栏：桌面态开着的侧栏到了手机态就是
+  // 一整屏遮罩，用户什么都点不到。
+  useEffect(() => {
+    if (isMobile) setSidebarOpen(false);
+  }, [isMobile]);
+  /** 窄屏上选完东西把抽屉收掉；桌面上不动。 */
+  const closeSidebarIfMobile = useCallback(() => {
+    if (isMobileNow()) setSidebarOpen(false);
+  }, []);
   /** 终端收起动画那一拍里内容还要显示（见 TerminalPanel 的 visible）。
    *  放在状态区：App 有条件早退，hook 不能出现在那之后。 */
   const termPresent = usePresence(showTerm);
@@ -436,7 +452,9 @@ export function App() {
 
   const toggleSidebar = useCallback(() => {
     setSidebarOpen((v) => {
-      localStorage.setItem(LS.sidebarOpen, v ? "0" : "1");
+      // 窄屏上的开合是临时的（抽屉），不写进偏好 —— 否则手机上开过一次
+      // 侧栏，回到桌面宽度时它就一直开着。
+      if (!isMobileNow()) localStorage.setItem(LS.sidebarOpen, v ? "0" : "1");
       return !v;
     });
   }, []);
@@ -865,8 +883,10 @@ export function App() {
     }
   }, [noteError, touchSession]);
 
+  const dirPicker = useDirectoryPicker();
+  const pickDir = dirPicker.pick;
   const openProject = useCallback(async () => {
-    const dir = await pickDirectory();
+    const dir = await pickDir();
     if (!dir) return;
     try {
       const root = await addProject(dir);
@@ -882,7 +902,7 @@ export function App() {
       }
       noteError("打不开这个目录", e);
     }
-  }, [newSession, noteError]);
+  }, [newSession, noteError, pickDir]);
 
   /** 会话发出第一条消息后补标题。宿主的 title 来自历史，UI 上要即时。 */
   const onFirstMessage = useCallback((sessionId: string, text: string) => {
@@ -957,9 +977,20 @@ export function App() {
         .catch(() => {});
     });
     const offChanges = subscribeScheduleChanges(reloadSchedules);
+    // 会话表：另一端（网页版 / 另一窗口）新建、删除、改名时重拉。
+    // 顺带刷新 config —— 项目分组在那里，加项目不开会话也要跟上。
+    const offSessions = subscribeSessionsChanges(() => {
+      listSessions()
+        .then(applySessions)
+        .catch(() => {});
+      getConfig()
+        .then(setConfig)
+        .catch(() => {});
+    });
     return () => {
       offRuns();
       offChanges();
+      offSessions();
     };
   }, [reloadSchedules, applySessions]);
 
@@ -1224,7 +1255,7 @@ export function App() {
    * 反过来的话，选目录失败会先丢掉旧会话。
    */
   const relocateGone = async (oldRoot: string) => {
-    const dir = await pickDirectory();
+    const dir = await pickDir();
     if (!dir) return;
     try {
       const root = await addProject(dir);
@@ -1509,9 +1540,14 @@ export function App() {
           推出屏幕；贴左缘的话它原地不动、只是被从右往左啃掉，而主区
           左缘在移动，两样东西速度不一致，看起来就成了"主区盖上去"。
           详见 styles.css 的 .slide-panel.end。 */}
+      {/* 窄屏：侧栏是浮在对话上的抽屉，点遮罩收起。桌面上不渲染这层。 */}
+      {isMobile && sidebarOpen ? (
+        <div className="mobile-backdrop" onClick={toggleSidebar} aria-hidden />
+      ) : null}
       <SlidePanel
         axis="x"
         anchor="end"
+        className="side"
         open={sidebarOpen}
         size={sidebarW}
         keepMounted
@@ -1527,11 +1563,18 @@ export function App() {
             onSelect={(id) => {
               setActive(id);
               setSchedulePage(false);
+              closeSidebarIfMobile();
             }}
             recency={recency}
-            onNewSession={newSession}
+            onNewSession={(root) => {
+              closeSidebarIfMobile();
+              return newSession(root);
+            }}
             onOpenProject={openProject}
-            onSettings={() => setShowSettings(true)}
+            onSettings={() => {
+              closeSidebarIfMobile();
+              setShowSettings(true);
+            }}
             onSchedules={() => {
               // 任务详情要占用右侧栏 —— 工作台开着就先收起来。
               // 进菜单不记住上次打开的详情，每次都从列表开始。
@@ -1539,6 +1582,7 @@ export function App() {
               setSelectedSchedule(null);
               setSchedCreating(false);
               setSchedulePage(true);
+              closeSidebarIfMobile();
             }}
             schedulesActive={schedulePage}
             missedSchedules={missedSchedules.length}
@@ -2000,6 +2044,7 @@ export function App() {
 
       {menu ? <ContextMenu menu={menu} onClose={() => setMenu(null)} /> : null}
       <ImageLightboxHost />
+      {dirPicker.element}
       {confirm ? <ConfirmDialog c={confirm} onClose={() => setConfirm(null)} /> : null}
       {goneRoot ? (
         <MissingProjectDialog

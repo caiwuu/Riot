@@ -2,6 +2,8 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 
 import { App } from "./App";
+import { host } from "./bridge";
+import { RemoteGate } from "./components/RemoteGate";
 import "./styles.css";
 
 /* 侧栏的磨砂底来自窗口那层系统材质：macOS 是 NSVisualEffectView 的
@@ -31,7 +33,11 @@ import "./styles.css";
    设置会整体替换 Tauri 的默认参数，所以默认的 --disable-features
    一并写回去了。 */
 const ua = navigator.userAgent;
-if (ua.includes("Mac")) {
+if (!host.nativeWindow) {
+  // 浏览器里没有窗口材质可透。不标 vibrancy，侧栏走实色那套配色 ——
+  // 透掉背景只会露出 html 的底色，看着像少了一层。
+  document.documentElement.dataset.host = "web";
+} else if (ua.includes("Mac")) {
   document.documentElement.dataset.vibrancy = "mac";
 } else if (ua.includes("Windows NT 10.0")) {
   // 材质要 Win11 22523+（DWMSBT），而 UA 里所有 Win10/11 都报 10.0，
@@ -48,7 +54,10 @@ if (!root) throw new Error("#root 不存在");
    改颜色（一写就把 overlay 打成占位槽）。藏掉原生条，滚动时自己画一条
    更暗的滑块，叠在内容上、不占宽度。 */
 function installMacOverlayScrollbar() {
-  if (document.documentElement.dataset.vibrancy !== "mac") return;
+  // 网页版也画这条：那边的原生条被整体藏掉了（理由见 styles.css 顶部），
+  // 不画的话滚动时没有任何位置指示。
+  const { vibrancy, host: hostKind } = document.documentElement.dataset;
+  if (vibrancy !== "mac" && hostKind !== "web") return;
   document.querySelector(".riot-osb")?.remove();
 
   const thumb = document.createElement("div");
@@ -132,6 +141,8 @@ installMacOverlayScrollbar();
 
 ReactDOM.createRoot(root).render(
   <React.StrictMode>
-    <App />
+    <RemoteGate>
+      <App />
+    </RemoteGate>
   </React.StrictMode>,
 );

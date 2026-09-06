@@ -112,6 +112,17 @@ export function HookIcon() {
   );
 }
 
+/** 远程访问：一部手机和一道信号弧。 */
+export function RemoteIcon() {
+  return (
+    <svg {...S} aria-hidden>
+      <rect x="4.2" y="1.9" width="7.6" height="12.2" rx="1.6" />
+      <path d="M7 12h2" />
+      <path d="M12.6 5.2a3.6 3.6 0 0 1 0 5.6" />
+    </svg>
+  );
+}
+
 /** 关于：信息圈。 */
 export function InfoIcon() {
   return (

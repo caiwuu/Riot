@@ -752,6 +752,29 @@ impl HostBrowser {
         Ok(())
     }
 
+    /// 让正在推的那一页立刻再出一帧。
+    ///
+    /// screencast 只在页面有变化时出帧：推流已经在跑、又有一个新观看者
+    /// 挂上来（手机端重连、桌面之外再开一个网页），静态页面上它会一直
+    /// 黑着。CDP 没有"再给一帧"的命令，但对同一页重发 `Page.startScreencast`
+    /// 会换掉当前会话并马上吐出一帧，`set_viewport` 改推流上限时用的也是
+    /// 这一招。没在推（面板没开、浏览器没起）就什么都不做。
+    pub async fn refresh_screencast(&self) {
+        if self.frames.lock().await.is_none() {
+            return;
+        }
+        let Some(b) = self.live().await else {
+            return;
+        };
+        let Some(tab) = *self.streaming.lock().await else {
+            return;
+        };
+        let params = screencast_params(self.cast_max().await);
+        if let Err(e) = b.cdp(tab, "Page.startScreencast", params).await {
+            tracing::warn!(error = %e, tab, "补发一帧失败");
+        }
+    }
+
     /// 视口跟着面板的尺寸走。
     ///
     /// `[约束]` 视口不能钉死在子进程那个 1280×800 的初值。画面是按帧的原始
