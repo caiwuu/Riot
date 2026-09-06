@@ -35,6 +35,8 @@
 
 use std::path::PathBuf;
 
+use riot_protocol::{UiError, ui_error};
+
 use crate::fence::Fence;
 use crate::state::AppState;
 
@@ -85,14 +87,9 @@ async fn roots(state: &AppState) -> Vec<PathBuf> {
 ///
 /// `[约束]` 这是 `read_image` / `read_file_bytes` 唯一该用的入口。它们不做
 /// 别的检查就直接读 `path` 的那个版本，等于把任意文件读取暴露给 webview。
-pub async fn resolve(state: &AppState, requested: &str) -> Result<PathBuf, String> {
-    resolve_in(&roots(state).await, requested).ok_or_else(|| {
-        format!(
-            "{requested} 不在应用能读的范围内。可读的是项目目录、应用自己的数据目录，\
-             以及桌面 / 下载 / 文档 / 图片这些常用文件夹。要用别处的文件，\
-             把它所在的目录作为项目打开，或者先拷到上面这些位置。"
-        )
-    })
+pub async fn resolve(state: &AppState, requested: &str) -> Result<PathBuf, UiError> {
+    resolve_in(&roots(state).await, requested)
+        .ok_or_else(|| ui_error!("host.preview.outOfScope", path = requested))
 }
 
 /// 在一组根里挨个试。哪些根，见 [`roots`]。

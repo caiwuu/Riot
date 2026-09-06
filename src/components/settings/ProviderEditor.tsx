@@ -11,6 +11,7 @@ import {
   testConnection,
 } from "../../bridge";
 import { useTimedFlag } from "../../hooks/useTimedFlag";
+import { useT } from "../../i18n";
 import {
   type SamplingDraft,
   parseSampling,
@@ -72,6 +73,7 @@ export function ProviderEditor({
   askConfirm: AskConfirm;
   onError: (e: string) => void;
 }) {
+  const { t, tx } = useT();
   // 文本字段走本地草稿、失焦提交。每敲一个字符就 IPC+写盘太吵。
   const [name, setName] = useState(p.name);
   const [baseUrl, setBaseUrl] = useState(p.baseUrl);
@@ -149,11 +151,11 @@ export function ProviderEditor({
   const removeModel = (m: string) => {
     const isActive = cfg.activeProvider === p.id && cfg.activeModel === m;
     askConfirm({
-      title: `移除模型「${m}」？`,
+      title: t("settings.provider.editor.model.remove.title", { model: m }),
       body: isActive
-        ? "当前正在使用，移除后需要重新选一个才能发消息。"
-        : "只从列表移除，随时可以加回来。",
-      confirmLabel: "移除",
+        ? t("settings.provider.editor.model.remove.active")
+        : t("settings.provider.editor.model.remove.other"),
+      confirmLabel: t("common.remove"),
       action: () => {
         const models = p.models.filter((x) => x.id !== m);
         // 删的是激活模型：清空 active，避免留下指向幽灵名字的配置
@@ -189,13 +191,14 @@ export function ProviderEditor({
     const model =
       (cfg.activeProvider === p.id && cfg.activeModel) || p.models[0]?.id || "";
     if (!model) {
-      setTestResult({ ok: false, text: "先添加一个模型（手动输入或从 API 获取）再测试。" });
+      setTestResult({ ok: false, text: t("settings.provider.editor.test.noModel") });
       return;
     }
     setTesting(true);
     setTestResult(null);
     try {
-      setTestResult({ ok: true, text: await testConnection(p.id, model) });
+      const detail = await testConnection(p.id, model);
+      setTestResult({ ok: true, text: t("settings.provider.editor.test.ok", { detail }) });
     } catch (e) {
       setTestResult({ ok: false, text: String(e) });
     } finally {
@@ -207,9 +210,9 @@ export function ProviderEditor({
 
   return (
     <>
-      <Group title="连接">
+      <Group title={t("settings.provider.editor.connection")}>
         <Card>
-          <Row title="名称" desc="只在界面上显示，随便起。">
+          <Row title={t("settings.common.name")} desc={t("settings.provider.editor.name.desc")}>
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
@@ -217,11 +220,11 @@ export function ProviderEditor({
               onKeyDown={blurOnEnter}
               autoFocus={autoFocusName}
               spellCheck={false}
-              aria-label="名称"
+              aria-label={t("settings.common.name")}
             />
           </Row>
-          <Row title="协议" desc="决定请求格式和认证头。选错了会被服务方拒绝。">
-            <div className="radio-row" role="radiogroup" aria-label="协议">
+          <Row title={t("settings.provider.editor.protocol")} desc={t("settings.provider.editor.protocol.desc")}>
+            <div className="radio-row" role="radiogroup" aria-label={t("settings.provider.editor.protocol")}>
               {(["openai", "anthropic"] as Protocol[]).map((proto) => (
                 <button
                   key={proto}
@@ -230,12 +233,12 @@ export function ProviderEditor({
                   className={p.protocol === proto ? "radio-pill active" : "radio-pill"}
                   onClick={() => void onPatch({ protocol: proto })}
                 >
-                  {proto === "openai" ? "OpenAI 兼容" : "Anthropic"}
+                  {proto === "openai" ? t("settings.provider.editor.protocol.openai") : "Anthropic"}
                 </button>
               ))}
             </div>
           </Row>
-          <Row title="API 主机">
+          <Row title={t("settings.provider.editor.baseUrl")}>
             <input
               value={baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
@@ -243,17 +246,14 @@ export function ProviderEditor({
               onKeyDown={blurOnEnter}
               placeholder="https://api.example.com"
               spellCheck={false}
-              aria-label="API 主机"
+              aria-label={t("settings.provider.editor.baseUrl")}
             />
           </Row>
           <Row
-            title="API 路径"
-            desc={
-              <>
-                留空按主机猜。接口不在常规位置时（如智谱的{" "}
-                <code>/api/paas/v4/chat/completions</code>）在这里填。
-              </>
-            }
+            title={t("settings.provider.editor.apiPath")}
+            desc={tx("settings.provider.editor.apiPath.desc", {
+              example: <code>/api/paas/v4/chat/completions</code>,
+            })}
           >
             <input
               value={apiPath}
@@ -262,13 +262,13 @@ export function ProviderEditor({
               onKeyDown={blurOnEnter}
               placeholder={defaultPath(p.protocol)}
               spellCheck={false}
-              aria-label="API 路径"
+              aria-label={t("settings.provider.editor.apiPath")}
             />
           </Row>
           {/* 把拼出来的完整地址摆出来。路径错一段的表现只是一个 404，
               报错里没有任何线索指向它 —— 而在这里一眼就能看出来。 */}
           <CardBlock className="url-preview-block">
-            <span className="set-row-title">实际请求地址</span>
+            <span className="set-row-title">{t("settings.provider.editor.urlPreview")}</span>
             <p className="url-preview">
               {joinUrl(baseUrl, apiPath.trim() || defaultPath(p.protocol))}
             </p>
@@ -279,18 +279,18 @@ export function ProviderEditor({
       <Group title="API Key">
         <Card>
           <Row
-            title="密钥"
+            title={t("settings.provider.editor.key")}
             desc={
               savedFlash ? (
-                <span className="key-state ok">已保存。</span>
+                <span className="key-state ok">{t("settings.provider.editor.key.saved")}</span>
               ) : keySource === "env" ? (
                 <span className="key-state ok">
-                  正在使用环境变量 <code>{p.apiKeyEnv}</code>。
+                  {tx("settings.provider.editor.key.env", { env: <code>{p.apiKeyEnv}</code> })}
                 </span>
               ) : keySource === "saved" ? (
-                <span className="key-state ok">已保存。粘贴新的可以覆盖。</span>
+                <span className="key-state ok">{t("settings.provider.editor.key.savedOverride")}</span>
               ) : (
-                <span className="key-state warn">还没有配置，现在还不能发消息。</span>
+                <span className="key-state warn">{t("settings.provider.editor.key.missing")}</span>
               )
             }
             stack
@@ -301,7 +301,7 @@ export function ProviderEditor({
                 value={keyDraft}
                 onChange={(e) => setKeyDraft(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && void saveKey()}
-                placeholder={`粘贴 ${p.name} 的 API key`}
+                placeholder={t("settings.provider.editor.key.placeholder", { name: p.name })}
                 autoComplete="off"
                 spellCheck={false}
                 aria-label="API key"
@@ -311,7 +311,7 @@ export function ProviderEditor({
                 onClick={() => void saveKey()}
                 disabled={!keyDraft.trim()}
               >
-                保存
+                {t("common.save")}
               </button>
             </div>
           </Row>
@@ -319,23 +319,23 @@ export function ProviderEditor({
       </Group>
 
       <Group
-        title="模型"
+        title={t("settings.provider.editor.models")}
         action={
           <div className="set-group-actions">
             <button className="btn-compact" onClick={() => setAdding(true)}>
-              添加模型…
+              {t("settings.provider.editor.addModel")}
             </button>
             {/* disabled 按钮吞掉 title，先决条件挂在外层 span 上才看得见 */}
             <span
               className="tip-wrap"
-              title={!keySource ? "先在上面保存 API key，才能从接口获取模型列表" : undefined}
+              title={!keySource ? t("settings.provider.editor.fetchNeedsKey") : undefined}
             >
               <button
                 className="btn-compact"
                 onClick={() => void doFetch()}
                 disabled={fetching || !keySource}
               >
-                {fetching ? "获取中…" : "从 API 获取"}
+                {fetching ? t("settings.provider.editor.fetching") : t("settings.provider.editor.fetch")}
               </button>
             </span>
           </div>
@@ -345,11 +345,11 @@ export function ProviderEditor({
         {p.models.length === 0 ? (
           <CardBlock>
             <p className="hint" style={{ margin: 0 }}>
-              还没有模型。用右上角的「添加模型」手动填，或从 API 获取。
+              {t("settings.provider.editor.models.empty")}
             </p>
           </CardBlock>
         ) : null}
-        <div className="model-list" role="radiogroup" aria-label="当前模型">
+        <div className="model-list" role="radiogroup" aria-label={t("settings.provider.editor.currentModel")}>
           {p.models.map((m) => {
             const active = isActive && cfg.activeModel === m.id;
             return (
@@ -359,23 +359,36 @@ export function ProviderEditor({
                   role="radio"
                   aria-checked={active}
                   onClick={() => activate(m.id)}
-                  title={active ? "使用中" : "设为当前模型"}
+                  title={active ? t("settings.provider.inUse") : t("settings.provider.editor.setCurrent")}
                 >
                   <span className="model-radio">{active ? "●" : "○"}</span>
                   <span className="model-label">
                     {m.name?.trim() || m.id}
                     {m.vision ? (
-                      <span className="cap-icon" role="img" aria-label="能收图片" title="这个模型能收图片">
+                      <span
+                        className="cap-icon"
+                        role="img"
+                        aria-label={t("settings.provider.editor.vision.aria")}
+                        title={t("settings.provider.editor.vision.title")}
+                      >
                         <EyeIcon />
                       </span>
                     ) : null}
                   </span>
                   {m.name?.trim() ? <code className="model-id">{m.id}</code> : null}
                 </button>
-                <button className="row-btn" onClick={() => setEditing(m)} title="编辑模型">
+                <button
+                  className="row-btn"
+                  onClick={() => setEditing(m)}
+                  title={t("settings.provider.editor.editModel")}
+                >
                   <PencilIcon />
                 </button>
-                <button className="row-btn" onClick={() => removeModel(m.id)} title="从列表移除">
+                <button
+                  className="row-btn"
+                  onClick={() => removeModel(m.id)}
+                  title={t("settings.provider.editor.removeFromList")}
+                >
                   <CloseIcon />
                 </button>
               </div>
@@ -394,7 +407,9 @@ export function ProviderEditor({
                       key={m}
                       className={added ? "fetched-item added" : "fetched-item"}
                       onClick={() => (added ? removeModel(m) : addModel(m))}
-                      title={added ? "点击移除" : "点击添加"}
+                      title={
+                        added ? t("settings.provider.editor.clickRemove") : t("settings.provider.editor.clickAdd")
+                      }
                     >
                       {added ? "✓ " : "+ "}
                       {m}
@@ -404,7 +419,7 @@ export function ProviderEditor({
               </div>
             ) : (
               <p className="hint" style={{ margin: 0 }}>
-                这个服务方没有返回任何模型。
+                {t("settings.provider.editor.fetched.empty")}
               </p>
             )}
           </CardBlock>
@@ -425,8 +440,8 @@ export function ProviderEditor({
       ) : null}
 
       <Group
-        title="采样参数"
-        desc="这一家的默认值。写着「模型默认」的字段一个都不发，由模型自己定；模型没单独设的字段用这里的值，单个模型在它的编辑弹窗里改，对话里还能按会话临时覆盖。"
+        title={t("settings.provider.editor.sampling")}
+        desc={t("settings.provider.editor.sampling.desc")}
       >
         <Card>
           <CardBlock>
@@ -445,18 +460,18 @@ export function ProviderEditor({
           <span className={testResult.ok ? "test-result ok" : "test-result err"}>{testResult.text}</span>
         ) : (
           <span className="hint" style={{ margin: 0 }}>
-            发一个最小请求验证配置。
+            {t("settings.provider.editor.test.hint")}
           </span>
         )}
         <div className="editor-foot-actions">
           {onRemove ? (
             <button className="btn-danger ghost-danger" onClick={onRemove}>
-              删除
+              {t("common.delete")}
             </button>
           ) : null}
-          <span className="tip-wrap" title={!keySource ? "先在上面保存 API key，才能测试连接" : undefined}>
+          <span className="tip-wrap" title={!keySource ? t("settings.provider.editor.testNeedsKey") : undefined}>
             <button className="primary" onClick={() => void doTest()} disabled={testing || !keySource}>
-              {testing ? "测试中…" : "测试连接"}
+              {testing ? t("settings.common.testing") : t("settings.provider.editor.test")}
             </button>
           </span>
         </div>

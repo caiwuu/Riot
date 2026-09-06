@@ -33,7 +33,13 @@ pub enum Message {
     System {
         id: MessageId,
         level: SystemLevel,
+        /// 技术细节（服务方原话、hook 输出）。`ui` 在时它是次要信息；
+        /// 老 transcript 里只有它，界面就原样显示。
         text: String,
+        /// 给界面翻译的那句话（词典键）。新写的 System 消息都要带 ——
+        /// `text` 不翻译。`default` 是为了老 transcript 能读回来。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ui: Option<crate::text::UiText>,
     },
 }
 
@@ -434,8 +440,21 @@ mod tests {
             id: MessageId::from_raw("m1"),
             level: SystemLevel::Warning,
             text: "switched model".into(),
+            ui: None,
         };
         assert!(!m.goes_to_model());
+    }
+
+    /// 老 transcript 里的 System 消息没有 `ui`，照样要能读回来。
+    #[test]
+    fn old_system_message_without_ui_still_loads() {
+        let line = r#"{"role":"system","id":"s1","level":"error","text":"旧文案"}"#;
+        let m: Message = serde_json::from_str(line).expect("老记录要能读");
+        let Message::System { ui, text, .. } = m else {
+            panic!("该是 System");
+        };
+        assert!(ui.is_none());
+        assert_eq!(text, "旧文案");
     }
 
     #[test]
@@ -586,6 +605,7 @@ mod tests {
             id: MessageId::from_raw("m5"),
             level: SystemLevel::Info,
             text: "提示".into(),
+            ui: None,
         };
         assert!(!system.is_user_prompt());
     }
@@ -628,6 +648,7 @@ mod tests {
             id: MessageId::from_raw("m2"),
             level: SystemLevel::Info,
             text: "提示".into(),
+            ui: None,
         };
         sys.stamp(1_000);
     }

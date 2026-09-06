@@ -26,7 +26,9 @@ use riot_protocol::permission::{
     DecisionReason, PermissionContext, PermissionMode, PermissionResult, PermissionUpdate,
     UpdateScope,
 };
+use riot_protocol::text::UiText;
 use riot_protocol::tool::{PromptContext, Tool, ToolContext, ToolOutcome, UiPayload};
+use riot_protocol::ui_text;
 
 use super::names::EXIT_PLAN_MODE;
 
@@ -79,8 +81,8 @@ impl Tool for ExitPlanMode {
         )
     }
 
-    fn describe(&self, _input: &serde_json::Value) -> String {
-        "提交计划等待批准".into()
+    fn describe(&self, _input: &serde_json::Value) -> UiText {
+        ui_text!("tools.plan.submit")
     }
 
     /// 不是只读：批准会切换权限模式。靠 `check_permissions` 的 Ask 在
@@ -95,7 +97,7 @@ impl Tool for ExitPlanMode {
         _ctx: &PermissionContext,
     ) -> PermissionResult {
         PermissionResult::Ask {
-            message: "计划已就绪，批准后退出规划模式开始执行".into(),
+            message: ui_text!("tools.ask.planReady"),
             // 顺序即弹窗按钮顺序：CC 的默认主选项是"自动接受编辑"——
             // 批准计划之后再逐个确认每次编辑，等于把刚做的决定再问一遍。
             suggestions: vec![
@@ -127,8 +129,8 @@ impl Tool for ExitPlanMode {
                 "用户已批准计划，规划模式已退出。开始执行：如果任务有多步，\
                  先用 TodoWrite 把计划落成待办清单，然后按顺序动手。",
             ),
-            ui_payload: Some(UiPayload::Plain {
-                text: "计划已批准，开始执行".into(),
+            ui_payload: Some(UiPayload::Message {
+                text: ui_text!("tools.plan.approved"),
             }),
             side_messages: Vec::new(),
         }

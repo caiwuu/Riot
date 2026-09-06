@@ -9,17 +9,18 @@
 import { useContext, useLayoutEffect, useRef, useState } from "react";
 
 import type { FileChange } from "../bridge";
+import { type MessageKey, t, useT } from "../i18n";
 import { joinRoot, looksAbsPath } from "../pathDisplay";
 import { Chevron } from "./Chevron";
 import { FileIcon } from "./FileIcon";
 import { openFilePreview } from "./FilePreview";
 import { ProjectRootContext } from "./Markdown";
 
-const STATUS_LABEL: Record<FileChange["status"], string> = {
-  created: "新增",
-  modified: "修改",
-  deleted: "删除",
-  renamed: "重命名",
+const STATUS_LABEL: Record<FileChange["status"], MessageKey> = {
+  created: "transcript.change.created",
+  modified: "transcript.change.modified",
+  deleted: "transcript.change.deleted",
+  renamed: "transcript.change.renamed",
 };
 
 /** 状态字母(git 惯例)。"修改"是常态,不标 —— 只让例外跳出来。 */
@@ -30,6 +31,7 @@ const STATUS_MARK: Partial<Record<FileChange["status"], string>> = {
 };
 
 export function FileChangeList({ changes }: { changes: FileChange[] }) {
+  const { t } = useT();
   // 手风琴:同时只展开一个文件。review 是一份一份看的,开着上一份
   // 去点下一份,旧 diff 只会把新 diff 顶出视野,还得手动收。
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -71,7 +73,7 @@ export function FileChangeList({ changes }: { changes: FileChange[] }) {
                 <span className="del">−{c.removed}</span>
               </span>
               {mark ? (
-                <span className={`change-mark ${c.status}`} title={STATUS_LABEL[c.status]}>
+                <span className={`change-mark ${c.status}`} title={t(STATUS_LABEL[c.status])}>
                   {mark}
                 </span>
               ) : null}
@@ -83,7 +85,7 @@ export function FileChangeList({ changes }: { changes: FileChange[] }) {
                   className="change-copy"
                   role="button"
                   tabIndex={0}
-                  title="预览文件"
+                  title={t("transcript.change.preview")}
                   onClick={(e) => {
                     e.stopPropagation();
                     openFilePreview(looksAbsPath(c.path) ? c.path : joinRoot(root, c.path));
@@ -103,7 +105,7 @@ export function FileChangeList({ changes }: { changes: FileChange[] }) {
                 className={copied === c.path ? "change-copy done" : "change-copy"}
                 role="button"
                 tabIndex={0}
-                title="复制完整路径"
+                title={t("transcript.change.copyPath")}
                 onClick={(e) => {
                   e.stopPropagation();
                   copyPath(c.path);
@@ -130,32 +132,35 @@ export function FileChangeList({ changes }: { changes: FileChange[] }) {
 }
 
 function ChangeDetail({ c }: { c: FileChange }) {
+  const { t } = useT();
   // 没有逐行差异的三种情况要说清是哪种 —— 全都显示成空白的话,
   // 用户分不清"没改内容"和"比不出来"。
   if (c.binary) {
-    return <div className="change-note">二进制文件，没有逐行差异。</div>;
+    return <div className="change-note">{t("transcript.change.binary")}</div>;
   }
   if (c.hunks.length === 0) {
     if (c.status === "renamed") {
       return (
         <div className="change-note">
-          文件已重命名，内容未变更。
+          {t("transcript.change.renamedOnly")}
           {c.renamedFrom ? (
-            <span className="change-note-from">旧路径：{c.renamedFrom}</span>
+            <span className="change-note-from">
+              {t("transcript.change.oldPath", { path: c.renamedFrom })}
+            </span>
           ) : null}
         </div>
       );
     }
     return (
       <div className="change-note">
-        {c.truncated ? "这个文件没能比出逐行差异，请直接看文件本身。" : "内容没有变化。"}
+        {c.truncated ? t("transcript.change.noDiff") : t("transcript.change.unchanged")}
       </div>
     );
   }
   return (
     <div className="change-diff">
       {c.status === "renamed" && c.renamedFrom ? (
-        <div className="change-note">旧路径：{c.renamedFrom}</div>
+        <div className="change-note">{t("transcript.change.oldPath", { path: c.renamedFrom })}</div>
       ) : null}
       {c.hunks.map((h, i) => (
         <div className="hunk" key={i}>
@@ -171,7 +176,7 @@ function ChangeDetail({ c }: { c: FileChange }) {
         </div>
       ))}
       {c.truncated ? (
-        <div className="hunk-more">改动太大，只显示了前面一截。完整内容请看文件本身。</div>
+        <div className="hunk-more">{t("transcript.change.truncated")}</div>
       ) : null}
     </div>
   );
@@ -179,10 +184,11 @@ function ChangeDetail({ c }: { c: FileChange }) {
 
 /** 悬停提示:状态 + 全路径;重命名带上旧路径,一眼看全"从哪来到哪去"。 */
 function fullTitle(c: FileChange): string {
+  const status = t(STATUS_LABEL[c.status]);
   if (c.status === "renamed" && c.renamedFrom) {
-    return `${STATUS_LABEL[c.status]}：${c.renamedFrom} → ${c.path}`;
+    return t("transcript.change.titleRenamed", { status, from: c.renamedFrom, path: c.path });
   }
-  return `${STATUS_LABEL[c.status]}：${c.path}`;
+  return t("transcript.change.title", { status, path: c.path });
 }
 
 /**

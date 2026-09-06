@@ -374,7 +374,7 @@ async fn 测试连接连通但没结果算失败() {
     let (base, _) = fake_server(r#"{"results":[]}"#, "application/json").await;
 
     let e = test_searxng(&base).await.expect_err("空结果不算连接成功");
-    assert!(e.contains("搜索引擎"), "{e}");
+    assert!(e.contains("engines"), "{e}");
 }
 
 #[tokio::test]

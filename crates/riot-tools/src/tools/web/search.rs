@@ -28,10 +28,12 @@ use riot_protocol::permission::{
     DecisionReason, PermissionContext, PermissionResult, PermissionUpdate, RuleDecision,
     UpdateScope,
 };
+use riot_protocol::text::UiText;
 use riot_protocol::tool::{
     InterruptBehavior, PromptContext, ResultBudget, Tool, ToolContext, ToolOutcome, UiPayload,
     ValidationError,
 };
+use riot_protocol::ui_text;
 use riot_protocol::web::{SearchHit, SearchQuery, WebError};
 use serde::Deserialize;
 
@@ -102,10 +104,10 @@ impl Tool for WebSearch {
         )
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         match input.get("query").and_then(|v| v.as_str()) {
-            Some(q) => format!("搜索 {q}"),
-            None => "联网搜索".to_owned(),
+            Some(q) => ui_text!("tools.webSearch.query", query = q),
+            None => ui_text!("tools.webSearch.any"),
         }
     }
 
@@ -153,7 +155,7 @@ impl Tool for WebSearch {
         }
 
         PermissionResult::Ask {
-            message: "是否允许联网搜索？搜索词会发给搜索后端。".to_owned(),
+            message: ui_text!("tools.ask.webSearch"),
             suggestions: vec![PermissionUpdate::AddRule {
                 tool: WEB_SEARCH.to_owned(),
                 pattern: None,

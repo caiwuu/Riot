@@ -68,7 +68,7 @@ pub fn print_process_env() {
     let map: std::collections::BTreeMap<String, String> = env::vars().collect();
     match serde_json::to_string(&map) {
         Ok(s) => print!("{s}"),
-        Err(e) => eprintln!("print-env 序列化失败: {e}"),
+        Err(e) => eprintln!("print-env: serialization failed: {e}"),
     }
 }
 

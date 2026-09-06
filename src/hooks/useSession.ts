@@ -28,6 +28,8 @@ import {
   queueRemove,
   queueTake,
   regenerateTurn,
+  renderUiError,
+  renderUiText,
   resendTurn,
   respondPermission,
   sendTurn,
@@ -35,6 +37,7 @@ import {
   subscribeWindowFocus,
   taskCancel,
 } from "../bridge";
+import { type MessageKey, t, tn } from "../i18n";
 import { extractTopLevelStringField, extractTopLevelStringFields } from "../lib/partialJson";
 
 /**
@@ -410,11 +413,11 @@ export function useSession(
   useEffect(() => {
     const flush = () => {
       rafId.current = 0;
-      const t = pendingText.current;
+      const txt = pendingText.current;
       const k = pendingThinking.current;
       const chunks = pendingToolJson.current;
       const lines = pendingProgress.current;
-      if (!t && !k && chunks.length === 0 && lines.length === 0) return;
+      if (!txt && !k && chunks.length === 0 && lines.length === 0) return;
       pendingText.current = "";
       pendingThinking.current = "";
       pendingToolJson.current = [];
@@ -439,7 +442,7 @@ export function useSession(
         if (lines.length) items = appendToolOutput(items, lines);
         return {
           ...s,
-          streaming: s.streaming + t,
+          streaming: s.streaming + txt,
           thinking: s.thinking + k,
           ...(plan !== undefined ? { streamingPlan: plan } : {}),
           ...(items !== s.items ? { items } : {}),
@@ -467,7 +470,7 @@ export function useSession(
           {
             kind: "error",
             id: `sub-${Date.now()}`,
-            text: `事件流订阅失败，这个会话收不到回复：${message}`,
+            text: t("transcript.session.subscribeFailed", { message }),
           },
         ],
       }));
@@ -627,10 +630,15 @@ export function useSession(
         }
 
         case "progress":
-          if (event.payload.kind === "line") {
+          // `line` 是工具的原始输出；`message` 是内核说的一句话（词典键），
+          // 比如子 agent 的"[kind·model] 标题 启动"，按当前语言翻了再进同一条流。
+          if (event.payload.kind === "line" || event.payload.kind === "message") {
             pendingProgress.current.push({
               id: event.tool_use_id,
-              text: event.payload.text,
+              text:
+                event.payload.kind === "line"
+                  ? event.payload.text
+                  : renderUiText(event.payload.text),
             });
             schedule();
           }
@@ -1223,7 +1231,7 @@ export function useSession(
         if (hist.busy) return false;
         const messageId = locateMessage(hist.messages, item);
         if (!messageId) {
-          throw new Error("这条消息已经不在当前上下文里（可能已被压缩进摘要）。");
+          throw new Error(t("transcript.session.messageGone"));
         }
         await op(messageId);
         const after = await getHistory(sessionId);
@@ -1271,7 +1279,7 @@ export function useSession(
         if (hist.busy) return false;
         const found = locateMessage(hist.messages, item);
         if (!found) {
-          throw new Error("这条消息已经不在当前上下文里（可能已被压缩进摘要）。");
+          throw new Error(t("transcript.session.messageGone"));
         }
         messageId = found;
       } catch (e) {
@@ -1352,7 +1360,7 @@ export function useSession(
         streamingPlan: null,
         items: s.items.map((it) =>
           it.kind === "tool" && it.status === "running"
-            ? { ...it, status: "error" as const, result: "未完成" }
+            ? { ...it, status: "error" as const, result: t("transcript.session.unfinished") }
             : it,
         ),
       }));
@@ -1475,7 +1483,7 @@ function historyToItems(live: Message[], archived: Message[], liveTurn = false):
   // 历史里不该有还在转圈的工具。有就是这一轮被中断了，如实说。
   // 轮子还在跑时（liveTurn）不能标 —— 切到正在跑的会话会把活工具
   // 画成「未完成」，下一秒事件又改回来，闪一下像出错了。
-  return finalizeIdleItems(items, "未完成（该轮被中断）");
+  return finalizeIdleItems(items, t("transcript.session.unfinishedInterrupted"));
 }
 
 /**
@@ -1507,7 +1515,7 @@ function applyHistorySnap(s: SessionState, hist: HistorySnap): SessionState {
             // 空闲也按快照对账而不是清空：后台子 agent 的询问不属于任何
             // 一轮，前台空闲时它可能正等着人答。快照为准。
             asks: reconcileAsks(s.asks, hist.pendingAsks),
-            items: finalizeIdleItems(s.items, "未完成"),
+            items: finalizeIdleItems(s.items, t("transcript.session.unfinished")),
           }
         : {
             asks: reconcileAsks(s.asks, hist.pendingAsks),
@@ -1766,10 +1774,10 @@ export function messagesToItems(msgs: Message[], skipSynthetic = false): Item[] 
         } else if (c.type === "tool_result") {
           const i = findLast(items, (it) => it.kind === "tool" && it.id === c.tool_use_id);
           if (i >= 0) {
-            const t = items[i] as Extract<Item, { kind: "tool" }>;
+            const card = items[i] as Extract<Item, { kind: "tool" }>;
             const view = resultView(c.content);
             items[i] = {
-              ...t,
+              ...card,
               status: c.is_error ? "error" : "ok",
               ...(view.text !== undefined ? { result: view.text } : {}),
               ...(view.image !== undefined ? { resultImage: view.image } : {}),
@@ -1874,12 +1882,18 @@ function taskNoticeItem(msg: Extract<Message, { role: "user" }>): Item | null {
 }
 
 /**
+ * 通知正文里前奏和汇报本体之间的分隔符。与内核 `tasks.rs` 拼通知时写的
+ * 那一行对齐 —— 它是协议标记，不是界面文案，不进词典。
+ */
+const NOTICE_REPORT_MARK = /--- 汇报 ---/;
+
+/**
  * 通知正文前面是给模型的行为说明（"不要复述……"），对人没有信息量；
- * 卡片只显示 `--- 汇报 ---` 之后的部分。找不到分隔符就全显示。
+ * 卡片只显示分隔符之后的部分。找不到分隔符就全显示。
  */
 function stripNoticePreamble(text: string): string {
-  const at = text.indexOf("--- 汇报 ---");
-  return at < 0 ? text : text.slice(at + "--- 汇报 ---".length).trim();
+  const m = NOTICE_REPORT_MARK.exec(text);
+  return m ? text.slice(m.index + m[0].length).trim() : text;
 }
 
 /** 按 id 覆盖；没有就追加到末尾。 */
@@ -1911,10 +1925,10 @@ function applyMessage(s: SessionState, event: Extract<AgentEvent, { type: "messa
         // 会被调用很多次，最近那次才是它。
         const i = findLast(items, (it) => it.kind === "tool" && it.id === c.tool_use_id);
         if (i >= 0) {
-          const t = items[i] as Extract<Item, { kind: "tool" }>;
+          const card = items[i] as Extract<Item, { kind: "tool" }>;
           const view = resultView(c.content);
           items[i] = {
-            ...t,
+            ...card,
             status: c.is_error ? "error" : "ok",
             ...(view.text !== undefined ? { result: view.text } : {}),
             ...(view.image !== undefined ? { resultImage: view.image } : {}),
@@ -1999,7 +2013,12 @@ function applyMessage(s: SessionState, event: Extract<AgentEvent, { type: "messa
   }
 
   if (msg.role === "system") {
-    items.push({ kind: "error", id: msg.id, text: msg.text });
+    // 新消息带词典键，按当前语言显示，技术细节跟在后面；老 transcript
+    // 只有 text，原样上屏。
+    const text = msg.ui
+      ? renderUiError({ key: msg.ui.key, args: msg.ui.args ?? {}, detail: msg.text })
+      : msg.text;
+    items.push({ kind: "error", id: msg.id, text });
   }
   return { ...s, items };
 }
@@ -2025,10 +2044,10 @@ function appendToolOutput(items: Item[], lines: { id: string; text: string }[]):
     if (i < 0) continue;
     // 第一次命中才复制，全都没命中时保持引用不变（memo 才挡得住）。
     if (out === items) out = [...items];
-    const t = out[i] as Extract<Item, { kind: "tool" }>;
+    const card = out[i] as Extract<Item, { kind: "tool" }>;
     // 只留尾部。一个 build 能吐几万行，全留着会让页面卡死，而有用的
     // 信息（错误摘要）总是在最后。
-    out[i] = { ...t, output: [...t.output, ...texts].slice(-MAX_TOOL_LINES) };
+    out[i] = { ...card, output: [...card.output, ...texts].slice(-MAX_TOOL_LINES) };
   }
   return out;
 }
@@ -2041,7 +2060,7 @@ function applyDone(s: SessionState, event: Extract<AgentEvent, { type: "done" }>
   for (let i = 0; i < items.length; i++) {
     const it = items[i];
     if (it && it.kind === "tool" && it.status === "running") {
-      items[i] = { ...it, status: "error", result: "未完成" };
+      items[i] = { ...it, status: "error", result: t("transcript.session.unfinished") };
     }
   }
 
@@ -2054,7 +2073,7 @@ function applyDone(s: SessionState, event: Extract<AgentEvent, { type: "done" }>
     items.push({
       kind: "notice",
       id: `done-${Date.now()}`,
-      text: `这一轮忙活了 ${r.limit} 步，先停下来喘口气。要继续的话说一声（比如“继续”）就接着做；这个步数上限可以在设置里调。`,
+      text: t("transcript.session.maxTurns", { limit: r.limit }),
     });
   }
 
@@ -2141,7 +2160,7 @@ function applyResolved(s: SessionState, requestId: string, reason: DecisionReaso
       {
         kind: "error",
         id: `ask-timeout-${requestId}`,
-        text: "等待授权超时，这一步没有执行。",
+        text: t("transcript.session.askTimeout"),
       },
     ],
   };
@@ -2155,14 +2174,31 @@ function applyResolved(s: SessionState, requestId: string, reason: DecisionReaso
  * 在跑，只是回执没回来。这时催用户重发，就是在制造两条一模一样的消息。
  */
 function sendFailureText(e: unknown): string {
-  if (isIpcTimeout(e)) {
-    return (
-      "宿主一直没有回应，这条消息有没有发出去不好说 —— 原文已经放回输入框。" +
-      "先看看这个会话过一会儿有没有自己动起来，再决定要不要重发。"
-    );
-  }
+  if (isIpcTimeout(e)) return t("transcript.session.sendTimeout");
   return humanizeError(e);
 }
+
+/**
+ * 技术错误链 → 人话的匹配表。存的是词典键，匹配到时再查 —— 存译文的话
+ * 会钉死在模块加载那一刻的语言上。
+ */
+const KNOWN_ERRORS: [RegExp, MessageKey][] = [
+  [/timed?\s*out|timeout/, "transcript.session.humanize.timeout"],
+  [/dns|name not resolved|nodename/, "transcript.session.humanize.dns"],
+  [/connection refused|connect error|network|fetch failed/, "transcript.session.humanize.network"],
+  [/401|unauthorized|invalid.*key|authentication/, "transcript.session.humanize.auth"],
+  [/429|rate.?limit|overloaded/, "transcript.session.humanize.rateLimit"],
+  // 额度类只认带额度语境的措辞。裸的 "insufficient" 会误伤 ——
+  // DeepSeek 的 tool_calls 校验报错里就有 "insufficient tool messages"，
+  // 真实余额没问题的用户被这句话带去查账单（生产事故）。
+  // 覆盖的真实文案：DeepSeek "Insufficient Balance"、OpenAI
+  // "insufficient_quota" / "You exceeded your current quota"、
+  // Anthropic "credit balance is too low"、Kimi "balance is insufficient"。
+  [
+    /insufficient[_\s]+(quota|balance|funds|credits)|(credit\s+)?balance\s+is\s+(too\s+low|insufficient)|exceeded.{0,40}quota|quota.{0,40}exceeded|out\s+of\s+(quota|credits)|余额不足|欠费/,
+    "transcript.session.humanize.quota",
+  ],
+];
 
 /**
  * 把一串技术错误链翻成一句人话。识别不了的原样保留 —— 编出来的
@@ -2171,28 +2207,14 @@ function sendFailureText(e: unknown): string {
 function humanizeError(e: unknown): string {
   // 宿主超时要抢在下面那条 timeout 规则前面：那句话说的是"网络或服务方
   // 没按时响应"，而这一类根本没走到网络 —— 是宿主自己没回话。
-  if (isIpcTimeout(e)) return `${e.message}这一步做没做成不好说，先别急着重试。`;
+  if (isIpcTimeout(e)) return t("transcript.session.humanize.ipcTimeout", { message: e.message });
   const raw = String(e);
   const lower = raw.toLowerCase();
-  const known: [RegExp, string][] = [
-    [/timed?\s*out|timeout/, "请求超时了，网络或服务方没有按时响应。稍等重试一般就好。"],
-    [/dns|name not resolved|nodename/, "域名解析失败 —— 检查网络连接或服务方地址。"],
-    [/connection refused|connect error|network|fetch failed/, "连不上服务方 —— 检查网络或代理设置。"],
-    [/401|unauthorized|invalid.*key|authentication/, "服务方拒绝了 API key，去设置里检查一下。"],
-    [/429|rate.?limit|overloaded/, "服务方限流了，稍等一会儿再发。"],
-    // 额度类只认带额度语境的措辞。裸的 "insufficient" 会误伤 ——
-    // DeepSeek 的 tool_calls 校验报错里就有 "insufficient tool messages"，
-    // 真实余额没问题的用户被这句话带去查账单（生产事故）。
-    // 覆盖的真实文案：DeepSeek "Insufficient Balance"、OpenAI
-    // "insufficient_quota" / "You exceeded your current quota"、
-    // Anthropic "credit balance is too low"、Kimi "balance is insufficient"。
-    [
-      /insufficient[_\s]+(quota|balance|funds|credits)|(credit\s+)?balance\s+is\s+(too\s+low|insufficient)|exceeded.{0,40}quota|quota.{0,40}exceeded|out\s+of\s+(quota|credits)|余额不足|欠费/,
-      "服务方账户额度不足。",
-    ],
-  ];
-  for (const [re, msg] of known) {
-    if (re.test(lower)) return `${msg}（${raw.length > 200 ? `${raw.slice(0, 200)}…` : raw}）`;
+  for (const [re, key] of KNOWN_ERRORS) {
+    if (re.test(lower)) {
+      const detail = raw.length > 200 ? `${raw.slice(0, 200)}…` : raw;
+      return t("errors.withDetail", { text: t(key), detail });
+    }
   }
   return raw;
 }
@@ -2200,16 +2222,16 @@ function humanizeError(e: unknown): string {
 function describeError(e: AgentError): string {
   switch (e.kind) {
     case "provider":
-      // 服务方的报错常是一整条 HTTP 错误链，先过一遍人话转换
-      return humanizeError(e.message);
+      // 内核已按原因（认证、限流、额度、连不上）选好键，HTTP 原文在 detail 里。
+      return renderUiError(e.error);
     case "context_exhausted":
-      return `上下文超限且压缩无效（用了 ${e.used}，上限 ${e.limit}）。开个新会话吧。`;
+      return t("transcript.session.err.contextExhausted", { used: e.used, limit: e.limit });
     case "compact_circuit_open":
-      return `压缩连续失败 ${e.attempts} 次，已停止重试。`;
+      return tn("transcript.session.err.compactCircuit", e.attempts);
     case "internal":
-      return `内部错误：${e.message}`;
+      return t("transcript.session.err.internal", { message: renderUiError(e.error) });
     default:
-      return "未知错误";
+      return t("transcript.session.err.unknown");
   }
 }
 
@@ -2228,10 +2250,12 @@ function resultView(c: ToolResultContent): { text?: string; image?: string; imag
   switch (c.type) {
     case "text":
       return { text: c.text };
-    case "spilled":
-      return { text: `结果过大（${c.total_bytes} 字节），已写入 ${c.path}\n\n${c.preview}` };
+    case "spilled": {
+      const head = t("transcript.session.result.spilled", { bytes: c.total_bytes, path: c.path });
+      return { text: `${head}\n\n${c.preview}` };
+    }
     case "cleared":
-      return { text: "（历史结果已清理）" };
+      return { text: t("transcript.session.result.cleared") };
     case "marked_image":
       return {
         text: c.text,

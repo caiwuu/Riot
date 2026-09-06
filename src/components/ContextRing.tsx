@@ -11,6 +11,7 @@
 
 import { useState } from "react";
 
+import { useT } from "../i18n";
 import { fmtTokens } from "../lib/contextWindow";
 import { useDropdown } from "./pickers";
 
@@ -44,6 +45,7 @@ export function ContextRing({
   /** 这个模型配的窗口。没配就不显示那一行。 */
   window?: number;
 }) {
+  const { t } = useT();
   const [open, setOpen] = useState(false);
   const { rootRef, onKeyDown } = useDropdown(open, setOpen);
 
@@ -59,8 +61,12 @@ export function ContextRing({
         className={level ? `ctx-ring ${level}` : "ctx-ring"}
         aria-haspopup="dialog"
         aria-expanded={open}
-        aria-label={`上下文占用 ${shown}%，点开看明细`}
-        title={`上下文 ${fmtTokens(used)} / ${fmtTokens(threshold)}（${shown}%）`}
+        aria-label={t("app.ctx.ariaLabel", { pct: shown })}
+        title={t("app.ctx.title", {
+          used: fmtTokens(used),
+          threshold: fmtTokens(threshold),
+          pct: shown,
+        })}
         onClick={() => setOpen(!open)}
       >
         <svg width={SIZE} height={SIZE} viewBox={`0 0 ${SIZE} ${SIZE}`} aria-hidden>
@@ -88,9 +94,9 @@ export function ContextRing({
         </svg>
       </button>
       {open ? (
-        <div className="ctx-panel" role="dialog" aria-label="上下文用量">
+        <div className="ctx-panel" role="dialog" aria-label={t("app.ctx.usage")}>
           <div className="ctx-panel-head">
-            <span className="ctx-panel-title">上下文用量</span>
+            <span className="ctx-panel-title">{t("app.ctx.usage")}</span>
             <span className={level ? `ctx-panel-pct ${level}` : "ctx-panel-pct"}>{shown}%</span>
           </div>
           <div className="ctx-bar">
@@ -98,27 +104,25 @@ export function ContextRing({
           </div>
           <dl className="ctx-rows">
             <div className="ctx-row">
-              <dt>当前占用</dt>
+              <dt>{t("app.ctx.current")}</dt>
               <dd>
                 {fmtTokens(used)} / {fmtTokens(threshold)}
               </dd>
             </div>
             {contextWindow ? (
               <div className="ctx-row">
-                <dt>模型窗口</dt>
+                <dt>{t("app.ctx.window")}</dt>
                 <dd>{fmtTokens(contextWindow)}</dd>
               </div>
             ) : null}
             <div className="ctx-row">
-              <dt>本会话累计</dt>
+              <dt>{t("app.ctx.total")}</dt>
               <dd>
                 ↑{fmtTokens(totals.input)} ↓{fmtTokens(totals.output)}
               </dd>
             </div>
           </dl>
-          <p className="ctx-note">
-            到 {fmtTokens(threshold)} 会自动摘要压缩。
-          </p>
+          <p className="ctx-note">{t("app.ctx.note", { threshold: fmtTokens(threshold) })}</p>
         </div>
       ) : null}
     </div>

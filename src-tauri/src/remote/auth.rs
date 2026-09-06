@@ -130,7 +130,10 @@ pub fn origin_allowed(origin: Option<&str>, host: Option<&str>, extra_allowed: &
     let Some(origin) = origin else {
         return true;
     };
-    if extra_allowed.iter().any(|o| o.trim_end_matches('/') == origin) {
+    if extra_allowed
+        .iter()
+        .any(|o| o.trim_end_matches('/') == origin)
+    {
         return true;
     }
     let Some(host) = host else {
@@ -184,7 +187,10 @@ mod tests {
     fn 令牌是_43_位_base64url() {
         let t = generate_token();
         assert_eq!(t.len(), 43);
-        assert!(t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(
+            t.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
         assert_ne!(generate_token(), t, "两次生成不能相同");
     }
 
@@ -198,14 +204,25 @@ mod tests {
 
     #[test]
     fn 来源必须和_host_同源() {
-        assert!(origin_allowed(None, Some("x:1"), &[]), "没有 Origin 的非浏览器客户端放过");
+        assert!(
+            origin_allowed(None, Some("x:1"), &[]),
+            "没有 Origin 的非浏览器客户端放过"
+        );
         assert!(origin_allowed(
             Some("http://192.168.1.5:7823"),
             Some("192.168.1.5:7823"),
             &[]
         ));
-        assert!(origin_allowed(Some("http://LOCALHOST:7823"), Some("localhost:7823"), &[]));
-        assert!(!origin_allowed(Some("http://evil.example"), Some("localhost:7823"), &[]));
+        assert!(origin_allowed(
+            Some("http://LOCALHOST:7823"),
+            Some("localhost:7823"),
+            &[]
+        ));
+        assert!(!origin_allowed(
+            Some("http://evil.example"),
+            Some("localhost:7823"),
+            &[]
+        ));
         assert!(!origin_allowed(Some("http://localhost:7823"), None, &[]));
         // 反向代理：显式放行列表
         assert!(origin_allowed(

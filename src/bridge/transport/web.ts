@@ -22,6 +22,8 @@
  * 直接用存的。被拒（换过令牌）就进 `auth-required`，RemoteGate 让用户重填。
  */
 
+import { t } from "../../i18n";
+import { type UiTextPayload, renderUiText } from "../errors";
 import type { HostChannel, LinkStatus, Transport } from "./types";
 import { TransportDisconnected } from "./types";
 
@@ -60,9 +62,9 @@ class WebChannel<T> implements HostChannel<T> {
 
 type Frame =
   | { t: "ready"; viewer: string; boot: string; version: string }
-  | { t: "denied"; reason: string }
+  | { t: "denied"; reason: UiTextPayload }
   | { t: "ok"; id: number; result: unknown }
-  | { t: "err"; id: number; error: string }
+  | { t: "err"; id: number; error: unknown }
   | { t: "channel"; ch: number; data: unknown }
   | { t: "event"; name: string; payload: unknown }
   | { t: "pong" };
@@ -94,7 +96,7 @@ export class WebTransport implements Transport {
   /** 用户主动登出 / 令牌被拒后不自动重连，等新令牌。 */
   private halted = false;
   /** 上一次被宿主拒绝的原因（"令牌不对"、"尝试太频繁"）。成功连上就清掉。 */
-  private denied: string | null = null;
+  private denied: UiTextPayload | null = null;
 
   constructor() {
     this.token = takeTokenFromHash() ?? localStorage.getItem(LS_TOKEN);
@@ -105,8 +107,8 @@ export class WebTransport implements Transport {
     // 页面已经开着、又在地址栏里贴了一条带 `#token=` 的链接：hash 变化
     // 不触发整页加载，构造函数看不到它，这里补上。
     window.addEventListener("hashchange", () => {
-      const t = takeTokenFromHash();
-      if (t) this.setToken(t);
+      const fresh = takeTokenFromHash();
+      if (fresh) this.setToken(fresh);
     });
     if (this.token) {
       this.connect();
@@ -119,7 +121,7 @@ export class WebTransport implements Transport {
 
   invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     if (this.linkStatus === "auth-required") {
-      return Promise.reject(new TransportDisconnected("还没连上宿主：需要访问令牌"));
+      return Promise.reject(new TransportDisconnected(t("errors.authRequired")));
     }
     const id = this.nextId++;
     const text = JSON.stringify({ t: "call", id, cmd, args: args ?? {} });
@@ -175,16 +177,16 @@ export class WebTransport implements Transport {
 
   /** 用一枚新令牌（重新）连接。 */
   setToken(token: string): void {
-    const t = token.trim();
-    if (!t) return;
-    this.token = t;
-    localStorage.setItem(LS_TOKEN, t);
+    const trimmed = token.trim();
+    if (!trimmed) return;
+    this.token = trimmed;
+    localStorage.setItem(LS_TOKEN, trimmed);
     this.halted = false;
     this.backoff = BACKOFF_MIN_MS;
     this.closeSocket();
     // closeSocket 摘掉了旧 socket 的 onclose，挂在它上面的调用不会再有人
     // 拒绝 —— 这里替它做，别让它们等到 bridge 的 15 秒期限才报"宿主没响应"。
-    this.failAllPending(new TransportDisconnected("正在用新令牌重新连接。"));
+    this.failAllPending(new TransportDisconnected(t("errors.reconnectingWithToken")));
     this.connect();
   }
 
@@ -194,7 +196,7 @@ export class WebTransport implements Transport {
     localStorage.removeItem(LS_TOKEN);
     this.halted = true;
     this.closeSocket();
-    this.failAllPending(new TransportDisconnected("已退出"));
+    this.failAllPending(new TransportDisconnected(t("errors.signedOut")));
     this.setStatus("auth-required");
   }
 
@@ -206,7 +208,7 @@ export class WebTransport implements Transport {
    * 上一次被拒的原因，给令牌表单显示。没有 = 从来没被拒过（首次访问没带
    * 令牌），或者被拒之后已经成功连上过。
    */
-  deniedReason(): string | null {
+  deniedReason(): UiTextPayload | null {
     return this.denied;
   }
 
@@ -230,7 +232,7 @@ export class WebTransport implements Transport {
     try {
       ws = new WebSocket(this.endpoint());
     } catch (e) {
-      console.warn("WebSocket 建不出来", e);
+      console.warn("Failed to create WebSocket", e);
       this.scheduleReconnect();
       return;
     }
@@ -265,7 +267,7 @@ export class WebTransport implements Transport {
     try {
       f = JSON.parse(raw) as Frame;
     } catch {
-      console.warn("宿主帧解析失败", raw.slice(0, 200));
+      console.warn("Failed to parse host frame", raw.slice(0, 200));
       return;
     }
     switch (f.t) {
@@ -277,11 +279,13 @@ export class WebTransport implements Transport {
         // 令牌不对（或换过了）。停下来等用户给新的，别对着宿主刷失败。
         // 原因要留给表单显示：否则用户看到的只是"输入 → 转一圈 → 表单又
         // 空了"，分不清是密码错了还是网络不通。
-        console.warn("宿主拒绝连接：", f.reason);
+        console.warn("Host refused the connection:", f.reason.key);
         this.denied = f.reason;
         this.halted = true;
         this.closeSocket();
-        this.failAllPending(new TransportDisconnected(`宿主拒绝连接：${f.reason}`));
+        this.failAllPending(
+          new TransportDisconnected(t("errors.hostDenied", { reason: renderUiText(f.reason) })),
+        );
         this.setStatus("auth-required");
         return;
       }
@@ -297,8 +301,8 @@ export class WebTransport implements Transport {
         const p = this.pending.get(f.id);
         if (p) {
           this.pending.delete(f.id);
-          // 原样给出去：宿主的错误多半是一句给人看的中文，和 Tauri 那条线
-          // 一样不包 Error（否则调用方的 String(e) 会多出 "Error: " 前缀）。
+          // 原样给出去：这是宿主的 UiError JSON，和 Tauri 那条线一样由
+          // bridge 的 invoke 统一包成 HostError。
           p.reject(f.error);
         }
         return;

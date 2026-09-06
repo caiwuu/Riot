@@ -190,11 +190,13 @@ impl WebAccess for HostWeb {
 ///
 /// 用一个真实查询而不是打首页：首页返回 200 只说明有个 web 服务在那，
 /// 说明不了 JSON 输出开没开 —— 而那正是最容易配错的一处。
+///
+/// 两边都是技术细节（英文），"连接正常 / 测试失败"那句由宿主按词典键说。
 pub async fn test_searxng(base_url: &str) -> Result<String, String> {
     // 空 = 测内置。不要在这里要求用户填地址。
     let base = crate::config::resolve_searxng_url(base_url);
     if !base.starts_with("http://") && !base.starts_with("https://") {
-        return Err(format!("地址要带上协议：http://{base}"));
+        return Err(format!("the address needs a scheme, e.g. http://{base}"));
     }
 
     let hits = searxng::search(
@@ -213,7 +215,10 @@ pub async fn test_searxng(base_url: &str) -> Result<String, String> {
     if hits.is_empty() {
         // 通了但没结果：JSON 是对的，是上游引擎那边的问题。这两种情况
         // 对用户来说要做的事完全不同，不能都报"成功"。
-        return Err("连上了，但没有返回任何结果。检查 SearXNG 里启用的搜索引擎。".to_owned());
+        return Err(
+            "connected, but the search returned no results; check the engines enabled in SearXNG"
+                .to_owned(),
+        );
     }
-    Ok(format!("连接正常，返回了 {} 条结果", hits.len()))
+    Ok(format!("{} results", hits.len()))
 }

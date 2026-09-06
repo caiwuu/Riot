@@ -41,18 +41,19 @@ use riot_protocol::permission::{
     DecisionReason, PermissionContext, PermissionMode, PermissionResult, PermissionUpdate,
     RuleDecision, SafetyKind, UpdateScope,
 };
+use riot_protocol::text::UiText;
 use riot_protocol::tool::{
     InterruptBehavior, PromptContext, ResultBudget, Tool, ToolContext, ToolOutcome, ValidationError,
 };
+use riot_protocol::ui_text;
 
 use super::names::{
     BROWSER_CLICK, BROWSER_CONSOLE, BROWSER_COOKIES, BROWSER_CRAWL, BROWSER_DISCOVER, BROWSER_DRAG,
     BROWSER_EVALUATE, BROWSER_FILL_FORM, BROWSER_FUZZ, BROWSER_GO, BROWSER_HANDOFF, BROWSER_HAR,
-    BROWSER_HOVER, BROWSER_INTERCEPT, BROWSER_KEY, BROWSER_NAVIGATE, BROWSER_NETWORK,
-    BROWSER_PERF, BROWSER_READ_TAB, BROWSER_REPLAY, BROWSER_REPORT, BROWSER_SCREENSHOT,
-    BROWSER_SCROLL, BROWSER_SECRETS, BROWSER_SELECT, BROWSER_SNAPSHOT, BROWSER_SOURCE_OF,
-    BROWSER_TABS, BROWSER_TYPE, BROWSER_UPLOAD, BROWSER_VIEW, BROWSER_WAIT_FOR, SHOW_BROWSER,
-    WEB_FETCH,
+    BROWSER_HOVER, BROWSER_INTERCEPT, BROWSER_KEY, BROWSER_NAVIGATE, BROWSER_NETWORK, BROWSER_PERF,
+    BROWSER_READ_TAB, BROWSER_REPLAY, BROWSER_REPORT, BROWSER_SCREENSHOT, BROWSER_SCROLL,
+    BROWSER_SECRETS, BROWSER_SELECT, BROWSER_SNAPSHOT, BROWSER_SOURCE_OF, BROWSER_TABS,
+    BROWSER_TYPE, BROWSER_UPLOAD, BROWSER_VIEW, BROWSER_WAIT_FOR, SHOW_BROWSER, WEB_FETCH,
 };
 use super::web::url as weburl;
 
@@ -133,9 +134,9 @@ impl Tool for BrowserNavigate {
         schemars::schema_for!(NavigateInput)
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         let url = input.get("url").and_then(|v| v.as_str()).unwrap_or("...");
-        format!("在浏览器里打开 {url}")
+        ui_text!("tools.browser.open", url = url)
     }
 
     fn is_read_only(&self, _input: &serde_json::Value) -> bool {
@@ -235,8 +236,8 @@ impl Tool for BrowserSnapshot {
         schemars::schema_for!(NoInput)
     }
 
-    fn describe(&self, _input: &serde_json::Value) -> String {
-        "读当前页面的结构".to_owned()
+    fn describe(&self, _input: &serde_json::Value) -> UiText {
+        ui_text!("tools.browser.snapshot")
     }
 
     fn is_read_only(&self, _input: &serde_json::Value) -> bool {
@@ -306,15 +307,15 @@ impl Tool for BrowserScreenshot {
         schemars::schema_for!(ScreenshotInput)
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         if input
             .get("deterministic")
             .and_then(serde_json::Value::as_bool)
             == Some(true)
         {
-            "给当前页面截图（冻结动画）".to_owned()
+            ui_text!("tools.browser.screenshotFrozen")
         } else {
-            "给当前页面截图".to_owned()
+            ui_text!("tools.browser.screenshot")
         }
     }
 
@@ -458,8 +459,8 @@ impl Tool for BrowserView {
         schemars::schema_for!(NoInput)
     }
 
-    fn describe(&self, _input: &serde_json::Value) -> String {
-        "看当前视口（带编号框）".to_owned()
+    fn describe(&self, _input: &serde_json::Value) -> UiText {
+        ui_text!("tools.browser.view")
     }
 
     fn is_read_only(&self, _input: &serde_json::Value) -> bool {
@@ -660,8 +661,8 @@ impl Tool for BrowserConsole {
         schemars::schema_for!(NoInput)
     }
 
-    fn describe(&self, _input: &serde_json::Value) -> String {
-        "读当前页面的 console".to_owned()
+    fn describe(&self, _input: &serde_json::Value) -> UiText {
+        ui_text!("tools.browser.console")
     }
 
     fn is_read_only(&self, _input: &serde_json::Value) -> bool {
@@ -771,8 +772,8 @@ impl Tool for BrowserPerf {
         schemars::schema_for!(NoInput)
     }
 
-    fn describe(&self, _input: &serde_json::Value) -> String {
-        "测量页面性能指标".to_owned()
+    fn describe(&self, _input: &serde_json::Value) -> UiText {
+        ui_text!("tools.browser.perf")
     }
 
     fn is_read_only(&self, _input: &serde_json::Value) -> bool {
@@ -919,10 +920,10 @@ impl Tool for BrowserSourceOf {
         schemars::schema_for!(LocateInput)
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         match target_from_input(input) {
-            Some(t) => format!("查{}的源码", t.describe()),
-            None => "查元素对应的源码".to_owned(),
+            Some(t) => ui_text!("tools.browser.sourceOf", target = target_arg(&t)),
+            None => ui_text!("tools.browser.source"),
         }
     }
 
@@ -995,10 +996,10 @@ impl Tool for BrowserReadTab {
         schemars::schema_for!(ReadTabInput)
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         match input.get("tab").and_then(serde_json::Value::as_u64) {
-            Some(n) => format!("读标签页 [{n}] 的结构"),
-            None => "读另一个标签页".to_owned(),
+            Some(n) => ui_text!("tools.browser.tabSnapshot", tab = n),
+            None => ui_text!("tools.browser.tabSnapshotAny"),
         }
     }
 
@@ -1075,8 +1076,8 @@ impl Tool for BrowserHar {
         schemars::schema_for!(NoInput)
     }
 
-    fn describe(&self, _input: &serde_json::Value) -> String {
-        "导出网络请求为 HAR".to_owned()
+    fn describe(&self, _input: &serde_json::Value) -> UiText {
+        ui_text!("tools.browser.har")
     }
 
     fn is_read_only(&self, _input: &serde_json::Value) -> bool {
@@ -1216,17 +1217,16 @@ impl Tool for BrowserClick {
         schemars::schema_for!(ClickInput)
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
-        let verb = if input.get("double").and_then(serde_json::Value::as_bool) == Some(true) {
-            "双击"
-        } else if input.get("right").and_then(serde_json::Value::as_bool) == Some(true) {
-            "右键"
-        } else {
-            "点击"
-        };
-        match target_from_input(input) {
-            Some(t) => format!("{verb}{}", t.describe()),
-            None => format!("{verb}页面元素"),
+    fn describe(&self, input: &serde_json::Value) -> UiText {
+        let double = input.get("double").and_then(serde_json::Value::as_bool) == Some(true);
+        let right = input.get("right").and_then(serde_json::Value::as_bool) == Some(true);
+        match (target_from_input(input), double, right) {
+            (Some(t), true, _) => ui_text!("tools.browser.doubleClick", target = target_arg(&t)),
+            (Some(t), _, true) => ui_text!("tools.browser.rightClick", target = target_arg(&t)),
+            (Some(t), _, _) => ui_text!("tools.browser.click", target = target_arg(&t)),
+            (None, true, _) => ui_text!("tools.browser.doubleClickAny"),
+            (None, _, true) => ui_text!("tools.browser.rightClickAny"),
+            (None, _, _) => ui_text!("tools.browser.clickAny"),
         }
     }
 
@@ -1335,13 +1335,19 @@ impl Tool for BrowserType {
         schemars::schema_for!(TypeInput)
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         let text = input.get("text").and_then(|v| v.as_str()).unwrap_or("...");
-        let short: String = text.chars().take(30).collect();
-        let ellipsis = if text.chars().count() > 30 { "…" } else { "" };
+        let mut short: String = text.chars().take(30).collect();
+        if text.chars().count() > 30 {
+            short.push('…');
+        }
         match type_target(input) {
-            Some(t) => format!("在{}输入 \"{short}{ellipsis}\"", t.describe()),
-            None => format!("在页面里输入 \"{short}{ellipsis}\""),
+            Some(t) => ui_text!(
+                "tools.browser.typeInto",
+                target = target_arg(&t),
+                text = short
+            ),
+            None => ui_text!("tools.browser.type", text = short),
         }
     }
 
@@ -1498,16 +1504,16 @@ impl Tool for BrowserFillForm {
         schemars::schema_for!(FillFormInput)
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         let n = input
             .get("fields")
             .and_then(|v| v.as_array())
             .map_or(0, Vec::len);
         let submit = input.get("submit").is_some_and(|v| !v.is_null());
         if submit {
-            format!("填写 {n} 个字段并提交")
+            ui_text!("tools.browser.fillSubmit", count = n)
         } else {
-            format!("填写 {n} 个字段")
+            ui_text!("tools.browser.fill", count = n)
         }
     }
 
@@ -1655,9 +1661,9 @@ impl Tool for BrowserKey {
         schemars::schema_for!(KeyInput)
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         let key = input.get("key").and_then(|v| v.as_str()).unwrap_or("...");
-        format!("按 {key}")
+        ui_text!("tools.browser.key", key = key)
     }
 
     fn is_read_only(&self, _input: &serde_json::Value) -> bool {
@@ -1739,15 +1745,15 @@ impl Tool for BrowserScroll {
         schemars::schema_for!(ScrollInput)
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         let dy = input
             .get("delta_y")
             .and_then(serde_json::Value::as_f64)
             .unwrap_or(0.0);
         if dy < 0.0 {
-            format!("向上滚动页面 {:.0}px", -dy)
+            ui_text!("tools.browser.scrollUp", px = format!("{:.0}", -dy))
         } else {
-            format!("向下滚动页面 {dy:.0}px")
+            ui_text!("tools.browser.scrollDown", px = format!("{dy:.0}"))
         }
     }
 
@@ -1852,14 +1858,18 @@ impl Tool for BrowserWaitFor {
         schemars::schema_for!(WaitInput)
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         match wait_condition(input) {
-            Some(WaitCondition::Selector(s)) => format!("等元素 `{s}` 出现"),
-            Some(WaitCondition::SelectorGone(s)) => format!("等元素 `{s}` 消失"),
-            Some(WaitCondition::Text(t)) => format!("等文本 “{t}”"),
-            Some(WaitCondition::UrlContains(u)) => format!("等地址包含 “{u}”"),
-            Some(WaitCondition::NetworkIdle) => "等网络空闲".to_owned(),
-            None => "等待页面条件".to_owned(),
+            Some(WaitCondition::Selector(s)) => {
+                ui_text!("tools.browser.waitSelector", selector = s)
+            }
+            Some(WaitCondition::SelectorGone(s)) => {
+                ui_text!("tools.browser.waitSelectorGone", selector = s)
+            }
+            Some(WaitCondition::Text(t)) => ui_text!("tools.browser.waitText", text = t),
+            Some(WaitCondition::UrlContains(u)) => ui_text!("tools.browser.waitUrl", url = u),
+            Some(WaitCondition::NetworkIdle) => ui_text!("tools.browser.waitNetworkIdle"),
+            None => ui_text!("tools.browser.wait"),
         }
     }
 
@@ -1968,10 +1978,10 @@ impl Tool for BrowserHover {
         schemars::schema_for!(ClickInput)
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         match target_from_input(input) {
-            Some(t) => format!("悬停到{}", t.describe()),
-            None => "悬停到页面元素".to_owned(),
+            Some(t) => ui_text!("tools.browser.hover", target = target_arg(&t)),
+            None => ui_text!("tools.browser.hoverAny"),
         }
     }
 
@@ -2051,11 +2061,15 @@ impl Tool for BrowserSelect {
         schemars::schema_for!(SelectInput)
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         let value = input.get("value").and_then(|v| v.as_str()).unwrap_or("...");
         match target_from_input(input) {
-            Some(t) => format!("把{}设为 {value:?}", t.describe()),
-            None => format!("下拉选择 {value:?}"),
+            Some(t) => ui_text!(
+                "tools.browser.select",
+                target = target_arg(&t),
+                value = value
+            ),
+            None => ui_text!("tools.browser.selectAny", value = value),
         }
     }
 
@@ -2177,10 +2191,16 @@ impl Tool for BrowserDrag {
         schemars::schema_for!(DragInput)
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         match (prefixed_target(input, "from"), prefixed_target(input, "to")) {
-            (Some(f), Some(t)) => format!("把{}拖到{}", f.describe(), t.describe()),
-            _ => "拖拽元素".to_owned(),
+            (Some(f), Some(t)) => {
+                ui_text!(
+                    "tools.browser.drag",
+                    from = target_arg(&f),
+                    to = target_arg(&t)
+                )
+            }
+            _ => ui_text!("tools.browser.dragAny"),
         }
     }
 
@@ -2265,16 +2285,16 @@ impl Tool for BrowserGo {
         schemars::schema_for!(GoInput)
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         match input
             .get("direction")
             .and_then(|v| v.as_str())
             .unwrap_or("")
         {
-            "back" => "后退".to_owned(),
-            "forward" => "前进".to_owned(),
-            "reload" => "刷新页面".to_owned(),
-            _ => "历史导航".to_owned(),
+            "back" => ui_text!("tools.browser.back"),
+            "forward" => ui_text!("tools.browser.forward"),
+            "reload" => ui_text!("tools.browser.reload"),
+            _ => ui_text!("tools.browser.history"),
         }
     }
 
@@ -2364,17 +2384,17 @@ impl Tool for BrowserTabs {
         schemars::schema_for!(TabsInput)
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         let id = input
             .get("id")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         match input.get("action").and_then(|v| v.as_str()).unwrap_or("") {
-            "list" => "列出标签页".to_owned(),
-            "new" => "新开标签页".to_owned(),
-            "select" => format!("切到标签页 [{id}]"),
-            "close" => format!("关闭标签页 [{id}]"),
-            _ => "标签页操作".to_owned(),
+            "list" => ui_text!("tools.browser.tabs.list"),
+            "new" => ui_text!("tools.browser.tabs.new"),
+            "select" => ui_text!("tools.browser.tabs.select", id = id),
+            "close" => ui_text!("tools.browser.tabs.close", id = id),
+            _ => ui_text!("tools.browser.tabs.any"),
         }
     }
 
@@ -2489,13 +2509,13 @@ impl Tool for BrowserEvaluate {
         schemars::schema_for!(EvaluateInput)
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         let e = input
             .get("expression")
             .and_then(|v| v.as_str())
             .unwrap_or("...");
         let short: String = e.chars().take(50).collect();
-        format!("执行 JS: {short}")
+        ui_text!("tools.browser.evaluate", expression = short)
     }
 
     fn is_read_only(&self, _input: &serde_json::Value) -> bool {
@@ -2529,7 +2549,12 @@ impl Tool for BrowserEvaluate {
     ) -> PermissionResult {
         // 高权限:任意 JS 能读会话、发请求。默认问一次（可"总是允许"），
         // 「全部放行」压得过它——bypass 的语义正是信任 agent 做开发。
-        single_consent(ctx, self.name(), "在当前页面执行脚本")
+        single_consent(
+            ctx,
+            self.name(),
+            ui_text!("tools.ask.browser.evaluate"),
+            "evaluate",
+        )
     }
 
     async fn call(&self, input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
@@ -2589,14 +2614,14 @@ impl Tool for BrowserUpload {
         schemars::schema_for!(UploadInput)
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         let n = input
             .get("paths")
             .and_then(|v| v.as_array())
             .map_or(0, Vec::len);
         match target_from_input(input) {
-            Some(t) => format!("给{}上传 {n} 个文件", t.describe()),
-            None => format!("上传 {n} 个文件"),
+            Some(t) => ui_text!("tools.browser.uploadTo", target = target_arg(&t), count = n),
+            None => ui_text!("tools.browser.upload", count = n),
         }
     }
 
@@ -2624,7 +2649,12 @@ impl Tool for BrowserUpload {
         ctx: &PermissionContext,
     ) -> PermissionResult {
         // 上传把本地文件内容发到网页，比点击敏感 —— 单独问一次（可总是允许）。
-        single_consent(ctx, self.name(), "把本地文件上传到当前页面")
+        single_consent(
+            ctx,
+            self.name(),
+            ui_text!("tools.ask.browser.upload"),
+            "upload",
+        )
     }
 
     async fn call(&self, input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
@@ -2674,8 +2704,8 @@ impl Tool for BrowserCookies {
         schemars::schema_for!(NoInput)
     }
 
-    fn describe(&self, _input: &serde_json::Value) -> String {
-        "读当前页面的 Cookie".to_owned()
+    fn describe(&self, _input: &serde_json::Value) -> UiText {
+        ui_text!("tools.browser.cookies")
     }
 
     fn is_read_only(&self, _input: &serde_json::Value) -> bool {
@@ -2688,7 +2718,12 @@ impl Tool for BrowserCookies {
         ctx: &PermissionContext,
     ) -> PermissionResult {
         // Cookie 里常有会话令牌，敏感。问一次（可"总是允许"）。
-        single_consent(ctx, self.name(), "读取当前页面的 Cookie")
+        single_consent(
+            ctx,
+            self.name(),
+            ui_text!("tools.ask.browser.cookies"),
+            "cookies",
+        )
     }
 
     async fn call(&self, _input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
@@ -2748,7 +2783,7 @@ impl Tool for BrowserNetwork {
         schemars::schema_for!(NetworkInput)
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         match input
             .get("action")
             .and_then(|v| v.as_str())
@@ -2759,10 +2794,10 @@ impl Tool for BrowserNetwork {
                     .get("request_id")
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
-                format!("看请求 #{id} 的细节")
+                ui_text!("tools.browser.network.detail", id = id)
             }
-            "audit" => "审计响应头安全配置".to_owned(),
-            _ => "列出网络请求".to_owned(),
+            "audit" => ui_text!("tools.browser.network.audit"),
+            _ => ui_text!("tools.browser.network.list"),
         }
     }
 
@@ -2884,13 +2919,13 @@ impl Tool for BrowserReplay {
         schemars::schema_for!(ReplayInput)
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         let m = input
             .get("method")
             .and_then(|v| v.as_str())
             .unwrap_or("GET");
         let u = input.get("url").and_then(|v| v.as_str()).unwrap_or("...");
-        format!("重放 {m} {u}")
+        ui_text!("tools.browser.replay", method = m, url = u)
     }
 
     fn is_read_only(&self, _input: &serde_json::Value) -> bool {
@@ -2995,17 +3030,17 @@ impl Tool for BrowserIntercept {
         schemars::schema_for!(InterceptInput)
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         let p = input
             .get("url_pattern")
             .and_then(|v| v.as_str())
             .unwrap_or("");
         match input.get("action").and_then(|v| v.as_str()).unwrap_or("") {
-            "block" => format!("拦截含 `{p}` 的请求"),
-            "fulfill" => format!("伪造 `{p}` 的响应"),
-            "list" => "列出拦截规则".to_owned(),
-            "clear" => "清空拦截规则".to_owned(),
-            _ => "拦截设置".to_owned(),
+            "block" => ui_text!("tools.browser.intercept.block", pattern = p),
+            "fulfill" => ui_text!("tools.browser.intercept.fulfill", pattern = p),
+            "list" => ui_text!("tools.browser.intercept.list"),
+            "clear" => ui_text!("tools.browser.intercept.clear"),
+            _ => ui_text!("tools.browser.intercept.any"),
         }
     }
 
@@ -3129,8 +3164,8 @@ impl Tool for BrowserSecrets {
         schemars::schema_for!(NoInput)
     }
 
-    fn describe(&self, _input: &serde_json::Value) -> String {
-        "扫描页面里的密钥泄露".to_owned()
+    fn describe(&self, _input: &serde_json::Value) -> UiText {
+        ui_text!("tools.browser.secrets")
     }
 
     fn is_read_only(&self, _input: &serde_json::Value) -> bool {
@@ -3193,8 +3228,8 @@ impl Tool for BrowserDiscover {
         schemars::schema_for!(NoInput)
     }
 
-    fn describe(&self, _input: &serde_json::Value) -> String {
-        "枚举页面的表单和链接".to_owned()
+    fn describe(&self, _input: &serde_json::Value) -> UiText {
+        ui_text!("tools.browser.discover")
     }
 
     fn is_read_only(&self, _input: &serde_json::Value) -> bool {
@@ -3302,9 +3337,9 @@ impl Tool for BrowserFuzz {
         schemars::schema_for!(FuzzInput)
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         let u = input.get("url").and_then(|v| v.as_str()).unwrap_or("...");
-        format!("fuzz {u}")
+        ui_text!("tools.browser.fuzz", url = u)
     }
 
     fn is_read_only(&self, _input: &serde_json::Value) -> bool {
@@ -3459,12 +3494,12 @@ impl Tool for BrowserReport {
         schemars::schema_for!(ReportInput)
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         let n = input
             .get("findings")
             .and_then(|v| v.as_array())
             .map_or(0, Vec::len);
-        format!("生成渗透报告（{n} 条发现）")
+        ui_text!("tools.browser.report", count = n)
     }
 
     fn is_read_only(&self, _input: &serde_json::Value) -> bool {
@@ -3561,9 +3596,12 @@ impl Tool for BrowserCrawl {
         schemars::schema_for!(CrawlInput)
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         let u = input.get("url").and_then(|v| v.as_str()).unwrap_or("...");
-        format!("爬取 {}", u.chars().take(60).collect::<String>())
+        ui_text!(
+            "tools.browser.crawl",
+            url = u.chars().take(60).collect::<String>()
+        )
     }
 
     fn is_read_only(&self, _input: &serde_json::Value) -> bool {
@@ -3710,12 +3748,11 @@ impl Tool for BrowserHandoff {
         schemars::schema_for!(HandoffInput)
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
-        let what = input
-            .get("prompt")
-            .and_then(|v| v.as_str())
-            .unwrap_or("接管操作");
-        format!("请用户操作：{what}")
+    fn describe(&self, input: &serde_json::Value) -> UiText {
+        match input.get("prompt").and_then(|v| v.as_str()) {
+            Some(what) => ui_text!("tools.browser.handoff", prompt = what),
+            None => ui_text!("tools.browser.handoffAny"),
+        }
     }
 
     /// 模型这一步不碰页面，是把控制权交给用户 —— 从模型视角是只读的。
@@ -3759,12 +3796,12 @@ impl Tool for BrowserHandoff {
         input: &serde_json::Value,
         _ctx: &PermissionContext,
     ) -> PermissionResult {
-        let what = input
-            .get("prompt")
-            .and_then(|v| v.as_str())
-            .unwrap_or("完成一步需要你本人操作的动作");
+        let message = match input.get("prompt").and_then(|v| v.as_str()) {
+            Some(what) => ui_text!("tools.ask.browser.handoff", prompt = what),
+            None => ui_text!("tools.ask.browser.handoffAny"),
+        };
         PermissionResult::Ask {
-            message: format!("请在浏览器面板里完成：{what}\n做完后点「允许」继续。"),
+            message,
             suggestions: Vec::new(),
             reason: DecisionReason::UserChoice { remembered: false },
         }
@@ -3822,6 +3859,19 @@ fn target_from_input(input: &serde_json::Value) -> Option<Target> {
     None
 }
 
+/// 定位目标在弹窗那句话里的写法。
+///
+/// 不用 [`Target::describe`]：那是给模型的成句（"元素 [3]"），带语言；这里
+/// 只要一个不用翻译的记号 —— 编号加方括号、选择器加反引号、文本加引号，
+/// 词典里的句子把它当名词填进去。
+fn target_arg(t: &Target) -> String {
+    match t {
+        Target::Ref(n) => format!("[{n}]"),
+        Target::Selector(s) => format!("`{s}`"),
+        Target::Text(text) => format!("“{text}”"),
+    }
+}
+
 fn require_target(input: &serde_json::Value) -> Result<(), ValidationError> {
     if target_from_input(input).is_some() {
         return Ok(());
@@ -3849,7 +3899,7 @@ fn interact_consent(ctx: &PermissionContext) -> PermissionResult {
         return PermissionResult::Passthrough;
     }
     PermissionResult::Ask {
-        message: "是否允许模型操作当前页面（点击、输入、按键）？".into(),
+        message: ui_text!("tools.ask.browser.interact"),
         suggestions: INTERACT_TOOLS
             .iter()
             .map(|t| PermissionUpdate::AddRule {
@@ -3870,12 +3920,17 @@ fn interact_consent(ctx: &PermissionContext) -> PermissionResult {
 ///
 /// `[约束]` 理由必须是 `Consent`、规划模式 Passthrough —— 和 [`interact_consent`]
 /// 同一套道理:放行模式该压得过它，规划模式交给决策链拒绝而不是在这儿抢答。
-fn single_consent(ctx: &PermissionContext, tool: &str, what: &str) -> PermissionResult {
+fn single_consent(
+    ctx: &PermissionContext,
+    tool: &str,
+    message: UiText,
+    what: &str,
+) -> PermissionResult {
     if ctx.mode.get() == PermissionMode::Plan {
         return PermissionResult::Passthrough;
     }
     PermissionResult::Ask {
-        message: format!("是否允许{what}？"),
+        message,
         suggestions: vec![PermissionUpdate::AddRule {
             tool: tool.to_owned(),
             pattern: None,
@@ -3969,7 +4024,7 @@ fn scope_gate(host: &str, ctx: &PermissionContext) -> PermissionResult {
                 reason,
             },
             RuleDecision::Ask => PermissionResult::Ask {
-                message: format!("是否对 {host} 执行这次渗透动作？"),
+                message: ui_text!("tools.ask.pentest.host", host = host),
                 suggestions: vec![scope_suggestion(&content)],
                 reason,
             },
@@ -3981,10 +4036,7 @@ fn scope_gate(host: &str, ctx: &PermissionContext) -> PermissionResult {
     }
     // 不在 scope 内:必须先授权。
     PermissionResult::Ask {
-        message: format!(
-            "目标 {host} 不在本次会话的渗透授权范围内。\
-             只在你有权测试的目标上继续 —— 是否授权对 {host} 进行渗透测试？"
-        ),
+        message: ui_text!("tools.ask.pentest.outOfScope", host = host),
         suggestions: vec![scope_suggestion(&content)],
         reason: DecisionReason::SafetyCheck {
             safety: SafetyKind::OutOfScope,
@@ -4350,9 +4402,10 @@ mod tests {
         let PermissionResult::Ask { message, .. } = ask else {
             panic!("本地文件仍要问一次：{ask:?}");
         };
-        assert!(
-            message.contains(LOCAL_PATH),
-            "弹窗要显示完整路径：{message}"
+        assert_eq!(
+            message.args.get("path").map(String::as_str),
+            Some(LOCAL_PATH),
+            "弹窗要显示完整路径：{message:?}"
         );
 
         assert_eq!(
@@ -5397,8 +5450,8 @@ mod tests {
             fn prompt(&self, _c: &PromptContext) -> String {
                 String::new()
             }
-            fn describe(&self, _i: &serde_json::Value) -> String {
-                String::new()
+            fn describe(&self, _i: &serde_json::Value) -> UiText {
+                UiText::new("evil")
             }
             fn check_permissions(
                 &self,

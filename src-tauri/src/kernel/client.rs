@@ -227,7 +227,7 @@ impl KernelClient {
         // 不该重置退避计数。
         self.restart.lock().await.record_success();
         match serde_json::from_value::<RpcResponse>(result)? {
-            RpcResponse::Error { error } => Err(KernelError::Rpc(error.message)),
+            RpcResponse::Error { error } => Err(KernelError::Rpc(error.error)),
             other => Ok(other),
         }
     }
@@ -388,9 +388,7 @@ fn spawn_dispatch(
                 AgentEvent::Done {
                     reason: TerminalReason::Error {
                         error: AgentError::Internal {
-                            message: "内核进程意外退出,这一轮的运行状态已丢失。\
-                                      下一条消息会自动重启内核。"
-                                .to_owned(),
+                            error: riot_protocol::ui_error!("host.kernel.gone"),
                         },
                     },
                 },
@@ -439,10 +437,10 @@ pub fn locate_kernel() -> Result<PathBuf, String> {
     #[cfg(debug_assertions)]
     rebuild_kernel_bin()?;
 
-    let exe = std::env::current_exe().map_err(|e| format!("拿不到宿主路径:{e}"))?;
+    let exe = std::env::current_exe().map_err(|e| format!("cannot get host exe path: {e}"))?;
     let dir = exe
         .parent()
-        .ok_or_else(|| "宿主路径没有父目录".to_owned())?;
+        .ok_or_else(|| "host exe path has no parent dir".to_owned())?;
     let name = format!("riot-kernel{}", std::env::consts::EXE_SUFFIX);
     for base in [Some(dir), dir.parent()].into_iter().flatten() {
         let candidate = base.join(&name);
@@ -451,7 +449,7 @@ pub fn locate_kernel() -> Result<PathBuf, String> {
         }
     }
     Err(format!(
-        "找不到内核二进制 {}。开发模式请先 `cargo build -p riot-kernel`。",
+        "kernel binary not found at {}; in dev run `cargo build -p riot-kernel` first",
         dir.join(&name).display()
     ))
 }
@@ -461,14 +459,14 @@ pub fn locate_kernel() -> Result<PathBuf, String> {
 fn rebuild_kernel_bin() -> Result<(), String> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .ok_or_else(|| "src-tauri 没有上级目录".to_owned())?;
+        .ok_or_else(|| "src-tauri has no parent dir".to_owned())?;
     let status = std::process::Command::new("cargo")
         .args(["build", "-p", "riot-kernel", "--quiet"])
         .current_dir(root)
         .status()
-        .map_err(|e| format!("编内核失败:{e}"))?;
+        .map_err(|e| format!("failed to run cargo build for the kernel: {e}"))?;
     if !status.success() {
-        return Err("cargo build -p riot-kernel 失败".to_owned());
+        return Err("cargo build -p riot-kernel failed".to_owned());
     }
     Ok(())
 }

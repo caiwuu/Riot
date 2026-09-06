@@ -26,6 +26,7 @@ use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use riot_protocol::{UiError, ui_error};
 use serde::Serialize;
 use tauri::ipc::Channel;
 
@@ -45,12 +46,20 @@ pub enum TermEvent {
 /// 刷了几万行进度条，那部分没人会看。
 const BUFFER_BYTES: usize = 256 * 1024;
 
+/// 给模型看的终端标题。用户自己开的 shell 没有标题（前端按界面语言起名），
+/// 模型那边不跟界面语言走，补一个固定的英文占位。
+pub fn model_title(title: Option<String>) -> String {
+    title.unwrap_or_else(|| "shell".to_owned())
+}
+
 /// 一个终端的概况。列表和前端重挂时用。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TermSummary {
     pub id: u32,
-    pub title: String,
+    /// 标签上显示的名字。模型起的服务带它给的标题；用户自己开的 shell 是
+    /// None —— 默认叫什么由前端按界面语言定，宿主这边不写界面文案。
+    pub title: Option<String>,
     /// 起它的命令。模型起的服务才有；用户自己开的 shell 是 None。
     pub command: Option<String>,
     pub running: bool,
@@ -83,7 +92,7 @@ struct Term {
     sinks: Mutex<HashMap<String, Channel<TermEvent>>>,
     /// 输出缓冲。模型靠它读，前端重新挂上来时靠它回放。
     buf: Mutex<Vec<u8>>,
-    title: String,
+    title: Option<String>,
     command: Option<String>,
     /// 进程还活着。退出后条目仍然留着（模型要读最后那几行报错），
     /// 真正的移除只发生在 [`Terminals::close`]。
@@ -105,8 +114,8 @@ impl Term {
     /// 见到一次，要么在广播里见到一次，不会漏也不会重。分开锁的话，attach
     /// 挤在"进缓冲"和"广播"之间就会收到两遍。
     fn push_and_broadcast(&self, bytes: &[u8]) {
-        let mut sinks = self.sinks.lock().expect("出口锁");
-        push_capped(&mut self.buf.lock().expect("缓冲锁"), bytes);
+        let mut sinks = self.sinks.lock().expect("sink lock");
+        push_capped(&mut self.buf.lock().expect("buffer lock"), bytes);
         let data = base64::engine::general_purpose::STANDARD.encode(bytes);
         self.broadcast(&mut sinks, TermEvent::Data { data });
     }
@@ -140,11 +149,11 @@ impl Terminals {
         rows: u16,
         viewer: &str,
         sink: Channel<TermEvent>,
-    ) -> Result<u32, String> {
+    ) -> Result<u32, UiError> {
         self.start(
             root,
             None,
-            "终端".to_owned(),
+            None,
             Some((viewer.to_owned(), sink)),
             cols,
             rows,
@@ -166,13 +175,13 @@ impl Terminals {
         command: &str,
         title: &str,
         owner: &str,
-    ) -> Result<u32, String> {
+    ) -> Result<u32, UiError> {
         // 尺寸随便给一个像样的：面板挂上来时会按真实宽度 resize。
         // 太窄的话服务启动那几行 banner 会折得没法看。
         self.start(
             root,
             Some(command.to_owned()),
-            title.to_owned(),
+            Some(title.to_owned()),
             None,
             120,
             30,
@@ -187,12 +196,12 @@ impl Terminals {
         &self,
         root: Option<String>,
         command: Option<String>,
-        title: String,
+        title: Option<String>,
         sink: Option<(String, Channel<TermEvent>)>,
         cols: u16,
         rows: u16,
         owner: Option<String>,
-    ) -> Result<u32, String> {
+    ) -> Result<u32, UiError> {
         let pty = native_pty_system()
             .openpty(PtySize {
                 rows,
@@ -200,7 +209,7 @@ impl Terminals {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|e| format!("开不了 PTY：{e}"))?;
+            .map_err(|e| ui_error!("host.term.spawnFailed"; format!("openpty: {e}")))?;
 
         let mut cmd = default_shell();
         cmd.env("TERM", "xterm-256color");
@@ -221,7 +230,7 @@ impl Terminals {
         let child = pty
             .slave
             .spawn_command(cmd)
-            .map_err(|e| format!("shell 起不来：{e}"))?;
+            .map_err(|e| ui_error!("host.term.spawnFailed"; format!("spawn shell: {e}")))?;
         // slave 端必须及时放掉。留着的话我们自己也持有从端 fd，子进程退出后
         // 读端永远等不到 EOF —— 表现是关了 shell 标签还亮着。
         drop(pty.slave);
@@ -229,11 +238,11 @@ impl Terminals {
         let mut reader = pty
             .master
             .try_clone_reader()
-            .map_err(|e| format!("拿不到 PTY 读端：{e}"))?;
+            .map_err(|e| ui_error!("host.term.spawnFailed"; format!("pty reader: {e}")))?;
         let writer = pty
             .master
             .take_writer()
-            .map_err(|e| format!("拿不到 PTY 写端：{e}"))?;
+            .map_err(|e| ui_error!("host.term.spawnFailed"; format!("pty writer: {e}")))?;
 
         // 进程退出后是否留着条目。模型起的要留 —— 服务挂了它得能读到
         // 最后那几行报错，而那正是它最需要看的时候。
@@ -257,7 +266,7 @@ impl Terminals {
         self.0
             .map
             .lock()
-            .expect("终端表锁")
+            .expect("terminal table lock")
             .insert(id, Arc::clone(&term));
 
         // Windows 的退出监视要多持一份句柄（见下）。读线程会把 term 移走，
@@ -281,7 +290,7 @@ impl Terminals {
                         // 不答的话这个 PTY 一个字节都不会出。见 [`DsrFilter`]。
                         #[cfg(windows)]
                         let bytes = dsr.feed(&chunk[..n], || {
-                            let mut w = term.writer.lock().expect("writer 锁");
+                            let mut w = term.writer.lock().expect("writer lock");
                             let _ = w.write_all(b"\x1b[1;1R");
                             let _ = w.flush();
                         });
@@ -300,12 +309,12 @@ impl Terminals {
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             // 收尸。close() 先到的话表里已经没有了，那边做过收尾。
             if keep {
-                let _ = term.child.lock().expect("child 锁").wait();
-            } else if let Some(t) = inner.map.lock().expect("终端表锁").remove(&id) {
-                let _ = t.child.lock().expect("child 锁").wait();
+                let _ = term.child.lock().expect("child lock").wait();
+            } else if let Some(t) = inner.map.lock().expect("terminal table lock").remove(&id) {
+                let _ = t.child.lock().expect("child lock").wait();
             }
             // 前端收到后关掉对应标签。它不听了也无所谓 —— send 失败没有下文。
-            term.broadcast(&mut term.sinks.lock().expect("出口锁"), TermEvent::Exit);
+            term.broadcast(&mut term.sinks.lock().expect("sink lock"), TermEvent::Exit);
         });
 
         // `[约束]` Windows 还要盯着子进程本身。ConPTY 的读端在子进程退出后
@@ -331,7 +340,7 @@ impl Terminals {
                     return;
                 }
                 let exited = matches!(
-                    watcher_term.child.lock().expect("child 锁").try_wait(),
+                    watcher_term.child.lock().expect("child lock").try_wait(),
                     Ok(Some(_))
                 );
                 if exited {
@@ -339,16 +348,16 @@ impl Terminals {
                     // 还有没送出的输出，ClosePseudoConsole 连管道一起丢 ——
                     // "跑完就退"的服务（比如一条 echo）输出会整段消失，
                     // 模型读到的是空白。等缓冲静默一拍再关，封顶两秒。
-                    let mut last = watcher_term.buf.lock().expect("缓冲锁").len();
+                    let mut last = watcher_term.buf.lock().expect("buffer lock").len();
                     for _ in 0..20 {
                         std::thread::sleep(std::time::Duration::from_millis(100));
-                        let now = watcher_term.buf.lock().expect("缓冲锁").len();
+                        let now = watcher_term.buf.lock().expect("buffer lock").len();
                         if now == last {
                             break;
                         }
                         last = now;
                     }
-                    *watcher_term.master.lock().expect("master 锁") = None;
+                    *watcher_term.master.lock().expect("master lock") = None;
                     return;
                 }
             }
@@ -361,12 +370,12 @@ impl Terminals {
     ///
     /// 面板重新打开、或者模型在面板没开时起了服务，都走这里。回放是
     /// 一次性的一大块 —— xterm 自己会把它渲染成正确的屏幕。
-    pub fn attach(&self, viewer: &str, id: u32, sink: Channel<TermEvent>) -> Result<(), String> {
+    pub fn attach(&self, viewer: &str, id: u32, sink: Channel<TermEvent>) -> Result<(), UiError> {
         let t = self.get(id)?;
         // 回放和登记在同一把出口锁里，和读线程的 push_and_broadcast 对齐：
         // 否则挤在"进缓冲"和"广播"之间的 attach 会把同一段输出收两遍。
-        let mut sinks = t.sinks.lock().expect("出口锁");
-        let backlog = t.buf.lock().expect("缓冲锁").clone();
+        let mut sinks = t.sinks.lock().expect("sink lock");
+        let backlog = t.buf.lock().expect("buffer lock").clone();
         if !backlog.is_empty() {
             let data = base64::engine::general_purpose::STANDARD.encode(&backlog);
             let _ = sink.send(TermEvent::Data { data });
@@ -386,18 +395,18 @@ impl Terminals {
             .0
             .map
             .lock()
-            .expect("终端表锁")
+            .expect("terminal table lock")
             .values()
             .cloned()
             .collect();
         for t in terms {
-            t.sinks.lock().expect("出口锁").remove(viewer);
+            t.sinks.lock().expect("sink lock").remove(viewer);
         }
     }
 
     /// 所有终端的概况，按 id 升序。前端重建标签栏、模型找自己的服务都用它。
     pub fn list(&self) -> Vec<TermSummary> {
-        let g = self.0.map.lock().expect("终端表锁");
+        let g = self.0.map.lock().expect("terminal table lock");
         let mut out: Vec<TermSummary> = g
             .iter()
             .map(|(id, t)| TermSummary {
@@ -417,15 +426,15 @@ impl Terminals {
     ///
     /// `Err` = 这个终端不在了。模型只该读自己起的那些，那条边界由
     /// 调用方（[`crate::term_access`]）把关。
-    pub fn read(&self, id: u32, lines: usize) -> Result<String, String> {
+    pub fn read(&self, id: u32, lines: usize) -> Result<String, UiError> {
         let t = self.get(id)?;
-        let raw = t.buf.lock().expect("缓冲锁").clone();
+        let raw = t.buf.lock().expect("buffer lock").clone();
         Ok(tail_lines(&plain_text(&raw), lines))
     }
 
     /// 这个终端是模型起的吗（以及它还在不在）。
     pub fn info(&self, id: u32) -> Option<TermSummary> {
-        let g = self.0.map.lock().expect("终端表锁");
+        let g = self.0.map.lock().expect("terminal table lock");
         g.get(&id).map(|t| TermSummary {
             id,
             title: t.title.clone(),
@@ -441,30 +450,30 @@ impl Terminals {
         self.0
             .map
             .lock()
-            .expect("终端表锁")
+            .expect("terminal table lock")
             .get(&id)
             .and_then(|t| t.owner.clone())
     }
 
     /// 把键盘输入写进 shell。`data` 是 xterm 给的原始串（含控制序列）。
-    pub fn write(&self, id: u32, data: &str) -> Result<(), String> {
+    pub fn write(&self, id: u32, data: &str) -> Result<(), UiError> {
         let t = self.get(id)?;
         if !t.running.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err("这个终端已经结束了".to_owned());
+            return Err(ui_error!("host.term.exited"));
         }
-        let mut w = t.writer.lock().expect("writer 锁");
+        let mut w = t.writer.lock().expect("writer lock");
         w.write_all(data.as_bytes())
             .and_then(|()| w.flush())
-            .map_err(|e| format!("写入终端失败：{e}"))
+            .map_err(|e| ui_error!("host.term.writeFailed"; e))
     }
 
     /// 面板尺寸变了。不同步的话 shell 还按旧宽度折行，vim 之类的全屏
     /// 程序会画花。
-    pub fn resize(&self, id: u32, cols: u16, rows: u16) -> Result<(), String> {
+    pub fn resize(&self, id: u32, cols: u16, rows: u16) -> Result<(), UiError> {
         self.get(id)?
             .master
             .lock()
-            .expect("master 锁")
+            .expect("master lock")
             .as_ref()
             // 退出的终端没有 master 了（见字段注释）。面板还留着标签，
             // 拖动尺寸不该报一堆错 —— 没人在里面跑，尺寸也无所谓。
@@ -475,7 +484,7 @@ impl Terminals {
                     pixel_width: 0,
                     pixel_height: 0,
                 })
-                .map_err(|e| format!("调整终端尺寸失败：{e}"))
+                .map_err(|e| ui_error!("host.term.resizeFailed"; e))
             })
     }
 
@@ -490,7 +499,7 @@ impl Terminals {
     /// 报错了"是最日常的场景，让他手动复制粘贴几十行日志是白费功夫。
     /// 折中就是把决定权交给他，一次一个终端。
     pub fn set_shared(&self, id: u32, shared: bool) {
-        if let Some(t) = self.0.map.lock().expect("终端表锁").get(&id) {
+        if let Some(t) = self.0.map.lock().expect("terminal table lock").get(&id) {
             t.shared.store(shared, std::sync::atomic::Ordering::Relaxed);
         }
     }
@@ -500,7 +509,7 @@ impl Terminals {
         self.0
             .map
             .lock()
-            .expect("终端表锁")
+            .expect("terminal table lock")
             .get(&id)
             .is_some_and(|t| t.shared.load(std::sync::atomic::Ordering::Relaxed))
     }
@@ -511,7 +520,14 @@ impl Terminals {
     /// 就是 shell 自己，跑着东西时是那个进程的组 —— iTerm 的"关闭前确认"
     /// 用的同一招。拿不到就当不忙：这只是提示，不是权限。
     pub fn is_busy(&self, id: u32) -> bool {
-        let Some(t) = self.0.map.lock().expect("终端表锁").get(&id).cloned() else {
+        let Some(t) = self
+            .0
+            .map
+            .lock()
+            .expect("terminal table lock")
+            .get(&id)
+            .cloned()
+        else {
             return false;
         };
         if !t.running.load(std::sync::atomic::Ordering::Relaxed) {
@@ -526,10 +542,10 @@ impl Terminals {
             let fg = t
                 .master
                 .lock()
-                .expect("master 锁")
+                .expect("master lock")
                 .as_ref()
                 .and_then(|m| m.process_group_leader());
-            let shell = t.child.lock().expect("child 锁").process_id();
+            let shell = t.child.lock().expect("child lock").process_id();
             if let (Some(fg), Some(shell)) = (fg, shell) {
                 return fg != shell as i32;
             }
@@ -539,22 +555,22 @@ impl Terminals {
 
     /// 关一个终端。幂等 —— shell 自己先退了、用户又点关闭，第二下不该报错。
     pub fn close(&self, id: u32) {
-        if let Some(t) = self.0.map.lock().expect("终端表锁").remove(&id) {
-            let mut child = t.child.lock().expect("child 锁");
+        if let Some(t) = self.0.map.lock().expect("terminal table lock").remove(&id) {
+            let mut child = t.child.lock().expect("child lock");
             let _ = child.kill();
             // kill 之后立刻 wait，不留僵尸。读线程那边拿不到表项，不会重复收尸。
             let _ = child.wait();
         }
     }
 
-    fn get(&self, id: u32) -> Result<Arc<Term>, String> {
+    fn get(&self, id: u32) -> Result<Arc<Term>, UiError> {
         self.0
             .map
             .lock()
-            .expect("终端表锁")
+            .expect("terminal table lock")
             .get(&id)
             .cloned()
-            .ok_or_else(|| "这个终端已经关了".to_owned())
+            .ok_or_else(|| ui_error!("host.term.closed", id = id))
     }
 }
 
@@ -877,7 +893,13 @@ mod tests {
         let terms = Terminals::default();
         let (ch, got) = probe();
         let id = terms
-            .open(Some(std::env::temp_dir().display().to_string()), 80, 24, "webview:main", ch)
+            .open(
+                Some(std::env::temp_dir().display().to_string()),
+                80,
+                24,
+                "webview:main",
+                ch,
+            )
             .expect("开终端");
 
         // Windows 上 ConPTY 的光标查询由宿主应答（见 DsrFilter），
@@ -904,7 +926,9 @@ mod tests {
     fn 关闭后再写会报错而不是恐慌() {
         let terms = Terminals::default();
         let (ch, _got) = probe();
-        let id = terms.open(None, 80, 24, "webview:main", ch).expect("开终端");
+        let id = terms
+            .open(None, 80, 24, "webview:main", ch)
+            .expect("开终端");
 
         terms.close(id);
         assert!(
@@ -919,7 +943,9 @@ mod tests {
     fn shell_退出后自动摘表并广播_exit() {
         let terms = Terminals::default();
         let (ch, got) = probe();
-        let id = terms.open(None, 80, 24, "webview:main", ch).expect("开终端");
+        let id = terms
+            .open(None, 80, 24, "webview:main", ch)
+            .expect("开终端");
 
         // 等提示符:应答光标查询（宿主做，见 DsrFilter）之前 shell 不收输入。
         #[cfg(windows)]

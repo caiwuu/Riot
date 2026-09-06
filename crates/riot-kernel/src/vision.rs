@@ -340,7 +340,7 @@ mod tests {
         let e = vision(
             false,
             vec![ProviderEvent::Error(ProviderError::Auth {
-                message: "key 不对".into(),
+                error: riot_protocol::ui_error!("kernel.provider.auth"; "key 不对"),
             })],
         )
         .describe(req())

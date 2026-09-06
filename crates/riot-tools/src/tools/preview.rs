@@ -20,7 +20,9 @@ use std::path::PathBuf;
 
 use riot_protocol::browser::BLANK_PAGE;
 use riot_protocol::permission::{DecisionReason, PermissionContext, PermissionResult};
+use riot_protocol::text::UiText;
 use riot_protocol::tool::{PromptContext, Tool, ToolContext, ToolOutcome};
+use riot_protocol::ui_text;
 
 use super::path;
 
@@ -61,10 +63,10 @@ impl Tool for PreviewFile {
             .into()
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         match input.get("path").and_then(|v| v.as_str()) {
-            Some(p) => format!("预览 {p}"),
-            None => "预览文件".to_owned(),
+            Some(p) => ui_text!("tools.preview.file", path = p),
+            None => ui_text!("tools.preview.any"),
         }
     }
 
@@ -172,8 +174,8 @@ impl Tool for ShowBrowser {
             .into()
     }
 
-    fn describe(&self, _input: &serde_json::Value) -> String {
-        "打开浏览器面板给用户看".to_owned()
+    fn describe(&self, _input: &serde_json::Value) -> UiText {
+        ui_text!("tools.preview.showBrowser")
     }
 
     fn is_read_only(&self, _input: &serde_json::Value) -> bool {

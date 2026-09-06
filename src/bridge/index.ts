@@ -25,6 +25,10 @@ import {
 
 export { host, TransportDisconnected };
 export type { LinkStatus };
+export { HostError, describeError, isHostError, renderUiError, renderUiText } from "./errors";
+export type { UiErrorPayload, UiTextPayload } from "./errors";
+import { type UiErrorPayload, type UiTextPayload, toHostError } from "./errors";
+import { t } from "../i18n";
 
 import type {
   AgentEvent,
@@ -88,10 +92,15 @@ export class IpcTimeoutError extends Error {
   readonly timeoutMs: number;
 
   constructor(command: string, timeoutMs: number) {
-    super(`宿主没有响应：${command} 超过 ${Math.round(timeoutMs / 1000)} 秒没有返回。`);
+    super(t("errors.ipcTimeout", { command, seconds: Math.round(timeoutMs / 1000) }));
     this.name = "IpcTimeoutError";
     this.command = command;
     this.timeoutMs = timeoutMs;
+  }
+
+  /** 调用方普遍用 `String(e)` 铺文案；别让用户看到 "IpcTimeoutError: " 前缀。 */
+  override toString(): string {
+    return this.message;
   }
 }
 
@@ -142,7 +151,11 @@ function invoke<T>(
   args?: Record<string, unknown>,
   timeoutMs: number | null = T_FAST,
 ): Promise<T> {
-  const call = transport.invoke<T>(command, args);
+  // 宿主的拒绝值是 UiError 的 JSON，这里统一包成 HostError —— 它的
+  // `toString()` 就是按当前语言查出来的文案，调用方 `String(e)` 直接上屏。
+  const call = transport.invoke<T>(command, args).catch((e: unknown) => {
+    throw toHostError(e);
+  });
   if (timeoutMs === null) return call;
   return new Promise<T>((resolve, reject) => {
     const timer = window.setTimeout(
@@ -156,8 +169,6 @@ function invoke<T>(
       },
       (e: unknown) => {
         window.clearTimeout(timer);
-        // 原样往外抛。宿主的错误多半是一句给人看的中文，包进 Error
-        // 之后调用方的 `String(e)` 会平白多出 "Error: " 前缀。
         reject(e);
       },
     );
@@ -527,7 +538,10 @@ export function deleteMessage(sessionId: string, messageId: string): Promise<voi
 /** 一条斜杠命令。模板正文留在宿主，展开走 slashExpand。 */
 export interface SlashCommand {
   name: string;
+  /** 用户自己在 frontmatter 里写的说明，原样显示。内置命令这里为空。 */
   description: string;
+  /** 内置命令的说明（词典键）。只有 `source === "builtin"` 才有。 */
+  descriptionText?: UiTextPayload;
   argumentHint?: string;
   /** `builtin` / `project` / `global` / `skill`。 */
   source: string;
@@ -596,7 +610,7 @@ export interface HookInfo {
   timeoutSecs: number;
   /** `global` / `project`。 */
   source: string;
-  error?: string;
+  error?: UiErrorPayload | null;
 }
 
 /** hooks.json 里配了什么（含解析失败的文件）。 */
@@ -710,7 +724,7 @@ export async function pickFiles(imagesOnly = false): Promise<string[]> {
   if (!host.nativePaths) {
     // 浏览器里选到的是这台设备的文件，没有宿主机上的路径。图片那条路
     // 由 Composer 用 <input type=file> 直接读内容走；引用文件请用 @。
-    throw new Error("网页版不能选服务器上的文件，请在输入框里用 @ 引用它。");
+    throw new Error(t("errors.webNoServerFiles"));
   }
   const { open } = await import("@tauri-apps/plugin-dialog");
   // 分开写而不是塞一个 undefined：tsconfig 开了 exactOptionalPropertyTypes，
@@ -718,7 +732,9 @@ export async function pickFiles(imagesOnly = false): Promise<string[]> {
   const picked = imagesOnly
     ? await open({
       multiple: true,
-      filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "gif", "webp"] }],
+      filters: [
+        { name: t("errors.dialog.imagesFilter"), extensions: ["png", "jpg", "jpeg", "gif", "webp"] },
+      ],
     })
     : await open({ multiple: true });
   if (!picked) return [];
@@ -913,7 +929,7 @@ export interface SkillInfo {
   /** `builtin` 随应用分发；`pack` 来自能力包；`global` / `project` 是用户写的。 */
   source: "builtin" | "pack" | "global" | "project";
   /** 解析失败的原因。没有 = 可用。 */
-  error?: string | null;
+  error?: UiErrorPayload | null;
 }
 
 /** 当前可用的技能清单。`root` 传当前会话的项目根；null 只列全局。 */
@@ -978,8 +994,8 @@ export function sandboxUninstall(): Promise<void> {
 /** 一个可下载的能力包。 */
 export interface PackStatus {
   id: string;
-  name: string;
-  description: string;
+  name: UiTextPayload;
+  description: UiTextPayload;
   /** 已装版本。null = 没装。 */
   installedVersion: string | null;
   /** 远端可装版本。null = 清单没拉到，或这个平台没有包。 */
@@ -990,7 +1006,7 @@ export interface PackStatus {
   installedSize: number;
   supported: boolean;
   /** 清单拉取失败的原因。有值时显示"离线"，而不是"没有可用更新"。 */
-  manifestError: string | null;
+  manifestError: UiErrorPayload | null;
 }
 
 /** 安装进度。各阶段耗时差着数量级，所以分开报而不是合成一个百分比。 */
@@ -1000,7 +1016,7 @@ export type PackProgress =
   | { kind: "extracting" }
   | { kind: "selfCheck" }
   | { kind: "done"; version: string }
-  | { kind: "failed"; error: string };
+  | { kind: "failed"; error: UiErrorPayload };
 
 /** 能力包清单：装了什么、有什么可装。 */
 export function packsStatus(): Promise<PackStatus[]> {
@@ -1200,7 +1216,7 @@ export function openBrowser(
       if (active) onReady?.(s);
     },
     (e: unknown) => {
-      if (active) console.error("打开浏览器面板失败", e);
+      if (active) console.error("Failed to open browser panel", e);
     },
   );
   return {
@@ -1264,7 +1280,7 @@ export function watchBrowserTabs(sessionId: string, onChange: () => void): () =>
   };
   invoke("browser_watch_tabs", { sessionId, onChange: channel }).catch((e: unknown) => {
     // 会话没了、浏览器起不来 —— 标签栏退化成纯轮询，不值得打扰用户。
-    console.warn("订阅浏览器标签变更失败", e);
+    console.warn("Failed to subscribe to browser tab changes", e);
   });
   return () => {
     live = false;
@@ -1423,7 +1439,8 @@ export function termOpen(
 /** 一个已经存在的终端。 */
 export interface TermSummary {
   id: number;
-  title: string;
+  /** 模型起的服务带它给的标题；用户自己开的 shell 是 null，默认名由前端按语言起。 */
+  title: string | null;
   /** 起它的命令。模型起的服务才有；用户自己开的 shell 是 null。 */
   command: string | null;
   running: boolean;
@@ -1480,12 +1497,10 @@ export function termBusy(id: number): Promise<boolean> {
   return invoke<boolean>("term_busy", { id });
 }
 
-/** 网页版里没有"这台机器"可打开。所有本地打开类操作统一用这句拒绝。 */
-const NO_LOCAL_OPEN = "网页版无法在这台设备上打开服务器上的文件。";
-
 /** 在系统文件管理器（访达/资源管理器）里显示这个目录。 */
 export async function revealInFinder(path: string): Promise<void> {
-  if (!host.openLocal) throw new Error(NO_LOCAL_OPEN);
+  // 网页版里没有"这台机器"可打开。所有本地打开类操作统一用这句拒绝。
+  if (!host.openLocal) throw new Error(t("errors.webNoLocalOpen"));
   const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
   await revealItemInDir(path);
 }
@@ -1500,17 +1515,17 @@ export async function openInDefaultApp(path: string): Promise<void> {
   try {
     await openPath(path);
   } catch (e) {
-    console.warn("打不开这个文件", path, e);
+    console.warn("Failed to open file", path, e);
   }
 }
 
 /** 用系统默认应用打开路径。失败会抛，调用方自己决定怎么告诉用户。 */
 export async function openPath(path: string): Promise<void> {
-  if (!host.openLocal) throw new Error(NO_LOCAL_OPEN);
+  if (!host.openLocal) throw new Error(t("errors.webNoLocalOpen"));
   // opener 插件是分离式启动，目标不存在它也报成功。先自己查一遍，
   // 让"文件不存在"成为看得见的失败，而不是点了没反应。
   if (!(await invoke<boolean>("path_exists", { path }))) {
-    throw new Error(`文件不存在：${path}`);
+    throw new Error(t("errors.fileNotFound", { path }));
   }
   const { openPath: open } = await import("@tauri-apps/plugin-opener");
   await open(path);
@@ -1521,7 +1536,7 @@ export async function openInBrowser(url: string): Promise<void> {
   if (!host.openLocal) {
     // noopener：新页面拿不到 window.opener，别让外站摸到这个页面。
     if (!window.open(url, "_blank", "noopener,noreferrer")) {
-      throw new Error("浏览器拦住了新窗口，请允许弹出窗口后重试。");
+      throw new Error(t("errors.popupBlocked"));
     }
     return;
   }
@@ -1677,7 +1692,7 @@ export function remoteClearToken(): void {
  * 浏览器里：上一次被宿主拒绝的原因（"令牌不对"、"尝试太频繁"），给令牌
  * 表单显示。没被拒过、或被拒后又成功连上过就是 null。桌面里永远 null。
  */
-export function remoteDeniedReason(): string | null {
+export function remoteDeniedReason(): UiTextPayload | null {
   return webTransport?.deniedReason() ?? null;
 }
 
@@ -1693,7 +1708,7 @@ export interface RemoteStatus {
   qrSvg: string | null;
   token: string | null;
   connections: number;
-  error: string | null;
+  error: UiErrorPayload | null;
 }
 
 export function remoteStatus(): Promise<RemoteStatus> {
@@ -1710,7 +1725,7 @@ export interface DirBrowse {
   path: string;
   parent: string | null;
   entries: { name: string; path: string }[];
-  error: string | null;
+  error: UiErrorPayload | null;
   /** 请求的路径不存在，这次列的是退回去的家目录；值是原路径，界面要说明。 */
   missing: string | null;
 }
@@ -1728,7 +1743,7 @@ export function browseDirs(path?: string | null): Promise<DirBrowse> {
  */
 export async function pickDirectory(defaultPath?: string): Promise<string | null> {
   if (!host.nativePaths) {
-    throw new Error("网页版请使用应用内的目录选择器。");
+    throw new Error(t("errors.webUseInAppDirPicker"));
   }
   const { open } = await import("@tauri-apps/plugin-dialog");
   const picked = await open({

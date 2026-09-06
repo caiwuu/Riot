@@ -19,6 +19,7 @@ import {
   type RunTargetSpec,
   type SchedulePatch,
   type ScheduleRunRecord,
+  renderUiError,
   type ScheduledTask,
   scheduleCreate,
   scheduleSetEnabled,
@@ -26,6 +27,7 @@ import {
   type SessionInfo,
   type WhenSpec,
 } from "../bridge";
+import { type MessageKey, dateTimeFormat, t, tn, useT } from "../i18n";
 import { basename } from "../pathDisplay";
 import { Chevron } from "./Chevron";
 import { FieldSelect } from "./FieldSelect";
@@ -36,35 +38,39 @@ import { ArrowOutIcon, DotsIcon, PlusIcon } from "./icons";
 
 type Filter = "all" | "enabled" | "paused" | "done";
 
-const TABS: { id: Filter; label: string }[] = [
-  { id: "all", label: "全部" },
-  { id: "enabled", label: "已开启" },
-  { id: "paused", label: "已暂停" },
-  { id: "done", label: "已完成" },
+const TABS: { id: Filter; label: MessageKey }[] = [
+  { id: "all", label: "schedules.tab.all" },
+  { id: "enabled", label: "schedules.tab.enabled" },
+  { id: "paused", label: "schedules.status.paused" },
+  { id: "done", label: "schedules.status.done" },
 ];
 
-const WEEKDAY_NAMES = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+/** 星期名（1 = 周一 … 7 = 周日），按当前界面语言。2024-01-01 是周一。 */
+function weekdayName(weekday: number): string {
+  if (weekday < 1 || weekday > 7) return "?";
+  return dateTimeFormat({ weekday: "long" }).format(new Date(2024, 0, weekday));
+}
 
 /** "每 N 分钟"：整小时 / 整天的说成小时 / 天，念着顺。 */
 function everyText(minutes: number): string {
-  if (minutes % 1440 === 0) return `每 ${minutes / 1440} 天`;
-  if (minutes % 60 === 0) return `每 ${minutes / 60} 小时`;
-  return `每 ${minutes} 分钟`;
+  if (minutes % 1440 === 0) return tn("schedules.repeat.everyDays", minutes / 1440);
+  if (minutes % 60 === 0) return tn("schedules.repeat.everyHours", minutes / 60);
+  return tn("schedules.repeat.everyMinutes", minutes);
 }
 
-function repeatText(t: ScheduledTask): string {
-  const r = t.repeat;
+function repeatText(task: ScheduledTask): string {
+  const r = task.repeat;
   switch (r.kind) {
     case "once":
-      return "一次性";
+      return t("schedules.repeat.once");
     case "every":
       return everyText(r.minutes);
     case "daily":
-      return `每天 ${r.time}`;
+      return t("schedules.repeat.dailyAt", { time: r.time });
     case "weekdays":
-      return `工作日 ${r.time}`;
+      return t("schedules.repeat.weekdaysAt", { time: r.time });
     case "weekly":
-      return `每${WEEKDAY_NAMES[r.weekday - 1] ?? "?"} ${r.time}`;
+      return t("schedules.repeat.weeklyAt", { weekday: weekdayName(r.weekday), time: r.time });
   }
 }
 
@@ -74,33 +80,31 @@ export function isDoneSchedule(t: ScheduledTask): boolean {
 }
 
 /** "下次运行"的相对说法。远了退回绝对时刻（掐掉年份）。 */
-function nextText(t: ScheduledTask): string {
-  if (!t.enabled) return isDoneSchedule(t) ? "已跑完" : "已暂停";
-  if (!t.nextRunMs) return "不再运行";
-  const d = t.nextRunMs - Date.now();
-  if (d <= 60_000) return "下次运行 1 分钟内";
-  if (d < 3_600_000) return `下次运行 ${Math.round(d / 60_000)} 分钟后`;
-  if (d < 86_400_000) return `下次运行 ${Math.round(d / 3_600_000)} 小时后`;
-  return `下次运行 ${t.nextRunLocal?.slice(5) ?? ""}`;
+function nextText(task: ScheduledTask): string {
+  if (!task.enabled) return t(isDoneSchedule(task) ? "schedules.next.finished" : "schedules.status.paused");
+  if (!task.nextRunMs) return t("schedules.next.never");
+  const d = task.nextRunMs - Date.now();
+  if (d <= 60_000) return t("schedules.next.withinMinute");
+  if (d < 3_600_000) return tn("schedules.next.inMinutes", Math.round(d / 60_000));
+  if (d < 86_400_000) return tn("schedules.next.inHours", Math.round(d / 3_600_000));
+  return t("schedules.next.at", { time: task.nextRunLocal?.slice(5) ?? "" });
 }
 
 /** 建议模板。点击把整段话送回输入框，让对话里的 agent 接手创建。 */
-const SUGGESTIONS = [
+const SUGGESTIONS: { id: string; title: MessageKey; when: MessageKey; desc: MessageKey; snippet: MessageKey }[] = [
   {
-    title: "每日晨报",
-    when: "工作日 8:00",
-    desc: "把项目的最新改动和待办整理成简明的开工简报",
-    snippet:
-      "帮我设一个定时任务：每个工作日早上 8:00，看看这个项目最近的提交和改动，" +
-      "把值得注意的事整理成一份简明的晨间简报。",
+    id: "morning",
+    title: "schedules.suggest.morning.title",
+    when: "schedules.suggest.morning.when",
+    desc: "schedules.suggest.morning.desc",
+    snippet: "schedules.suggest.morning.snippet",
   },
   {
-    title: "每周回顾",
-    when: "星期五 16:00",
-    desc: "每周五将你最近的工作整理成简明的状态更新",
-    snippet:
-      "帮我设一个定时任务：每周五 16:00，把本周这个项目的提交记录和改动" +
-      "整理成一份简明的周报。",
+    id: "weekly",
+    title: "schedules.suggest.weekly.title",
+    when: "schedules.suggest.weekly.when",
+    desc: "schedules.suggest.weekly.desc",
+    snippet: "schedules.suggest.weekly.snippet",
   },
 ];
 
@@ -140,6 +144,7 @@ export function SchedulesPage({
   onRerunMissed: (m: MissedRun) => void;
   onDismissMissed: () => void;
 }) {
+  const { t, tn } = useT();
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
 
@@ -169,14 +174,14 @@ export function SchedulesPage({
         <div className="sp-scroll">
         <div className="sp-inner">
           <div className="sp-head">
-            <h2>定时任务</h2>
-            <p className="sp-sub">让 Riot 到点自动跑一轮 —— 手动填表创建，或在对话里说时间和要做的事</p>
+            <h2>{t("schedules.title")}</h2>
+            <p className="sp-sub">{t("schedules.subtitle")}</p>
           </div>
 
           <input
             className="sp-search"
             type="search"
-            placeholder="搜索定时任务"
+            placeholder={t("schedules.searchPlaceholder")}
             value={query}
             onChange={(e) => setQuery(e.currentTarget.value)}
           />
@@ -191,7 +196,7 @@ export function SchedulesPage({
                   className={filter === tab.id ? "sp-tab active" : "sp-tab"}
                   onClick={() => setFilter(tab.id)}
                 >
-                  {tab.label}
+                  {t(tab.label)}
                 </button>
               ))}
             </div>
@@ -201,11 +206,11 @@ export function SchedulesPage({
                 disabled={!schedules.some(isDoneSchedule)}
                 onClick={onClearDone}
               >
-                清理已完成
+                {t("schedules.clearDone")}
               </button>
               <button className="sp-create" onClick={onCreate} aria-haspopup="menu">
                 <PlusIcon />
-                创建
+                {t("schedules.create")}
                 <Chevron down open={false} />
               </button>
             </div>
@@ -213,20 +218,20 @@ export function SchedulesPage({
 
           {missed.length > 0 ? (
             <div className="sp-missed" role="status">
-              <div className="sp-missed-title">App 关着的时候错过了 {missed.length} 个任务</div>
+              <div className="sp-missed-title">{tn("schedules.missed.title", missed.length)}</div>
               {missed.map((m) => (
                 <div className="sp-missed-row" key={m.taskId}>
                   <span className="sp-missed-name">
-                    「{m.name}」错过 {m.count} 次，最后一次 {m.lastLocal}
+                    {tn("schedules.missed.row", m.count, { name: m.name, time: m.lastLocal })}
                   </span>
                   <button className="sp-missed-btn" onClick={() => onRerunMissed(m)}>
-                    补跑一次
+                    {t("schedules.missed.rerun")}
                   </button>
                 </div>
               ))}
               <div className="sp-missed-foot">
                 <button className="ghost" onClick={onDismissMissed}>
-                  都不用跑
+                  {t("schedules.missed.dismiss")}
                 </button>
               </div>
             </div>
@@ -235,41 +240,41 @@ export function SchedulesPage({
           <div className="sp-list">
             {shown.length === 0 ? (
               <div className="sp-empty">
-                {schedules.length === 0
-                  ? "还没有定时任务。点「创建」，或试试下面的建议。"
-                  : "没有匹配的任务。"}
+                {schedules.length === 0 ? t("schedules.empty.none") : t("schedules.empty.noMatch")}
               </div>
             ) : (
-              shown.map((t) => {
-                const m = missedOf(t.id);
+              shown.map((task) => {
+                const m = missedOf(task.id);
                 return (
                   <div
                     className={
-                      (t.enabled ? "sp-row" : "sp-row paused") +
-                      (t.id === selected ? " selected" : "") +
-                      (menuAnchor === `schedule:${t.id}` ? " menu-open" : "")
+                      (task.enabled ? "sp-row" : "sp-row paused") +
+                      (task.id === selected ? " selected" : "") +
+                      (menuAnchor === `schedule:${task.id}` ? " menu-open" : "")
                     }
-                    key={t.id}
-                    onContextMenu={(e) => onMenu(e, t)}
+                    key={task.id}
+                    onContextMenu={(e) => onMenu(e, task)}
                   >
                     <button
                       className="sp-row-main"
-                      onClick={() => onSelect(t.id === selected ? null : t.id)}
-                      title={t.prompt}
+                      onClick={() => onSelect(task.id === selected ? null : task.id)}
+                      title={task.prompt}
                     >
-                      <StatusRing t={t} />
+                      <StatusRing t={task} />
                       <span className="sp-row-text">
                         <span className="sp-row-name">
-                          {t.name}
-                          {m ? <span className="sp-row-missed">错过 {m.count} 次</span> : null}
+                          {task.name}
+                          {m ? (
+                            <span className="sp-row-missed">{tn("schedules.row.missed", m.count)}</span>
+                          ) : null}
                         </span>
                         <span className="sp-row-meta">
-                          {repeatText(t)} · {nextText(t)}
-                          {t.sessionId ? " · 在原会话续跑" : ""}
+                          {repeatText(task)} · {nextText(task)}
+                          {task.sessionId ? ` · ${t("schedules.row.continueInSession")}` : ""}
                         </span>
                       </span>
                     </button>
-                    <button className="row-btn" onClick={(e) => onMenu(e, t)} title="任务操作">
+                    <button className="row-btn" onClick={(e) => onMenu(e, task)} title={t("schedules.row.actions")}>
                       <DotsIcon />
                     </button>
                   </div>
@@ -279,14 +284,14 @@ export function SchedulesPage({
           </div>
 
           <div className="sp-suggest">
-            <div className="sp-suggest-caption">建议</div>
+            <div className="sp-suggest-caption">{t("schedules.suggest.caption")}</div>
             {SUGGESTIONS.map((s) => (
-              <button className="sp-suggest-row" key={s.title} onClick={() => onSuggest(s.snippet)}>
+              <button className="sp-suggest-row" key={s.id} onClick={() => onSuggest(t(s.snippet))}>
                 <span className="sp-row-name">
-                  {s.title}
-                  <span className="sp-suggest-when">{s.when}</span>
+                  {t(s.title)}
+                  <span className="sp-suggest-when">{t(s.when)}</span>
                 </span>
-                <span className="sp-row-meta">{s.desc}</span>
+                <span className="sp-row-meta">{t(s.desc)}</span>
               </button>
             ))}
           </div>
@@ -323,13 +328,23 @@ function StatusRing({ t }: { t: ScheduledTask }) {
 /** 重复选项的扁平表示："once"/"every"/"daily"/"weekdays"/"w1".."w7"。 */
 type RepeatChoice = "once" | "every" | "daily" | "weekdays" | `w${number}`;
 
-const REPEAT_OPTIONS = [
-  { value: "once", label: "一次性" },
-  { value: "every", label: "每隔…" },
-  { value: "daily", label: "每天" },
-  { value: "weekdays", label: "工作日" },
-  ...WEEKDAY_NAMES.map((w, i) => ({ value: `w${i + 1}`, label: `每${w}` })),
+const REPEAT_FIXED: { value: RepeatChoice; label: MessageKey }[] = [
+  { value: "once", label: "schedules.repeat.once" },
+  { value: "every", label: "schedules.repeat.every" },
+  { value: "daily", label: "schedules.repeat.daily" },
+  { value: "weekdays", label: "schedules.repeat.weekdays" },
 ];
+
+/** 渲染时现算：标签跟着当前语言走，星期名由 Intl 给。 */
+function repeatOptions(): { value: string; label: string }[] {
+  return [
+    ...REPEAT_FIXED.map((o) => ({ value: o.value, label: t(o.label) })),
+    ...Array.from({ length: 7 }, (_, i) => ({
+      value: `w${i + 1}`,
+      label: t("schedules.repeat.weekly", { weekday: weekdayName(i + 1) }),
+    })),
+  ];
+}
 
 function choiceOf(t: ScheduledTask): RepeatChoice {
   switch (t.repeat.kind) {
@@ -370,9 +385,10 @@ function intervalMinutes(iv: Interval): number | null {
 
 /** 频率组里"间隔"那一行：数值输入 + 单位下拉。 */
 function IntervalRow({ value, onChange }: { value: Interval; onChange: (v: Interval) => void }) {
+  const { t } = useT();
   return (
     <div className="sp-d-row">
-      <span>间隔</span>
+      <span>{t("schedules.form.interval")}</span>
       <span className="sp-d-interval">
         <input
           className="sp-d-input sp-d-interval-n"
@@ -382,15 +398,15 @@ function IntervalRow({ value, onChange }: { value: Interval; onChange: (v: Inter
           inputMode="numeric"
           value={value.n}
           onChange={(e) => onChange({ ...value, n: e.currentTarget.value })}
-          aria-label="间隔数值"
+          aria-label={t("schedules.form.intervalValue")}
         />
         <FieldSelect
           className="sp-d-field"
           value={value.unit}
           onChange={(u) => onChange({ ...value, unit: u as Interval["unit"] })}
           options={[
-            { value: "min", label: "分钟" },
-            { value: "hour", label: "小时" },
+            { value: "min", label: t("schedules.unit.minutes") },
+            { value: "hour", label: t("schedules.unit.hours") },
           ]}
         />
       </span>
@@ -434,9 +450,12 @@ export function ScheduleDetail({
   const [onceAt, setOnceAt] = useState(task.nextRunLocal ?? "");
   const [saving, setSaving] = useState(false);
   const [saveFailed, setSaveFailed] = useState(false);
+  const { t } = useT();
 
   const done = isDoneSchedule(task);
-  const status = task.enabled ? "活跃" : done ? "已完成" : "已暂停";
+  const status = t(
+    task.enabled ? "schedules.status.active" : done ? "schedules.status.done" : "schedules.status.paused",
+  );
 
   /** 频率相对任务当前值动过没有。三种形态各看自己那一项。 */
   const whenChanged =
@@ -467,7 +486,7 @@ export function ScheduleDetail({
     if (runIn !== wasRunIn || (runIn === "session" && sessionId !== task.sessionId) || (runIn === "new" && root !== task.root)) {
       if (runIn === "session") {
         if (!sessionId) {
-          onError("还没选会话", "「运行于现有会话」需要先选一个会话。");
+          onError(t("schedules.err.noSession.title"), t("schedules.err.noSession.body"));
           return;
         }
         patch.target = { kind: "session", id: sessionId };
@@ -479,7 +498,7 @@ export function ScheduleDetail({
     if (whenChanged) {
       const when = buildWhen(choice, time, onceAt, every);
       if (!when) {
-        onError("间隔不对", "「每隔」的数值要是大于 0 的整数。");
+        onError(t("schedules.err.badInterval.title"), t("schedules.err.badInterval.body"));
         return;
       }
       patch.when = when;
@@ -491,7 +510,7 @@ export function ScheduleDetail({
       setSaveFailed(false);
     } catch (e) {
       setSaveFailed(true);
-      onError("保存失败", e);
+      onError(t("schedules.saveFailed"), e);
     } finally {
       setSaving(false);
     }
@@ -509,25 +528,25 @@ export function ScheduleDetail({
           aria-hidden={!dirty}
           onClick={() => void save()}
         >
-          {saving ? "保存中…" : saveFailed ? "重试保存" : "保存"}
+          {saving ? t("common.saving") : saveFailed ? t("schedules.retrySave") : t("common.save")}
         </button>
-        <button className="row-btn" onClick={(e) => onMenu(e, task)} title="更多操作">
+        <button className="row-btn" onClick={(e) => onMenu(e, task)} title={t("schedules.moreActions")}>
           <DotsIcon />
         </button>
         {!done ? (
           <button
             className="row-btn"
-            title={task.enabled ? "暂停" : "恢复"}
+            title={task.enabled ? t("schedules.pause") : t("schedules.resume")}
             onClick={() =>
               void scheduleSetEnabled(task.id, !task.enabled).catch((e: unknown) =>
-                onError(task.enabled ? "暂停失败" : "恢复失败", e),
+                onError(task.enabled ? t("schedules.pauseFailed") : t("schedules.resumeFailed"), e),
               )
             }
           >
             <PauseResumeIcon paused={!task.enabled} />
           </button>
         ) : null}
-        <button className="row-btn" onClick={onClose} title="关闭" aria-label="关闭详情">
+        <button className="row-btn" onClick={onClose} title={t("common.close")} aria-label={t("schedules.closeDetail")}>
           <CloseIcon />
         </button>
       </div>
@@ -536,7 +555,7 @@ export function ScheduleDetail({
         className="sp-d-name"
         value={name}
         onChange={(e) => setName(e.currentTarget.value)}
-        aria-label="任务名"
+        aria-label={t("schedules.form.name")}
         spellCheck={false}
       />
 
@@ -545,34 +564,34 @@ export function ScheduleDetail({
         value={prompt}
         onChange={(e) => setPrompt(e.currentTarget.value)}
         rows={6}
-        aria-label="到点发出的提示词"
+        aria-label={t("schedules.form.prompt")}
         spellCheck={false}
       />
 
-      <div className="sp-d-caption">详情</div>
+      <div className="sp-d-caption">{t("schedules.section.details")}</div>
       <div className="sp-d-group">
         <div className="sp-d-row">
-          <span>运行于</span>
+          <span>{t("schedules.form.runIn")}</span>
           <FieldSelect
             className="sp-d-field"
             value={runIn}
             onChange={(v) => setRunIn(v as "new" | "session")}
             options={[
-              { value: "new", label: "新会话" },
-              { value: "session", label: "现有会话" },
+              { value: "new", label: t("schedules.newSession") },
+              { value: "session", label: t("schedules.existingSession") },
             ]}
           />
         </div>
         {runIn === "session" ? (
           <div className="sp-d-row">
             <span className="sp-d-label">
-              会话
+              {t("schedules.form.session")}
               <button
                 className="row-btn"
                 disabled={!sessionId || !sessions.some((s) => s.id === sessionId)}
                 onClick={() => sessionId && onOpenSession(sessionId)}
-                title="打开这个会话"
-                aria-label="打开这个会话"
+                title={t("schedules.openSession")}
+                aria-label={t("schedules.openSession")}
               >
                 <ArrowOutIcon />
               </button>
@@ -581,7 +600,7 @@ export function ScheduleDetail({
           </div>
         ) : (
           <div className="sp-d-row">
-            <span>项目</span>
+            <span>{t("schedules.form.project")}</span>
             <FieldSelect
               className="sp-d-field"
               value={root}
@@ -597,27 +616,27 @@ export function ScheduleDetail({
         )}
       </div>
 
-      <div className="sp-d-caption">频率</div>
+      <div className="sp-d-caption">{t("schedules.section.frequency")}</div>
       <div className="sp-d-group">
         <div className="sp-d-row">
-          <span>重复</span>
+          <span>{t("schedules.form.repeat")}</span>
           <FieldSelect
             className="sp-d-field"
             value={choice}
             onChange={(v) => setChoice(v as RepeatChoice)}
-            options={REPEAT_OPTIONS}
+            options={repeatOptions()}
           />
         </div>
         {choice === "once" ? (
           <div className="sp-d-row">
-            <span>时刻</span>
+            <span>{t("schedules.form.datetime")}</span>
             <DateTimePicker className="sp-d-field" value={onceAt} onChange={setOnceAt} />
           </div>
         ) : choice === "every" ? (
           <IntervalRow value={every} onChange={setEvery} />
         ) : (
           <div className="sp-d-row">
-            <span>时间</span>
+            <span>{t("schedules.form.time")}</span>
             <TimePicker className="sp-d-field" value={time} onChange={setTime} />
           </div>
         )}
@@ -644,17 +663,20 @@ function RunHistory({
   sessions: SessionInfo[];
   onOpenSession: (id: string) => void;
 }) {
+  const { t } = useT();
   if (runs.length === 0) return null;
   return (
     <>
-      <div className="sp-d-caption">运行历史</div>
+      <div className="sp-d-caption">{t("schedules.runs.title")}</div>
       <div className="sp-d-group sp-runs">
         {runs.map((r) => {
           const state = r.error ? "failed" : r.finishedAtMs ? "ok" : "running";
           const session = r.sessionId ? sessions.find((s) => s.id === r.sessionId) : undefined;
           // 会话还在就能点过去；已删（或开跑就失败没会话）只展示。
           const canOpen = Boolean(session);
-          const title = r.error ?? (state === "running" ? "还在跑" : "已完成");
+          const errorText = r.error ? renderUiError(r.error) : null;
+          const title =
+            errorText ?? t(state === "running" ? "schedules.runs.running" : "schedules.status.done");
           return (
             <button
               key={`${r.startedAtMs}:${r.sessionId ?? ""}`}
@@ -667,9 +689,9 @@ function RunHistory({
               <span className="sp-run-text">
                 <span className="sp-run-when">{r.startedAtLocal}</span>
                 {session ? (
-                  <span className="sp-run-session">{session.title ?? "新会话"}</span>
-                ) : r.error ? (
-                  <span className="sp-run-session err">{r.error}</span>
+                  <span className="sp-run-session">{session.title ?? t("schedules.newSession")}</span>
+                ) : errorText ? (
+                  <span className="sp-run-session err">{errorText}</span>
                 ) : null}
               </span>
               <span className="sp-run-ago">{agoText(r.startedAtMs)}</span>
@@ -684,11 +706,11 @@ function RunHistory({
 /** "多久之前"：分钟 / 小时 / 天，再远给日期。 */
 function agoText(ms: number): string {
   const d = Date.now() - ms;
-  if (d < 60_000) return "刚刚";
-  if (d < 3_600_000) return `${Math.round(d / 60_000)} 分钟前`;
-  if (d < 86_400_000) return `${Math.round(d / 3_600_000)} 小时前`;
-  if (d < 30 * 86_400_000) return `${Math.round(d / 86_400_000)} 天前`;
-  return new Date(ms).toLocaleDateString();
+  if (d < 60_000) return t("common.justNow");
+  if (d < 3_600_000) return tn("common.minutesAgo", Math.round(d / 60_000));
+  if (d < 86_400_000) return tn("common.hoursAgo", Math.round(d / 3_600_000));
+  if (d < 30 * 86_400_000) return tn("common.daysAgo", Math.round(d / 86_400_000));
+  return dateTimeFormat({ year: "numeric", month: "numeric", day: "numeric" }).format(new Date(ms));
 }
 
 /** 表单选择 → 协议的时间说法。间隔非法时返回 null，调用方提示。 */
@@ -749,6 +771,7 @@ export function ScheduleCreatePanel({
   const [onceAt, setOnceAt] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { t } = useT();
 
   const when = buildWhen(choice, time, onceAt, every);
   const canSubmit =
@@ -767,13 +790,13 @@ export function ScheduleCreatePanel({
     setBusy(true);
     setError(null);
     try {
-      const t = await scheduleCreate({
+      const created = await scheduleCreate({
         name: name.trim(),
         prompt: prompt.trim(),
         when,
         target,
       });
-      onCreated(t);
+      onCreated(created);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -782,18 +805,18 @@ export function ScheduleCreatePanel({
   };
 
   return (
-    <div className="sp-detail" style={{ width }} aria-label="创建定时任务">
+    <div className="sp-detail" style={{ width }} aria-label={t("schedules.createPanel")}>
       <div className="sp-d-head">
-        <span className="sp-d-status">新任务</span>
+        <span className="sp-d-status">{t("schedules.newTask")}</span>
         <span className="sp-d-space" />
         <button
           className="sp-create sp-d-save"
           disabled={!canSubmit || busy}
           onClick={() => void submit()}
         >
-          {busy ? "创建中…" : "创建"}
+          {busy ? t("schedules.creating") : t("schedules.create")}
         </button>
-        <button className="row-btn" onClick={onClose} title="取消" aria-label="取消创建">
+        <button className="row-btn" onClick={onClose} title={t("common.cancel")} aria-label={t("schedules.cancelCreate")}>
           <CloseIcon />
         </button>
       </div>
@@ -803,8 +826,8 @@ export function ScheduleCreatePanel({
         autoFocus
         value={name}
         onChange={(e) => setName(e.currentTarget.value)}
-        placeholder="任务名"
-        aria-label="任务名"
+        placeholder={t("schedules.form.name")}
+        aria-label={t("schedules.form.name")}
         spellCheck={false}
       />
 
@@ -813,33 +836,33 @@ export function ScheduleCreatePanel({
         value={prompt}
         onChange={(e) => setPrompt(e.currentTarget.value)}
         rows={6}
-        placeholder="到点发给 Riot 的话。像写给未来的自己：把背景说全，那时不一定有现在的上下文。"
-        aria-label="到点发出的提示词"
+        placeholder={t("schedules.form.promptPlaceholder")}
+        aria-label={t("schedules.form.prompt")}
         spellCheck={false}
       />
 
-      <div className="sp-d-caption">详情</div>
+      <div className="sp-d-caption">{t("schedules.section.details")}</div>
       <div className="sp-d-group">
         <div className="sp-d-row">
-          <span>运行于</span>
+          <span>{t("schedules.form.runIn")}</span>
           <FieldSelect
             className="sp-d-field"
             value={runIn}
             onChange={(v) => setRunIn(v as "new" | "session")}
             options={[
-              { value: "new", label: "新会话" },
-              { value: "session", label: "现有会话" },
+              { value: "new", label: t("schedules.newSession") },
+              { value: "session", label: t("schedules.existingSession") },
             ]}
           />
         </div>
         {runIn === "session" ? (
           <div className="sp-d-row">
-            <span>会话</span>
+            <span>{t("schedules.form.session")}</span>
             <SessionPicker sessions={sessions} value={sessionId} onPick={setSessionId} />
           </div>
         ) : (
           <div className="sp-d-row">
-            <span>项目</span>
+            <span>{t("schedules.form.project")}</span>
             <FieldSelect
               className="sp-d-field"
               value={root}
@@ -851,27 +874,27 @@ export function ScheduleCreatePanel({
         )}
       </div>
 
-      <div className="sp-d-caption">频率</div>
+      <div className="sp-d-caption">{t("schedules.section.frequency")}</div>
       <div className="sp-d-group">
         <div className="sp-d-row">
-          <span>重复</span>
+          <span>{t("schedules.form.repeat")}</span>
           <FieldSelect
             className="sp-d-field"
             value={choice}
             onChange={(v) => setChoice(v as RepeatChoice)}
-            options={REPEAT_OPTIONS}
+            options={repeatOptions()}
           />
         </div>
         {choice === "once" ? (
           <div className="sp-d-row">
-            <span>时刻</span>
+            <span>{t("schedules.form.datetime")}</span>
             <DateTimePicker className="sp-d-field" value={onceAt} onChange={setOnceAt} />
           </div>
         ) : choice === "every" ? (
           <IntervalRow value={every} onChange={setEvery} />
         ) : (
           <div className="sp-d-row">
-            <span>时间</span>
+            <span>{t("schedules.form.time")}</span>
             <TimePicker className="sp-d-field" value={time} onChange={setTime} />
           </div>
         )}
@@ -899,6 +922,7 @@ function SessionPicker({
   value: string | null;
   onPick: (id: string) => void;
 }) {
+  const { t } = useT();
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
   const boxRef = useRef<HTMLDivElement>(null);
@@ -915,13 +939,14 @@ function SessionPicker({
   }, [open]);
 
   const current = sessions.find((s) => s.id === value) ?? null;
-  const label = current ? (current.title ?? "新会话") : "选择一个会话";
+  const untitled = t("schedules.newSession");
+  const label = current ? (current.title ?? untitled) : t("schedules.picker.placeholder");
 
   /** 按项目分组，组内新的在前（和侧栏同序）。 */
   const groups = useMemo(() => {
     const needle = q.trim().toLowerCase();
     const hit = sessions.filter(
-      (s) => !needle || (s.title ?? "新会话").toLowerCase().includes(needle),
+      (s) => !needle || (s.title ?? untitled).toLowerCase().includes(needle),
     );
     const byRoot = new Map<string, SessionInfo[]>();
     for (const s of hit) {
@@ -933,7 +958,7 @@ function SessionPicker({
       root: groupRoot,
       list: [...list].sort((a, b) => b.seq - a.seq),
     }));
-  }, [sessions, q]);
+  }, [sessions, q, untitled]);
 
   return (
     <div className="sp-picker" ref={boxRef}>
@@ -948,12 +973,12 @@ function SessionPicker({
             autoFocus
             value={q}
             onChange={(e) => setQ(e.currentTarget.value)}
-            placeholder="搜索会话"
+            placeholder={t("schedules.picker.search")}
             spellCheck={false}
           />
           <div className="sp-picker-list">
             {groups.length === 0 ? (
-              <div className="sp-picker-empty">没有匹配的会话</div>
+              <div className="sp-picker-empty">{t("schedules.picker.empty")}</div>
             ) : (
               groups.map((g) => (
                 <div key={g.root}>
@@ -967,7 +992,7 @@ function SessionPicker({
                         setOpen(false);
                       }}
                     >
-                      {s.title ?? "新会话"}
+                      {s.title ?? untitled}
                     </button>
                   ))}
                 </div>

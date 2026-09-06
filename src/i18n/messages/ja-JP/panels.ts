@@ -1,0 +1,82 @@
+import type { Dict } from "..";
+import type zh from "../zh-CN/panels";
+
+export default {
+  /* ── ターミナル ── */
+  "panels.terminal.title": "ターミナル",
+  "panels.terminal.newTab": "新しいターミナル",
+  "panels.terminal.closeTab": "ターミナルを閉じる",
+  "panels.terminal.hide": "ターミナルパネルを隠す",
+  "panels.terminal.badge.agent": "エージェント",
+  "panels.terminal.badge.exited": "終了",
+  "panels.terminal.agentTabTitle": "{title}（エージェントが起動したサービス）",
+  "panels.terminal.share.on": "エージェントと共有中：このターミナルの出力を読めます（クリックで解除）",
+  "panels.terminal.share.off": "エージェントと共有：このターミナルの出力を読めるようにします。停止はできません",
+  "panels.terminal.share.mark": "共有中",
+  "panels.terminal.share.failed": "共有に失敗しました",
+  "panels.terminal.sendSelection": "選択範囲をエージェントに送る",
+  "panels.terminal.sendSelection.hint": "先にターミナル内でテキストを選択してから、ここから送信してください",
+  "panels.terminal.closeConfirm.title": "「{title}」を閉じますか？",
+  "panels.terminal.closeConfirm.agentBody": "これはエージェントが起動したサービスです。閉じると即座に終了し、エージェントがまだ依存している可能性があります。",
+  "panels.terminal.closeConfirm.body": "このターミナルには実行中のプロセスがあります。閉じると即座に終了します。",
+  "panels.terminal.closeConfirm.confirm": "閉じて終了",
+  "panels.terminal.reattachFailed": "再接続後にこのターミナルへ再アタッチできませんでした。すでに終了している可能性があります。",
+  "panels.terminal.processExited": "[プロセスは終了しました。ログはここに残ります。タブの × で閉じてください。]",
+  "panels.terminal.attachFailed": "このターミナルにアタッチできません。対応するサービスが終了した可能性があります。このタブは閉じて構いません。",
+  "panels.terminal.startFailed": "ターミナルを起動できませんでした。このタブを閉じて新しく開いてみてください。",
+
+  /* ── ブラウザパネル ── */
+  "panels.browser.back": "戻る",
+  "panels.browser.forward": "進む",
+  "panels.browser.starting": "ブラウザを起動中…",
+  "panels.browser.address": "アドレスバー",
+  "panels.browser.address.placeholder": "URL を入力",
+  "panels.browser.viewMode": "ビューポートモード",
+  "panels.browser.viewMode.fit": "フィット：パネル幅でページを描画",
+  "panels.browser.viewMode.web": "Web：{width}px のデスクトップ幅で描画し、パネルに合わせて全体を縮小",
+  "panels.browser.pick": "要素を選択",
+  "panels.browser.pick.title": "要素を選択：パネル内の要素をクリックし、そのセレクターをエージェントに渡す",
+  "panels.browser.pick.miss": "要素に当たりませんでした。ページ内の何かをもう一度クリックしてください。",
+  "panels.browser.pick.failed": "要素の選択に失敗しました：{error}",
+  "panels.browser.navFailed": "開けません：{error}",
+  "panels.browser.keyboard": "ページへのキーボード入力",
+  "panels.browser.empty.title": "ブラウズを開始",
+  "panels.browser.empty.hint": "URL を入力して、エージェントと一緒に閲覧します。",
+
+  /* ── ファイルプレビュー ── */
+  "panels.filePreview.openFailed": "開けません",
+  "panels.filePreview.showTree": "ファイルツリーを表示",
+  "panels.filePreview.hideTree": "ファイルツリーを隠す",
+  "panels.filePreview.pickOne": "右側からファイルを選択してください",
+  "panels.filePreview.loadingViewer": "ビューアーを読み込み中…",
+  "panels.filePreview.reading": "ファイルを読み込み中…",
+  "panels.filePreview.binary": "バイナリファイルのため、アプリ内では表示できません。",
+
+  /* ── ファイルツリー ── */
+  "panels.fileTree.label": "プロジェクトファイル",
+  "panels.fileTree.loading": "読み込み中…",
+  "panels.fileTree.truncated": "他 {count} 件は非表示",
+  "panels.fileTree.filter": "ファイルを絞り込む",
+  "panels.fileTree.filter.placeholder": "ファイルを絞り込む…",
+  "panels.fileTree.clear": "クリア",
+  "panels.fileTree.openFromDisk": "ディスクから開く",
+  "panels.fileTree.openFromDisk.title": "ディスクから開く…（⌘O）",
+  "panels.fileTree.noMatch": "一致するファイルはありません",
+  "panels.fileTree.symlink": "シンボリックリンク",
+
+  /* ── Git の変更 ── */
+  "panels.git.base.title": "比較の基準。比較対象のブランチを変えるだけで、checkout はしません。",
+  "panels.git.currentBranch": "現在のブランチ",
+  "panels.git.recompare": "再比較",
+  "panels.git.comparing": "比較中…",
+  "panels.git.failed": "比較に失敗しました：{error}",
+  "panels.git.stale": "下に表示されているのは前回の結果です。",
+  "panels.git.notRepo": "このフォルダは git リポジトリではありません。",
+  "panels.git.notRepo.hint": "リポジトリを初期化（git init）すると、未コミットの変更がここに表示されます。",
+  "panels.git.noDiffAgainst": "{base} との差分はありません。",
+  "panels.git.clean": "ワークスペースはクリーンで、未コミットの変更はありません。",
+  "panels.git.scope.title":
+    "ワークスペース（未コミット分を含む）と選択したブランチの差分。ブランチを変えても比較の基準が変わるだけで、checkout はしません。このセッションでの変更だけを見るには、入力欄の上にある変更バーを使ってください。",
+  "panels.git.baseLabel": "比較の基準：{base}",
+  "panels.git.allUncommitted": "git の未コミットの変更をすべて表示しています",
+} satisfies Dict<typeof zh>;

@@ -22,7 +22,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use riot_protocol::permission::{DecisionReason, PermissionContext, PermissionResult};
+use riot_protocol::text::UiText;
 use riot_protocol::tool::{PromptContext, Tool, ToolContext, ToolOutcome, UiPayload};
+use riot_protocol::ui_text;
 
 use super::names::TODO_WRITE;
 
@@ -99,12 +101,12 @@ impl Tool for TodoWrite {
         )
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         let n = input
             .get("todos")
             .and_then(|v| v.as_array())
             .map_or(0, Vec::len);
-        format!("更新任务清单（{n} 项）")
+        ui_text!("tools.todo.update", count = n)
     }
 
     /// 显式放行：记待办没有副作用面。这也让它在规划模式可用 ——
@@ -165,10 +167,15 @@ impl Tool for TodoWrite {
             model_content: riot_protocol::message::ToolResultContent::text(
                 "清单已更新。继续用它跟踪进度：开工前标 in_progress，做完立刻标 completed。",
             ),
-            ui_payload: Some(UiPayload::Plain {
+            ui_payload: Some(UiPayload::Message {
                 text: match doing {
-                    Some(active) => format!("{done}/{total} 完成 · {active}"),
-                    None => format!("{done}/{total} 完成"),
+                    Some(active) => ui_text!(
+                        "tools.todo.progressActive",
+                        done = done,
+                        total = total,
+                        active = active
+                    ),
+                    None => ui_text!("tools.todo.progress", done = done, total = total),
                 },
             }),
             side_messages: Vec::new(),

@@ -9,6 +9,8 @@
 
 import { useEffect, useState } from "react";
 
+import { useT } from "../i18n";
+
 /**
  * 扩展名 → highlight.js 语言名。认不出的按纯文本渲染 —— 不好看，
  * 但不会坏。清单和 Markdown.tsx 的 EXT_LANG 同源，这里为"文件预览"
@@ -135,6 +137,7 @@ export default function CodeView({
   /** 文件名。Makefile / Dockerfile 这类靠它认语言。 */
   name?: string;
 }) {
+  const { t } = useT();
   const [body, setBody] = useState<Body | null>(null);
 
   useEffect(() => {
@@ -180,7 +183,7 @@ export default function CodeView({
   return (
     <div className="code-view">
       {body?.truncated ? (
-        <div className="code-view-note">文件太大，只显示前 2 MB。完整内容请用"系统应用打开"。</div>
+        <div className="code-view-note">{t("transcript.preview.tooLarge", { size: "2 MB" })}</div>
       ) : null}
       {body ? (
         // 行号栏和正文并排、共用一个滚动容器；横向滚时行号钉在左缘
@@ -199,7 +202,7 @@ export default function CodeView({
           </pre>
         </div>
       ) : (
-        <div className="preview-panel-state">正在高亮…</div>
+        <div className="preview-panel-state">{t("transcript.preview.highlighting")}</div>
       )}
     </div>
   );

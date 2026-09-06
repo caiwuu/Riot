@@ -13,7 +13,7 @@ fn install_panic_hook() {
     std::panic::set_hook(Box::new(move |info| {
         // 先尽力把"内核要死了"送出去。放在默认 hook 之前:默认 hook 在
         // panic=abort 下可能直接结束进程,排在它后面就发不出去了。
-        riot_kernel::report_kernel_error(format!("内核 panic:{info}"), true);
+        riot_kernel::report_kernel_error(format!("kernel panic: {info}"), true);
         default(info);
     }));
 }

@@ -2,6 +2,6 @@
   {
     "event": "error",
     "kind": "auth",
-    "message": "401 Unauthorized"
+    "error": { "key": "kernel.provider.auth", "detail": "401 Unauthorized" }
   }
 ]

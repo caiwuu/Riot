@@ -1,3 +1,4 @@
+import { useT } from "../i18n";
 import { Modal } from "./Modal";
 
 /**
@@ -18,18 +19,24 @@ export function MissingProjectDialog({
   onRemove: () => void;
   onRelocate: () => void;
 }) {
+  const { t } = useT();
   return (
-    <Modal className="confirm missing-project" label="找不到项目目录" alert onClose={onClose}>
+    <Modal
+      className="confirm missing-project"
+      label={t("app.missingProject.title")}
+      alert
+      onClose={onClose}
+    >
       <div className="confirm-body">
-        <h3>找不到项目目录</h3>
-        <p>这个目录已经不在磁盘上了。会话必须绑一个还在的工作区。</p>
+        <h3>{t("app.missingProject.title")}</h3>
+        <p>{t("app.missingProject.body")}</p>
         <div className="missing-project-path" title={root}>
           {root}
         </div>
       </div>
       <div className="modal-actions">
         <button autoFocus onClick={onClose}>
-          取消
+          {t("common.cancel")}
         </button>
         <span className="modal-actions-spacer" />
         <button
@@ -38,7 +45,7 @@ export function MissingProjectDialog({
             onRelocate();
           }}
         >
-          另选目录
+          {t("app.missingProject.relocate")}
         </button>
         <button
           className="btn-danger"
@@ -47,7 +54,7 @@ export function MissingProjectDialog({
             onRemove();
           }}
         >
-          从列表移除
+          {t("app.project.removeFromList")}
         </button>
       </div>
     </Modal>

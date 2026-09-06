@@ -1,6 +1,12 @@
 import { useSyncExternalStore } from "react";
 
-import { type PackProgress, packsInstall } from "../bridge";
+import {
+  type PackProgress,
+  type UiErrorPayload,
+  describeError,
+  isHostError,
+  packsInstall,
+} from "../bridge";
 
 /**
  * 能力包安装任务的状态，存在模块级而不是组件里。
@@ -61,7 +67,7 @@ export function startPackInstall(id: string): void {
       // 失败时宿主也会从 channel 推一条 failed，那条能指到是哪一步坏的，
       // 别拿命令的返回把它盖掉。
       if (state.progress[id]?.kind !== "failed") {
-        reportPackFailure(id, String(e));
+        reportPackFailure(id, e);
       }
     })
     .finally(() => {
@@ -71,8 +77,14 @@ export function startPackInstall(id: string): void {
     });
 }
 
-/** 把一条失败挂到某个包上。卸载失败也走这里，和安装共用同一行结果。 */
-export function reportPackFailure(id: string, error: string): void {
+/**
+ * 把一条失败挂到某个包上。卸载失败也走这里，和安装共用同一行结果。
+ * 传 catch 到的原值：宿主的 HostError 保留键和参数，其它的包成 legacy。
+ */
+export function reportPackFailure(id: string, e: unknown): void {
+  const error: UiErrorPayload = isHostError(e)
+    ? { key: e.key, args: e.args, detail: e.detail }
+    : { key: "host.legacy", detail: describeError(e) };
   set({ ...state, progress: { ...state.progress, [id]: { kind: "failed", error } } });
 }
 

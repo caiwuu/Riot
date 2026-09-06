@@ -9,8 +9,10 @@ import {
   remoteRotateToken,
   remoteSetToken,
   remoteStatus,
+  renderUiError,
   setConfig,
 } from "../../bridge";
+import { useT } from "../../i18n";
 import { FieldNumber } from "../FieldNumber";
 import { FieldSelect } from "../FieldSelect";
 import { Card, CardBlock, Group, Row } from "./layout";
@@ -37,6 +39,7 @@ export function RemotePane({
   onSaved: () => void;
   askConfirm: AskConfirm;
 }) {
+  const { t, tn, tx } = useT();
   const remote = status.config.remote ?? DEFAULT_REMOTE;
   const [live, setLive] = useState<RemoteStatus | null>(null);
   const [port, setPort] = useState(String(remote.port));
@@ -79,15 +82,15 @@ export function RemotePane({
       setCopied(what);
       window.setTimeout(() => setCopied(null), 1500);
     } catch {
-      setError("复制失败，请手动选中复制。");
+      setError(t("settings.remote.copyFailed"));
     }
   };
 
   const rotate = () => {
     askConfirm({
-      title: "换一枚新令牌？",
-      body: "旧的链接和二维码立刻失效，已经登录的设备下次重连时要重新输入。正在连着的不会掉线。",
-      confirmLabel: "换新令牌",
+      title: t("settings.remote.token.rotate.title"),
+      body: t("settings.remote.token.rotate.body"),
+      confirmLabel: t("settings.remote.token.rotate"),
       action: () => {
         remoteRotateToken()
           .then((token) => {
@@ -105,7 +108,7 @@ export function RemotePane({
   const commitPort = () => {
     const n = Number(port.trim());
     if (!Number.isInteger(n) || n < 1 || n > 65535) {
-      setError("端口要在 1–65535 之间。");
+      setError(t("settings.remote.port.range"));
       setPort(String(remote.port));
       return;
     }
@@ -123,39 +126,32 @@ export function RemotePane({
         <Card>
           <CardBlock>
             <p className="hint" style={{ margin: 0 }}>
-              你正通过网页访问这台机器上的 Riot。这里的改动作用在宿主机上；关掉开关会让
-              当前页面断开。
+              {t("settings.remote.webNotice")}
             </p>
           </CardBlock>
         </Card>
       ) : null}
 
-      <Group title="服务">
+      <Group title={t("settings.remote.service")}>
         <Card>
-          <Row
-            title="允许远程访问"
-            desc="宿主开一个 HTTP 服务，浏览器里加载同一套界面。拿到令牌的人能做你在这台机器前能做的一切 —— 只在自己的网络里开。"
-          >
+          <Row title={t("settings.remote.enable")} desc={t("settings.remote.enable.desc")}>
             <Switch
               on={remote.enabled}
               onChange={(v) => void patch({ enabled: v })}
-              label="允许远程访问"
+              label={t("settings.remote.enable")}
             />
           </Row>
-          <Row
-            title="监听范围"
-            desc="「仅本机」配 SSH 隧道、Tailscale Serve 或反向代理；「局域网」让同一 Wi-Fi 下的手机直连。"
-          >
+          <Row title={t("settings.remote.bind")} desc={t("settings.remote.bind.desc")}>
             <FieldSelect
               value={remote.bind}
               onChange={(v) => void patch({ bind: v as RemoteConfig["bind"] })}
               options={[
-                { value: "loopback", label: "仅本机（127.0.0.1）" },
-                { value: "lan", label: "局域网（所有网卡）" },
+                { value: "loopback", label: t("settings.remote.bind.loopback") },
+                { value: "lan", label: t("settings.remote.bind.lan") },
               ]}
             />
           </Row>
-          <Row title="端口" desc="默认 7823。被占用时改一个再开。" htmlFor="remote-port">
+          <Row title={t("settings.remote.port")} desc={t("settings.remote.port.desc")} htmlFor="remote-port">
             <span className="field-inline">
               <FieldNumber
                 id="remote-port"
@@ -163,7 +159,7 @@ export function RemotePane({
                 onChange={(e) => setPort(e.target.value)}
                 onBlur={commitPort}
                 onKeyDown={blurOnEnter}
-                aria-label="端口"
+                aria-label={t("settings.remote.port")}
               />
             </span>
           </Row>
@@ -171,16 +167,19 @@ export function RemotePane({
             <CardBlock>
               {live.error ? (
                 <p className="key-state warn" style={{ margin: 0 }}>
-                  没起来：{live.error}
+                  {t("settings.remote.status.error", { error: renderUiError(live.error) })}
                 </p>
               ) : live.running ? (
                 <p className="key-state ok" style={{ margin: 0 }}>
-                  正在监听 <code>{live.listenAddr}</code>
-                  {live.connections > 0 ? ` · ${live.connections} 个连接` : " · 暂无连接"}
+                  {tx("settings.remote.status.listening", { addr: <code>{live.listenAddr}</code> })}
+                  {" · "}
+                  {live.connections > 0
+                    ? tn("settings.remote.status.connections", live.connections)
+                    : t("settings.remote.status.noConnections")}
                 </p>
               ) : (
                 <p className="hint" style={{ margin: 0 }}>
-                  未开启。
+                  {t("settings.remote.status.off")}
                 </p>
               )}
             </CardBlock>
@@ -189,11 +188,17 @@ export function RemotePane({
       </Group>
 
       {live?.running ? (
-        <Group title="连接" desc="手机扫二维码即登录；或把链接发到另一台设备打开（链接里带着令牌，别公开分享）。">
+        <Group title={t("settings.remote.connect")} desc={t("settings.remote.connect.desc")}>
           <Card>
             <div className="remote-connect">
               {qrSrc ? (
-                <img className="remote-qr" src={qrSrc} alt="登录二维码" width={180} height={180} />
+                <img
+                  className="remote-qr"
+                  src={qrSrc}
+                  alt={t("settings.remote.qrAlt")}
+                  width={180}
+                  height={180}
+                />
               ) : null}
               <div className="remote-links">
                 {live.urls.map((u) => (
@@ -208,14 +213,13 @@ export function RemotePane({
                       className="btn-compact"
                       onClick={() => void copy(live.loginUrl ?? "", "url")}
                     >
-                      {copied === "url" ? "已复制" : "复制登录链接"}
+                      {copied === "url" ? t("common.copied") : t("settings.remote.copyLink")}
                     </button>
                   </div>
                 ) : null}
                 {remote.bind === "loopback" ? (
                   <p className="hint" style={{ margin: 0 }}>
-                    当前只听本机。别的设备要连，得先把 127.0.0.1:{live.port} 通过隧道或代理转出去，
-                    或者把监听范围改成「局域网」。
+                    {t("settings.remote.loopbackHint", { port: live.port })}
                   </p>
                 ) : null}
               </div>
@@ -224,47 +228,43 @@ export function RemotePane({
         </Group>
       ) : null}
 
-      <Group title="令牌">
+      <Group title={t("settings.remote.token")}>
         <Card>
-          <Row
-            title="访问令牌"
-            desc="登录用的密码。存在 auth.json（只有你能读），不进 config.json。泄露了就换一枚。"
-            stack
-          >
+          <Row title={t("settings.remote.token.title")} desc={t("settings.remote.token.desc")} stack>
             <div className="input-with-btn">
               <input
                 readOnly
                 type={showToken ? "text" : "password"}
                 value={live?.token ?? ""}
-                placeholder={live?.token ? "" : "开启后自动生成"}
+                placeholder={live?.token ? "" : t("settings.remote.token.placeholder")}
                 onFocus={(e) => e.currentTarget.select()}
                 spellCheck={false}
               />
               <button className="btn-compact" onClick={() => setShowToken((v) => !v)} disabled={!live?.token}>
-                {showToken ? "隐藏" : "显示"}
+                {showToken ? t("settings.remote.token.hide") : t("settings.remote.token.show")}
               </button>
               <button
                 className="btn-compact"
                 onClick={() => void copy(live?.token ?? "", "token")}
                 disabled={!live?.token}
               >
-                {copied === "token" ? "已复制" : "复制"}
+                {copied === "token" ? t("common.copied") : t("common.copy")}
               </button>
               <button className="btn-compact" onClick={rotate} disabled={!live?.token}>
-                换新令牌
+                {t("settings.remote.token.rotate")}
               </button>
             </div>
           </Row>
         </Card>
       </Group>
 
-      <Group title="安全提示">
+      <Group title={t("settings.remote.notes")}>
         <Card>
           <CardBlock>
             <ul className="remote-notes">
-              <li>服务本身不带 TLS。局域网直连在你自己的 Wi-Fi 里；要出公网，用 Tailscale Serve、Cloudflare Tunnel 或 nginx 之类挂证书，别直接把端口暴露到路由器外。</li>
-              <li>浏览器里的第三方网页连不上这个端口（来源校验），令牌猜错五次同一来源锁一分钟。</li>
-              <li>网页版拿不到宿主机的文件对话框和拖放路径：选项目目录用应用内的目录选择器，附图片直接选或粘贴，引用文件在输入框里打 @。</li>
+              <li>{t("settings.remote.notes.tls")}</li>
+              <li>{t("settings.remote.notes.origin")}</li>
+              <li>{t("settings.remote.notes.web")}</li>
             </ul>
           </CardBlock>
         </Card>

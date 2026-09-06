@@ -509,6 +509,7 @@ fn system_消息不计入估算() {
         id: MessageId::from_raw("s1"),
         level: riot_protocol::message::SystemLevel::Warning,
         text: "上次请求失败了".repeat(100),
+        ui: None,
     }];
     assert_eq!(wire_bytes(&msgs), 0, "System 消息不进请求");
 }
@@ -912,8 +913,15 @@ fn 数据里的错误对象变成拒绝() {
     ));
 
     match &d.finish()[0] {
-        ProviderEvent::Error(riot_protocol::provider::ProviderError::Refused { message }) => {
-            assert!(message.contains("余额不足"));
+        ProviderEvent::Error(riot_protocol::provider::ProviderError::Refused { error }) => {
+            assert_eq!(error.key(), "kernel.provider.quota", "额度措辞要认成额度键");
+            assert!(
+                error
+                    .detail
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("余额不足")
+            );
         }
         other => panic!("{other:?}"),
     }

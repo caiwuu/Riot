@@ -1,0 +1,146 @@
+import type { Dict } from "..";
+import type zh from "../zh-CN/app";
+
+export default {
+  "app.newSession": "새 세션",
+  "app.openDir": "폴더 열기…",
+
+  "app.boot.failed": "문제가 발생했습니다",
+  "app.boot.reload": "다시 불러오기",
+  "app.boot.starting": "시작하는 중",
+
+  "app.update.released": "Riot {version}이(가) 출시되었습니다",
+  "app.update.download": "다운로드",
+
+  "app.dialog.gotIt": "확인",
+  "app.error.createSession": "세션을 만들 수 없습니다",
+  "app.error.openDir": "이 폴더를 열 수 없습니다",
+  "app.error.removeProject": "프로젝트를 제거할 수 없습니다",
+  "app.error.rerun": "보충 실행에 실패했습니다",
+  "app.error.runNow": "실행을 시작할 수 없습니다",
+  "app.error.pause": "일시 중지에 실패했습니다",
+  "app.error.resume": "재개에 실패했습니다",
+  "app.error.delete": "삭제에 실패했습니다",
+  "app.error.clearDone": "정리에 실패했습니다",
+
+  "app.notify.turnDone": "작업이 끝났습니다. 돌아와서 결과를 확인해 보세요.",
+
+  "app.notify.scheduleDone.title": "예약 작업 완료",
+
+  "app.notify.scheduleDone.body": "\"{name}\" 작업이 끝났습니다. 결과를 확인해 보세요.",
+
+  "app.notify.scheduleFailed.title": "예약 작업 실패",
+
+  "app.notify.scheduleFailed.body": "\"{name}\": {error}",
+
+  "app.hero.title": "오늘은 무엇을 할까요?",
+  "app.hero.dirGone": "폴더가 더 이상 존재하지 않습니다. 클릭하여 해결",
+
+  "app.treeMenu.preview": "미리보기",
+  "app.treeMenu.addToChat": "대화에 추가",
+  "app.treeMenu.copyRelPath": "상대 경로 복사",
+  "app.treeMenu.copyFullPath": "전체 경로 복사",
+  "app.treeMenu.revealInFileManager": "Finder / 탐색기에서 보기",
+
+  "app.sessionMenu.rename": "이름 바꾸기",
+  "app.sessionMenu.delete": "세션 삭제",
+  "app.sessionMenu.deleteTitle": "이 세션을 삭제할까요?",
+  "app.sessionMenu.deleteBody": "“{title}”의 기록이 사라집니다.",
+
+  "app.projectMenu.copyPath": "경로 복사",
+  "app.projectMenu.removeTitle": "{name}(을)를 제거할까요?",
+  "app.projectMenu.removeBodyCount": "아래 {count}개 세션이 닫힙니다. 폴더 자체는 삭제되지 않습니다.",
+  "app.projectMenu.removeBody": "폴더 자체는 삭제되지 않습니다.",
+
+  "app.scheduleMenu.rerunMissed": "지금 한 번 실행 (놓친 실행 {count}회)",
+  "app.scheduleMenu.ignoreMissed": "놓친 실행 무시",
+  "app.scheduleMenu.runNow": "지금 실행",
+  "app.scheduleMenu.pause": "일시 중지",
+  "app.scheduleMenu.resume": "재개",
+  "app.scheduleMenu.viewLastRun": "마지막 실행 보기",
+  "app.scheduleMenu.delete": "작업 삭제",
+  "app.scheduleMenu.deleteTitle": "“{name}”을(를) 삭제할까요?",
+  "app.scheduleMenu.deleteBody": "예약된 시간에 더 이상 실행되지 않습니다. 이미 실행된 세션은 영향을 받지 않습니다.",
+  "app.scheduleCreate.manual": "직접 만들기…",
+  "app.scheduleCreate.byRiot": "Riot이 만들도록",
+  "app.scheduleCreate.prompt": "예약 작업을 하나 설정해 주세요: ",
+  "app.schedules.clearDoneTitle": "완료된 작업 {count}개를 정리할까요?",
+  "app.schedules.clearDoneBody": "완료된 일회성 작업의 기록이 목록에서 제거됩니다. 이미 실행된 세션은 영향을 받지 않습니다.",
+  "app.schedules.clearDone": "정리",
+
+  "app.sidebar.expand": "사이드바 펼치기",
+  "app.sidebar.expandTitle": "사이드바 펼치기 (⌘B)",
+  "app.sidebar.collapse": "사이드바 접기",
+  "app.sidebar.collapseTitle": "사이드바 접기 (⌘B)",
+  "app.sidebar.schedules": "예약 작업",
+  "app.sidebar.missedTitle": "앱이 닫혀 있는 동안 작업 {count}개를 놓쳤습니다",
+  "app.sidebar.projects": "프로젝트",
+  "app.sidebar.settings": "설정",
+
+  "app.project.collapsed": "접힘",
+  "app.project.expanded": "펼침",
+  "app.project.ariaLabel": "{name}, {state}",
+  "app.project.ariaLabelGone": "{name}, {state}, 폴더가 더 이상 존재하지 않음",
+  "app.project.titleGone": "{root} (폴더가 더 이상 존재하지 않음)",
+  "app.project.dirGone": "폴더가 더 이상 존재하지 않습니다",
+  "app.project.gone": "없음",
+  "app.project.busy": "실행 중인 세션이 있습니다",
+  "app.project.newSessionIn": "{name}에서 새 세션",
+  "app.project.actions": "프로젝트 작업",
+  "app.project.removeFromList": "목록에서 제거",
+  "app.session.actions": "세션 작업",
+
+  "app.topbar.sessionSettings": "세션 설정",
+  "app.topbar.needSession": "먼저 세션을 열어 주세요",
+  "app.win.terminal": "터미널 패널",
+  "app.win.terminalTitle": "터미널 패널 (⌘J)",
+  "app.win.terminalNeedSession": "터미널을 사용하려면 먼저 세션을 열어 주세요",
+  "app.win.drawer": "사이드 패널",
+  "app.scopeBadge.title": "{count}개 사이트에 침투 테스트 권한이 부여되어 있습니다 — 클릭하여 확인 또는 철회",
+  "app.scopeBadge.label": "침투 테스트 범위: {count}개 사이트",
+  "app.resizer.title": "드래그하여 크기 조절, 더블 클릭으로 기본값 복원",
+
+  "app.welcome.tagline": "각 세션은 하나의 프로젝트 폴더에 연결됩니다.",
+  "app.welcome.recent": "최근",
+  "app.welcome.dirMissing": "폴더를 찾을 수 없습니다",
+
+  "app.workbench.browser": "브라우저",
+  "app.workbench.browserStarting": "브라우저 시작 중…",
+  "app.workbench.changes": "Git 변경 사항",
+  "app.workbench.files": "파일",
+  "app.workbench.newTab": "새 탭",
+  "app.workbench.subagent": "하위 agent {id}",
+  "app.workbench.addPanel": "패널 추가",
+  "app.workbench.closeTab": "{title} 닫기",
+
+  "app.remote.connecting": "연결하는 중",
+  "app.remote.connectingHost": "호스트에 연결하는 중…",
+  "app.remote.reconnecting": "호스트와의 연결이 끊어졌습니다. 다시 연결하는 중…",
+  "app.remote.title": "Riot에 연결",
+  "app.remote.hint": "데스크톱 앱의 「설정 → 원격 접근」에 표시된 액세스 토큰을 입력하세요. 그곳의 QR 코드를 스캔하면 이 단계를 건너뛸 수 있습니다.",
+  "app.remote.denied": "호스트가 마지막 연결을 거부했습니다: {reason}",
+  "app.remote.tokenPlaceholder": "액세스 토큰",
+  "app.remote.connect": "연결",
+
+  "app.missingProject.title": "프로젝트 폴더를 찾을 수 없습니다",
+  "app.missingProject.body": "이 폴더는 더 이상 디스크에 없습니다. 세션은 존재하는 작업 공간에 연결되어야 합니다.",
+  "app.missingProject.relocate": "다른 폴더 선택",
+
+  "app.dirPicker.label": "폴더 선택",
+  "app.dirPicker.title": "서버의 폴더 선택",
+  "app.dirPicker.up": "상위 폴더",
+  "app.dirPicker.placeholder": "절대 경로를 입력하고 Enter를 누르세요",
+  "app.dirPicker.missing": "폴더가 없습니다: {missing}. {path}(으)로 돌아갔습니다.",
+  "app.dirPicker.empty": "하위 폴더가 없습니다.",
+  "app.dirPicker.choose": "현재 폴더 선택",
+
+  "app.ctx.ariaLabel": "컨텍스트 사용량 {pct}%. 열어서 자세히 보기",
+  "app.ctx.title": "컨텍스트 {used} / {threshold} ({pct}%)",
+  "app.ctx.usage": "컨텍스트 사용량",
+  "app.ctx.current": "현재 사용 중",
+  "app.ctx.window": "모델 윈도우",
+  "app.ctx.total": "이 세션 누계",
+  "app.ctx.note": "{threshold}에 도달하면 자동으로 요약 압축됩니다.",
+
+  "app.hintTip.label": "도움말",
+} satisfies Dict<typeof zh>;

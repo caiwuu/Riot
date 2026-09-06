@@ -97,11 +97,7 @@ pub struct PickResult {
 pub enum Input {
     /// 按下并抬起。合成一次完整点击，而不是让前端发两条 —— 中间要是
     /// 丢了一条，页面会停在"按住"状态，后续所有交互都不对。
-    Click {
-        x: f64,
-        y: f64,
-        button: String,
-    },
+    Click { x: f64, y: f64, button: String },
     /// 单独的按下 / 抬起。面板转发原生 mousedown/mouseup（而不只是合成的
     /// click），页面里才拖得动滑块、选得中文字。`click_count` 让双击选词、
     /// 三击选段成立。丢一条会停在按住态，但那是真实鼠标本来就有的风险，
@@ -144,20 +140,14 @@ pub enum Input {
     },
     /// 输入文本。走 insertText 而不是逐字符 keyDown ——
     /// 中文、emoji 这些没有对应键码，逐字符发根本发不出来。
-    Text {
-        text: String,
-    },
+    Text { text: String },
     /// 输入法正在组字：`text` 是还没上屏的临时内容，空串表示取消。
     ///
     /// 只发最终结果也能用，但页面在整个打字过程中一个字都不显示 ——
     /// 带自动补全的搜索框会一直是空的，直到你按下回车。
-    Compose {
-        text: String,
-    },
+    Compose { text: String },
     /// 功能键（Enter、Backspace、方向键之类）。
-    Key {
-        key: String,
-    },
+    Key { key: String },
 }
 
 /// 标签栏上的一页。
@@ -575,7 +565,7 @@ impl HostBrowser {
         {
             let mut tabs = self.tabs.lock().await;
             if !tabs.order.contains(&tab) {
-                return Err(BrowserUnavailable(format!("标签页 {tab} 不存在")));
+                return Err(BrowserUnavailable(format!("tab {tab} does not exist")));
             }
             tabs.active = tab;
         }
@@ -656,7 +646,7 @@ impl HostBrowser {
         self.opening.lock().await.remove(&id);
         match opened {
             Ok(Ok(())) => {}
-            Ok(Err(_)) => return Err(BrowserUnavailable("浏览器进程退出了".into())),
+            Ok(Err(_)) => return Err(BrowserUnavailable("browser process exited".into())),
             Err(_) => {
                 return Err(BrowserUnavailable(format!(
                     "标签页 {TAB_OPEN_TIMEOUT:?} 内没有就绪"
@@ -1229,8 +1219,8 @@ impl HostBrowser {
         // console 钩子也是每页一份，跟着开页一起装。
         tokio::time::timeout(std::time::Duration::from_secs(30), ready_rx)
             .await
-            .map_err(|_| BrowserUnavailable("浏览器 30 秒内没有就绪".into()))?
-            .map_err(|_| BrowserUnavailable("浏览器启动过程中退出了".into()))?;
+            .map_err(|_| BrowserUnavailable("browser did not become ready within 30 s".into()))?
+            .map_err(|_| BrowserUnavailable("browser exited during startup".into()))?;
 
         *slot = Some(Arc::clone(&browser));
         Ok(browser)

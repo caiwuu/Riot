@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { SessionInfo } from "../bridge";
 import { useImeGuard } from "../hooks/useImeGuard";
+import { useT } from "../i18n";
 import { basename } from "../pathDisplay";
 import { Chevron } from "./Chevron";
 import {
@@ -83,6 +84,7 @@ export interface SidebarProps {
 export function Sidebar(props: SidebarProps) {
   const { width, projects, sessions, active, onOpenProject, onSettings, onSchedules, onCollapse } =
     props;
+  const { t, tn } = useT();
   const [collapsed, setCollapsed] = useState(loadCollapsedProjects);
   const [projectsFolded, toggleProjectsFolded] = useSectionFold("riot.layout.projectsFold");
   // 用来分辨「刚切到一个会话」和「本来就停在这个会话」。后者不能
@@ -133,8 +135,8 @@ export function Sidebar(props: SidebarProps) {
         <button
           className="tb-btn"
           onClick={onCollapse}
-          title="收起侧边栏（⌘B）"
-          aria-label="收起侧边栏"
+          title={t("app.sidebar.collapseTitle")}
+          aria-label={t("app.sidebar.collapse")}
         >
           <SidebarToggleIcon />
         </button>
@@ -142,7 +144,7 @@ export function Sidebar(props: SidebarProps) {
 
       <button className="new-thread" onClick={onOpenProject}>
         <PlusIcon />
-        打开目录…
+        {t("app.openDir")}
       </button>
 
       {/* 菜单项在滚动区里跟着列表一起走 —— 项目多的时候它占着顶部不动，
@@ -153,11 +155,11 @@ export function Sidebar(props: SidebarProps) {
           onClick={onSchedules}
         >
           <ClockIcon />
-          <span className="side-label">定时任务</span>
+          <span className="side-label">{t("app.sidebar.schedules")}</span>
           {props.missedSchedules > 0 ? (
             <span
               className="side-badge"
-              title={`有 ${props.missedSchedules} 个任务在 App 关着时错过了`}
+              title={tn("app.sidebar.missedTitle", props.missedSchedules)}
             >
               {props.missedSchedules}
             </span>
@@ -173,10 +175,10 @@ export function Sidebar(props: SidebarProps) {
               onClick={toggleProjectsFolded}
             >
               <Chevron open={!projectsFolded} />
-              <span className="section-name">项目</span>
+              <span className="section-name">{t("app.sidebar.projects")}</span>
               {projectsFolded ? <span className="project-count">{roots.length}</span> : null}
             </button>
-            <button className="row-btn" onClick={onOpenProject} title="打开目录…">
+            <button className="row-btn" onClick={onOpenProject} title={t("app.openDir")}>
               <PlusIcon />
             </button>
           </div>
@@ -206,7 +208,7 @@ export function Sidebar(props: SidebarProps) {
       <div className="sidebar-foot">
         <button className="side-item" onClick={onSettings}>
           <GearIcon />
-          <span className="side-label">设置</span>
+          <span className="side-label">{t("app.sidebar.settings")}</span>
         </button>
       </div>
     </aside>
@@ -243,6 +245,7 @@ function ProjectGroup(
     recency,
   } = props;
   const name = basename(root) || root;
+  const { t } = useT();
   // 同一时刻只有一行在改名，一个 guard 够用。
   const ime = useImeGuard();
   // 刚聊过的在上面；并列时退回创建序。
@@ -253,6 +256,7 @@ function ProjectGroup(
     return b.seq - a.seq;
   });
   const busy = collapsed && ordered.some((s) => s.busy);
+  const foldState = t(collapsed ? "app.project.collapsed" : "app.project.expanded");
 
   return (
     <div className={collapsed ? "project collapsed" : "project"}>
@@ -267,20 +271,27 @@ function ProjectGroup(
           type="button"
           className="project-toggle"
           aria-expanded={!collapsed}
-          aria-label={`${name}，${collapsed ? "已折叠" : "已展开"}${gone ? "，目录已不存在" : ""}`}
-          title={gone ? `${root}（目录已不存在）` : root}
+          aria-label={t(gone ? "app.project.ariaLabelGone" : "app.project.ariaLabel", {
+            name,
+            state: foldState,
+          })}
+          title={gone ? t("app.project.titleGone", { root }) : root}
           onClick={onToggle}
         >
           <Chevron open={!collapsed} />
           <FolderIcon />
           <span className="project-name">{name}</span>
           {gone ? (
-            <span className="project-gone" title="目录已不存在">
-              已失效
+            <span className="project-gone" title={t("app.project.dirGone")}>
+              {t("app.project.gone")}
             </span>
           ) : null}
           {busy ? (
-            <span className="thread-busy" title="有会话正在运行" aria-label="有会话正在运行" />
+            <span
+              className="thread-busy"
+              title={t("app.project.busy")}
+              aria-label={t("app.project.busy")}
+            />
           ) : null}
           {collapsed && ordered.length > 0 ? (
             <span className="project-count">{ordered.length}</span>
@@ -292,11 +303,15 @@ function ProjectGroup(
             onExpand();
             onNewSession(root);
           }}
-          title={`在 ${name} 开新会话`}
+          title={t("app.project.newSessionIn", { name })}
         >
           <PlusIcon />
         </button>
-        <button className="row-btn" onClick={(e) => onProjectMenu(e, root)} title="项目操作">
+        <button
+          className="row-btn"
+          onClick={(e) => onProjectMenu(e, root)}
+          title={t("app.project.actions")}
+        >
           <DotsIcon />
         </button>
       </div>
@@ -338,11 +353,19 @@ function ProjectGroup(
                   {/* 正在跑的会话给个小圆点 —— 切走之后它还在干活，列表里
                       得看得出来，不然用户以为它闲着。 */}
                   {s.busy ? (
-                    <span className="thread-busy" title="正在运行" aria-label="正在运行" />
+                    <span
+                      className="thread-busy"
+                      title={t("common.running")}
+                      aria-label={t("common.running")}
+                    />
                   ) : null}
-                  {s.title ?? "新会话"}
+                  {s.title ?? t("app.newSession")}
                 </button>
-                <button className="row-btn" onClick={(e) => onSessionMenu(e, s)} title="会话操作">
+                <button
+                  className="row-btn"
+                  onClick={(e) => onSessionMenu(e, s)}
+                  title={t("app.session.actions")}
+                >
                   <DotsIcon />
                 </button>
               </div>

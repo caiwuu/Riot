@@ -8,36 +8,55 @@
 use std::path::{Path, PathBuf};
 
 use riot_kernel::packs::{InstalledPack, PackManifest};
+use riot_protocol::{UiError, ui_error};
 
+/// 安装链路的错误。`Display` 是给日志的英文；给前端看的形态见 [`Self::to_ui`]。
+///
+/// 各变体里的字符串都是技术细节（HTTP 状态、io 错误原文、哪个二进制起不来），
+/// 不翻译，前端放在译文后面的次要位置。
 #[derive(Debug, thiserror::Error)]
 pub enum InstallError {
-    #[error("{0}")]
+    #[error("manifest: {0}")]
     Manifest(String),
-    #[error("清单里没有能力包「{0}」")]
+    #[error("pack `{0}` is not in the manifest")]
     NotFound(String),
-    #[error("这个平台（{0}）暂时没有对应的能力包")]
+    #[error("no pack for platform {0}")]
     Unsupported(String),
-    #[error("{0}")]
+    #[error("network: {0}")]
     Network(String),
-    #[error(
-        "下载的文件校验不通过（期望 {expected}，实际 {actual}）。可能下到了半截或被中间网络改写，重试一次试试。"
-    )]
+    #[error("checksum mismatch (expected {expected}, got {actual})")]
     Checksum { expected: String, actual: String },
-    #[error("{0}失败：{1}")]
+    /// 第一项是"当时在做什么"（英文短语），进细节里。
+    #[error("{0}: {1}")]
     Io(String, #[source] std::io::Error),
-    #[error("能力包解压后结构不对：{0}")]
+    #[error("bad pack layout: {0}")]
     Layout(String),
-    #[error("能力包装好了但跑不起来：{0}")]
+    #[error("self-check failed: {0}")]
     SelfCheck(String),
     /// 解压 / 自检那个 blocking 任务本身没能跑完（panic 或 runtime 正在关）。
     /// 和"包坏了"分开，不然用户会去重下一个没问题的包。
-    #[error("{0}")]
+    #[error("task: {0}")]
     Task(String),
 }
 
-impl serde::Serialize for InstallError {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&self.to_string())
+impl InstallError {
+    /// 前端要的形态：按"发生了什么"给键，原始原因留作细节。
+    pub fn to_ui(&self) -> UiError {
+        match self {
+            InstallError::Manifest(d) => ui_error!("host.pack.manifestFailed"; d),
+            InstallError::NotFound(id) => ui_error!("host.pack.notInManifest", id = id),
+            InstallError::Unsupported(p) => {
+                ui_error!("host.pack.unsupportedPlatform", platform = p)
+            }
+            InstallError::Network(d) => ui_error!("host.pack.downloadFailed"; d),
+            InstallError::Checksum { expected, actual } => {
+                ui_error!("host.pack.checksumMismatch"; format!("expected {expected}, got {actual}"))
+            }
+            InstallError::Io(what, e) => ui_error!("host.pack.ioFailed"; format!("{what}: {e}")),
+            InstallError::Layout(d) => ui_error!("host.pack.badLayout"; d),
+            InstallError::SelfCheck(d) => ui_error!("host.pack.selfCheckFailed"; d),
+            InstallError::Task(d) => ui_error!("host.pack.taskFailed"; d),
+        }
     }
 }
 
@@ -49,8 +68,8 @@ impl serde::Serialize for InstallError {
 pub fn unpack(archive: &Path, dest: &Path) -> Result<PathBuf, InstallError> {
     let parent = dest
         .parent()
-        .ok_or_else(|| InstallError::Layout(format!("{} 没有父目录", dest.display())))?;
-    std::fs::create_dir_all(parent).map_err(|e| InstallError::Io("建能力包目录".into(), e))?;
+        .ok_or_else(|| InstallError::Layout(format!("{} has no parent dir", dest.display())))?;
+    std::fs::create_dir_all(parent).map_err(|e| InstallError::Io("create packs dir".into(), e))?;
 
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -61,7 +80,8 @@ pub fn unpack(archive: &Path, dest: &Path) -> Result<PathBuf, InstallError> {
         dest.file_name().unwrap_or_default().to_string_lossy()
     ));
     let _ = std::fs::remove_dir_all(&staging);
-    std::fs::create_dir_all(&staging).map_err(|e| InstallError::Io("建临时解压目录".into(), e))?;
+    std::fs::create_dir_all(&staging)
+        .map_err(|e| InstallError::Io("create staging dir".into(), e))?;
 
     // 出任何岔子都要把临时目录收掉,否则失败几次就在用户盘上堆了几个 GB。
     let result = extract_into(archive, &staging).and_then(|()| swap_in(&staging, dest));
@@ -73,10 +93,10 @@ pub fn unpack(archive: &Path, dest: &Path) -> Result<PathBuf, InstallError> {
 }
 
 fn extract_into(archive: &Path, staging: &Path) -> Result<(), InstallError> {
-    let file = std::fs::File::open(archive)
-        .map_err(|e| InstallError::Io("打开能力包压缩文件".into(), e))?;
+    let file =
+        std::fs::File::open(archive).map_err(|e| InstallError::Io("open archive".into(), e))?;
     let decoder = zstd::stream::read::Decoder::new(std::io::BufReader::new(file))
-        .map_err(|e| InstallError::Io("初始化 zstd 解压器".into(), e))?;
+        .map_err(|e| InstallError::Io("init zstd decoder".into(), e))?;
     let mut tar = tar::Archive::new(decoder);
     // 可执行位必须保留 —— 丢了的话 bin 里的 shim 全都跑不了。
     tar.set_preserve_permissions(true);
@@ -94,9 +114,9 @@ fn extract_into(archive: &Path, staging: &Path) -> Result<(), InstallError> {
     // 用户手上可能有老脚本打的包，而这个故障的排查成本高得离谱。
     for entry in tar
         .entries()
-        .map_err(|e| InstallError::Io("读能力包条目".into(), e))?
+        .map_err(|e| InstallError::Io("read archive entries".into(), e))?
     {
-        let mut entry = entry.map_err(|e| InstallError::Io("读能力包条目".into(), e))?;
+        let mut entry = entry.map_err(|e| InstallError::Io("read archive entry".into(), e))?;
         let path = entry.path().map(|p| p.into_owned()).ok();
         let is_apple_double = path.as_ref().is_some_and(|p| {
             p.file_name()
@@ -109,7 +129,7 @@ fn extract_into(archive: &Path, staging: &Path) -> Result<(), InstallError> {
         let is_file = entry.header().entry_type().is_file();
         let unpacked = entry
             .unpack_in(staging)
-            .map_err(|e| InstallError::Io("解压能力包".into(), e))?;
+            .map_err(|e| InstallError::Io("extract archive".into(), e))?;
 
         #[cfg(unix)]
         if unpacked && is_file && mode & 0o6000 != 0 {
@@ -122,10 +142,10 @@ fn extract_into(archive: &Path, staging: &Path) -> Result<(), InstallError> {
                 let target = staging.join(p);
                 let safe = std::fs::Permissions::from_mode(mode & 0o777);
                 if let Err(e) = std::fs::set_permissions(&target, safe) {
-                    return Err(InstallError::Io("收掉 setuid 位".into(), e));
+                    return Err(InstallError::Io("strip setuid bit".into(), e));
                 }
                 tracing::warn!(path = %target.display(), mode = format!("{mode:o}"),
-                    "能力包里带 setuid/setgid 位，已掩掉");
+                    "pack entry had setuid/setgid bits; masked");
             }
         }
         #[cfg(not(unix))]
@@ -144,7 +164,7 @@ fn swap_in(staging: &Path, dest: &Path) -> Result<(), InstallError> {
     // 藏起来 —— 归档看着只有一个顶层目录,别的 tar 实现解出来却是两个条目。
     // 不跳过的话这里会误判成"没有外层目录",然后在压缩包根下找 pack.json。
     let entries: Vec<_> = std::fs::read_dir(staging)
-        .map_err(|e| InstallError::Io("读临时解压目录".into(), e))?
+        .map_err(|e| InstallError::Io("read staging dir".into(), e))?
         .filter_map(Result::ok)
         .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
         .collect();
@@ -162,13 +182,12 @@ fn swap_in(staging: &Path, dest: &Path) -> Result<(), InstallError> {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         return Err(InstallError::Layout(format!(
-            "压缩包里找不到 pack.json，这多半不是一个 Riot 能力包。\
-             解压后 {} 下有：{}",
+            "no pack.json in archive; {} contains: {}",
             root.display(),
             if found.is_empty() {
-                "（空）".to_owned()
+                "(empty)".to_owned()
             } else {
-                found.join("、")
+                found.join(", ")
             }
         )));
     }
@@ -183,14 +202,15 @@ fn swap_in(staging: &Path, dest: &Path) -> Result<(), InstallError> {
     let backup = dest.with_extension("old");
     let _ = std::fs::remove_dir_all(&backup);
     if dest.exists() {
-        std::fs::rename(dest, &backup).map_err(|e| InstallError::Io("挪开旧版本".into(), e))?;
+        std::fs::rename(dest, &backup)
+            .map_err(|e| InstallError::Io("move old version aside".into(), e))?;
     }
     if let Err(e) = std::fs::rename(&root, dest) {
         // 新的没就位就把旧的放回去,不能让用户既失去旧版本又没装上新的。
         if backup.exists() {
             let _ = std::fs::rename(&backup, dest);
         }
-        return Err(InstallError::Io("切换到新版本".into(), e));
+        return Err(InstallError::Io("swap in new version".into(), e));
     }
     let _ = std::fs::remove_dir_all(&backup);
     let _ = std::fs::remove_dir_all(staging);
@@ -207,9 +227,9 @@ fn clear_quarantine(dir: &Path) {
         .output()
     {
         Ok(o) if !o.status.success() => {
-            tracing::debug!(status = ?o.status, "清除 quarantine 标记未成功（通常是本来就没有）");
+            tracing::debug!(status = ?o.status, "clearing quarantine flag failed (usually: none set)");
         }
-        Err(e) => tracing::debug!(error = %e, "xattr 调不起来"),
+        Err(e) => tracing::debug!(error = %e, "cannot run xattr"),
         _ => {}
     }
 }
@@ -223,9 +243,9 @@ fn clear_quarantine(dir: &Path) {
 /// 把问题摁在用户还知道自己刚点了"安装"的时刻。
 pub fn finalize(root: &Path) -> Result<InstalledPack, InstallError> {
     let raw = std::fs::read_to_string(root.join("pack.json"))
-        .map_err(|e| InstallError::Io("读 pack.json".into(), e))?;
+        .map_err(|e| InstallError::Io("read pack.json".into(), e))?;
     let manifest: PackManifest = serde_json::from_str(&raw)
-        .map_err(|e| InstallError::Layout(format!("pack.json 解析失败：{e}")))?;
+        .map_err(|e| InstallError::Layout(format!("pack.json parse error: {e}")))?;
 
     let pack = InstalledPack {
         root: root.to_path_buf(),
@@ -236,7 +256,7 @@ pub fn finalize(root: &Path) -> Result<InstalledPack, InstallError> {
         let program = pack.resolve(&check.0);
         if !program.exists() {
             return Err(InstallError::SelfCheck(format!(
-                "{} 不存在",
+                "{} does not exist",
                 program.display()
             )));
         }
@@ -254,12 +274,12 @@ pub fn finalize(root: &Path) -> Result<InstalledPack, InstallError> {
                 tracing::debug!(
                     program = %program.display(),
                     out = %String::from_utf8_lossy(&o.stdout).trim(),
-                    "能力包自检通过"
+                    "pack self-check passed"
                 );
             }
             Ok(o) => {
                 return Err(InstallError::SelfCheck(format!(
-                    "{} 退出码 {:?}：{}",
+                    "{} exited with {:?}: {}",
                     program.display(),
                     o.status.code(),
                     String::from_utf8_lossy(&o.stderr).trim(),
@@ -267,7 +287,7 @@ pub fn finalize(root: &Path) -> Result<InstalledPack, InstallError> {
             }
             Err(e) => {
                 return Err(InstallError::SelfCheck(format!(
-                    "{} 起不来：{e}",
+                    "{} failed to start: {e}",
                     program.display()
                 )));
             }

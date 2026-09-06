@@ -6,17 +6,19 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import type { PermissionMode, ProviderConfig } from "../bridge";
+import { type MessageKey, useT } from "../i18n";
 import { Chevron } from "./Chevron";
 import { ConfirmDialog, type ConfirmRequest } from "./ConfirmDialog";
 import { AgentModeIcon, EyeIcon, MultitaskIcon, PlanModeIcon } from "./icons";
 
-export const MODE_LABEL: Record<string, string> = {
-  default: "每次询问",
-  acceptEdits: "编辑放行",
-  plan: "Plan",
-  auto: "自动判危",
-  bypassPermissions: "全部放行",
-  unattended: "无人值守",
+/** 权限档名的词典键。渲染时 `t()`，不缓存翻译结果。 */
+export const MODE_LABEL_KEY: Record<string, MessageKey> = {
+  default: "composer.perm.default",
+  acceptEdits: "composer.perm.acceptEdits",
+  plan: "composer.perm.plan",
+  auto: "composer.perm.auto",
+  bypassPermissions: "composer.perm.bypassPermissions",
+  unattended: "composer.perm.unattended",
 };
 
 /**
@@ -31,10 +33,10 @@ export const PERMISSION_MODES = [
   "unattended",
 ] as const satisfies readonly PermissionMode[];
 
-/** 跟在权限档名后面的警示语。没有就是不需要提醒。 */
-export const MODE_WARN: Record<string, string> = {
-  bypassPermissions: "风险自负",
-  unattended: "含危险操作",
+/** 跟在权限档名后面的警示语（词典键）。没有就是不需要提醒。 */
+export const MODE_WARN_KEY: Record<string, MessageKey> = {
+  bypassPermissions: "composer.perm.bypassPermissions.warn",
+  unattended: "composer.perm.unattended.warn",
 };
 
 /** 后端 PermissionMode 里真正表示「执行前问多少」的档位（不含 plan）。 */
@@ -48,15 +50,10 @@ export function isExecPermissionMode(m: PermissionMode): boolean {
  */
 export type WorkMode = "agent" | "plan" | "multitask";
 
-const WORK_MODES: { id: WorkMode; label: string; title: string }[] = [
-  { id: "agent", label: "Agent", title: "边看边做，按当前权限档直接执行。" },
-  { id: "plan", label: "Plan", title: "只读侦察并产出计划，批准后才动手。" },
-  {
-    id: "multitask",
-    label: "多任务",
-    title:
-      "主 agent 只协调，实质工作交给后台子 agent；委派完就结束回合，做完通知你。适合几分钟起的任务、边等边聊。",
-  },
+const WORK_MODES: { id: WorkMode; labelKey: MessageKey; titleKey: MessageKey }[] = [
+  { id: "agent", labelKey: "composer.mode.agent", titleKey: "composer.mode.agent.hint" },
+  { id: "plan", labelKey: "composer.mode.plan", titleKey: "composer.mode.plan.hint" },
+  { id: "multitask", labelKey: "composer.mode.multitask", titleKey: "composer.mode.multitask.hint" },
 ];
 
 /**
@@ -221,10 +218,12 @@ export function ModeMenu({
   onChange: (m: WorkMode) => void;
   canMultitask?: boolean;
 }) {
+  const { t } = useT();
   const [open, setOpen] = useState(false);
   const { rootRef, onKeyDown } = useDropdown(open, setOpen);
   const items = canMultitask ? WORK_MODES : WORK_MODES.filter((w) => w.id !== "multitask");
   const cur = WORK_MODES.find((w) => w.id === value) ?? WORK_MODES[0]!;
+  const curLabel = t(cur.labelKey);
 
   return (
     <div className="mode-menu" ref={rootRef} onKeyDown={onKeyDown}>
@@ -233,7 +232,7 @@ export function ModeMenu({
         // Cursor 的做法：整个 pill 跟着模式换色，不只是图标。Agent 是常态，
         // 保持默认灰；Plan 黄、多任务绿，扫一眼就知道现在在哪种方式里。
         className={`pill picker-pill pill-mode-${value}`}
-        title={`工作方式：${cur.label}`}
+        title={t("composer.mode.title", { mode: curLabel })}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen(!open)}
@@ -242,20 +241,20 @@ export function ModeMenu({
             落不到子项上，图标就贴着汉字上沿。span 没有这个问题。 */}
         <span className="picker-pill-row">
           <WorkModeMark mode={value} />
-          <span className="pick-label">{cur.label}</span>
+          <span className="pick-label">{curLabel}</span>
           <Chevron down open={open} />
         </span>
       </button>
       {open ? (
         <div className="menu" role="menu">
-          <div className="menu-group-title">工作方式</div>
+          <div className="menu-group-title">{t("composer.mode.group")}</div>
           {items.map((w) => (
             <ModeMenuItem
               key={w.id}
-              label={w.label}
+              label={t(w.labelKey)}
               active={w.id === value}
               icon={<WorkModeMark mode={w.id} />}
-              title={w.title}
+              title={t(w.titleKey)}
               onPick={() => {
                 onChange(w.id);
                 setOpen(false);
@@ -283,20 +282,23 @@ export function PermissionMenu({
   mode: PermissionMode;
   onChange: (m: PermissionMode) => void;
 }) {
+  const { t } = useT();
   const [open, setOpen] = useState(false);
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
   const { rootRef, onKeyDown } = useDropdown(open, setOpen);
-  const label = MODE_LABEL[mode] ?? mode;
-  const warn = MODE_WARN[mode];
+  const labelKey = MODE_LABEL_KEY[mode];
+  const label = labelKey ? t(labelKey) : mode;
+  const warnKey = MODE_WARN_KEY[mode];
+  const warn = warnKey ? t(warnKey) : undefined;
 
   const pick = (m: PermissionMode) => {
     setOpen(false);
     if (m === mode) return;
     if (m === "unattended") {
       setConfirm({
-        title: "切到无人值守？",
-        body: "这个会话之后不会再有任何权限弹窗，包括危险操作。",
-        confirmLabel: "确认切换",
+        title: t("composer.perm.unattended.confirm.title"),
+        body: t("composer.perm.unattended.confirm.body"),
+        confirmLabel: t("composer.perm.unattended.confirm.ok"),
         action: () => onChange(m),
       });
       return;
@@ -309,7 +311,11 @@ export function PermissionMenu({
       <button
         type="button"
         className={warn ? "pill picker-pill perm-flag pill-danger" : "pill picker-pill perm-flag"}
-        title={`权限：${label}${warn ? `（${warn}）` : ""}`}
+        title={
+          warn
+            ? t("composer.perm.titleWarn", { mode: label, warn })
+            : t("composer.perm.title", { mode: label })
+        }
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen(!open)}
@@ -322,16 +328,20 @@ export function PermissionMenu({
       </button>
       {open ? (
         <div className="menu menu-down" role="menu">
-          <div className="menu-group-title">权限</div>
-          {PERMISSION_MODES.map((m) => (
-            <ModeMenuItem
-              key={m}
-              label={MODE_LABEL[m] ?? m}
-              {...(MODE_WARN[m] ? { warn: MODE_WARN[m] } : {})}
-              active={m === mode}
-              onPick={() => pick(m)}
-            />
-          ))}
+          <div className="menu-group-title">{t("composer.perm.group")}</div>
+          {PERMISSION_MODES.map((m) => {
+            const lk = MODE_LABEL_KEY[m];
+            const wk = MODE_WARN_KEY[m];
+            return (
+              <ModeMenuItem
+                key={m}
+                label={lk ? t(lk) : m}
+                {...(wk ? { warn: t(wk) } : {})}
+                active={m === mode}
+                onPick={() => pick(m)}
+              />
+            );
+          })}
         </div>
       ) : null}
       {/* portal：顶栏是窄条，遮罩要罩住整个窗口，不能就地渲染在它里面。 */}
@@ -370,6 +380,7 @@ export interface PickerSection {
 }
 
 function PickerRow({ item, onPick }: { item: PickerItem; onPick: () => void }) {
+  const { t } = useT();
   return (
     <button
       type="button"
@@ -382,7 +393,12 @@ function PickerRow({ item, onPick }: { item: PickerItem; onPick: () => void }) {
         <span className="pick-main">
           <span className="pick-label">{item.label}</span>
           {item.vision ? (
-            <span className="cap-icon" role="img" aria-label="能收图片" title="能收图片">
+            <span
+              className="cap-icon"
+              role="img"
+              aria-label={t("composer.model.vision")}
+              title={t("composer.model.vision")}
+            >
               <EyeIcon />
             </span>
           ) : null}

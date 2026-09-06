@@ -29,6 +29,7 @@ import type { PermissionAsk, PermissionResponse } from "../bridge";
 import { useImeGuard } from "../hooks/useImeGuard";
 import type { Item, TextItem } from "../hooks/useSession";
 import { useTimedFlag } from "../hooks/useTimedFlag";
+import { dateTimeFormat, useT } from "../i18n";
 import {
   caretToEnd,
   guardChipDeletes,
@@ -189,6 +190,7 @@ function FindBar({
   box: React.RefObject<HTMLElement | null>;
   onClose: () => void;
 }) {
+  const { t } = useT();
   const [query, setQuery] = useState("");
   const [cur, setCur] = useState(0);
   const hitsRef = useRef<Range[]>([]);
@@ -263,7 +265,7 @@ function FindBar({
       clear();
       return;
     }
-    const t = window.setTimeout(() => {
+    const timer = window.setTimeout(() => {
       const ranges = scan(query);
       hitsRef.current = ranges;
       setTotal(ranges.length);
@@ -271,7 +273,7 @@ function FindBar({
       paint(ranges, 0);
       jump(ranges, 0);
     }, FIND_QUIET_MS);
-    return () => window.clearTimeout(t);
+    return () => window.clearTimeout(timer);
   }, [query, scan, paint, jump, clear]);
 
   const step = (dir: 1 | -1) => {
@@ -306,7 +308,7 @@ function FindBar({
           ref={inputRef}
           autoFocus
           value={query}
-          placeholder="在会话中查找"
+          placeholder={t("transcript.find.placeholder")}
           onChange={(e) => setQuery(e.target.value)}
           onCompositionStart={ime.onCompositionStart}
           onCompositionEnd={ime.onCompositionEnd}
@@ -329,8 +331,8 @@ function FindBar({
         <button
           type="button"
           className="find-btn"
-          title="上一个 (⇧Enter)"
-          aria-label="上一个"
+          title={t("transcript.find.prevTitle")}
+          aria-label={t("transcript.find.prev")}
           disabled={!total}
           onClick={() => step(-1)}
         >
@@ -339,8 +341,8 @@ function FindBar({
         <button
           type="button"
           className="find-btn"
-          title="下一个 (Enter)"
-          aria-label="下一个"
+          title={t("transcript.find.nextTitle")}
+          aria-label={t("transcript.find.next")}
           disabled={!total}
           onClick={() => step(1)}
         >
@@ -349,8 +351,8 @@ function FindBar({
         <button
           type="button"
           className="find-btn"
-          title="关闭 (Esc)"
-          aria-label="关闭查找"
+          title={t("transcript.find.closeTitle")}
+          aria-label={t("transcript.find.close")}
           onClick={() => {
             clear();
             onClose();
@@ -417,6 +419,7 @@ export function Transcript({
   /** 上下文删除：把这条气泡从历史里抹掉。 */
   onDeleteEntry?: (item: TextItem) => Promise<boolean>;
 }) {
+  const { t } = useT();
   const boxRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   /** 程序化贴底时挡住 onScroll，免得自己把 stick 打成 false。 */
@@ -513,15 +516,13 @@ export function Transcript({
     (item: TextItem) => {
       if (!onDeleteEntry) return;
       setConfirmDel({
-        title: "删除这一轮问答",
-        body:
-          "这条消息所属的提问，连同它引出的全部回应（回复、工具调用），" +
-          "会一起从上下文中删除，之后的对话不再受这一轮影响。",
-        confirmLabel: "删除",
+        title: t("transcript.msg.deleteTurn"),
+        body: t("transcript.msg.deleteTurnBody"),
+        confirmLabel: t("common.delete"),
         action: () => void onDeleteEntry(item),
       });
     },
-    [onDeleteEntry],
+    [onDeleteEntry, t],
   );
 
   const pinBottom = () => {
@@ -735,7 +736,9 @@ export function Transcript({
     return null;
   }, [items]);
 
-  const waitLabel = runningTool ? `正在执行 ${runningTool}` : "正在生成…";
+  const waitLabel = runningTool
+    ? t("transcript.wait.runningTool", { tool: runningTool })
+    : t("transcript.wait.generating");
 
   // 连续的思考 / 工具折成组（学 Cursor）。长探索几十行连排会把回答
   // 挤出屏幕，折完对话流里剩下的才是内容。生成期间正在跑的工具也在
@@ -836,7 +839,7 @@ export function Transcript({
          * 压缩优先且不看 busy：手动 `/compact` 不开轮次，不占 busy。
          */}
         {compacting ? (
-          <Dots label="正在压缩上下文…" timed since={waitSince} />
+          <Dots label={t("transcript.wait.compacting")} timed since={waitSince} />
         ) : busy && !planAsk && !choiceAsk ? (
           <Dots label={waitLabel} timed since={waitSince} />
         ) : null}
@@ -856,8 +859,8 @@ export function Transcript({
         <button
           type="button"
           className="jump-bottom"
-          title="回到底部"
-          aria-label="回到底部"
+          title={t("transcript.jumpBottom")}
+          aria-label={t("transcript.jumpBottom")}
           onClick={() => {
             stick.current = true;
             pinBottom();
@@ -907,6 +910,7 @@ export const Row = memo(function Row({
   /** 编辑/删除此刻可用（空闲）。生成中改历史会和正在写的轮子打架。 */
   mutateEnabled?: boolean;
 }) {
+  const { t } = useT();
   // 编辑态挂在 Row 上（hooks 不能进 switch 分支），只有文本气泡用它。
   const [editing, setEditing] = useState(false);
 
@@ -984,7 +988,7 @@ export const Row = memo(function Row({
           <LazyMarkdown text={item.text} eager={!!hydrate} />
           {/* 半截话得说明白它为什么半截 —— 不标的话，用户过一会儿回来
               看到的是一句戛然而止的回答，分不清是自己停的还是模型崩了。 */}
-          {item.stopped ? <div className="msg-stopped">已停止生成</div> : null}
+          {item.stopped ? <div className="msg-stopped">{t("transcript.msg.stopped")}</div> : null}
           <MsgActions
             text={item.text}
             regenEnabled={!!regenEnabled && !!onRegenerate}
@@ -1009,7 +1013,7 @@ export const Row = memo(function Row({
     case "compact":
       return (
         <div className="compact-rule" role="separator">
-          以上消息已被压缩
+          {t("transcript.compactRule")}
         </div>
       );
   }
@@ -1018,20 +1022,20 @@ export const Row = memo(function Row({
 /**
  * 气泡上的时刻只到分钟。
  *
- * 秒对读对话没有意义，而且这个格式化器是模块级单例 —— 每条消息每帧
- * 现造一个 Intl 实例，流式输出时是几百次没有产出的构造。
+ * 秒对读对话没有意义。格式化器实例由 i18n 的 dateTimeFormat 按语言缓存 ——
+ * 每条消息每帧现造一个 Intl 实例，流式输出时是几百次没有产出的构造。
  */
-const HHMM = new Intl.DateTimeFormat(undefined, {
+const HHMM_OPTS: Intl.DateTimeFormatOptions = {
   hour: "2-digit",
   minute: "2-digit",
   hour12: false,
-});
+};
 
 /** hover 提示给完整日期：长会话里光看"15:18"分不出是哪天。 */
-const FULL_STAMP = new Intl.DateTimeFormat(undefined, {
+const FULL_STAMP_OPTS: Intl.DateTimeFormatOptions = {
   dateStyle: "long",
   timeStyle: "medium",
-});
+};
 
 /** 悬停出现的消息操作：复制 / 重新生成 / 上下文编辑 / 删除，末尾是时刻。
  *  占位始终在，hover 才可见。 */
@@ -1056,14 +1060,16 @@ function MsgActions({
   /** 编辑/删除此刻可用（空闲）。 */
   mutateEnabled?: boolean;
 }) {
+  const { t } = useT();
   const [copied, flashCopied] = useTimedFlag(false, 1500);
+  const copyLabel = copied ? t("common.copied") : t("transcript.msg.copy");
   return (
     <div className="msg-actions">
       <button
         type="button"
         className={copied ? "msg-action done" : "msg-action"}
-        title={copied ? "已复制" : "复制原文"}
-        aria-label={copied ? "已复制" : "复制原文"}
+        title={copyLabel}
+        aria-label={copyLabel}
         onClick={() => {
           void navigator.clipboard.writeText(text);
           flashCopied(true);
@@ -1075,8 +1081,10 @@ function MsgActions({
         <button
           type="button"
           className="msg-action"
-          title={regenEnabled ? "重新生成" : "生成中，结束后才能重新生成"}
-          aria-label="重新生成"
+          title={
+            regenEnabled ? t("transcript.msg.regenerate") : t("transcript.msg.regenerateBusy")
+          }
+          aria-label={t("transcript.msg.regenerate")}
           disabled={!regenEnabled}
           onClick={() => onRegenerate()}
         >
@@ -1087,8 +1095,8 @@ function MsgActions({
         <button
           type="button"
           className="msg-action"
-          title={mutateEnabled ? "编辑（替换上下文里的原文）" : "生成中，结束后才能编辑"}
-          aria-label="编辑消息"
+          title={mutateEnabled ? t("transcript.msg.edit") : t("transcript.msg.editBusy")}
+          aria-label={t("transcript.msg.editLabel")}
           disabled={!mutateEnabled}
           onClick={onEdit}
         >
@@ -1100,9 +1108,9 @@ function MsgActions({
           type="button"
           className="msg-action"
           title={
-            mutateEnabled ? "删除这一轮问答（提问连同回复）" : "生成中，结束后才能删除"
+            mutateEnabled ? t("transcript.msg.deleteTurnTitle") : t("transcript.msg.deleteBusy")
           }
-          aria-label="删除这一轮问答"
+          aria-label={t("transcript.msg.deleteTurn")}
           disabled={!mutateEnabled}
           onClick={onDelete}
         >
@@ -1116,10 +1124,16 @@ function MsgActions({
 
 /** 消息时刻。跟在操作按钮后面，和它们一起 hover 出现。 */
 function MsgTime({ at }: { at: number }) {
+  // 只为订阅语言：切语言时格式化器要跟着换。
+  useT();
   const d = new Date(at);
   return (
-    <time className="msg-time" dateTime={d.toISOString()} title={FULL_STAMP.format(d)}>
-      {HHMM.format(d)}
+    <time
+      className="msg-time"
+      dateTime={d.toISOString()}
+      title={dateTimeFormat(FULL_STAMP_OPTS).format(d)}
+    >
+      {dateTimeFormat(HHMM_OPTS).format(d)}
     </time>
   );
 }
@@ -1152,6 +1166,7 @@ function MsgEditor({
   onResend?: (text: string) => Promise<boolean>;
   onCancel: () => void;
 }) {
+  const { t } = useT();
   /** 正在落哪一种；null = 空闲。两个按钮各自显示自己的进行中文案。 */
   const [saving, setSaving] = useState<"save" | "resend" | null>(null);
   const [hasText, setHasText] = useState(!!initial.trim());
@@ -1257,21 +1272,19 @@ function MsgEditor({
       />
       <div className="msg-editor-btns">
         <span className="msg-editor-hint">
-          {onResend
-            ? "发送：从这条重新开始，之后的对话会被丢弃 · 保存：只改上下文里的原文"
-            : "保存后替换上下文里的原文，之后的对话按新内容走"}
+          {onResend ? t("transcript.editor.hintResend") : t("transcript.editor.hintSave")}
         </span>
         <button type="button" onClick={onCancel} disabled={saving !== null}>
-          取消
+          {t("common.cancel")}
         </button>
         <button
           type="button"
           className={onResend ? undefined : "msg-editor-save"}
           onClick={() => void save()}
           disabled={saving !== null || !hasText}
-          title={onResend ? "只替换上下文里的原文，不重新生成" : undefined}
+          title={onResend ? t("transcript.editor.saveOnlyTitle") : undefined}
         >
-          {saving === "save" ? "保存中…" : "保存"}
+          {saving === "save" ? t("common.saving") : t("common.save")}
         </button>
         {onResend ? (
           <button
@@ -1279,9 +1292,9 @@ function MsgEditor({
             className="msg-editor-save"
             onClick={() => void primary()}
             disabled={saving !== null || !hasText}
-            title="从这条消息重新开始（⌘/Ctrl+Enter）"
+            title={t("transcript.editor.resendTitle")}
           >
-            {saving === "resend" ? "发送中…" : "发送"}
+            {saving === "resend" ? t("transcript.editor.sending") : t("transcript.editor.send")}
           </button>
         ) : null}
       </div>
@@ -1515,6 +1528,7 @@ function UserText({ text, files = [] }: { text: string; files?: string[] }) {
 
 /** 用户消息里附的图。点击全屏放大 —— 附完图想核对细节是常事。 */
 function UserImage({ src }: { src: string }) {
+  const { t } = useT();
   const [viewer, setViewer] = useState(false);
   return (
     <>
@@ -1522,11 +1536,13 @@ function UserImage({ src }: { src: string }) {
         type="button"
         className="msg-image-btn"
         onClick={() => setViewer(true)}
-        aria-label="放大查看图片"
+        aria-label={t("transcript.image.zoom")}
       >
         <img src={src} alt="" />
       </button>
-      {viewer ? <ShotViewer src={src} alt="消息附图" onClose={() => setViewer(false)} /> : null}
+      {viewer ? (
+        <ShotViewer src={src} alt={t("transcript.image.attached")} onClose={() => setViewer(false)} />
+      ) : null}
     </>
   );
 }

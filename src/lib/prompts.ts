@@ -1,4 +1,5 @@
 import type { PromptPreset } from "../bridge";
+import { t, tn } from "../i18n";
 
 /**
  * 提示词库的共用逻辑。设置里的管理页和会话设置的选择器都要用，
@@ -18,7 +19,7 @@ export function presetLabel(p: PromptPreset): string {
   const title = (p.title ?? "").trim();
   if (title) return title;
   const first = p.body.split("\n").find((l) => l.trim())?.trim() ?? "";
-  if (!first) return "空提示词";
+  if (!first) return t("composer.prompts.empty");
   return first.length > LABEL_MAX ? `${first.slice(0, LABEL_MAX)}…` : first;
 }
 
@@ -30,8 +31,8 @@ export function presetLabel(p: PromptPreset): string {
  */
 export function presetSummary(p: PromptPreset): string {
   const body = p.body.trim();
-  if (!body) return "还没写内容";
-  if (!(p.title ?? "").trim()) return `${body.length} 字`;
+  if (!body) return t("composer.prompts.noBody");
+  if (!(p.title ?? "").trim()) return tn("common.chars", body.length);
   const flat = body.replace(/\s+/g, " ");
   return flat.length > LABEL_MAX ? `${flat.slice(0, LABEL_MAX)}…` : flat;
 }

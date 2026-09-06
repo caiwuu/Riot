@@ -17,6 +17,8 @@ use tokio_util::sync::CancellationToken;
 use riot_protocol::id::MessageId;
 use riot_protocol::message::{Message, MessageMeta, UserContent};
 use riot_protocol::provider::Provider;
+use riot_protocol::text::UiError;
+use riot_protocol::ui_error;
 use riot_providers::anthropic::request::SystemSection;
 use riot_providers::{
     AnthropicConfig, AnthropicProvider, OpenAiConfig, OpenAiProvider, ReqwestTransport,
@@ -25,10 +27,34 @@ use riot_providers::{
 use crate::config::ResolvedModel;
 use crate::prompt::Flavor;
 
+/// 建不起 Provider 的原因。
+///
+/// 两个读者：会话把它变成 [`UiError`] 发给前端；宿主的「测试连接」把
+/// `Display` 当技术细节带回去（英文）。
+#[derive(Debug, thiserror::Error)]
+pub enum ProviderSetupError {
+    /// 宿主没解析出密钥（环境变量 / auth.json 都没有）。
+    #[error("API key is missing for this provider")]
+    MissingKey,
+    /// HTTP 客户端建不起来（TLS 后端初始化失败之类，极少见）。
+    #[error("failed to build HTTP client: {0}")]
+    Http(String),
+}
+
+impl From<ProviderSetupError> for UiError {
+    fn from(e: ProviderSetupError) -> Self {
+        match e {
+            ProviderSetupError::MissingKey => ui_error!("kernel.provider.missingKey"),
+            ProviderSetupError::Http(detail) => ui_error!("kernel.provider.httpClient"; detail),
+        }
+    }
+}
+
 /// 按配置构建 provider。会话和"测试连接"共用 —— 两处各写一遍的话，
 /// 测试通过而正式请求失败（或反过来）这种事迟早发生。
 pub fn provider_for(model: &ResolvedModel) -> Result<Arc<dyn Provider>, String> {
-    provider_from_endpoint(&model.to_endpoint().map_err(|e| e.to_string())?)
+    let endpoint = model.to_endpoint().map_err(|e| e.to_string())?;
+    provider_from_endpoint(&endpoint).map_err(|e| e.to_string())
 }
 
 /// 从一个解析好的端点(含明文 key)建 Provider。
@@ -39,15 +65,16 @@ pub fn provider_for(model: &ResolvedModel) -> Result<Arc<dyn Provider>, String> 
 /// 解析出来。两处共用一份建构逻辑,避免"内嵌能连、RPC 连不上"这类分叉。
 pub fn provider_from_endpoint(
     model: &riot_protocol::ModelEndpoint,
-) -> Result<Arc<dyn Provider>, String> {
+) -> Result<Arc<dyn Provider>, ProviderSetupError> {
     let key = model.api_key.clone();
     // 空 key = 宿主没解析出密钥(环境变量 / auth.json 都没有)。在这里立即
     // 失败,不建 provider、不发请求 —— 和拆进程前 provider_for 缺 key 的行为
     // 一致(那时靠 ResolvedModel::api_key() 报 MissingKey)。
     if key.trim().is_empty() {
-        return Err("缺少 API key".to_owned());
+        return Err(ProviderSetupError::MissingKey);
     }
-    let transport = Arc::new(ReqwestTransport::new().map_err(|e| e.to_string())?);
+    let transport =
+        Arc::new(ReqwestTransport::new().map_err(|e| ProviderSetupError::Http(e.to_string()))?);
     let clock = Arc::new(riot_providers::watchdog::TokioClock);
 
     let sampling = riot_providers::SamplingParams {
@@ -158,7 +185,7 @@ pub async fn list_models(p: &crate::config::ProviderConfig) -> Result<Vec<String
     if ids.is_empty() {
         // 一个都没问到才算失败。报第一条错 —— 它来自最规范的那个路径，
         // 而后面那个只是补充。
-        return Err(first_error.unwrap_or_else(|| "服务方没有返回任何模型".to_owned()));
+        return Err(first_error.unwrap_or_else(|| "the provider returned no models".to_owned()));
     }
 
     ids.sort();
@@ -233,14 +260,17 @@ async fn fetch_models(req: reqwest::RequestBuilder) -> Result<Vec<String>, Strin
         .timeout(Duration::from_secs(15))
         .send()
         .await
-        .map_err(|e| format!("请求失败：{e}"))?;
+        .map_err(|e| format!("request failed: {e}"))?;
 
     let status = resp.status();
-    let body = resp.text().await.map_err(|e| format!("读响应失败：{e}"))?;
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("failed to read response: {e}"))?;
     if !status.is_success() {
         // 错误体里常有有用的说明（key 无效、路径不对），截断后带给用户
         let hint: String = body.chars().take(200).collect();
-        return Err(format!("HTTP {status}：{hint}"));
+        return Err(format!("HTTP {status}: {hint}"));
     }
 
     #[derive(serde::Deserialize)]
@@ -253,7 +283,7 @@ async fn fetch_models(req: reqwest::RequestBuilder) -> Result<Vec<String>, Strin
     }
 
     let list: ModelList =
-        serde_json::from_str(&body).map_err(|e| format!("响应不是模型列表：{e}"))?;
+        serde_json::from_str(&body).map_err(|e| format!("response is not a model list: {e}"))?;
     Ok(list.data.into_iter().map(|m| m.id).collect())
 }
 
@@ -261,6 +291,9 @@ async fn fetch_models(req: reqwest::RequestBuilder) -> Result<Vec<String>, Strin
 ///
 /// 这是设置页"测试连接"按钮的后端。没有它的话，配置错误的表现是
 /// "发消息后转圈很久然后报一长串"—— 用户分不清是网络、key 还是模型名的锅。
+///
+/// 两边都是**技术细节**，不带界面文案：`Ok` 是 `模型 @ 地址`，`Err` 是
+/// 英文原因。"连接正常 / 测试失败"那句话由宿主按词典键说（它包这个结果）。
 pub async fn test_connection(model: &ResolvedModel) -> Result<String, String> {
     use riot_protocol::provider::{ProviderEvent, ProviderRequest};
 
@@ -297,15 +330,15 @@ pub async fn test_connection(model: &ResolvedModel) -> Result<String, String> {
                 _ => {}
             }
         }
-        Err("连接中断，没有收到任何响应".to_owned())
+        Err("connection closed before any response arrived".to_owned())
     })
     .await;
 
     cancel.cancel();
     match verdict {
-        Ok(Ok(())) => Ok(format!("连接正常：{} @ {}", model.model, model.base_url)),
+        Ok(Ok(())) => Ok(format!("{} @ {}", model.model, model.base_url)),
         Ok(Err(e)) => Err(e),
-        Err(_) => Err("30 秒内没有响应。检查 base URL 和网络。".to_owned()),
+        Err(_) => Err("no response within 30 seconds; check the base URL and network".to_owned()),
     }
 }
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { browserScopeList, browserScopeRevoke } from "../bridge";
+import { useT } from "../i18n";
 
 /**
  * 渗透授权范围（scope）管理。
@@ -16,6 +17,7 @@ import { browserScopeList, browserScopeRevoke } from "../bridge";
  * 空的时候整块不渲染 —— 没在做渗透的会话不该看到一块空面板占地方。
  */
 export function ScopePanel({ sessionId }: { sessionId: string }) {
+  const { t } = useT();
   const [hosts, setHosts] = useState<string[]>([]);
   /** 撤销被宿主拒绝。乐观移除会被轮询默默补回来 —— 用户以为权限
    *  已收回而实际仍生效，这在安全面板上必须说出声。 */
@@ -36,8 +38,8 @@ export function ScopePanel({ sessionId }: { sessionId: string }) {
 
   useEffect(() => {
     refresh();
-    const t = setInterval(refresh, 2000);
-    return () => clearInterval(t);
+    const timer = setInterval(refresh, 2000);
+    return () => clearInterval(timer);
   }, [refresh]);
 
   const revoke = (host: string) => {
@@ -51,7 +53,7 @@ export function ScopePanel({ sessionId }: { sessionId: string }) {
     }
     browserScopeRevoke(sessionId, host).catch(() => {
       refresh();
-      setRevokeError(`撤销 ${host} 失败，授权仍然有效`);
+      setRevokeError(t("transcript.scope.revokeFailed", { host }));
       window.clearTimeout(errTimer.current);
       errTimer.current = window.setTimeout(() => setRevokeError(""), 4000);
     });
@@ -62,7 +64,7 @@ export function ScopePanel({ sessionId }: { sessionId: string }) {
     return (
       <div className="scope-panel">
         <div className="scope-head">
-          <span className="scope-title">已全部撤销</span>
+          <span className="scope-title">{t("transcript.scope.allRevoked")}</span>
         </div>
       </div>
     );
@@ -71,11 +73,8 @@ export function ScopePanel({ sessionId }: { sessionId: string }) {
   return (
     <div className="scope-panel">
       <div className="scope-head">
-        <span className="scope-title">渗透授权范围</span>
-        <span
-          className="scope-info"
-          title="这些站点是你在权限弹窗里点过「总是允许」的侵入性渗透目标。撤销之后，模型再对它做侵入操作会重新询问。"
-        >
+        <span className="scope-title">{t("transcript.scope.title")}</span>
+        <span className="scope-info" title={t("transcript.scope.info")}>
           ⓘ
         </span>
         <span className="scope-count">{hosts.length}</span>
@@ -90,10 +89,10 @@ export function ScopePanel({ sessionId }: { sessionId: string }) {
             <button
               type="button"
               className="scope-revoke"
-              title={`撤销对 ${h} 的授权`}
+              title={t("transcript.scope.revokeTitle", { host: h })}
               onClick={() => revoke(h)}
             >
-              撤销
+              {t("transcript.scope.revoke")}
             </button>
           </li>
         ))}

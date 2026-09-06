@@ -3,16 +3,26 @@ import { useEffect, useState } from "react";
 import {
   type ConfigStatus,
   type SkillInfo,
+  renderUiError,
   revealInFinder,
   skillsList,
 } from "../../bridge";
+import { type MessageKey, useT } from "../../i18n";
 import { Card, CardBlock, Group, Row } from "./layout";
+
+const SOURCE_TIER: Record<SkillInfo["source"], MessageKey> = {
+  builtin: "settings.ext.tier.builtin",
+  project: "settings.ext.tier.project",
+  pack: "settings.ext.tier.pack",
+  global: "settings.ext.tier.global",
+};
 
 /**
  * 技能清单（只读）。技能就是磁盘上的 SKILL.md，编辑器比表单好用 ——
  * 这页只负责"有哪些、哪个坏了、目录在哪"。
  */
 export function SkillsPane({ status, activeRoot }: { status: ConfigStatus; activeRoot: string | null }) {
+  const { t, tx } = useT();
   const [skills, setSkills] = useState<SkillInfo[] | null>(null);
   const [loadError, setLoadError] = useState("");
   const configDir = status.configPath.replace(/\/[^/]*$/, "");
@@ -36,63 +46,59 @@ export function SkillsPane({ status, activeRoot }: { status: ConfigStatus; activ
   return (
     <>
       <Group
-        title="怎么写"
-        desc={
-          <>
-            写成 <code>SKILL.md</code>，模型按需加载：名字和描述每轮都在上下文里，正文用到才读，
-            所以描述要写「什么时候用」。优先级 <strong>项目 &gt; 全局 &gt; 内置</strong>
-            ，同名即可盖掉内置。只想自己敲 <code>/</code> 调用、不想占上下文的，去「命令」页。
-          </>
-        }
+        title={t("settings.ext.howTo")}
+        desc={tx("settings.skills.howTo.desc", {
+          skillMd: <code>SKILL.md</code>,
+          priority: <strong>{t("settings.skills.howTo.priority")}</strong>,
+          slash: <code>/</code>,
+        })}
       >
         <Card>
-          <Row title="全局技能目录" desc={<code>{globalDir}/&lt;名字&gt;/SKILL.md</code>}>
-            <button onClick={() => void revealInFinder(globalDir)}>打开目录</button>
+          <Row
+            title={t("settings.skills.globalDir")}
+            desc={<code>{t("settings.skills.dirPattern", { dir: globalDir })}</code>}
+          >
+            <button onClick={() => void revealInFinder(globalDir)}>{t("settings.ext.openDir")}</button>
           </Row>
           {activeRoot ? (
             <Row
-              title="项目技能目录"
-              desc={<code>{activeRoot}/.riot/skills/&lt;名字&gt;/SKILL.md</code>}
+              title={t("settings.skills.projectDir")}
+              desc={<code>{t("settings.skills.dirPattern", { dir: `${activeRoot}/.riot/skills` })}</code>}
             >
-              <button onClick={() => void revealInFinder(activeRoot)}>打开项目</button>
+              <button onClick={() => void revealInFinder(activeRoot)}>{t("settings.ext.openProject")}</button>
             </Row>
           ) : null}
         </Card>
       </Group>
 
       <Group
-        title="已发现的技能"
+        title={t("settings.skills.found")}
         action={
           <button className="btn-compact" onClick={() => void refresh()}>
-            刷新
+            {t("common.refresh")}
           </button>
         }
       >
         {loadError ? (
           <div className="empty-state">
             <p className="form-error" style={{ margin: 0 }}>
-              读取失败：{loadError}
+              {t("settings.ext.loadFailed", { error: loadError })}
             </p>
-            <button onClick={() => void refresh()}>重试</button>
+            <button onClick={() => void refresh()}>{t("common.retry")}</button>
           </div>
         ) : skills === null ? (
           <Card>
             <CardBlock>
               <p className="hint" style={{ margin: 0 }}>
-                读取中…
+                {t("settings.ext.loading")}
               </p>
             </CardBlock>
           </Card>
         ) : skills.length === 0 ? (
           <div className="empty-state">
-            <p className="empty-title">还没有技能</p>
-            <p className="hint">在上面的目录里建一个文件夹，放进这样一个 SKILL.md：</p>
-            <pre className="skill-example">{`---
-name: 发布流程
-description: 发布新版本时用。跑测试、打 tag、更新 changelog。
----
-1. 跑 cargo test --workspace
-2. ……`}</pre>
+            <p className="empty-title">{t("settings.skills.empty.title")}</p>
+            <p className="hint">{t("settings.skills.empty.hint")}</p>
+            <pre className="skill-example">{t("settings.skills.example")}</pre>
           </div>
         ) : (
           <ul className="skill-list">
@@ -104,17 +110,11 @@ description: 发布新版本时用。跑测试、打 tag、更新 changelog。
                 <div className="skill-item-head">
                   <span className="skill-name">{s.name}</span>
                   <span className="skill-source">
-                    {s.source === "builtin"
-                      ? "内置"
-                      : s.source === "project"
-                        ? "项目"
-                        : s.source === "pack"
-                          ? "能力包"
-                          : "全局"}
+                    {t(SOURCE_TIER[s.source])}
                   </span>
                 </div>
                 <p className={s.error ? "form-error" : "hint"} style={{ margin: "2px 0 0" }}>
-                  {s.error ?? s.description}
+                  {s.error ? renderUiError(s.error) : s.description}
                 </p>
               </li>
             ))}

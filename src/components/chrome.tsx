@@ -6,6 +6,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { browserScopeList, host, type PermissionMode, type SessionInfo } from "../bridge";
+import { useT } from "../i18n";
 import { Chevron } from "./Chevron";
 import { useEscLayer } from "./Modal";
 import { PermissionMenu } from "./pickers";
@@ -44,6 +45,7 @@ export function SidebarReveal({
   visible: boolean;
   onToggle: () => void;
 }) {
+  const { t } = useT();
   return (
     <div
       className={[
@@ -58,8 +60,8 @@ export function SidebarReveal({
         <button
           className="tb-btn"
           onClick={onToggle}
-          title="展开侧边栏（⌘B）"
-          aria-label="展开侧边栏"
+          title={t("app.sidebar.expandTitle")}
+          aria-label={t("app.sidebar.expand")}
         >
           <SidebarToggleIcon />
         </button>
@@ -107,6 +109,7 @@ export function TopBar({
   /** 抽屉收起后窗口开关钉在右上角，顶栏用空槽给设置钮让位。 */
   reserveControls?: boolean;
 }) {
+  const { t } = useT();
   return (
     <header className="topbar" data-tauri-drag-region>
       <SidebarReveal visible={!sidebarOpen} onToggle={onToggleSidebar} />
@@ -117,7 +120,7 @@ export function TopBar({
           onClick={(e) => onSessionMenu(e, session)}
           title={session.root}
         >
-          <span className="tb-title-text">{session.title ?? "新会话"}</span>
+          <span className="tb-title-text">{session.title ?? t("app.newSession")}</span>
           <Chevron down />
         </button>
       ) : null}
@@ -134,8 +137,8 @@ export function TopBar({
         className={sessionCfgOpen ? "tb-btn active" : "tb-btn"}
         onClick={onToggleSessionCfg}
         disabled={!sessionCfgEnabled}
-        title={sessionCfgEnabled ? "会话设置" : "先打开一个会话"}
-        aria-label="会话设置"
+        title={sessionCfgEnabled ? t("app.topbar.sessionSettings") : t("app.topbar.needSession")}
+        aria-label={t("app.topbar.sessionSettings")}
       >
         <GearIcon />
       </button>
@@ -172,6 +175,7 @@ export function WindowControls({
   drawerEnabled: boolean;
   onToggleDrawer: () => void;
 }) {
+  const { t } = useT();
   return (
     // 按钮之间的缝也归窗口拖拽 —— 顶栏其余空白处都是这么用的，
     // 到了这一组突然拖不动会显得这块是"别的东西"。
@@ -180,8 +184,8 @@ export function WindowControls({
         className={terminalOpen ? "tb-btn active" : "tb-btn"}
         onClick={onToggleTerminal}
         disabled={!terminalEnabled}
-        title={terminalEnabled ? "终端面板（⌘J）" : "先打开一个会话再用终端"}
-        aria-label="终端面板"
+        title={terminalEnabled ? t("app.win.terminalTitle") : t("app.win.terminalNeedSession")}
+        aria-label={t("app.win.terminal")}
       >
         <PanelBottomIcon />
       </button>
@@ -189,8 +193,8 @@ export function WindowControls({
         className={drawerOpen ? "tb-btn active" : "tb-btn"}
         onClick={onToggleDrawer}
         disabled={!drawerEnabled}
-        title={drawerEnabled ? "侧边面板" : "先打开一个会话"}
-        aria-label="侧边面板"
+        title={drawerEnabled ? t("app.win.drawer") : t("app.topbar.needSession")}
+        aria-label={t("app.win.drawer")}
       >
         <PanelRightIcon />
       </button>
@@ -210,6 +214,7 @@ function ScopeBadge({
   sessionId: string;
   onOpen: () => void;
 }) {
+  const { tn } = useT();
   const [count, setCount] = useState(0);
 
   useEffect(() => {
@@ -236,8 +241,8 @@ function ScopeBadge({
     <button
       className="tb-btn scope-badge"
       onClick={onOpen}
-      title={`${count} 个站点授权了侵入性渗透操作 —— 点击查看和撤销`}
-      aria-label={`渗透授权 ${count} 个站点`}
+      title={tn("app.scopeBadge.title", count)}
+      aria-label={tn("app.scopeBadge.label", count)}
     >
       <ShieldIcon />
       <span className="scope-badge-count">{count}</span>
@@ -281,6 +286,7 @@ export function Resizer({
   onEnd: () => void;
   onReset: () => void;
 }) {
+  const { t } = useT();
   const [dragging, setDragging] = useState(false);
   return (
     <div
@@ -313,7 +319,7 @@ export function Resizer({
         window.addEventListener("pointercancel", up);
       }}
       onDoubleClick={onReset}
-      title="拖动调整大小，双击恢复默认"
+      title={t("app.resizer.title")}
     />
   );
 }

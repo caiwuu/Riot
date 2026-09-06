@@ -5,8 +5,10 @@ import {
   host,
   remoteDeniedReason,
   remoteSetToken,
+  renderUiText,
   subscribeHostLink,
 } from "../bridge";
+import { useT } from "../i18n";
 
 /**
  * 网页版的门：没连上宿主之前不渲染应用，连着的时候在顶上挂一条连接状态。
@@ -19,6 +21,7 @@ import {
  *   卸掉，那会丢掉输入框里正在打的字。
  */
 export function RemoteGate({ children }: { children: ReactNode }) {
+  const { t } = useT();
   const [status, setStatus] = useState<LinkStatus>("connecting");
   useEffect(() => subscribeHostLink(setStatus), []);
 
@@ -29,8 +32,8 @@ export function RemoteGate({ children }: { children: ReactNode }) {
     return (
       <div className="booting">
         <div className="booting-logo">Riot</div>
-        <div className="booting-spinner" aria-label="正在连接" />
-        <p className="hint">正在连接宿主…</p>
+        <div className="booting-spinner" aria-label={t("app.remote.connecting")} />
+        <p className="hint">{t("app.remote.connectingHost")}</p>
       </div>
     );
   }
@@ -39,7 +42,7 @@ export function RemoteGate({ children }: { children: ReactNode }) {
       {status === "reconnecting" ? (
         <div className="link-banner" role="status">
           <span className="booting-spinner" aria-hidden />
-          与宿主的连接断了，正在重连…
+          {t("app.remote.reconnecting")}
         </div>
       ) : null}
       {children}
@@ -48,25 +51,24 @@ export function RemoteGate({ children }: { children: ReactNode }) {
 }
 
 function TokenForm() {
+  const { t } = useT();
   const [token, setToken] = useState("");
   // 每次回到这一屏都是一次新的"被拒"或"没令牌"，读一次当前原因就够；
   // 提交后表单会先切到 connecting 屏，再被拒会重新挂载、重新读。
   const denied = remoteDeniedReason();
   const submit = () => {
-    const t = token.trim();
-    if (!t) return;
-    remoteSetToken(t);
+    const trimmed = token.trim();
+    if (!trimmed) return;
+    remoteSetToken(trimmed);
   };
   return (
     <div className="boot-fail remote-login">
       <div className="booting-logo">Riot</div>
-      <h1>连接到 Riot</h1>
-      <p className="hint">
-        输入桌面端「设置 → 远程访问」里显示的访问令牌。扫那里的二维码可以跳过这一步。
-      </p>
+      <h1>{t("app.remote.title")}</h1>
+      <p className="hint">{t("app.remote.hint")}</p>
       {denied ? (
         <p className="form-error" role="alert">
-          宿主拒绝了上一次连接：{denied}
+          {t("app.remote.denied", { reason: renderUiText(denied) })}
         </p>
       ) : null}
       <form
@@ -80,14 +82,14 @@ function TokenForm() {
           autoFocus
           value={token}
           onChange={(e) => setToken(e.target.value)}
-          placeholder="访问令牌"
+          placeholder={t("app.remote.tokenPlaceholder")}
           spellCheck={false}
           autoComplete="off"
           autoCapitalize="off"
           inputMode="text"
         />
         <button type="submit" className="primary" disabled={!token.trim()}>
-          连接
+          {t("app.remote.connect")}
         </button>
       </form>
     </div>

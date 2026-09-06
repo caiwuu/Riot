@@ -42,14 +42,16 @@
 //! 明写出来」这一种形态，而那正是这条攻击链里唯一需要模型主动做的一步。
 
 use riot_protocol::permission::SafetyKind;
+use riot_protocol::text::UiText;
+use riot_protocol::ui_text;
 
 use super::ast::SubCommand;
 
 /// 扫出来的一个敏感写目标。
 pub struct WriteRisk<'a> {
     pub kind: SafetyKind,
-    /// 给用户看的一句话，说明为什么拦。
-    pub message: String,
+    /// 给用户看的一句话，说明为什么拦。词典键，翻译在前端做。
+    pub message: UiText,
     /// 命中的那条子命令，用来生成「总是允许」建议。
     pub sub: &'a SubCommand,
 }
@@ -76,10 +78,7 @@ fn sub_risk(sub: &SubCommand) -> Option<WriteRisk<'_>> {
     if !read_only && let Some(key) = git_exec_config_key(&name, &args) {
         return Some(WriteRisk {
             kind: SafetyKind::GitInternals,
-            message: format!(
-                "这会设置 Git 配置 `{key}`。这一类键的值会被 Git 当成命令执行 —— \
-                 设了它等于让之后的 git 操作自动跑指定的程序。"
-            ),
+            message: ui_text!("tools.safety.gitExecConfig", key = key),
             sub,
         });
     }

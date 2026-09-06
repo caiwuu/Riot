@@ -129,14 +129,12 @@ impl Provider for ScriptedProvider {
 
         let events = self.responses.get(n).cloned().unwrap_or_else(|| {
             vec![ProviderEvent::Error(
-                riot_protocol::provider::ProviderError::Transport {
-                    message: format!(
-                        "脚本只有 {} 个响应，但主循环发起了第 {} 次请求。\
-                         要么用例缺响应，要么主循环多转了一圈。",
-                        self.responses.len(),
-                        n + 1
-                    ),
-                },
+                riot_protocol::provider::ProviderError::transport(format!(
+                    "脚本只有 {} 个响应，但主循环发起了第 {} 次请求。\
+                     要么用例缺响应，要么主循环多转了一圈。",
+                    self.responses.len(),
+                    n + 1
+                )),
             )]
         });
 
@@ -349,10 +347,10 @@ impl Provider for ChaosProvider {
             })],
             4 => vec![ProviderEvent::Error(E::OutputLimit)],
             5 => vec![ProviderEvent::Error(E::Auth {
-                message: "401".into(),
+                error: riot_protocol::ui_error!("kernel.provider.auth"; "401"),
             })],
             6 => vec![ProviderEvent::Error(E::RetriesExhausted {
-                message: "529 x3".into(),
+                error: riot_protocol::ui_error!("kernel.provider.overloaded"; "529 x3"),
             })],
             // 先吐半截内容再出错：扣留机制必须丢掉这半截，
             // 否则 transcript 里会留下没有 tool_result 的 tool_use。

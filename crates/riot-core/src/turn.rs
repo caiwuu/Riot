@@ -164,9 +164,7 @@ mod tests {
             used: 200,
             limit: 100,
         });
-        t.withhold(ProviderError::Transport {
-            message: "连接断了".into(),
-        });
+        t.withhold(ProviderError::transport("连接断了"));
 
         assert_eq!(
             t.withheld(),

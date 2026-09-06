@@ -12,9 +12,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use riot_protocol::permission::{PermissionContext, PermissionResult};
+use riot_protocol::text::UiText;
 use riot_protocol::tool::{
     PromptContext, ResultBudget, Tool, ToolContext, ToolOutcome, UiPayload, ValidationError,
 };
+use riot_protocol::ui_text;
 use serde::Deserialize;
 
 use super::names::{BASH, GLOB, GREP, READ};
@@ -149,14 +151,14 @@ impl Tool for Grep {
         )
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         let pat = input
             .get("pattern")
             .and_then(|v| v.as_str())
             .unwrap_or("...");
         match input.get("glob").and_then(|v| v.as_str()) {
-            Some(g) => format!("在 {g} 里搜索 {pat}"),
-            None => format!("搜索 {pat}"),
+            Some(g) => ui_text!("tools.grep.in", pattern = pat, glob = g),
+            None => ui_text!("tools.grep.search", pattern = pat),
         }
     }
 

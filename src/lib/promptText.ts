@@ -53,6 +53,7 @@ export function segsToPrompt(segs: Seg[]): string {
       // 打架）。模型看到的是"【描述】`选择器`"，一眼能懂是哪个元素、选择器多少。
       if (s.kind === "elem") {
         const label = s.label.replace(/[【】`]/g, "").trim();
+        // eslint-disable-next-line no-restricted-syntax -- 发给模型的文本，不随界面语言
         return `【${label}】\`${s.value}\``;
       }
       const next = segs[i + 1];
@@ -99,6 +100,7 @@ export function mentionToken(path: string, after = ""): string {
 }
 
 /** 与 `mentions.rs` 的 `is_stop_punct` 对齐：这些字符在路径里几乎不会出现。 */
+// eslint-disable-next-line no-restricted-syntax -- 解析规则用的标点集合（与内核对齐），不是界面文案
 const MENTION_STOP = new Set("，。；：、！？）（「」《》“”");
 
 /**

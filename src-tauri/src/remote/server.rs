@@ -64,7 +64,7 @@ async fn ws_upgrade(
     let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
     if !super::auth::origin_allowed(origin, host, &ctx.shared.allowed_origins) {
         tracing::warn!(?origin, ?host, %peer, "远程连接来源不匹配，拒绝握手");
-        return (StatusCode::FORBIDDEN, "来源不匹配").into_response();
+        return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
     }
     // 限速按谁记账：配了放行 origin = 用户明确处于反向代理后，看 X-Forwarded-For；
     // 否则就是 TCP 对端（见 auth::client_ip）。
@@ -114,7 +114,7 @@ async fn static_asset(State(ctx): State<Ctx>, req: Request) -> Response {
         if let Some(dev) = ctx.app.config().build.dev_url.as_ref() {
             return Redirect::temporary(dev.as_str()).into_response();
         }
-        return (StatusCode::NOT_FOUND, "没有这个资源").into_response();
+        return (StatusCode::NOT_FOUND, "not found").into_response();
     };
 
     let is_html = asset.mime_type.starts_with("text/html");

@@ -1,5 +1,6 @@
 /** 欢迎页（没有活跃会话时的主区）。从 App.tsx 拆出。 */
 
+import { useT } from "../i18n";
 import { basename, parentOf, tildify } from "../pathDisplay";
 import { FolderIcon } from "./icons";
 
@@ -69,24 +70,25 @@ export function Welcome({
   onNewSession: (root: string) => void;
   onOpenProject: () => void;
 }) {
+  const { t } = useT();
   const recent = projects.slice(0, RECENT_LIMIT);
 
   return (
     <div className="welcome">
       <WelcomeArt />
       <h1>Riot</h1>
-      <p>每个会话绑定一个项目目录。</p>
+      <p>{t("app.welcome.tagline")}</p>
 
       {/* 按钮标签只放短动词。之前这里是「在 codeTest 开新会话」——
           把一句话塞进按钮，目录名还在中间，名字一长按钮就跟着变形。
           项目本身是数据，该列出来让人挑，不该编进标签里。 */}
       <button className="primary big" onClick={onOpenProject}>
-        打开目录…
+        {t("app.openDir")}
       </button>
 
       {recent.length > 0 ? (
         <div className="recent">
-          <div className="recent-label">最近</div>
+          <div className="recent-label">{t("app.welcome.recent")}</div>
           {recent.map((root) => (
             <button
               key={root}
@@ -99,7 +101,7 @@ export function Welcome({
                   重复一遍既占地方又要截断。失效项改说「找不到」，
                   父目录还在也帮不上忙。 */}
               <span className="recent-path">
-                {missing.has(root) ? "找不到这个目录" : tildify(parentOf(root))}
+                {missing.has(root) ? t("app.welcome.dirMissing") : tildify(parentOf(root))}
               </span>
             </button>
           ))}

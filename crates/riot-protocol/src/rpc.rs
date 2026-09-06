@@ -339,16 +339,38 @@ pub struct McpServerStatus {
     pub id: String,
     /// `connecting` / `connected` / `failed`
     pub state: String,
-    /// connected 时是服务器自报的名字和版本;failed 时是错误原因。
+    /// connected 时是服务器自报的名字和版本(原样显示,不翻译);其余状态为空。
     pub detail: String,
+    /// failed 时的原因(词典键 + 技术细节)。其余状态为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<crate::text::UiError>,
     /// 对外的完整工具名(`mcp__…`)。
     pub tools: Vec<String>,
 }
 
+/// 内核回给宿主的错误。
+///
+/// `code` 给宿主分支用（比如"这一轮还在跑"要不要重试）；`error` 是给前端
+/// 翻译的键和参数，见 [`crate::text`]。这里没有任何一种语言的文案。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RpcError {
     pub code: RpcErrorCode,
-    pub message: String,
+    #[serde(flatten)]
+    pub error: crate::text::UiError,
+}
+
+impl RpcError {
+    pub fn new(code: RpcErrorCode, error: crate::text::UiError) -> Self {
+        Self { code, error }
+    }
+
+    pub fn internal(error: crate::text::UiError) -> Self {
+        Self::new(RpcErrorCode::Internal, error)
+    }
+
+    pub fn invalid_params(error: crate::text::UiError) -> Self {
+        Self::new(RpcErrorCode::InvalidParams, error)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -112,6 +112,17 @@ export function HookIcon() {
   );
 }
 
+/** 通用：两根滑杆。 */
+export function SlidersIcon() {
+  return (
+    <svg {...S} aria-hidden>
+      <path d="M2.2 5.2h2.2M7.6 5.2h6.2M2.2 10.8h6.2M11.6 10.8h2.2" />
+      <circle cx="6" cy="5.2" r="1.6" />
+      <circle cx="10" cy="10.8" r="1.6" />
+    </svg>
+  );
+}
+
 /** 远程访问：一部手机和一道信号弧。 */
 export function RemoteIcon() {
   return (

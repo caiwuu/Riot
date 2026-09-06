@@ -25,9 +25,10 @@ use riot_protocol::message::Message;
 use riot_protocol::permission::{PendingAsk, PermissionMode, PermissionResponse};
 use riot_protocol::rpc::{RpcRequest, RpcResponse};
 use riot_protocol::schedule::{
-    MissedRun, Repeat, RunTargetSpec, ScheduleDraft, SchedulePatch, ScheduleRun,
-    ScheduleRunPhase, ScheduleSpec, ScheduledTask, WhenSpec,
+    MissedRun, Repeat, RunTargetSpec, ScheduleDraft, SchedulePatch, ScheduleRun, ScheduleRunPhase,
+    ScheduleSpec, ScheduledTask, WhenSpec,
 };
+use riot_protocol::{UiError, ui_error};
 
 use crate::config::AppConfig;
 use crate::fence::Fence;
@@ -37,6 +38,10 @@ use crate::{HostError, HostResult};
 fn sid(id: &str) -> SessionId {
     SessionId::from_raw(id.to_owned())
 }
+
+/// 定时任务的总数上限。防失控：模型抽风循环创建、或用户忘了删，都不该
+/// 积出一个每分钟都在烧模型调用的任务堆。
+const MAX_SCHEDULES: usize = 50;
 
 /// 切回一个会话时前端要的东西。
 #[derive(Debug, Clone, Serialize)]
@@ -333,7 +338,7 @@ impl AppState {
         if !missed.is_empty() {
             tracing::info!(
                 count = missed.len(),
-                "有 {} 个定时任务在 App 关着时错过了到点",
+                "{} scheduled task(s) were missed while the app was closed",
                 missed.len()
             );
         }
@@ -500,7 +505,10 @@ impl AppState {
         // 分发点在 KernelClient 的 sinks 表(事件从内核 stdout 流进来时
         // 现查),换表即换出口 —— 不换的话这一轮剩下的事件(包括结束)
         // 全发给没人听的旧 channel,界面就永远停在"它正在做事"。
-        self.0.kernel.attach_sink(&session_id, viewer, channel).await;
+        self.0
+            .kernel
+            .attach_sink(&session_id, viewer, channel)
+            .await;
         g.entry(session_id)
             .or_default()
             .insert(viewer.to_owned(), Sink { epoch });
@@ -584,8 +592,7 @@ impl AppState {
             hub.epoch
         };
 
-        let (tx, mut rx) =
-            tokio::sync::mpsc::unbounded_channel::<crate::browser::access::Frame>();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::browser::access::Frame>();
         let state = self.clone();
         let sid = session_id.to_owned();
         // 帧从 tokio 通道转到各观看者的 Channel。中间这一跳是必要的:
@@ -603,7 +610,9 @@ impl AppState {
                 buf.extend_from_slice(&f.height.to_le_bytes());
                 buf.extend_from_slice(&f.data);
                 let mut hubs = state.0.panel_hubs.lock().await;
-                let Some(hub) = hubs.get_mut(&sid) else { return };
+                let Some(hub) = hubs.get_mut(&sid) else {
+                    return;
+                };
                 if hub.epoch != epoch {
                     // 已经有更新的一条流接手,这条是旧的,安静退出。
                     return;
@@ -667,7 +676,9 @@ impl AppState {
         let _g = gate.lock().await;
         {
             let mut hubs = self.0.panel_hubs.lock().await;
-            let Some(hub) = hubs.get_mut(session_id) else { return };
+            let Some(hub) = hubs.get_mut(session_id) else {
+                return;
+            };
             if !hub.frames.is_empty() || !hub.streaming {
                 return;
             }
@@ -929,7 +940,7 @@ impl AppState {
         } = resp
         else {
             return Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
-                "session.resume 回了意外的应答".into(),
+                riot_protocol::ui_error!("host.kernel.unexpectedReply", method = "session.resume"),
             )));
         };
 
@@ -1086,7 +1097,7 @@ impl AppState {
     /// transcript，照那个判会把它正在用的 profile 删掉。
     pub async fn gc_browser_profiles(&self) {
         let root = crate::config::profiles_dir(&self.0.config_path);
-        self.gc_orphan_dirs(root, "浏览器 profile").await;
+        self.gc_orphan_dirs(root, "browser profile").await;
     }
 
     /// 清掉没有会话认领的工件目录（截图、过大工具结果）。
@@ -1097,7 +1108,7 @@ impl AppState {
     /// 已经积下的。
     pub async fn gc_artifacts(&self) {
         let root = crate::config::artifacts_root(&self.0.config_path);
-        self.gc_orphan_dirs(root, "工件目录").await;
+        self.gc_orphan_dirs(root, "artifact dir").await;
     }
 
     /// `root` 下每个子目录以会话 id 命名；不在内存会话表里的整个删掉。
@@ -1254,11 +1265,7 @@ impl AppState {
             .await
             .get(id)
             .cloned()
-            .ok_or_else(|| {
-                HostError::Browser(riot_protocol::browser::BrowserUnavailable(
-                    "这个构建没有内置浏览器。开发时先跑 scripts/build-browser.sh。".into(),
-                ))
-            })
+            .ok_or_else(|| ui_error!("host.browser.notBundled").into())
     }
 
     /// 会话在登记表里吗。给出一致的 NoSession 错误。
@@ -1357,11 +1364,7 @@ impl AppState {
         // 走事件流，用户看到的是"发出去了，然后模型说它看不见图" —— 那时候
         // 他已经等了几秒，而且不知道该去改什么。
         if !images.is_empty() && !config.active_takes_images() && config.vision_target().is_none() {
-            return Err(HostError::Provider(
-                "当前模型收不了图片。去设置里给这个服务方打开「图片」，\
-                 或者配一个视觉兼容模型（设置 → 服务方 → 视觉兼容）。"
-                    .to_owned(),
-            ));
+            return Err(ui_error!("host.provider.noVision").into());
         }
 
         // 第一句话定下自动标题，立刻落索引 —— 重启后侧边栏就靠它显示名字。
@@ -1397,7 +1400,7 @@ impl AppState {
             .await?;
         let RpcResponse::TurnSubmitted { queued_id } = resp else {
             return Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
-                "turn.submit 回了意外的应答".into(),
+                riot_protocol::ui_error!("host.kernel.unexpectedReply", method = "turn.submit"),
             )));
         };
         // 无论直接开轮还是进了插话队列,此刻都有轮子在跑(排队的前提就是
@@ -1606,10 +1609,11 @@ impl AppState {
     ) -> HostResult<crate::tree::DirListing> {
         let root = self.session_root(session_id).await?;
         let rel = rel.to_owned();
-        tokio::task::spawn_blocking(move || crate::tree::list_dir(&root, &rel))
-            .await
-            .map_err(|e| HostError::Provider(format!("列目录的任务没跑成：{e}")))?
-            .map_err(HostError::Provider)
+        Ok(
+            tokio::task::spawn_blocking(move || crate::tree::list_dir(&root, &rel))
+                .await
+                .map_err(|e| ui_error!("host.dir.readFailed"; e))??,
+        )
     }
 
     /// 展开一条自定义命令。None = 没这条命令或它是内置的。
@@ -1637,7 +1641,7 @@ impl AppState {
         {
             RpcResponse::QueueList { entries } => Ok(entries),
             _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
-                "queue.list 回了意外的应答".into(),
+                riot_protocol::ui_error!("host.kernel.unexpectedReply", method = "queue.list"),
             ))),
         }
     }
@@ -1654,7 +1658,7 @@ impl AppState {
         {
             RpcResponse::Removed { removed } => Ok(removed),
             _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
-                "queue.remove 回了意外的应答".into(),
+                riot_protocol::ui_error!("host.kernel.unexpectedReply", method = "queue.remove"),
             ))),
         }
     }
@@ -1671,7 +1675,7 @@ impl AppState {
         {
             RpcResponse::Removed { removed } => Ok(removed),
             _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
-                "task.cancel 回了意外的应答".into(),
+                riot_protocol::ui_error!("host.kernel.unexpectedReply", method = "task.cancel"),
             ))),
         }
     }
@@ -1700,7 +1704,7 @@ impl AppState {
                 descendants,
             }),
             _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
-                "task.history 回了意外的应答".into(),
+                riot_protocol::ui_error!("host.kernel.unexpectedReply", method = "task.history"),
             ))),
         }
     }
@@ -1721,7 +1725,7 @@ impl AppState {
         {
             RpcResponse::QueueTaken { input } => Ok(input),
             _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
-                "queue.take 回了意外的应答".into(),
+                riot_protocol::ui_error!("host.kernel.unexpectedReply", method = "queue.take"),
             ))),
         }
     }
@@ -1747,7 +1751,7 @@ impl AppState {
         {
             RpcResponse::Changes { changes } => Ok(changes),
             _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
-                "session.changes 回了意外的应答".into(),
+                riot_protocol::ui_error!("host.kernel.unexpectedReply", method = "session.changes"),
             ))),
         }
     }
@@ -1769,7 +1773,10 @@ impl AppState {
         {
             RpcResponse::GitChanges { git } => Ok(git),
             _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
-                "session.git_changes 回了意外的应答".into(),
+                riot_protocol::ui_error!(
+                    "host.kernel.unexpectedReply",
+                    method = "session.git_changes"
+                ),
             ))),
         }
     }
@@ -1804,7 +1811,7 @@ impl AppState {
         {
             RpcResponse::ScopeHosts { hosts } => Ok(hosts),
             _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
-                "scope.list 回了意外的应答".into(),
+                riot_protocol::ui_error!("host.kernel.unexpectedReply", method = "scope.list"),
             ))),
         }
     }
@@ -1876,7 +1883,7 @@ impl AppState {
         {
             RpcResponse::Nudged { queued } => Ok(queued),
             _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
-                "turn.nudge 回了意外的应答".into(),
+                riot_protocol::ui_error!("host.kernel.unexpectedReply", method = "turn.nudge"),
             ))),
         }
     }
@@ -1910,12 +1917,8 @@ impl AppState {
             let python = venv_python(std::path::Path::new(trimmed));
             // 宿主层验证用户亲手填的路径，直接查真实文件系统。
             if !python.exists() {
-                return Err(HostError::Provider(format!(
-                    "{} 不像一个虚拟环境：找不到 {}。\
-                     应该填 venv 的根目录（python -m venv 创建出来的那个）。",
-                    trimmed,
-                    python.display(),
-                )));
+                let python = python.display();
+                return Err(ui_error!("host.venv.invalid", path = trimmed, python = python).into());
             }
             Some(trimmed.to_owned())
         };
@@ -2035,16 +2038,17 @@ impl AppState {
     /// 创建定时任务。`origin_session` 是发起会话：`in_this_session` 的
     /// 目标就是它，新会话任务从它取项目根。
     ///
-    /// 错误是给模型（或前端）的人话 —— 时间给错了会附上当前时刻。
+    /// 错误是带键的 [`UiError`]：前端查词显示；模型那条路拿它的 `Display`
+    /// （键 + 参数，时间给错了会带上当前时刻）。
     pub async fn schedule_create(
         &self,
         origin_session: &str,
         spec: ScheduleSpec,
-    ) -> Result<ScheduledTask, String> {
+    ) -> Result<ScheduledTask, UiError> {
         let root = self
             .session_root(origin_session)
             .await
-            .map_err(|_| "发起会话不存在，创建不了定时任务。".to_owned())?;
+            .map_err(|_| ui_error!("host.schedule.originMissing"))?;
         let session_id = spec.in_this_session.then(|| origin_session.to_owned());
         self.insert_schedule(
             spec.name,
@@ -2061,29 +2065,29 @@ impl AppState {
     pub async fn schedule_create_manual(
         &self,
         draft: ScheduleDraft,
-    ) -> Result<ScheduledTask, String> {
+    ) -> Result<ScheduledTask, UiError> {
         let (session_id, root) = match draft.target {
             RunTargetSpec::Session { id } => {
                 let root = self
                     .session_root(&id)
                     .await
-                    .map_err(|_| "指定的会话不存在（可能已被删除）。".to_owned())?;
+                    .map_err(|_| ui_error!("host.schedule.sessionMissing"))?;
                 (Some(id), root.display().to_string())
             }
             RunTargetSpec::NewSession { root } => {
                 if !std::path::Path::new(&root).is_dir() {
-                    return Err(format!("项目目录不存在：{root}"));
+                    return Err(ui_error!("host.project.missing", path = root));
                 }
                 (None, root)
             }
         };
         let name = draft.name.trim().to_owned();
         if name.is_empty() {
-            return Err("任务名不能为空。".to_owned());
+            return Err(ui_error!("host.schedule.nameEmpty"));
         }
         let prompt = draft.prompt.trim().to_owned();
         if prompt.is_empty() {
-            return Err("提示词不能为空 —— 到点发出去的就是它。".to_owned());
+            return Err(ui_error!("host.schedule.promptEmpty"));
         }
         self.insert_schedule(name, prompt, &draft.when, session_id, root)
             .await
@@ -2097,7 +2101,7 @@ impl AppState {
         when: &WhenSpec,
         session_id: Option<String>,
         root: String,
-    ) -> Result<ScheduledTask, String> {
+    ) -> Result<ScheduledTask, UiError> {
         let now = crate::schedule::now_ms();
         let (repeat, first_run) = crate::schedule::resolve_spec(when, now)?;
 
@@ -2118,10 +2122,8 @@ impl AppState {
 
         {
             let mut g = self.0.schedules.lock().await;
-            // 上限防失控：模型抽风循环创建、或用户忘了删，都不该积出一个
-            // 每分钟都在烧模型调用的任务堆。
-            if g.tasks.len() >= 50 {
-                return Err("定时任务已经有 50 个了（上限）。先删掉不用的再建。".to_owned());
+            if g.tasks.len() >= MAX_SCHEDULES {
+                return Err(ui_error!("host.schedule.limitReached", max = MAX_SCHEDULES));
             }
             g.tasks.push(task.clone());
             self.persist_schedules(&g);
@@ -2144,14 +2146,14 @@ impl AppState {
         &self,
         id: &str,
         enabled: bool,
-    ) -> Result<ScheduledTask, String> {
+    ) -> Result<ScheduledTask, UiError> {
         let view = {
             let mut g = self.0.schedules.lock().await;
             let t = g
                 .tasks
                 .iter_mut()
                 .find(|t| t.id == id)
-                .ok_or_else(|| format!("没有 id 为 {id} 的任务。先用 list 查一遍。"))?;
+                .ok_or_else(|| ui_error!("host.schedule.notFound", id = id))?;
             t.enabled = enabled;
             if enabled {
                 let now = crate::schedule::now_ms();
@@ -2161,11 +2163,7 @@ impl AppState {
                         // "恢复"可言 —— 要么立即补跑要么删掉。
                         if t.next_run_ms.is_none_or(|ts| ts <= now) {
                             t.enabled = false;
-                            return Err(
-                                "这个一次性任务的时刻已经过了。要现在跑用 run_now（前端的「立即运行」），\
-                                 不跑就删了它。"
-                                    .to_owned(),
-                            );
+                            return Err(ui_error!("host.schedule.oncePast"));
                         }
                     }
                     repeat => t.next_run_ms = crate::schedule::next_run(repeat, now),
@@ -2184,23 +2182,20 @@ impl AppState {
         &self,
         id: &str,
         patch: SchedulePatch,
-    ) -> Result<ScheduledTask, String> {
+    ) -> Result<ScheduledTask, UiError> {
         // 需要 await 的校验先做完，再进锁改表。
         let target = match patch.target {
             Some(RunTargetSpec::Session { id: sid }) => {
-                self.require_session(&sid)
-                    .await
-                    .map_err(|_| "指定的会话不存在（可能已被删除）。".to_owned())?;
                 // 续跑不用 root，但让它指向该会话的根，语义保持一致。
                 let root = self
                     .session_root(&sid)
                     .await
-                    .map_err(|_| "指定的会话不存在。".to_owned())?;
+                    .map_err(|_| ui_error!("host.schedule.sessionMissing"))?;
                 Some((Some(sid), root.display().to_string()))
             }
             Some(RunTargetSpec::NewSession { root }) => {
                 if !std::path::Path::new(&root).is_dir() {
-                    return Err(format!("项目目录不存在：{root}"));
+                    return Err(ui_error!("host.project.missing", path = root));
                 }
                 Some((None, root))
             }
@@ -2217,18 +2212,18 @@ impl AppState {
                 .tasks
                 .iter_mut()
                 .find(|t| t.id == id)
-                .ok_or_else(|| format!("没有 id 为 {id} 的任务。"))?;
+                .ok_or_else(|| ui_error!("host.schedule.notFound", id = id))?;
             if let Some(name) = patch.name {
                 let name = name.trim().to_owned();
                 if name.is_empty() {
-                    return Err("任务名不能为空。".to_owned());
+                    return Err(ui_error!("host.schedule.nameEmpty"));
                 }
                 t.name = name;
             }
             if let Some(prompt) = patch.prompt {
                 let prompt = prompt.trim().to_owned();
                 if prompt.is_empty() {
-                    return Err("提示词不能为空 —— 到点发出去的就是它。".to_owned());
+                    return Err(ui_error!("host.schedule.promptEmpty"));
                 }
                 t.prompt = prompt;
             }
@@ -2251,13 +2246,13 @@ impl AppState {
     }
 
     /// 删除任务。删不存在的报错 —— 对模型"没有这个 id"比静默成功有用。
-    pub async fn schedule_delete(&self, id: &str) -> Result<(), String> {
+    pub async fn schedule_delete(&self, id: &str) -> Result<(), UiError> {
         {
             let mut g = self.0.schedules.lock().await;
             let before = g.tasks.len();
             g.tasks.retain(|t| t.id != id);
             if g.tasks.len() == before {
-                return Err(format!("没有 id 为 {id} 的任务。先用 list 查一遍。"));
+                return Err(ui_error!("host.schedule.notFound", id = id));
             }
             self.persist_schedules(&g);
         }
@@ -2267,14 +2262,14 @@ impl AppState {
 
     /// 立即跑一次（前端的「立即运行」和错过补跑共用）。
     /// 不动 next_run —— 手动跑一次不该改变周期任务的节奏。
-    pub async fn schedule_run_now(&self, id: &str) -> Result<(), String> {
+    pub async fn schedule_run_now(&self, id: &str) -> Result<(), UiError> {
         let task = {
             let g = self.0.schedules.lock().await;
             g.tasks
                 .iter()
                 .find(|t| t.id == id)
                 .cloned()
-                .ok_or_else(|| format!("没有 id 为 {id} 的任务。"))?
+                .ok_or_else(|| ui_error!("host.schedule.notFound", id = id))?
         };
         let state = self.clone();
         tauri::async_runtime::spawn(async move {
@@ -2329,9 +2324,10 @@ impl AppState {
     }
 
     /// 跑一个定时任务：定会话（新建或续跑）→ 提交轮子 → 广播开跑。
-    /// 失败走系统通知 —— 到点没跑成而用户毫不知情，任务就白设了。
+    /// 失败也广播（`ScheduleRun` 带 error）—— 到点没跑成而用户毫不知情，
+    /// 任务就白设了；系统通知由前端收到这条事件后发（文案跟界面语言走）。
     async fn run_schedule(&self, task: crate::schedule::PersistedTask) {
-        tracing::info!(task = %task.id, name = %task.name, "定时任务到点，开跑");
+        tracing::info!(task = %task.id, name = %task.name, "scheduled task due, starting");
         match self.run_schedule_inner(&task).await {
             Ok(session_id) => {
                 self.emit_schedule(ScheduleRun {
@@ -2342,17 +2338,16 @@ impl AppState {
                     error: None,
                 });
             }
-            Err(msg) => {
+            Err(err) => {
                 // 失败已经由 run_schedule_inner 记进历史（它知道有没有会话）。
-                tracing::warn!(task = %task.id, error = %msg, "定时任务没跑成");
+                tracing::warn!(task = %task.id, error = %err, "scheduled task failed to start");
                 self.emit_schedule_changed();
-                self.notify_os("定时任务没跑成", &format!("「{}」：{msg}", task.name));
                 self.emit_schedule(ScheduleRun {
                     task_id: task.id,
                     name: task.name,
                     session_id: String::new(),
                     phase: ScheduleRunPhase::Done,
-                    error: Some(msg),
+                    error: Some(err.clone()),
                 });
             }
         }
@@ -2360,10 +2355,10 @@ impl AppState {
 
     /// 开跑即失败（还没有会话）：记一条失败历史。用户打开详情要能看到
     /// "昨晚那次为什么没跑"，而不是只有一条系统通知一闪而过。
-    async fn record_failed_run(&self, task_id: &str, msg: &str, pause: bool) {
+    async fn record_failed_run(&self, task_id: &str, err: &UiError, pause: bool) {
         let mut g = self.0.schedules.lock().await;
         if let Some(t) = g.tasks.iter_mut().find(|t| t.id == task_id) {
-            t.push_run(crate::schedule::now_ms(), None, Some(msg.to_owned()));
+            t.push_run(crate::schedule::now_ms(), None, Some(err.clone()));
             if pause {
                 t.enabled = false;
             }
@@ -2376,16 +2371,16 @@ impl AppState {
     async fn run_schedule_inner(
         &self,
         task: &crate::schedule::PersistedTask,
-    ) -> Result<String, String> {
+    ) -> Result<String, UiError> {
         // 定会话。
         let session_id = match &task.session_id {
             Some(sid) => {
                 if self.require_session(sid).await.is_err() {
                     // 续跑目标没了：暂停任务等用户处置，而不是每到点都
                     // 失败一次 —— 那会变成一个循环报错的闹钟。
-                    let msg = "它要续跑的会话已被删除，任务已暂停。";
-                    self.record_failed_run(&task.id, msg, true).await;
-                    return Err(msg.to_owned());
+                    let err = ui_error!("host.schedule.run.sessionDeleted");
+                    self.record_failed_run(&task.id, &err, true).await;
+                    return Err(err);
                 }
                 sid.clone()
             }
@@ -2393,9 +2388,9 @@ impl AppState {
                 let info = match self.create_session(&task.root).await {
                     Ok(info) => info,
                     Err(e) => {
-                        let msg = format!("建不了会话：{e}");
-                        self.record_failed_run(&task.id, &msg, false).await;
-                        return Err(msg);
+                        let err = ui_error!("host.schedule.run.createSessionFailed"; e.to_ui());
+                        self.record_failed_run(&task.id, &err, false).await;
+                        return Err(err);
                     }
                 };
                 // 标题 = 任务名 + 日期。custom_title 一并挡住了"第一句话
@@ -2424,21 +2419,20 @@ impl AppState {
             .submit_turn(&session_id, &task.prompt, Vec::new(), Vec::new())
             .await
         {
-            let msg = format!("轮子没起来：{e}");
+            let err = ui_error!("host.schedule.run.turnFailed"; e.to_ui());
             // 刚记的那条"在跑"要改成失败，不然它会一直挂着"还在跑"。
             let mut g = self.0.schedules.lock().await;
             g.running.remove(&session_id);
             if let Some(t) = g.tasks.iter_mut().find(|t| t.id == task.id)
-                && let Some(r) = t
-                    .runs
-                    .iter_mut()
-                    .find(|r| r.finished_at_ms.is_none() && r.session_id.as_deref() == Some(&session_id))
+                && let Some(r) = t.runs.iter_mut().find(|r| {
+                    r.finished_at_ms.is_none() && r.session_id.as_deref() == Some(&session_id)
+                })
             {
                 r.finished_at_ms = Some(crate::schedule::now_ms());
-                r.error = Some(msg.clone());
+                r.error = Some(err.clone());
                 self.persist_schedules(&g);
             }
-            return Err(msg);
+            return Err(err);
         }
         Ok(session_id)
     }
@@ -2462,9 +2456,8 @@ impl AppState {
             (task_id, name)
         };
         let (task_id, name) = claimed;
-        tracing::info!(task = %task_id, session = %session_id, "定时任务跑完了");
+        tracing::info!(task = %task_id, session = %session_id, "scheduled task finished");
         self.emit_schedule_changed();
-        self.notify_os("定时任务完成", &format!("「{name}」跑完了，回来看看结果。"));
         self.emit_schedule(ScheduleRun {
             task_id,
             name,
@@ -2481,17 +2474,7 @@ impl AppState {
             tasks: g.tasks.clone(),
         };
         if let Err(e) = crate::schedule::save(&self.0.sessions_dir, &book) {
-            tracing::warn!(error = %e, "任务表没能写盘，重启后定时任务可能回到旧状态");
-        }
-    }
-
-    /// 系统通知。没挂 AppHandle（测试）就跳过；失败只记日志 ——
-    /// 通知是锦上添花，不值得让任务本身报错。
-    fn notify_os(&self, title: &str, body: &str) {
-        let Some(app) = self.0.app.get() else { return };
-        use tauri_plugin_notification::NotificationExt;
-        if let Err(e) = app.notification().builder().title(title).body(body).show() {
-            tracing::debug!(error = %e, "系统通知没发出去");
+            tracing::warn!(error = %e, "failed to persist schedules; tasks may revert after restart");
         }
     }
 
@@ -2734,10 +2717,12 @@ impl crate::kernel::HostCallHandler for HostCalls {
             Req::ScheduleCall { session_id, call } => {
                 use riot_protocol::hostcall::ScheduleCall as SC;
                 match call {
+                    // 这条线的读者是模型，它没有词典：拒绝原因要说成句子
+                    // （schedule::for_model），只给键名它改不了参数。
                     SC::Create { spec } => {
                         match self.0.schedule_create(session_id.as_str(), spec).await {
                             Ok(task) => R::Schedule { task },
-                            Err(m) => host_unavailable(m),
+                            Err(e) => host_unavailable(crate::schedule::for_model(&e)),
                         }
                     }
                     SC::List => R::Schedules {
@@ -2746,12 +2731,12 @@ impl crate::kernel::HostCallHandler for HostCalls {
                     SC::SetEnabled { id, enabled } => {
                         match self.0.schedule_set_enabled(&id, enabled).await {
                             Ok(task) => R::Schedule { task },
-                            Err(m) => host_unavailable(m),
+                            Err(e) => host_unavailable(crate::schedule::for_model(&e)),
                         }
                     }
                     SC::Delete { id } => match self.0.schedule_delete(&id).await {
                         Ok(()) => R::Ok,
-                        Err(m) => host_unavailable(m),
+                        Err(e) => host_unavailable(crate::schedule::for_model(&e)),
                     },
                 }
             }
@@ -2873,16 +2858,24 @@ mod tests {
         let (old_ch, _) = probe();
 
         // 新的先落地，旧的后落地 —— 正是会出问题的那个顺序
-        assert!(state.attach_sink("webview:main", id.clone(), 2, new_ch).await);
         assert!(
-            !state.attach_sink("webview:main", id.clone(), 1, old_ch).await,
+            state
+                .attach_sink("webview:main", id.clone(), 2, new_ch)
+                .await
+        );
+        assert!(
+            !state
+                .attach_sink("webview:main", id.clone(), 1, old_ch)
+                .await,
             "epoch 更小的订阅必须被拒绝"
         );
 
         // 反方向也要成立，否则切走再切回来就再也收不到事件了。
         let (newer, _) = probe();
         assert!(
-            state.attach_sink("webview:main", id.clone(), 3, newer).await,
+            state
+                .attach_sink("webview:main", id.clone(), 3, newer)
+                .await,
             "更新的订阅要能顶掉旧的"
         );
     }
@@ -2901,7 +2894,11 @@ mod tests {
 
         let (desk, _) = probe();
         let (phone, _) = probe();
-        assert!(state.attach_sink("webview:main", id.clone(), 40, desk).await);
+        assert!(
+            state
+                .attach_sink("webview:main", id.clone(), 40, desk)
+                .await
+        );
         assert!(
             state.attach_sink("remote:1", id.clone(), 1, phone).await,
             "另一个观看者的首次订阅不能被桌面的序号压住"
@@ -3195,7 +3192,7 @@ mod tests {
             .schedule_create("s_ghost", after_60min("x", false))
             .await
             .expect_err("没有发起会话就没有项目根，必须拒绝");
-        assert!(err.contains("会话"), "{err}");
+        assert_eq!(err.key(), "host.schedule.originMissing", "{err}");
     }
 
     #[tokio::test]
@@ -3265,7 +3262,7 @@ mod tests {
             )
             .await
             .expect_err("空名要拒绝");
-        assert!(err.contains("任务名"), "{err}");
+        assert_eq!(err.key(), "host.schedule.nameEmpty", "{err}");
     }
 
     #[tokio::test]
@@ -3292,7 +3289,7 @@ mod tests {
             )
             .await
             .expect_err("指到不存在的会话要拒绝");
-        assert!(err.contains("会话"), "{err}");
+        assert_eq!(err.key(), "host.schedule.sessionMissing", "{err}");
 
         let updated = state
             .schedule_update(
@@ -3329,29 +3326,31 @@ mod tests {
             .schedule_create_manual(draft("晨报", "给我晨报", new_in("/definitely/not/here")))
             .await
             .expect_err("目录不存在要拒绝");
-        assert!(err.contains("目录"), "{err}");
+        assert_eq!(err.key(), "host.project.missing", "{err}");
 
         let err = state
             .schedule_create_manual(draft(
                 "晨报",
                 "给我晨报",
-                riot_protocol::RunTargetSpec::Session { id: "s_ghost".into() },
+                riot_protocol::RunTargetSpec::Session {
+                    id: "s_ghost".into(),
+                },
             ))
             .await
             .expect_err("会话不存在要拒绝");
-        assert!(err.contains("会话"), "{err}");
+        assert_eq!(err.key(), "host.schedule.sessionMissing", "{err}");
 
         let err = state
             .schedule_create_manual(draft("  ", "给我晨报", new_in(&root)))
             .await
             .expect_err("空名字要拒绝");
-        assert!(err.contains("任务名"), "{err}");
+        assert_eq!(err.key(), "host.schedule.nameEmpty", "{err}");
 
         let err = state
             .schedule_create_manual(draft("晨报", "  ", new_in(&root)))
             .await
             .expect_err("空提示词要拒绝");
-        assert!(err.contains("提示词"), "{err}");
+        assert_eq!(err.key(), "host.schedule.promptEmpty", "{err}");
 
         let fresh = state
             .schedule_create_manual(draft(" 晨报 ", "给我晨报", new_in(&root)))

@@ -9,6 +9,8 @@
  * 那份实现几乎是透传，而 Web 那份要做的就是把这三样搬到一条 WebSocket 上。
  */
 
+import { t } from "../../i18n";
+
 /** 宿主往前端推消息的通道。对应 `@tauri-apps/api/core` 的 `Channel`。 */
 export interface HostChannel<T> {
   /** 收到一条消息。宿主保证同一通道内有序。 */
@@ -29,7 +31,7 @@ export type LinkStatus =
 export interface Transport {
   readonly kind: "tauri" | "web";
 
-  /** 调一条宿主命令。错误 reject 成宿主给的那个值（多半是一句中文）。 */
+  /** 调一条宿主命令。错误 reject 成宿主给的那个值（`UiError` 的 JSON），由 bridge 包成 HostError。 */
   invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T>;
 
   /**
@@ -58,7 +60,7 @@ export interface Transport {
 
 /** 连接断开时未完成的调用会以这个类拒绝。调用方能据此分辨"宿主说不行"和"线断了"。 */
 export class TransportDisconnected extends Error {
-  constructor(message = "与宿主的连接已断开，请稍后重试。") {
+  constructor(message = t("errors.disconnected")) {
     super(message);
     this.name = "TransportDisconnected";
   }

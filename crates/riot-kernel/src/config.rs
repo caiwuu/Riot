@@ -22,6 +22,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use riot_protocol::text::UiError;
+use riot_protocol::ui_error;
 use serde::{Deserialize, Serialize};
 
 /// 服务方说话用的协议。决定请求格式、认证头和哪些采样参数可发送。
@@ -518,31 +520,34 @@ struct RawMcpServer {
 /// 三种都常见。
 pub fn mcp_servers_from_json(raw: &str) -> Result<Vec<McpServerConfig>, ConfigError> {
     let root: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|e| ConfigError::Parse(format!("不是合法的 JSON：{e}")))?;
+        .map_err(|e| ConfigError::Parse(ui_error!("kernel.config.badJson"; e)))?;
 
     let map = root
         .get("mcpServers")
         .or_else(|| root.get("servers"))
         .unwrap_or(&root);
-    let map = map.as_object().ok_or_else(|| {
-        ConfigError::Parse("形状不对。期待 {\"mcpServers\": {\"名字\": {\"command\": …}}}".into())
-    })?;
+    let map = map
+        .as_object()
+        .ok_or_else(|| ConfigError::Parse(ui_error!("kernel.config.mcpImportShape")))?;
     if map.is_empty() {
-        return Err(ConfigError::Parse("里面一个服务器都没有".into()));
+        return Err(ConfigError::Parse(ui_error!(
+            "kernel.config.mcpImportEmpty"
+        )));
     }
     // 裸映射的误判保护：如果"服务器"的值不是对象，说明用户粘的是单个
     // 服务器的内层（{"command": "npx"}），缺了名字这一层。
     if map.values().any(|v| !v.is_object()) {
-        return Err(ConfigError::Parse(
-            "形状不对。每个服务器要有名字：{\"mcpServers\": {\"名字\": {\"command\": …}}}".into(),
-        ));
+        return Err(ConfigError::Parse(ui_error!(
+            "kernel.config.mcpImportUnnamed"
+        )));
     }
 
     let mut servers = Vec::with_capacity(map.len());
     let mut seen = std::collections::HashSet::new();
     for (key, value) in map {
-        let raw: RawMcpServer = serde_json::from_value(value.clone())
-            .map_err(|e| ConfigError::Parse(format!("「{key}」解析失败：{e}")))?;
+        let raw: RawMcpServer = serde_json::from_value(value.clone()).map_err(|e| {
+            ConfigError::Parse(ui_error!("kernel.config.mcpServerBad", name = key; e))
+        })?;
 
         if raw.url.is_some()
             || raw.server_url.is_some()
@@ -555,20 +560,26 @@ pub fn mcp_servers_from_json(raw: &str) -> Result<Vec<McpServerConfig>, ConfigEr
                 Some("http" | "sse" | "streamable-http")
             )
         {
-            return Err(ConfigError::Parse(format!(
-                "「{key}」是 http/sse 远程服务器，Riot 暂时只支持 stdio（command + args）"
+            return Err(ConfigError::Parse(ui_error!(
+                "kernel.config.mcpRemoteUnsupported",
+                name = key
             )));
         }
         if raw.command.trim().is_empty() {
-            return Err(ConfigError::Parse(format!("「{key}」缺 command")));
+            return Err(ConfigError::Parse(ui_error!(
+                "kernel.config.mcpMissingCommand",
+                name = key
+            )));
         }
 
         // 生态里的键可以是任意字符串（"my.server"），而 id 要进工具名，
         // 字符集受限。消毒进 id，原名进显示名 —— 不改用户看到的东西。
         let id = sanitize_mcp_id(key);
         if !seen.insert(id.clone()) {
-            return Err(ConfigError::Parse(format!(
-                "「{key}」和另一个服务器的 id 消毒后撞名了（{id}），改一下名字"
+            return Err(ConfigError::Parse(ui_error!(
+                "kernel.config.mcpIdClash",
+                name = key,
+                id = id
             )));
         }
         servers.push(McpServerConfig {
@@ -1105,7 +1116,10 @@ impl AppConfig {
         self.provider(&self.active_provider)
             .map(|_| ())
             .ok_or_else(|| {
-                ConfigError::Parse(format!("找不到 provider「{}」", self.active_provider))
+                ConfigError::Parse(ui_error!(
+                    "kernel.config.providerNotFound",
+                    id = &self.active_provider
+                ))
             })?;
         self.validate_mcp()
     }
@@ -1119,10 +1133,13 @@ impl AppConfig {
         let mut seen = std::collections::HashSet::new();
         for p in &self.prompts {
             if p.id.trim().is_empty() {
-                return Err(ConfigError::Parse("提示词的 id 不能为空".into()));
+                return Err(ConfigError::Parse(ui_error!("kernel.config.promptIdEmpty")));
             }
             if !seen.insert(p.id.as_str()) {
-                return Err(ConfigError::Parse(format!("提示词 id「{}」重复了", p.id)));
+                return Err(ConfigError::Parse(ui_error!(
+                    "kernel.config.promptIdDuplicate",
+                    id = &p.id
+                )));
             }
         }
         Ok(())
@@ -1141,22 +1158,22 @@ impl AppConfig {
         let mut seen = std::collections::HashSet::new();
         for s in &self.mcp_servers {
             if s.id.trim().is_empty() {
-                return Err(ConfigError::Parse("MCP 服务器的 id 不能为空".into()));
+                return Err(ConfigError::Parse(ui_error!("kernel.config.mcpIdEmpty")));
             }
             if !s
                 .id
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
             {
-                return Err(ConfigError::Parse(format!(
-                    "MCP 服务器 id「{}」只能用字母、数字、- 和 _（它要进工具名）",
-                    s.id
+                return Err(ConfigError::Parse(ui_error!(
+                    "kernel.config.mcpIdInvalid",
+                    id = &s.id
                 )));
             }
             if !seen.insert(s.id.as_str()) {
-                return Err(ConfigError::Parse(format!(
-                    "MCP 服务器 id「{}」重复了",
-                    s.id
+                return Err(ConfigError::Parse(ui_error!(
+                    "kernel.config.mcpIdDuplicate",
+                    id = &s.id
                 )));
             }
         }
@@ -1181,19 +1198,20 @@ impl AppConfig {
         // 一个字都没配的时候，「找不到 provider「」」这种话等于没说。
         // 报错要能直接告诉用户下一步做什么。
         if provider_id.is_empty() {
-            return Err(ConfigError::Parse(
-                "还没有配置服务方，去设置里添加一个。".into(),
-            ));
+            return Err(ConfigError::Parse(ui_error!("kernel.config.noProvider")));
         }
-        let p = self
-            .provider(provider_id)
-            .ok_or_else(|| ConfigError::Parse(format!("找不到 provider「{provider_id}」")))?;
+        let p = self.provider(provider_id).ok_or_else(|| {
+            ConfigError::Parse(ui_error!(
+                "kernel.config.providerNotFound",
+                id = provider_id
+            ))
+        })?;
         // 空模型名不能出宿主。发出去的结果是各家 API 五花八门的 400，
         // 用户从那种报错里看不出"其实是没选模型"。
         if model.trim().is_empty() {
-            return Err(ConfigError::Parse(format!(
-                "「{}」还没有选中模型。在设置里添加一个模型并点选，或在输入框的模型菜单里选择。",
-                p.name
+            return Err(ConfigError::Parse(ui_error!(
+                "kernel.config.noModelSelected",
+                name = &p.name
             )));
         }
         let model = model.trim();
@@ -1298,12 +1316,14 @@ impl ResolvedModel {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("没有找到 API key。在设置里粘贴，或设置环境变量 {var}。")]
+    #[error("API key not found; paste it in settings or set the {var} environment variable")]
     MissingKey { var: String },
-    #[error("读配置失败：{0}")]
+    #[error("failed to read config: {0}")]
     Io(String),
-    #[error("配置格式错误：{0}")]
-    Parse(String),
+    /// 配置内容说不通（格式、校验、找不到引用的东西）。带词典键：这些话
+    /// 直接给设置页的用户看，宿主原样透传即可。`Display` 是日志用的英文。
+    #[error("invalid config: {0}")]
+    Parse(UiError),
 }
 
 /// 前端能看到的配置状态。**不含 key 本身**，只说每个 provider 有没有、从哪来。
@@ -1422,8 +1442,8 @@ fn save_key_at(p: &Path, env_name: &str, key: &str) -> Result<(), ConfigError> {
         #[allow(clippy::disallowed_methods)]
         std::fs::create_dir_all(d).map_err(|e| ConfigError::Io(e.to_string()))?;
     }
-    let json =
-        serde_json::to_string_pretty(&auth).map_err(|e| ConfigError::Parse(e.to_string()))?;
+    let json = serde_json::to_string_pretty(&auth)
+        .map_err(|e| ConfigError::Parse(ui_error!("kernel.config.encode"; e)))?;
     #[allow(clippy::disallowed_methods)]
     std::fs::write(p, json).map_err(|e| ConfigError::Io(e.to_string()))?;
 
@@ -1742,7 +1762,8 @@ pub fn save_at(p: &Path, c: &AppConfig) -> Result<(), ConfigError> {
         #[allow(clippy::disallowed_methods)]
         std::fs::create_dir_all(d).map_err(|e| ConfigError::Io(e.to_string()))?;
     }
-    let json = serde_json::to_string_pretty(c).map_err(|e| ConfigError::Parse(e.to_string()))?;
+    let json = serde_json::to_string_pretty(c)
+        .map_err(|e| ConfigError::Parse(ui_error!("kernel.config.encode"; e)))?;
     #[allow(clippy::disallowed_methods)]
     std::fs::write(p, json).map_err(|e| ConfigError::Io(e.to_string()))
 }
@@ -2240,9 +2261,16 @@ mod tests {
     #[test]
     fn 没配服务方时报错要说人话() {
         // 「找不到 provider「」」等于没说。用户需要知道下一步点哪儿。
-        let msg = AppConfig::default().resolve().unwrap_err().to_string();
-        assert!(msg.contains("设置"), "报错要指路，实际：{msg}");
-        assert!(!msg.contains("「」"), "空名字不该出现在报错里：{msg}");
+        let e = AppConfig::default().resolve().unwrap_err();
+        let ConfigError::Parse(ui) = &e else {
+            panic!("该是配置问题：{e}");
+        };
+        assert_eq!(
+            ui.key(),
+            "kernel.config.noProvider",
+            "报错要指路，实际：{e}"
+        );
+        assert!(ui.text.args.is_empty(), "空名字不该出现在报错里：{e}");
     }
 
     /// 临时配置文件路径。`load_at` 会改名，所以每个用例得用独立的一份。
@@ -2338,8 +2366,12 @@ mod tests {
             prompts: vec![preset("p1", "甲"), preset("p1", "乙")],
             ..Default::default()
         };
-        let msg = c.validate().unwrap_err().to_string();
-        assert!(msg.contains("p1"), "报错要点名是哪个 id，实际：{msg}");
+        let e = c.validate().unwrap_err();
+        let ConfigError::Parse(ui) = &e else {
+            panic!("该是配置问题：{e}");
+        };
+        assert_eq!(ui.key(), "kernel.config.promptIdDuplicate");
+        assert_eq!(ui.text.args["id"], "p1", "报错要点名是哪个 id，实际：{e}");
     }
 
     #[test]
@@ -2506,11 +2538,12 @@ mod tests {
             mcp_servers: vec![mcp("my.server", "npx")],
             ..Default::default()
         };
-        let e = bad_char
-            .validate()
-            .expect_err("带点的 id 必须拦")
-            .to_string();
-        assert!(e.contains("my.server"), "报错要点名：{e}");
+        let e = bad_char.validate().expect_err("带点的 id 必须拦");
+        let ConfigError::Parse(ui) = &e else {
+            panic!("该是配置问题：{e}");
+        };
+        assert_eq!(ui.key(), "kernel.config.mcpIdInvalid");
+        assert_eq!(ui.text.args["id"], "my.server", "报错要点名：{e}");
     }
 
     #[test]
@@ -2586,20 +2619,30 @@ mod tests {
             r#"{ "mcpServers": { "r": { "url": "https://x.test/mcp" } } }"#,
             r#"{ "mcpServers": { "r": { "type": "sse", "command": "x" } } }"#,
         ] {
-            let e = mcp_servers_from_json(raw)
-                .expect_err("远程该拒")
-                .to_string();
-            assert!(e.contains("stdio"), "报错要说清暂不支持什么：{e}");
+            let e = mcp_servers_from_json(raw).expect_err("远程该拒");
+            let ConfigError::Parse(ui) = &e else {
+                panic!("该是配置问题：{e}");
+            };
+            assert_eq!(
+                ui.key(),
+                "kernel.config.mcpRemoteUnsupported",
+                "报错要说清暂不支持什么：{e}"
+            );
         }
     }
 
     #[test]
     fn mcp_json_单个服务器内层给指路的报错() {
         // 用户常粘错层级：只粘了 {"command": ...}，缺名字那一层。
-        let e = mcp_servers_from_json(r#"{ "command": "npx" }"#)
-            .expect_err("缺名字层该拒")
-            .to_string();
-        assert!(e.contains("名字"), "要教用户正确形状：{e}");
+        let e = mcp_servers_from_json(r#"{ "command": "npx" }"#).expect_err("缺名字层该拒");
+        let ConfigError::Parse(ui) = &e else {
+            panic!("该是配置问题：{e}");
+        };
+        assert_eq!(
+            ui.key(),
+            "kernel.config.mcpImportUnnamed",
+            "要教用户正确形状：{e}"
+        );
     }
 
     #[test]
@@ -2691,7 +2734,10 @@ mod tests {
             ..one_provider()
         };
         let e = c.resolve().expect_err("空模型必须在发请求前拦下");
-        assert!(e.to_string().contains("还没有选中模型"), "要说人话：{e}");
+        let ConfigError::Parse(ui) = &e else {
+            panic!("该是配置问题：{e}");
+        };
+        assert_eq!(ui.key(), "kernel.config.noModelSelected", "要说人话：{e}");
         assert!(c.validate().is_ok(), "设置页的中间状态不该被拒绝保存");
     }
 

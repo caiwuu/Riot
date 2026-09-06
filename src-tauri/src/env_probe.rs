@@ -133,7 +133,7 @@ pub async fn assemble(state: &AppState, session_id: &str) -> EnvSnapshot {
 fn info(t: &crate::term::TermSummary, shared: bool) -> TerminalInfo {
     TerminalInfo {
         id: t.id,
-        title: t.title.clone(),
+        title: crate::term::model_title(t.title.clone()),
         command: t.command.clone(),
         running: t.running,
         shared,
@@ -182,7 +182,10 @@ mod tests {
         let st = state();
         // 用户自己开的 shell：默认对任何会话都只算个数。
         let (ch, _probe) = crate::term::testing::probe();
-        let user_term = st.terminals().open(None, 80, 24, "webview:main", ch).expect("开终端");
+        let user_term = st
+            .terminals()
+            .open(None, 80, 24, "webview:main", ch)
+            .expect("开终端");
         // s1 起的服务。
         let owned = st
             .terminals()

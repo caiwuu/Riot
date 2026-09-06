@@ -22,6 +22,7 @@ pub mod runner;
 pub mod schedule;
 pub mod task;
 pub mod terminal;
+pub mod text;
 pub mod tool;
 pub mod turn;
 pub mod vision;
@@ -61,6 +62,7 @@ pub use schedule::{
     SchedulePatch, ScheduleRun, ScheduleRunPhase, ScheduleSpec, ScheduledTask, WhenSpec,
 };
 pub use task::{BackgroundTaskStatus, BackgroundTaskView, TaskNotice};
+pub use text::{UiError, UiText};
 pub use tool::{
     Clock, FileMeta, FileState, FileStateCache, FileSystem, FileView, InterruptBehavior,
     ProcessOutput, ProcessRunner, ProcessSpec, ProgressSink, PromptContext, ResultBudget, Tool,

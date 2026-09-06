@@ -13,6 +13,8 @@ use riot_protocol::permission::{
     DecisionReason, PermissionContext, PermissionResult, PermissionUpdate, RuleDecision,
     UpdateScope,
 };
+use riot_protocol::text::UiText;
+use riot_protocol::ui_text;
 use url::Url;
 
 use super::preapproved;
@@ -75,14 +77,14 @@ pub fn decide_for_domain(tool: &str, u: &Url, ctx: &PermissionContext) -> Permis
     }
 }
 
-fn ask_message(tool: &str, u: &Url) -> String {
+fn ask_message(tool: &str, u: &Url) -> UiText {
     let label = permission_label(u);
     if tool == "WebFetch" {
-        format!("是否允许抓取 {label}？")
+        ui_text!("tools.ask.fetch", host = label)
     } else if u.scheme() == "file" {
-        format!("是否允许在浏览器里打开本地文件 {label}？")
+        ui_text!("tools.ask.openLocalFile", path = label)
     } else {
-        format!("是否允许在浏览器里打开 {label}？")
+        ui_text!("tools.ask.openUrl", host = label)
     }
 }
 
@@ -211,9 +213,11 @@ mod tests {
         else {
             panic!("本地文件必须确认，实际：{r:?}");
         };
-        assert!(
-            message.contains(local::DISPLAY),
-            "要让人看见完整路径：{message}"
+        assert_eq!(message.key, "tools.ask.openLocalFile", "{message:?}");
+        assert_eq!(
+            message.args.get("path").map(String::as_str),
+            Some(local::DISPLAY),
+            "要让人看见完整路径：{message:?}"
         );
         assert!(
             matches!(reason, DecisionReason::Consent { .. }),

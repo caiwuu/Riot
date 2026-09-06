@@ -46,8 +46,17 @@ use tauri::ipc::Channel;
 use pasteboard::clipboard_paths;
 
 use riot_protocol::event::AgentEvent;
+use riot_protocol::{UiError, ui_error};
 use state::AppState;
 
+/// 宿主命令的错误。
+///
+/// `[约束]` 发给前端的形态是 [`UiError`]（词典键 + 参数 + 技术细节），
+/// 见 [`HostError::to_ui`]。前端按当前界面语言查词，Rust 这边不写任何
+/// 界面文案 —— `Display` 只给日志用，写英文。
+///
+/// 按来源分变体只是为了 `?` 好用和少数几处 `matches!`；前端不按来源分支。
+/// 带具体键的错误直接造 [`HostError::Ui`]（用 `ui_error!`）。
 #[derive(Debug, thiserror::Error)]
 pub enum HostError {
     #[error(transparent)]
@@ -55,40 +64,71 @@ pub enum HostError {
     #[error(transparent)]
     Fence(#[from] fence::FenceError),
     /// 工作区根已经不在磁盘上。前端当成可恢复错误，不要整页炸掉。
-    #[error("项目目录不存在：{0}")]
+    #[error("project directory missing: {0}")]
     MissingProject(String),
-    #[error("浏览器不可用：{0}")]
+    #[error("browser unavailable: {0}")]
     Browser(riot_protocol::browser::BrowserUnavailable),
-    #[error("会话不存在。先用 create_session 建一个（每个会话绑定一个项目目录）。")]
+    #[error("no such session")]
     NoSession,
-    #[error("这个会话还没有订阅事件流")]
+    #[error("session has no event sink")]
     NoSink,
     #[error(transparent)]
     Config(#[from] config::ConfigError),
+    /// 键已经定好的错误。
     #[error("{0}")]
-    Provider(String),
-    #[error("{0}")]
-    Term(String),
-    /// UserPromptSubmit hook 拦下了这条消息。
-    #[error("{0}")]
+    Ui(#[from] UiError),
+    /// UserPromptSubmit hook 拦下了这条消息。文案是 hook 脚本自己给的
+    /// （用户写的脚本，说什么语言由他定），不翻译。
+    #[error("blocked by hook: {0}")]
     Hook(String),
-    #[error("{0}")]
-    Pack(String),
-    #[error("{0}")]
-    Update(String),
-    /// 沙箱的提权安装。文案已经是给用户看的（含"你取消了权限确认"这种
-    /// 非故障结局），前端直接显示即可。
-    #[error("{0}")]
-    Sandbox(String),
-    /// 定时任务操作。文案已经是人话，前端直接显示。
-    #[error("{0}")]
-    Schedule(String),
 }
 
-// Tauri 要求错误类型可序列化。thiserror 不给 Serialize，手写一层。
+impl HostError {
+    /// 前端要的形态。键对应 `src/i18n/messages/zh-CN/host.ts`。
+    pub fn to_ui(&self) -> UiError {
+        use kernel::KernelError as K;
+        match self {
+            HostError::Kernel(K::NotRunning) => ui_error!("host.kernel.notRunning"),
+            HostError::Kernel(K::RestartExhausted(n)) => {
+                ui_error!("host.kernel.restartExhausted", count = n)
+            }
+            HostError::Kernel(K::Timeout { method }) => {
+                ui_error!("host.kernel.timeout", method = method)
+            }
+            HostError::Kernel(K::Rpc(e)) => e.clone(),
+            HostError::Kernel(K::Io(e)) => ui_error!("host.kernel.io"; e),
+            HostError::Kernel(K::Json(e)) => ui_error!("host.kernel.io"; e),
+            HostError::Fence(fence::FenceError::Escaped { path, root }) => {
+                ui_error!(
+                    "host.fence.escaped",
+                    path = path.display(),
+                    root = root.display()
+                )
+            }
+            HostError::Fence(fence::FenceError::Unresolvable { path, msg }) => {
+                ui_error!("host.fence.unresolvable", path = path.display(); msg)
+            }
+            HostError::MissingProject(p) => ui_error!("host.project.missing", path = p),
+            HostError::Browser(e) => ui_error!("host.browser.unavailable"; &e.0),
+            HostError::NoSession => ui_error!("host.session.missing"),
+            HostError::NoSink => ui_error!("host.session.noSink"),
+            HostError::Config(config::ConfigError::MissingKey { var }) => {
+                ui_error!("host.config.missingKey", var = var)
+            }
+            HostError::Config(config::ConfigError::Io(e)) => ui_error!("host.config.io"; e),
+            // 已经是带具体键的错误（"还没配服务方"、"没选模型"……），再包一层
+            // 就只剩"配置格式错误"，用户看不到真正的原因。
+            HostError::Config(config::ConfigError::Parse(e)) => e.clone(),
+            HostError::Ui(e) => e.clone(),
+            HostError::Hook(msg) => ui_error!("host.hook.blocked"; msg),
+        }
+    }
+}
+
+// Tauri 要求错误类型可序列化。前端拿到的是 UiError 的 JSON，不是一句话。
 impl serde::Serialize for HostError {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&self.to_string())
+        serde::Serialize::serialize(&self.to_ui(), s)
     }
 }
 
@@ -133,7 +173,7 @@ async fn subscribe_session_as(
     {
         // 不当错误报。前端那次订阅本来就已经被自己弃用了，
         // 弹一条"订阅失败"只会把用户引向一个不存在的问题。
-        tracing::debug!(session_id, epoch, viewer, "忽略过期的订阅");
+        tracing::debug!(session_id, epoch, viewer, "ignoring stale subscription");
     }
     Ok(())
 }
@@ -267,10 +307,7 @@ async fn schedule_create(
     state: tauri::State<'_, AppState>,
     draft: riot_protocol::ScheduleDraft,
 ) -> HostResult<riot_protocol::ScheduledTask> {
-    state
-        .schedule_create_manual(draft)
-        .await
-        .map_err(HostError::Schedule)
+    Ok(state.schedule_create_manual(draft).await?)
 }
 
 /// 暂停 / 恢复一个定时任务。返回更新后的任务。
@@ -280,10 +317,7 @@ async fn schedule_set_enabled(
     id: String,
     enabled: bool,
 ) -> HostResult<riot_protocol::ScheduledTask> {
-    state
-        .schedule_set_enabled(&id, enabled)
-        .await
-        .map_err(HostError::Schedule)
+    Ok(state.schedule_set_enabled(&id, enabled).await?)
 }
 
 /// 编辑一个定时任务（详情面板的保存）。返回更新后的任务。
@@ -293,28 +327,19 @@ async fn schedule_update(
     id: String,
     patch: riot_protocol::SchedulePatch,
 ) -> HostResult<riot_protocol::ScheduledTask> {
-    state
-        .schedule_update(&id, patch)
-        .await
-        .map_err(HostError::Schedule)
+    Ok(state.schedule_update(&id, patch).await?)
 }
 
 /// 删除一个定时任务。
 #[tauri::command]
 async fn schedule_delete(state: tauri::State<'_, AppState>, id: String) -> HostResult<()> {
-    state
-        .schedule_delete(&id)
-        .await
-        .map_err(HostError::Schedule)
+    Ok(state.schedule_delete(&id).await?)
 }
 
 /// 立即跑一次（「立即运行」按钮和错过补跑共用）。
 #[tauri::command]
 async fn schedule_run_now(state: tauri::State<'_, AppState>, id: String) -> HostResult<()> {
-    state
-        .schedule_run_now(&id)
-        .await
-        .map_err(HostError::Schedule)
+    Ok(state.schedule_run_now(&id).await?)
 }
 
 /// 启动时发现的错过运行清单。
@@ -550,8 +575,9 @@ async fn sandbox_status() -> riot_runtime::SandboxStatus {
 async fn sandbox_install() -> HostResult<()> {
     tokio::task::spawn_blocking(riot_runtime::sandbox::install)
         .await
-        .map_err(|e| HostError::Sandbox(format!("安装任务没跑完：{e}")))?
-        .map_err(HostError::Sandbox)
+        .map_err(|e| ui_error!("host.sandbox.installFailed"; e))?
+        .map_err(|e| ui_error!("host.sandbox.installFailed"; e))?;
+    Ok(())
 }
 
 /// 卸载命令隔离（删掉沙箱专用账户与凭证）。**Windows 上会弹一次 UAC。**
@@ -561,8 +587,9 @@ async fn sandbox_install() -> HostResult<()> {
 async fn sandbox_uninstall() -> HostResult<()> {
     tokio::task::spawn_blocking(riot_runtime::sandbox::uninstall)
         .await
-        .map_err(|e| HostError::Sandbox(format!("卸载任务没跑完：{e}")))?
-        .map_err(HostError::Sandbox)
+        .map_err(|e| ui_error!("host.sandbox.uninstallFailed"; e))?
+        .map_err(|e| ui_error!("host.sandbox.uninstallFailed"; e))?;
+    Ok(())
 }
 
 /// 和 `tauri.conf.json` 的 version 同一份，设置 → 关于用来显示。
@@ -719,10 +746,9 @@ async fn packs_install(
         Err(e) => {
             // 失败也要推一条终态。只靠命令的 Err 返回的话，进度条会永远停在
             // 最后一个百分比上，用户不知道是卡住了还是失败了。
-            let _ = on_progress.send(packs::PackProgress::Failed {
-                error: e.to_string(),
-            });
-            Err(HostError::Pack(e.to_string()))
+            let ui = e.to_ui();
+            let _ = on_progress.send(packs::PackProgress::Failed { error: ui.clone() });
+            Err(HostError::Ui(ui))
         }
     }
 }
@@ -730,7 +756,7 @@ async fn packs_install(
 /// 卸载一个能力包，连带摘掉它注册的 MCP 服务器。
 #[tauri::command]
 async fn packs_uninstall(state: tauri::State<'_, AppState>, id: String) -> HostResult<()> {
-    packs::uninstall(&id).map_err(|e| HostError::Pack(e.to_string()))?;
+    packs::uninstall(&id).map_err(|e| e.to_ui())?;
     sync_packs_into_config(&state).await;
     Ok(())
 }
@@ -744,7 +770,7 @@ async fn sync_packs_into_config(state: &AppState) {
     // 存不下也要让本次生效 —— 配置文件写不进去是另一个问题，不该顺带
     // 把刚装好的能力包也变成不可用。
     if let Err(e) = config::save(&config) {
-        tracing::warn!(error = %e, "能力包的 MCP 配置没能落盘");
+        tracing::warn!(error = %e, "failed to persist pack MCP config");
     }
     state.set_config(config).await;
     state.reconcile_mcp().await;
@@ -763,7 +789,7 @@ async fn set_api_key(
     let config = state.config().await;
     let p = config
         .provider(&provider_id)
-        .ok_or_else(|| HostError::Provider(format!("找不到 provider「{provider_id}」")))?;
+        .ok_or_else(|| ui_error!("host.provider.notFound", id = &provider_id))?;
     config::save_key(&p.api_key_env, &key)?;
     Ok(config::ConfigStatus::of(config))
 }
@@ -798,7 +824,11 @@ async fn browser_open(
     on_frame: Channel<tauri::ipc::InvokeResponseBody>,
 ) -> HostResult<browser::access::PanelState> {
     state
-        .browser_open_for(&state::webview_viewer(webview.label()), &session_id, on_frame)
+        .browser_open_for(
+            &state::webview_viewer(webview.label()),
+            &session_id,
+            on_frame,
+        )
         .await
 }
 
@@ -824,11 +854,7 @@ async fn browser_navigate(
 ) -> HostResult<()> {
     use riot_protocol::browser::BrowserAccess as _;
     if !browser::access::panel_navigable(&url) {
-        return Err(HostError::Browser(
-            riot_protocol::browser::BrowserUnavailable(
-                "内置浏览器只能打开 http / https 地址，或者 file:// 开头的本地文件。".into(),
-            ),
-        ));
+        return Err(ui_error!("host.browser.badScheme").into());
     }
     let b = state.panel_browser(&session_id).await?;
     b.navigate(&url).await.map_err(HostError::Browser)
@@ -1024,15 +1050,13 @@ async fn term_open(
     rows: u16,
     on_event: Channel<term::TermEvent>,
 ) -> HostResult<u32> {
-    terms
-        .open(
-            root,
-            cols,
-            rows,
-            &state::webview_viewer(webview.label()),
-            on_event,
-        )
-        .map_err(HostError::Term)
+    Ok(terms.open(
+        root,
+        cols,
+        rows,
+        &state::webview_viewer(webview.label()),
+        on_event,
+    )?)
 }
 
 /// 把键盘输入写进 shell。`data` 是 xterm 给的原始串（含控制序列）。
@@ -1042,7 +1066,7 @@ async fn term_write(
     id: u32,
     data: String,
 ) -> HostResult<()> {
-    terms.write(id, &data).map_err(HostError::Term)
+    Ok(terms.write(id, &data)?)
 }
 
 /// 面板里的终端尺寸变了，PTY 跟着变 —— 不同步的话 shell 按旧宽度折行。
@@ -1053,7 +1077,7 @@ async fn term_resize(
     cols: u16,
     rows: u16,
 ) -> HostResult<()> {
-    terms.resize(id, cols, rows).map_err(HostError::Term)
+    Ok(terms.resize(id, cols, rows)?)
 }
 
 /// 关一个终端（杀掉 shell）。幂等。
@@ -1080,9 +1104,7 @@ async fn term_attach(
     id: u32,
     on_event: Channel<term::TermEvent>,
 ) -> HostResult<()> {
-    terms
-        .attach(&state::webview_viewer(webview.label()), id, on_event)
-        .map_err(HostError::Term)
+    Ok(terms.attach(&state::webview_viewer(webview.label()), id, on_event)?)
 }
 
 /// 把一个终端交给模型看 / 收回来。
@@ -1123,12 +1145,11 @@ async fn read_image(
     state: tauri::State<'_, AppState>,
     path: String,
 ) -> HostResult<content::ImageOutput> {
-    let path = preview::resolve(&state, &path)
+    let path = preview::resolve(&state, &path).await?;
+    // 图片读取在内核 crate 里，报的是一句原文；这边包成键，原文留作细节。
+    Ok(content::read_image(&path.display().to_string())
         .await
-        .map_err(HostError::Provider)?;
-    content::read_image(&path.display().to_string())
-        .await
-        .map_err(HostError::Provider)
+        .map_err(|e| ui_error!("host.image.readFailed"; e))?)
 }
 
 /// 文件预览一次能读进来的上限。
@@ -1151,25 +1172,21 @@ async fn read_file_bytes(
     state: tauri::State<'_, AppState>,
     path: String,
 ) -> HostResult<tauri::ipc::Response> {
-    let path = preview::resolve(&state, &path)
-        .await
-        .map_err(HostError::Provider)?;
+    let path = preview::resolve(&state, &path).await?;
     let meta = tokio::fs::metadata(&path)
         .await
-        .map_err(|e| HostError::Provider(format!("读不到文件：{e}")))?;
+        .map_err(|e| ui_error!("host.file.readFailed"; e))?;
     if !meta.is_file() {
-        return Err(HostError::Provider("这个路径不是文件".into()));
+        return Err(ui_error!("host.file.notFile").into());
     }
     if meta.len() > MAX_PREVIEW_FILE {
-        return Err(HostError::Provider(format!(
-            "文件太大（{} MB），应用内预览最多 {} MB。请用系统应用打开。",
-            meta.len() / (1024 * 1024),
-            MAX_PREVIEW_FILE / (1024 * 1024),
-        )));
+        let (size, max) = (meta.len() / (1024 * 1024), MAX_PREVIEW_FILE / (1024 * 1024));
+        // 键写在和宏同一行：词典对齐测试按行扫。
+        return Err(ui_error!("host.file.tooLarge", size = size, max = max).into());
     }
     let bytes = tokio::fs::read(&path)
         .await
-        .map_err(|e| HostError::Provider(format!("读文件失败：{e}")))?;
+        .map_err(|e| ui_error!("host.file.readFailed"; e))?;
     Ok(tauri::ipc::Response::new(bytes))
 }
 
@@ -1190,7 +1207,7 @@ async fn add_project(state: tauri::State<'_, AppState>, path: String) -> HostRes
     // 记不住就算了，不影响本次使用 —— 但要留下痕迹，不然"为什么有时候
     // 记得有时候不记得"会变成一个没法排查的玄学问题。
     if let Err(e) = config::save(&config) {
-        tracing::warn!(error = %e, "项目列表没能写进配置");
+        tracing::warn!(error = %e, "failed to persist project list");
     }
     state.set_config(config).await;
     // 项目表变了：另一端（网页版 / 另一窗口）要重拉 config.projects，
@@ -1289,9 +1306,9 @@ async fn test_connection(
         probe.active_model = m;
     }
     let resolved = probe.resolve()?;
-    models::test_connection(&resolved)
+    Ok(models::test_connection(&resolved)
         .await
-        .map_err(HostError::Provider)
+        .map_err(|e| ui_error!("host.provider.testFailed"; e))?)
 }
 
 /// 测搜索后端通不通。设置页的「测试」按钮走这里。
@@ -1300,9 +1317,9 @@ async fn test_connection(
 /// 测试"，要求先保存再测会让他在两个按钮之间来回跑。空地址测内置实例。
 #[tauri::command]
 async fn test_search_backend(base_url: String) -> HostResult<String> {
-    web::test_searxng(&base_url)
+    Ok(web::test_searxng(&base_url)
         .await
-        .map_err(HostError::Provider)
+        .map_err(|e| ui_error!("host.web.searchTestFailed"; e))?)
 }
 
 /// 拉取某个 provider 的可用模型列表（`GET /v1/models`）。
@@ -1314,8 +1331,10 @@ async fn list_models(
     let config = state.config().await;
     let p = config
         .provider(&provider_id)
-        .ok_or_else(|| HostError::Provider(format!("找不到 provider「{provider_id}」")))?;
-    models::list_models(p).await.map_err(HostError::Provider)
+        .ok_or_else(|| ui_error!("host.provider.notFound", id = &provider_id))?;
+    Ok(models::list_models(p)
+        .await
+        .map_err(|e| ui_error!("host.provider.listModelsFailed"; e))?)
 }
 
 /// 没人设变量时的日志级别。
@@ -1352,7 +1371,7 @@ fn install_panic_hook() {
         tracing::error!(
             panic = %info,
             backtrace = %std::backtrace::Backtrace::force_capture(),
-            "线程 panic"
+            "thread panicked"
         );
         default(info);
     }));
@@ -1408,7 +1427,7 @@ pub fn run() {
     // 豁免理由：宿主启动路径，操作自己的配置目录。
     #[allow(clippy::disallowed_methods)]
     if let Err(e) = std::fs::create_dir_all(skills::global_dir()) {
-        tracing::warn!(error = %e, "全局技能目录建不出来，设置页的「打开目录」将无效");
+        tracing::warn!(error = %e, "cannot create global skills dir; the settings 'open folder' button will be a no-op");
     }
 
     // restore 而不是空表：会话和历史从上次的磁盘状态恢复。
@@ -1580,7 +1599,7 @@ pub fn run() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("Tauri 初始化失败")
+        .expect("tauri init failed")
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 // [约束] 这里必须开新的 tokio runtime，不能复用 tauri::async_runtime。
@@ -1601,7 +1620,7 @@ pub fn run() {
                         Ok(rt) => rt.block_on(state.shutdown()),
                         Err(e) => tracing::error!(
                             error = %e,
-                            "退出清理的 runtime 起不来，内核可能留下孤儿进程"
+                            "shutdown runtime failed to start; the kernel may leave orphan processes"
                         ),
                     }
                 })

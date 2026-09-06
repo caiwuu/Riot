@@ -36,7 +36,10 @@ use riot_protocol::permission::{
     PermissionContext, PermissionGate, PermissionMode, PermissionModeState, PermissionRule,
 };
 use riot_protocol::provider::Provider;
+use riot_protocol::rpc::{RpcError, RpcErrorCode};
+use riot_protocol::text::UiError;
 use riot_protocol::tool::{FileStateCache, PromptContext, Tool};
+use riot_protocol::ui_error;
 use riot_runtime::{MemoryFileState, SystemFs, SystemProcessRunner};
 use riot_tools::registry::Registry;
 use riot_tools::scheduler::Scheduler;
@@ -120,6 +123,54 @@ impl SessionSink {
 /// 继续跑只是白烧额度。
 #[derive(Debug)]
 pub struct SinkClosed;
+
+/// 会话拒绝了一次操作（重新生成、编辑、压缩、分叉……）。
+///
+/// 三类，对应宿主要分支的三种情形：`Busy` 是"有轮在跑"，前端据此决定
+/// 排队还是提示；`Invalid` 是参数说不通（空文本、消息不在、不是能这么
+/// 操作的消息），改了再来；`Internal` 是内核自己没做成（压缩失败、panic）。
+/// 文案一律走词典键（见 [`riot_protocol::text`]），这里没有任何语言的话。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionError {
+    Busy,
+    Invalid(UiError),
+    Internal(UiError),
+}
+
+impl SessionError {
+    pub fn code(&self) -> RpcErrorCode {
+        match self {
+            SessionError::Busy => RpcErrorCode::TurnInProgress,
+            SessionError::Invalid(_) => RpcErrorCode::InvalidParams,
+            SessionError::Internal(_) => RpcErrorCode::Internal,
+        }
+    }
+
+    pub fn ui_error(&self) -> UiError {
+        match self {
+            SessionError::Busy => ui_error!("kernel.turn.busy"),
+            SessionError::Invalid(e) | SessionError::Internal(e) => e.clone(),
+        }
+    }
+
+    fn invalid(e: UiError) -> Self {
+        SessionError::Invalid(e)
+    }
+}
+
+impl std::fmt::Display for SessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.ui_error())
+    }
+}
+
+impl std::error::Error for SessionError {}
+
+impl From<SessionError> for RpcError {
+    fn from(e: SessionError) -> Self {
+        RpcError::new(e.code(), e.ui_error())
+    }
+}
 
 /// 排队中的一条待注入消息。
 struct QueuedEntry {
@@ -1189,7 +1240,7 @@ impl Session {
                 tracing::error!(error = %e, "唤醒轮失败");
                 let _ = sink.send(AgentEvent::Done {
                     reason: riot_protocol::event::TerminalReason::Error {
-                        error: riot_protocol::event::AgentError::Internal { message: e },
+                        error: riot_protocol::event::AgentError::Internal { error: e },
                     },
                 });
             }
@@ -1297,7 +1348,7 @@ impl Session {
                 // 那种情况用户只会以为程序坏了。
                 let _ = sink.send(AgentEvent::Done {
                     reason: riot_protocol::event::TerminalReason::Error {
-                        error: riot_protocol::event::AgentError::Internal { message: e },
+                        error: riot_protocol::event::AgentError::Internal { error: e },
                     },
                 });
             }
@@ -1463,17 +1514,18 @@ impl Session {
         caps: TurnCapabilities,
         sink: SessionSink,
         limits: TurnLimits,
-    ) -> Result<(), String> {
+    ) -> Result<(), SessionError> {
         let cancel = CancellationToken::new();
         {
             let mut g = self.running.lock().await;
             if g.is_some() {
-                return Err("上一轮还在进行中".into());
+                return Err(SessionError::Busy);
             }
             *g = Some(cancel.clone());
         }
         self.run_locked(TurnStart::User(input), model, caps, sink, cancel, limits)
             .await
+            .map_err(SessionError::Internal)
     }
 
     /// 丢掉指定助手消息及其后的一切，从它前面那条用户提示再跑一轮。
@@ -1487,12 +1539,12 @@ impl Session {
         caps: TurnCapabilities,
         sink: SessionSink,
         limits: TurnLimits,
-    ) -> Result<(), String> {
+    ) -> Result<(), SessionError> {
         let cancel = CancellationToken::new();
         {
             let mut g = self.running.lock().await;
             if g.is_some() {
-                return Err("正在跑一轮，等它结束再重新生成。".into());
+                return Err(SessionError::Busy);
             }
             *g = Some(cancel.clone());
         }
@@ -1519,15 +1571,15 @@ impl Session {
         caps: TurnCapabilities,
         sink: SessionSink,
         limits: TurnLimits,
-    ) -> Result<(), String> {
+    ) -> Result<(), SessionError> {
         if text.trim().is_empty() {
-            return Err("内容不能为空。想去掉这条消息的话，用删除。".into());
+            return Err(SessionError::invalid(ui_error!("kernel.history.emptyText")));
         }
         let cancel = CancellationToken::new();
         {
             let mut g = self.running.lock().await;
             if g.is_some() {
-                return Err("正在跑一轮，等它结束再重新发送。".into());
+                return Err(SessionError::Busy);
             }
             *g = Some(cancel.clone());
         }
@@ -1564,7 +1616,7 @@ impl Session {
                 tracing::error!(error = %e, "重新生成失败");
                 let _ = sink.send(AgentEvent::Done {
                     reason: riot_protocol::event::TerminalReason::Error {
-                        error: riot_protocol::event::AgentError::Internal { message: e },
+                        error: riot_protocol::event::AgentError::Internal { error: e },
                     },
                 });
             }
@@ -1580,7 +1632,7 @@ impl Session {
         &self,
         message_id: &str,
         text: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), SessionError> {
         self.hydrate().await;
         let mut live = self.history.lock().await;
         let Some(at) = live.iter().position(|m| m.id().as_str() == message_id) else {
@@ -1588,11 +1640,13 @@ impl Session {
             return Err(self.missing_message_error(message_id).await);
         };
         if !live[at].is_user_prompt() {
-            return Err("只能从用户消息重新发送。改回复的话用「编辑」。".into());
+            return Err(SessionError::invalid(ui_error!(
+                "kernel.history.resendNotPrompt"
+            )));
         }
         live.truncate(at + 1);
         if !live[at].edit_text(text) {
-            return Err("这条消息没有可编辑的文本。".into());
+            return Err(SessionError::invalid(ui_error!("kernel.history.noText")));
         }
         let env_seen = crate::env::last_snapshot_text(&live);
         drop(live);
@@ -1609,7 +1663,7 @@ impl Session {
     /// 截断内存历史（以及 transcript）到指定助手消息前面那条用户提示。
     ///
     /// 归档里的旧回复也能点：截回那条就把压缩后的活历史一并丢掉。
-    pub async fn rewind_to_prompt(&self, assistant_id: &str) -> Result<String, String> {
+    pub async fn rewind_to_prompt(&self, assistant_id: &str) -> Result<String, SessionError> {
         self.hydrate().await;
         let mut live = self.history.lock().await;
         let mut archived = self.ui_archive.lock().await;
@@ -1619,11 +1673,11 @@ impl Session {
         all.extend_from_slice(&live);
 
         let keep = cut_at_user_prompt(&all, assistant_id).ok_or_else(|| {
-            if all.iter().any(|m| m.id().as_str() == assistant_id) {
-                "找不到这条回复前面的用户消息，没法重新生成。".to_owned()
+            SessionError::invalid(if all.iter().any(|m| m.id().as_str() == assistant_id) {
+                ui_error!("kernel.history.noPromptBefore")
             } else {
-                "这条消息已经不在当前上下文里。".to_owned()
-            }
+                ui_error!("kernel.history.notInContext")
+            })
         })?;
         let keep_id = all[keep].id().as_str().to_owned();
         let archive_len = archived.len();
@@ -1672,9 +1726,9 @@ impl Session {
     ///
     /// 只对活历史生效。归档（压缩前）的消息模型已经看不见，改它对上下文
     /// 没有任何效果 —— 与其静默假装成功，不如把这层告诉用户。
-    pub async fn edit_message(&self, message_id: &str, text: &str) -> Result<(), String> {
+    pub async fn edit_message(&self, message_id: &str, text: &str) -> Result<(), SessionError> {
         if text.trim().is_empty() {
-            return Err("内容不能为空。想去掉这条消息的话，用删除。".into());
+            return Err(SessionError::invalid(ui_error!("kernel.history.emptyText")));
         }
         self.with_idle_lock(async {
             let mut live = self.history.lock().await;
@@ -1683,7 +1737,9 @@ impl Session {
                 return Err(self.missing_message_error(message_id).await);
             };
             if !msg.edit_text(text) {
-                return Err("这条是系统提示，没有可编辑的文本。".into());
+                return Err(SessionError::invalid(ui_error!(
+                    "kernel.history.systemNoText"
+                )));
             }
             drop(live);
             if let Some(p) = &self.persist {
@@ -1707,7 +1763,7 @@ impl Session {
     ///
     /// 例外自动成立：提问发出后模型没来得及回应（被停止/出错），这一轮
     /// 只有提问自己，删除也就只删它。
-    pub async fn delete_message(&self, message_id: &str) -> Result<(), String> {
+    pub async fn delete_message(&self, message_id: &str) -> Result<(), SessionError> {
         self.with_idle_lock(async {
             let mut live = self.history.lock().await;
             let Some(at) = live.iter().position(|m| m.id().as_str() == message_id) else {
@@ -1715,7 +1771,9 @@ impl Session {
                 return Err(self.missing_message_error(message_id).await);
             };
             if matches!(live[at], Message::System { .. }) {
-                return Err("这条是系统提示，不支持删除。".into());
+                return Err(SessionError::invalid(ui_error!(
+                    "kernel.history.systemNoDelete"
+                )));
             }
             // 轮的起点：目标自己是提问就是它，否则向前找最近的提问；
             // 找不到（历史以回应开头的病态形状）就从目标本身删起。
@@ -1757,12 +1815,12 @@ impl Session {
     /// 并发。期间到达的插话照常排队，下一轮的收尾 drain 会捞到。
     async fn with_idle_lock<T>(
         &self,
-        op: impl Future<Output = Result<T, String>>,
-    ) -> Result<T, String> {
+        op: impl Future<Output = Result<T, SessionError>>,
+    ) -> Result<T, SessionError> {
         {
             let mut g = self.running.lock().await;
             if g.is_some() {
-                return Err("正在跑一轮，等它结束再修改上下文。".into());
+                return Err(SessionError::Busy);
             }
             *g = Some(CancellationToken::new());
         }
@@ -1773,18 +1831,20 @@ impl Session {
     }
 
     /// 编辑/删除的目标不在活历史里时，说清它到底去了哪。
-    async fn missing_message_error(&self, message_id: &str) -> String {
-        if self
-            .ui_archive
-            .lock()
-            .await
-            .iter()
-            .any(|m| m.id().as_str() == message_id)
-        {
-            "这条消息已被压缩进摘要，模型看的是摘要 —— 改它不会影响上下文。".into()
-        } else {
-            "这条消息已经不在当前上下文里。".into()
-        }
+    async fn missing_message_error(&self, message_id: &str) -> SessionError {
+        SessionError::invalid(
+            if self
+                .ui_archive
+                .lock()
+                .await
+                .iter()
+                .any(|m| m.id().as_str() == message_id)
+            {
+                ui_error!("kernel.history.compacted")
+            } else {
+                ui_error!("kernel.history.notInContext")
+            },
+        )
     }
 
     /// 把半截流里已经吐出来的正文定稿成一条助手消息（历史 + transcript）。
@@ -1871,7 +1931,7 @@ impl Session {
         sink: SessionSink,
         cancel: CancellationToken,
         limits: TurnLimits,
-    ) -> Result<(), String> {
+    ) -> Result<(), UiError> {
         // 上一轮的停止不能算到这一轮头上。清在这里而不是置 `running` 那几处：
         // 那是三个入口，漏一个的表现是"上次按过停止，这次没按也把话撤了"。
         self.stopped_by_user.store(false, Ordering::Relaxed);
@@ -1902,7 +1962,7 @@ impl Session {
             Ok(r) => r,
             Err(_) => {
                 tracing::error!("轮次 panic，已收束成一次失败");
-                Err("内部错误，这一轮没有完成。可以重试，或者换一种说法。".to_owned())
+                Err(ui_error!("kernel.turn.panicked"))
             }
         };
 
@@ -2533,14 +2593,15 @@ impl Session {
         &self,
         model: riot_protocol::ModelEndpoint,
         sink: SessionSink,
-    ) -> Result<(), String> {
-        let provider = crate::models::provider_from_endpoint(&model)?;
+    ) -> Result<(), SessionError> {
+        let provider = crate::models::provider_from_endpoint(&model)
+            .map_err(|e| SessionError::Internal(e.into()))?;
         let cancel = CancellationToken::new();
         // 占住 running：期间的插话照常排队，下一轮的收尾 drain 会捞到。
         {
             let mut g = self.running.lock().await;
             if g.is_some() {
-                return Err("正在跑一轮，等它结束再压缩。".into());
+                return Err(SessionError::Busy);
             }
             *g = Some(cancel.clone());
         }
@@ -2551,7 +2612,7 @@ impl Session {
         // 莫名其妙的"压缩失败"。
         riot_core::repair::repair_tool_pairing(&mut history);
         let result = if history.is_empty() {
-            Err("还没有对话内容，没什么可压缩的。".to_owned())
+            Err(SessionError::invalid(ui_error!("kernel.compact.empty")))
         } else {
             // 后台已经算好一份且对得上就直接用；否则走瘦身路径现算。
             let outcome = match self.take_precompact(&history, &sink, &cancel).await {
@@ -2569,7 +2630,7 @@ impl Session {
                     *self.history.lock().await = o.history;
                     Ok((o.before_tokens, o.after_tokens))
                 }
-                None => Err("压缩失败，历史保持原样。稍后再试。".to_owned()),
+                None => Err(SessionError::Internal(ui_error!("kernel.compact.failed"))),
             }
         };
         if result.is_ok() {
@@ -2730,12 +2791,10 @@ impl Session {
         ));
         // 分叉总在后台跑，权限弹窗要带归属（见 subagent::Attributed）。
         // 只改 describe，工具清单的 name / schema / prompt 和父一致。
-        let registry = Registry::new(crate::subagent::Attributed::wrap_all(
-            tools,
-            &format!("后台任务「{title}」"),
-        ))
-        .map(Arc::new)
-        .map_err(|e| format!("分叉的工具装配失败：{e}"))?;
+        // 标签就是任务标题本身，"后台任务「…」"那层措辞由前端按语言给。
+        let registry = Registry::new(crate::subagent::Attributed::wrap_all(tools, title))
+            .map(Arc::new)
+            .map_err(|e| format!("分叉的工具装配失败：{e}"))?;
         let sandbox = self
             .sandbox
             .lock()
@@ -2806,7 +2865,7 @@ impl Session {
         sink: SessionSink,
         cancel: CancellationToken,
         limits: TurnLimits,
-    ) -> Result<(), String> {
+    ) -> Result<(), UiError> {
         let provider = match crate::models::provider_from_endpoint(&model) {
             Ok(p) => p,
             Err(e) => {
@@ -2818,7 +2877,7 @@ impl Session {
                         .unwrap_or_else(|e| e.into_inner())
                         .extend(notices);
                 }
-                return Err(e);
+                return Err(e.into());
             }
         };
         // 这一轮的配置留一份给唤醒轮沿用（见 LastTurn）。放在 provider 建成
@@ -3163,7 +3222,7 @@ impl Session {
         match input {
             TurnStart::Regenerate => {
                 if history.is_empty() {
-                    return Err("没有可重新生成的用户消息".into());
+                    return Err(ui_error!("kernel.history.noPromptBefore"));
                 }
             }
             TurnStart::Notices(notices) => {
@@ -3883,9 +3942,10 @@ mod tests {
         PermissionAsk {
             tool_use_id: riot_protocol::id::ToolUseId::from_raw("t1"),
             tool_name: tool.to_owned(),
-            summary: format!("运行 {tool}"),
+            summary: riot_protocol::ui_text!("tools.ask.useTool", name = tool),
+            agent_label: None,
             preview: AskPreview::Plain {
-                text: String::new(),
+                text: riot_protocol::text::UiText::new("test"),
             },
             suggestions: vec![],
             reason: DecisionReason::UserChoice { remembered: false },
@@ -5178,9 +5238,7 @@ mod tests {
         let provider: Arc<dyn Provider> =
             Arc::new(riot_core::testing::ScriptedProvider::new(vec![vec![
                 riot_protocol::provider::ProviderEvent::Error(
-                    riot_protocol::provider::ProviderError::Transport {
-                        message: "断网".into(),
-                    },
+                    riot_protocol::provider::ProviderError::transport("断网"),
                 ),
             ]]));
         let history = vec![
@@ -5371,7 +5429,7 @@ mod tests {
             tool_use_id: riot_protocol::id::ToolUseId::from_raw("tu_1"),
             parent: None,
             status: riot_protocol::task::BackgroundTaskStatus::Running,
-            activity: String::new(),
+            activity: riot_protocol::ui_text!("kernel.task.activity.started"),
             tool_uses: 0,
             tokens: 0,
             started_at_ms: 0,
@@ -6359,7 +6417,7 @@ mod tests {
             .regenerate("a1", test_model(), test_caps(), test_sink(), test_limits())
             .await
             .expect_err("忙着不该开重新生成");
-        assert!(err.contains("正在跑"), "{err}");
+        assert_eq!(err, SessionError::Busy, "{err}");
     }
 
     #[test]

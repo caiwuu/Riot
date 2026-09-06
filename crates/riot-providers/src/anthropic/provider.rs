@@ -132,7 +132,7 @@ fn build_http_request(
     endpoint: &Endpoint,
 ) -> Result<HttpRequest, HttpError> {
     let body = serde_json::to_vec(wire)
-        .map_err(|e| HttpError::transport(format!("请求序列化失败: {e}")))?;
+        .map_err(|e| HttpError::transport(format!("failed to serialize request: {e}")))?;
 
     Ok(HttpRequest {
         url: crate::endpoint::api_url_with(
@@ -201,9 +201,7 @@ impl Provider for AnthropicProvider {
                 let http_req = match build_http_request(&wire, &endpoint) {
                     Ok(r) => r,
                     Err(e) => {
-                        yield ProviderEvent::Error(ProviderError::Transport {
-                            message: e.to_string(),
-                        });
+                        yield ProviderEvent::Error(ProviderError::transport(e));
                         return;
                     }
                 };
@@ -304,9 +302,7 @@ fn decode_stream(
                             for ev in decoder.finish() {
                                 yield ev;
                             }
-                            yield ProviderEvent::Error(ProviderError::Transport {
-                                message: e.to_string(),
-                            });
+                            yield ProviderEvent::Error(crate::errors::stream_broken(e));
                             return;
                         }
                     };
@@ -322,9 +318,9 @@ fn decode_stream(
                     for ev in decoder.finish() {
                         yield ev;
                     }
-                    yield ProviderEvent::Error(ProviderError::Transport {
-                        message: format!("读取响应流失败: {e}"),
-                    });
+                    yield ProviderEvent::Error(crate::errors::stream_broken(format!(
+                        "failed to read response stream: {e}"
+                    )));
                     return;
                 }
             }
@@ -342,45 +338,18 @@ fn decode_stream(
     }
 }
 
+/// 放弃重试后的错误映射。键的选择在 [`crate::errors`]；这里只贡献
+/// Anthropic 认上下文超长的那一手：400 正文里带 "context limit" 和两个数。
 fn map_giveup(reason: GiveUpReason, e: &HttpError) -> ProviderError {
-    match reason {
-        GiveUpReason::SubscriptionRateLimit => ProviderError::RetriesExhausted {
-            message: format!("已达用量上限：{}", e.body),
-        },
-        GiveUpReason::BackgroundOverload => ProviderError::RetriesExhausted {
-            message: "服务过载，后台任务已跳过".into(),
-        },
-        GiveUpReason::AuthUnrecoverable => ProviderError::Auth {
-            message: format!("凭证无效，刷新后仍然失败：{}", e.body),
-        },
-        GiveUpReason::Exhausted => ProviderError::RetriesExhausted {
-            message: e.to_string(),
-        },
-        GiveUpReason::ServerSaidNo | GiveUpReason::NotRetryable => match e.status {
-            Some(401) | Some(403) => ProviderError::Auth {
-                message: e.body.clone(),
-            },
-            Some(400) if e.body.contains("context limit") => {
-                match crate::retry::parse_context_overflow(&e.body) {
-                    Some(o) => ProviderError::ContextOverflow {
-                        used: o.input_tokens,
-                        limit: o.context_limit,
-                    },
-                    None => ProviderError::Refused {
-                        message: e.to_string(),
-                    },
-                }
-            }
-            // 服务端明确拒绝（参数错误、内容策略）。**没有重试过** ——
-            // 不是传输问题，更不是重试耗尽。
-            Some(_) => ProviderError::Refused {
-                message: e.to_string(),
-            },
-            None => ProviderError::Transport {
-                message: e.to_string(),
-            },
-        },
-    }
+    crate::errors::map_giveup(reason, e, |body| {
+        if !body.contains("context limit") {
+            return None;
+        }
+        crate::retry::parse_context_overflow(body).map(|o| ProviderError::ContextOverflow {
+            used: o.input_tokens,
+            limit: o.context_limit,
+        })
+    })
 }
 
 #[cfg(test)]

@@ -21,9 +21,11 @@ use async_trait::async_trait;
 use riot_protocol::permission::{
     AskChoiceOption, DecisionReason, PermissionContext, PermissionResult,
 };
+use riot_protocol::text::UiText;
 use riot_protocol::tool::{
     PromptContext, ResultBudget, Tool, ToolContext, ToolOutcome, UiPayload, ValidationError,
 };
+use riot_protocol::ui_text;
 use serde::Deserialize;
 
 /// 宿主把用户的选择写进工具输入的哪个键。
@@ -101,11 +103,11 @@ pub fn preview_parts(input: &serde_json::Value) -> Option<(String, Vec<AskChoice
     ))
 }
 
-/// 一条选择怎么写成给模型看的话。
+/// 一条选择怎么写成给模型看的话。只进 tool_result，不进界面。
 ///
 /// 点了现成选项：`label（id）`。自己填写：`自己填写：原文`，前缀不外泄 ——
 /// `__other:` 是宿主和工具之间的编码，模型不该看见实现细节。
-fn describe_pick(id: &str, options: &[AskChoiceOption]) -> String {
+fn pick_for_model(id: &str, options: &[AskChoiceOption]) -> String {
     if let Some(text) = id.strip_prefix(OTHER_PREFIX) {
         let t = text.trim();
         return if t.is_empty() {
@@ -147,12 +149,11 @@ impl Tool for AskUserQuestion {
             .into()
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
-        let q = input
-            .get("question")
-            .and_then(|v| v.as_str())
-            .unwrap_or("请用户决定");
-        format!("提问：{q}")
+    fn describe(&self, input: &serde_json::Value) -> UiText {
+        match input.get("question").and_then(|v| v.as_str()) {
+            Some(q) => ui_text!("tools.ask.question", question = q),
+            None => ui_text!("tools.ask.questionAny"),
+        }
     }
 
     /// 只是问一句话，不碰任何东西。
@@ -187,7 +188,7 @@ impl Tool for AskUserQuestion {
         _ctx: &PermissionContext,
     ) -> PermissionResult {
         PermissionResult::Ask {
-            message: "模型想让你做一个决定".into(),
+            message: ui_text!("tools.ask.decision"),
             suggestions: Vec::new(),
             reason: DecisionReason::UserChoice { remembered: false },
         }
@@ -258,16 +259,37 @@ impl Tool for AskUserQuestion {
         // 「其他」是用户自己写的，没有 id ↔ label 映射，前缀剥掉后原文送出。
         let lines: Vec<String> = picked
             .iter()
-            .map(|id| describe_pick(id, &options))
+            .map(|id| pick_for_model(id, &options))
             .collect();
         let answer = lines.join("、");
+
+        // 卡片上只放用户实际读到/写下的字：选项的 label，或他自己填的原文。
+        // 这些是模型和用户的原话，不翻译；"自己填写"那种说明性前缀是给
+        // 模型的，卡片上不需要 —— 用户知道那是自己写的。
+        let shown: Vec<&str> = picked
+            .iter()
+            .map(|id| {
+                id.strip_prefix(OTHER_PREFIX)
+                    .map(str::trim)
+                    .unwrap_or_else(|| {
+                        options
+                            .iter()
+                            .find(|o| o.id == *id)
+                            .map_or(id.as_str(), |o| o.label.as_str())
+                    })
+            })
+            .collect();
 
         ToolOutcome::Ok {
             model_content: riot_protocol::message::ToolResultContent::text(format!(
                 "用户选了：{answer}\n\n按这个继续，不要再确认一遍。"
             )),
-            ui_payload: Some(UiPayload::Plain {
-                text: format!("{question} → {answer}"),
+            ui_payload: Some(UiPayload::Message {
+                text: ui_text!(
+                    "tools.ask.answered",
+                    question = question,
+                    answer = shown.join(", ")
+                ),
             }),
             side_messages: Vec::new(),
         }

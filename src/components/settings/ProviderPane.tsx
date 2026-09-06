@@ -6,6 +6,7 @@ import {
   type ProviderConfig,
   setConfig,
 } from "../../bridge";
+import { useT } from "../../i18n";
 import { FieldSelect } from "../FieldSelect";
 import { Card, CardBlock, Group, Row } from "./layout";
 import { ProviderEditor } from "./ProviderEditor";
@@ -22,6 +23,7 @@ export function ProviderPane({
   askConfirm: AskConfirm;
   onSaved: () => void;
 }) {
+  const { t } = useT();
   const cfg = status.config;
   const [selId, setSelId] = useState(cfg.activeProvider);
   /** 刚新建的服务方：编辑器聚焦到名称，省得用户自己找第一个待填字段。 */
@@ -56,7 +58,7 @@ export function ProviderPane({
     const id = `custom-${Date.now().toString(36)}`;
     const p: ProviderConfig = {
       id,
-      name: `服务方 ${n}`,
+      name: t("settings.provider.newName", { n }),
       protocol: "openai",
       baseUrl: "",
       apiKeyEnv: `RIOT_KEY_${n}`,
@@ -84,13 +86,13 @@ export function ProviderPane({
     const target = sel;
     const last = cfg.providers.length === 1;
     askConfirm({
-      title: `删除服务方「${target.name}」？`,
+      title: t("settings.provider.remove.title", { name: target.name }),
       body: last
-        ? "删掉后要重新添加才能发消息。API key 不会被删除。"
+        ? t("settings.provider.remove.last")
         : target.id === cfg.activeProvider
-          ? "会自动切换到下一个。API key 不会被删除。"
-          : "API key 不会被删除。",
-      confirmLabel: "删除",
+          ? t("settings.provider.remove.active")
+          : t("settings.provider.remove.other"),
+      confirmLabel: t("common.delete"),
       action: () => {
         const rest = cfg.providers.filter((p) => p.id !== target.id);
         const next: AppConfig = { ...cfg, providers: rest };
@@ -113,12 +115,12 @@ export function ProviderPane({
   // 少了它这里是一片空白，用户看不出是"还没配"还是"设置页坏了"。
   if (!sel) {
     return (
-      <Group title="服务方">
+      <Group title={t("settings.tab.provider.title")}>
         <div className="empty-state">
-          <p className="empty-title">还没有服务方</p>
-          <p className="hint">加一家服务方、填上 API key，就可以开始对话了。</p>
+          <p className="empty-title">{t("settings.provider.empty.title")}</p>
+          <p className="hint">{t("settings.provider.empty.hint")}</p>
           <button className="primary" onClick={addProvider}>
-            添加服务方
+            {t("settings.provider.add")}
           </button>
         </div>
       </Group>
@@ -129,14 +131,14 @@ export function ProviderPane({
     <>
       {/* 全局设置放在最上面，而且不在任何一个服务方的编辑器里面 ——
           放在下面的话它看着就像"当前这家的设置"，而它管的是所有模型。 */}
-      <Group title="全局模型分工">
+      <Group title={t("settings.provider.roles")}>
         <Card>
           <VisionFallback cfg={cfg} onCommit={commit} />
           <SubagentModel cfg={cfg} onCommit={commit} />
         </Card>
       </Group>
 
-      <Group title="服务方" desc="切换要编辑的服务方。带圆点的是当前对话在用的那家。">
+      <Group title={t("settings.tab.provider.title")} desc={t("settings.provider.list.desc")}>
         <div className="prov-tabs">
           {cfg.providers.map((p) => (
             <button
@@ -148,10 +150,12 @@ export function ProviderPane({
               }}
             >
               {p.name}
-              {p.id === cfg.activeProvider ? <span className="prov-dot" title="使用中" /> : null}
+              {p.id === cfg.activeProvider ? (
+                <span className="prov-dot" title={t("settings.provider.inUse")} />
+              ) : null}
             </button>
           ))}
-          <button className="prov-tab add" onClick={addProvider} title="添加服务方">
+          <button className="prov-tab add" onClick={addProvider} title={t("settings.provider.add")}>
             +
           </button>
         </div>
@@ -193,6 +197,7 @@ function VisionFallback({
   cfg: AppConfig;
   onCommit: (next: AppConfig) => Promise<boolean>;
 }) {
+  const { t, tx } = useT();
   // 候选只列**勾了「看图」的模型** —— 让用户从纯文本模型里挑一个当"眼睛"，
   // 选完之后每次截图都是一个 400，而报错会在另一个地方冒出来。
   const options = cfg.providers.flatMap((p) =>
@@ -207,29 +212,25 @@ function VisionFallback({
 
   return (
     <>
-      <Row
-        title="视觉兼容"
-        desc="只对没勾「看图」的模型生效：先让这里配的模型看图、转成文字，再交给主模型。主模型自己能收图时直接发原图。转述有损，精确像素判断别依赖它。"
-      >
+      <Row title={t("settings.provider.vision")} desc={t("settings.provider.vision.desc")}>
         <FieldSelect
           value={known ? cfg.visionModel : ""}
           onChange={(v) => void onCommit({ ...cfg, visionModel: v })}
           disabled={options.length === 0}
-          options={[{ value: "", label: "不转（截图工具会说用不了）" }, ...options]}
+          options={[{ value: "", label: t("settings.provider.vision.none") }, ...options]}
         />
       </Row>
       {options.length === 0 ? (
         <CardBlock>
           <p className="hint" style={{ margin: 0 }}>
-            还没有标记为能看图的模型。先在下面的模型列表里给一个视觉模型点上「看图」。
+            {t("settings.provider.vision.noCandidates")}
           </p>
         </CardBlock>
       ) : null}
       {cfg.visionModel && !known ? (
         <CardBlock>
           <p className="key-state warn" style={{ margin: 0 }}>
-            <code>{cfg.visionModel}</code>{" "}
-            已不可用（模型被删了，或者它的「看图」被取消了），当前不会转述。
+            {tx("settings.provider.vision.gone", { model: <code>{cfg.visionModel}</code> })}
           </p>
         </CardBlock>
       ) : null}
@@ -250,6 +251,7 @@ function SubagentModel({
   cfg: AppConfig;
   onCommit: (next: AppConfig) => Promise<boolean>;
 }) {
+  const { t, tx } = useT();
   // 这里不筛模型：任何模型都能读文件、写报告。视觉兼容要筛是因为
   // 挑错了每次截图都是个 400，而这里挑错了只是慢一点或笨一点。
   const options = cfg.providers.flatMap((p) =>
@@ -263,16 +265,13 @@ function SubagentModel({
 
   return (
     <>
-      <Row
-        title="子 agent 便宜档"
-        desc="只读侦察的子 agent 走这一档。翻代码、写报告不改东西，但搜索结果全进上下文，往往更吃 token。会改代码的子 agent 始终用主模型。"
-      >
+      <Row title={t("settings.provider.subagent")} desc={t("settings.provider.subagent.desc")}>
         <FieldSelect
           value={known ? cfg.subagentModel : ""}
           onChange={(v) => void onCommit({ ...cfg, subagentModel: v })}
           disabled={options.length === 0}
           options={[
-            { value: "", label: "跟主模型" },
+            { value: "", label: t("settings.provider.subagent.main") },
             ...options.filter((o) => o.value !== activeValue),
           ]}
         />
@@ -280,7 +279,7 @@ function SubagentModel({
       {cfg.subagentModel && !known ? (
         <CardBlock>
           <p className="key-state warn" style={{ margin: 0 }}>
-            <code>{cfg.subagentModel}</code> 已不可用（模型被删了），侦察当前走主模型。
+            {tx("settings.provider.subagent.gone", { model: <code>{cfg.subagentModel}</code> })}
           </p>
         </CardBlock>
       ) : null}

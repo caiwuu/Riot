@@ -543,6 +543,7 @@ mod tests {
             id: MessageId::from_raw("s1"),
             level: riot_protocol::SystemLevel::Warning,
             text: "x".into(),
+            ui: None,
         }]);
     }
 

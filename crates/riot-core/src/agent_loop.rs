@@ -186,7 +186,7 @@ pub fn run_agent(
                         yield AgentEvent::Done {
                             reason: TerminalReason::Error {
                                 error: AgentError::Provider {
-                                    message: e.to_string(),
+                                    error: e.ui_error(),
                                     retryable: false,
                                 },
                             },
@@ -308,10 +308,15 @@ pub fn run_agent(
                         }
                         // 两条消息两个读者：System 给用户解释为什么没停
                         // （不进模型），SystemReminder 给模型布置整改。
+                        // hook 的理由是用户自己脚本的输出，作为参数原样带上。
                         let notice = Message::System {
                             id: riot_protocol::id::MessageId::from_raw(deps.ids.next_id("msg")),
                             level: riot_protocol::message::SystemLevel::Info,
-                            text: format!("Stop hook 要求继续：{reason}"),
+                            text: reason.clone(),
+                            ui: Some(riot_protocol::ui_text!(
+                                "kernel.hook.stopBlocked",
+                                reason = &reason
+                            )),
                         };
                         state.messages.push(notice.clone());
                         yield AgentEvent::Message(notice);
@@ -456,7 +461,10 @@ pub fn run_agent(
                     yield AgentEvent::Done {
                         reason: TerminalReason::Error {
                             error: AgentError::Internal {
-                                message: "工具批次没有返回结果".into(),
+                                error: riot_protocol::ui_error!(
+                                    "kernel.turn.toolBatchLost";
+                                    "ToolRunner stream ended without BatchEvent::Done"
+                                ),
                             },
                         },
                     };
@@ -535,8 +543,9 @@ fn attempt_recovery(state: &mut AgentState, err: &ProviderError) -> Recovery {
         ProviderError::OutputLimit => {
             if state.output_limit_recovery_count >= MAX_OUTPUT_LIMIT_RECOVERY {
                 return Recovery::Surface(AgentError::Provider {
-                    message: format!(
-                        "输出 token 连续 {MAX_OUTPUT_LIMIT_RECOVERY} 次耗尽，任务需要的输出超出模型能力"
+                    error: riot_protocol::ui_error!(
+                        "kernel.provider.outputLimitExhausted",
+                        count = MAX_OUTPUT_LIMIT_RECOVERY
                     ),
                     retryable: false,
                 });
@@ -573,7 +582,7 @@ fn attempt_recovery(state: &mut AgentState, err: &ProviderError) -> Recovery {
         }
 
         ProviderError::MediaTooLarge { .. } => Recovery::Surface(AgentError::Provider {
-            message: err.to_string(),
+            error: err.ui_error(),
             retryable: false,
         }),
 
@@ -581,7 +590,7 @@ fn attempt_recovery(state: &mut AgentState, err: &ProviderError) -> Recovery {
         other => {
             invariant!(false, "不可恢复的错误进了恢复路径：{other:?}");
             Recovery::Surface(AgentError::Provider {
-                message: other.to_string(),
+                error: other.ui_error(),
                 retryable: false,
             })
         }
@@ -629,10 +638,14 @@ fn synthesize_orphan_results(state: &AgentState, id_suffix: &str, text: &str) ->
 /// 让模型看到「你上次请求失败了」的元信息会让它开始为错误道歉，
 /// 而不是继续干活。由 INV-7 断言。
 fn error_message_for_user(deps: &AgentDeps, err: &ProviderError) -> Message {
+    let ui = err.ui_error();
     Message::System {
         id: deps.ids.message_id(),
         level: riot_protocol::message::SystemLevel::Error,
-        text: err.to_string(),
+        // `text` 是技术细节：服务方原话。没有原话（数值类错误）就放英文
+        // 表示 —— 老前端和日志读它，新前端读 `ui`。
+        text: ui.detail.clone().unwrap_or_else(|| err.to_string()),
+        ui: Some(ui.text),
     }
 }
 

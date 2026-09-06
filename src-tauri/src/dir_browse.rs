@@ -13,6 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
+use riot_protocol::{UiError, ui_error};
 use serde::Serialize;
 
 /// 一层目录的内容。
@@ -27,7 +28,7 @@ pub struct DirBrowse {
     pub entries: Vec<DirEntry>,
     /// 读目录时出的错（权限不够之类）。有错时 `entries` 是空的，但 `path`
     /// 和 `parent` 照常给 —— 用户至少能退回上一级。
-    pub error: Option<String>,
+    pub error: Option<UiError>,
     /// 请求的路径不存在（或不是目录），这次列的是退回去的家目录。带上
     /// 原路径让界面说清楚"你要的那个没有"，而不是静默跳走 —— 用户手打
     /// 错一个字母，看到的不该是"怎么跑到家目录了"。
@@ -82,7 +83,7 @@ pub async fn browse(path: Option<String>) -> DirBrowse {
                 });
             }
         }
-        Err(e) => error = Some(format!("读不了这个目录：{e}")),
+        Err(e) => error = Some(ui_error!("host.dir.readFailed"; e)),
     }
     entries.sort_by_key(|e| e.name.to_lowercase());
     DirBrowse {

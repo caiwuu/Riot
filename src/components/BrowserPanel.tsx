@@ -19,6 +19,7 @@ import {
   openBrowser,
 } from "../bridge";
 import { useHostReconnectTick } from "../hooks/useHostLink";
+import { useT } from "../i18n";
 
 /**
  * 内置浏览器面板。
@@ -56,6 +57,7 @@ export function BrowserPanel({
    *  没传就退回复制到剪贴板。 */
   onSendToComposer?: (text: string) => void;
 }) {
+  const { t } = useT();
   /**
    * 收到过画面没有。只在第一帧翻一次 —— 帧本身不进 React 状态。
    *
@@ -471,7 +473,7 @@ export function BrowserPanel({
       await browserNavigate(sessionId, url);
     } catch (e) {
       // DNS 错、拒绝连接 —— 画面停在原地，不给一行原因用户会以为是自己的问题。
-      setNavError(`打不开：${String(e)}`);
+      setNavError(t("panels.browser.navFailed", { error: String(e) }));
     } finally {
       setBusy(false);
     }
@@ -494,7 +496,7 @@ export function BrowserPanel({
           className="icon"
           onClick={() => step(-1)}
           disabled={!active?.canBack}
-          title="后退"
+          title={t("panels.browser.back")}
         >
           <BackIcon />
         </button>
@@ -502,7 +504,7 @@ export function BrowserPanel({
           className="icon"
           onClick={() => step(1)}
           disabled={!active?.canForward}
-          title="前进"
+          title={t("panels.browser.forward")}
         >
           <ForwardIcon />
         </button>
@@ -510,13 +512,13 @@ export function BrowserPanel({
           className="icon"
           onClick={() => void browserReload(sessionId).catch(() => {})}
           disabled={!active?.url}
-          title="刷新"
+          title={t("common.refresh")}
         >
           <ReloadIcon />
         </button>
         <div className="browser-address">
           {/* 加载中转个圈 —— 慢站上除此之外画面没有任何"在加载"的迹象 */}
-          {busy ? <span className="browser-spinner" aria-label="加载中" /> : null}
+          {busy ? <span className="browser-spinner" aria-label={t("common.loading")} /> : null}
           <input
             ref={addressRef}
             value={address}
@@ -553,15 +555,17 @@ export function BrowserPanel({
             }}
             // 启动期导航会静默失败 —— 与其让人输完地址没反应，不如先禁掉
             disabled={starting}
-            placeholder={starting ? "浏览器启动中…" : "输入 URL"}
-            aria-label="地址栏"
+            placeholder={
+              starting ? t("panels.browser.starting") : t("panels.browser.address.placeholder")
+            }
+            aria-label={t("panels.browser.address")}
             spellCheck={false}
           />
           <button
             className="icon"
             onClick={() => void go()}
             disabled={starting || busy || !address.trim()}
-            title="打开"
+            title={t("common.open")}
           >
             <OpenIcon />
           </button>
@@ -570,12 +574,12 @@ export function BrowserPanel({
          * 视口模式。挨着地址栏 —— 它决定"页面以多宽渲染"，和导航一族。
          * 用图标不用文字:面板可以窄到 320px，见上面三个导航键的说明。
          */}
-        <div className="browser-mode" role="group" aria-label="视口模式">
+        <div className="browser-mode" role="group" aria-label={t("panels.browser.viewMode")}>
           <button
             className={viewMode === "fit" ? "icon active" : "icon"}
             aria-pressed={viewMode === "fit"}
             onClick={() => switchMode("fit")}
-            title="自适应：页面按面板宽度渲染"
+            title={t("panels.browser.viewMode.fit")}
           >
             <FitIcon />
           </button>
@@ -583,18 +587,18 @@ export function BrowserPanel({
             className={viewMode === "web" ? "icon active" : "icon"}
             aria-pressed={viewMode === "web"}
             onClick={() => switchMode("web")}
-            title={`Web：按 ${WEB_WIDTH}px 桌面宽度渲染，整体缩放进面板`}
+            title={t("panels.browser.viewMode.web", { width: WEB_WIDTH })}
           >
             <WebIcon />
           </button>
         </div>
         {/* 取件：点面板里的元素，拿到它的选择器交给模型（“点这个、改那个”）。 */}
-        <div className="browser-mode" role="group" aria-label="取件">
+        <div className="browser-mode" role="group" aria-label={t("panels.browser.pick")}>
           <button
             className={pickMode ? "icon active" : "icon"}
             aria-pressed={pickMode}
             onClick={() => setPickMode((v) => !v)}
-            title="取件：点面板里的元素，拿到它的选择器交给模型"
+            title={t("panels.browser.pick.title")}
           >
             <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
               <circle
@@ -632,7 +636,7 @@ export function BrowserPanel({
                   if (!r) {
                     // 命中测试没点到元素（点在空白/留边上）——给一句反馈，
                     // 而不是静默。
-                    setNavError("没点中任何元素，再点一次页面里的东西。");
+                    setNavError(t("panels.browser.pick.miss"));
                     return;
                   }
                   // 塞进对话输入框（渲染成一个元素色块，用户还要补
@@ -644,7 +648,7 @@ export function BrowserPanel({
                   }
                 })
                 // 别再静默吞错 —— 之前 catch 空实现，权限没放行时点了毫无反应。
-                .catch((err) => setNavError(`取件失败：${String(err)}`));
+                .catch((err) => setNavError(t("panels.browser.pick.failed", { error: String(err) })));
             }
             // 退出取件模式 —— pickMode 的 effect 会顺手撤掉页面里的高亮框。
             setPickMode(false);
@@ -809,7 +813,7 @@ export function BrowserPanel({
         <textarea
           className="browser-ime"
           ref={imeRef}
-          aria-label="页面键盘输入"
+          aria-label={t("panels.browser.keyboard")}
           style={{ left: caret.x, top: caret.y }}
           // 输入法自己有候选和纠错，浏览器再插一手只会打架。
           spellCheck={false}
@@ -885,11 +889,11 @@ export function BrowserPanel({
             {hasFrame ? (
               <>
                 <GlobeIcon size={30} />
-                <p className="browser-empty-title">开始浏览</p>
-                <p className="hint">输入网址，与模型同看。</p>
+                <p className="browser-empty-title">{t("panels.browser.empty.title")}</p>
+                <p className="hint">{t("panels.browser.empty.hint")}</p>
               </>
             ) : (
-              <p className="hint">浏览器启动中…</p>
+              <p className="hint">{t("panels.browser.starting")}</p>
             )}
           </div>
         )}

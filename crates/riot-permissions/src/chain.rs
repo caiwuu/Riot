@@ -46,7 +46,9 @@ use riot_protocol::permission::{
     DecisionReason, PermissionContext, PermissionMode, PermissionResult, PermissionUpdate,
     RuleDecision, RuleSource, UpdateScope,
 };
+use riot_protocol::text::{UiError, UiText};
 use riot_protocol::tool::Tool;
+use riot_protocol::ui_text;
 
 use crate::rules::{MatchMode, RuleSet};
 use crate::safety;
@@ -80,7 +82,7 @@ pub fn decide(
     // ── 2. 整工具 ask ─────────────────────────────────
     if let Some(r) = rules.tool_rule(name, RuleDecision::Ask) {
         return finish_ask(
-            format!("是否允许使用 `{name}`？"),
+            ui_text!("tools.ask.useTool", name = name),
             vec![allow_tool_suggestion(name)],
             rule_reason(r.source, name),
             ctx,
@@ -131,7 +133,7 @@ pub fn decide(
         && let Some(r) = rules.content_rule(name, c, RuleDecision::Ask, MatchMode::Raw)
     {
         return finish_ask(
-            format!("是否允许 `{name}` 执行这次调用？"),
+            ui_text!("tools.ask.thisCall", name = name),
             vec![allow_content_suggestion(name, c)],
             rule_reason(r.source, r.pattern.as_deref().unwrap_or_default()),
             ctx,
@@ -237,7 +239,7 @@ fn mode_default(
                 |c| allow_content_suggestion(tool.name(), c),
             );
             finish_ask(
-                format!("是否允许 `{}`？", tool.name()),
+                ui_text!("tools.ask.useTool", name = tool.name()),
                 vec![suggestion],
                 DecisionReason::Mode { mode },
                 ctx,
@@ -270,7 +272,7 @@ fn mode_default(
 /// 别拦着任务"，不是"把模型主动要的决定静默扔掉"。用户真不在场时，
 /// 由宿主的 ask 超时按拒绝兜底（那条路本来就是为没人回应设计的）。
 fn finish_ask(
-    message: String,
+    message: UiText,
     suggestions: Vec<PermissionUpdate>,
     reason: DecisionReason,
     ctx: &PermissionContext,
@@ -278,8 +280,13 @@ fn finish_ask(
     let mode = ctx.mode.get();
 
     if mode == PermissionMode::DontAsk || !ctx.can_prompt_user {
+        // 给模型的话。原本要问用户的那句是词典键,这里没有词典,只能给
+        // 键和参数（`UiError` 的 Display）—— 足够让模型知道拦的是什么。
         return PermissionResult::Deny {
-            message: format!("{message}（无法询问，已拒绝）"),
+            message: format!(
+                "这次调用需要用户确认（{}），但当前没有人能回答，已拒绝。",
+                UiError::from(message)
+            ),
             reason,
         };
     }
@@ -594,7 +601,7 @@ mod tests {
     /// 复刻 WebFetch 的形状：只读工具，对陌生目标发同意请求。
     fn consent_tool() -> PermTool {
         PermTool::read_only("WebFetch").says(PermissionResult::Ask {
-            message: "是否允许抓取 example.com？".into(),
+            message: ui_text!("tools.ask.fetch", host = "example.com"),
             suggestions: Vec::new(),
             reason: DecisionReason::Consent {
                 what: "domain:example.com".into(),
@@ -631,9 +638,11 @@ mod tests {
         assert!(
             matches!(
                 &r,
-                PermissionResult::Ask { message, .. } if message.contains("example.com")
+                PermissionResult::Ask { message, .. }
+                    if message.key == "tools.ask.fetch"
+                        && message.args.get("host").map(String::as_str) == Some("example.com")
             ),
-            "要保留工具给的那句话，不能退化成通用文案"
+            "要保留工具给的那句话，不能退化成通用文案：{r:?}"
         );
     }
 
@@ -667,7 +676,7 @@ mod tests {
         // 和同意请求的区别就在这：这是用户亲手写下的"问我一下"。
         // 切到 bypass 不代表要撤回它。
         let tool = PermTool::read_only("WebFetch").says(PermissionResult::Ask {
-            message: "是否允许抓取 example.com？".into(),
+            message: ui_text!("tools.ask.fetch", host = "example.com"),
             suggestions: Vec::new(),
             reason: DecisionReason::Rule {
                 source: RuleSource::User,
@@ -822,7 +831,7 @@ mod tests {
     /// 复刻 AskUserQuestion 的形状：提问用的 ask，理由是 UserChoice。
     fn question_tool() -> PermTool {
         PermTool::read_only("AskUserQuestion").says(PermissionResult::Ask {
-            message: "模型想让你做一个决定".into(),
+            message: ui_text!("tools.ask.decision"),
             suggestions: Vec::new(),
             reason: DecisionReason::UserChoice { remembered: false },
         })

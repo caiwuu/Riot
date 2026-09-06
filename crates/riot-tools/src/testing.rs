@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use riot_protocol::event::ProgressPayload;
+use riot_protocol::text::UiText;
 use riot_protocol::tool::{
     InterruptBehavior, PromptContext, ResultBudget, Tool, ToolContext, ToolOutcome,
 };
@@ -152,8 +153,9 @@ impl Tool for FakeTool {
         format!("{} 的说明", self.name)
     }
 
-    fn describe(&self, _input: &serde_json::Value) -> String {
-        format!("运行 {}", self.name)
+    fn describe(&self, _input: &serde_json::Value) -> UiText {
+        // 替身不进界面；键随便给，词典对齐测试只扫 `ui_text!` 字面量。
+        UiText::new("fake.run").arg("name", self.name)
     }
 
     async fn call(&self, _input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {

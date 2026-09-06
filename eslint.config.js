@@ -18,6 +18,27 @@ const BRIDGE_ONLY =
   "宿主 API 只能在 src/bridge/ 里调用，其余代码 import bridge 导出的函数。" +
   "绕过这层，前端就无法脱离 Tauri 单独跑起来（调试、组件测试全部失效），mock 也无处下手。";
 
+const NO_TAURI_DYNAMIC_IMPORT = {
+  selector: "ImportExpression[source.value=/^@tauri-apps/]",
+  message: BRIDGE_ONLY,
+};
+
+/**
+ * 界面文案一律走 `src/i18n` 的 `t()`，代码里不许写死中文。
+ *
+ * 只拦汉字：这是"漏了没翻"最可靠的信号 —— 英文字面量分不清是文案还是
+ * 标识符（className、事件名、URL），汉字一定是给人看的。日志（console.*）
+ * 用英文写，不进词典。词典目录本身是唯一的例外。
+ */
+const NO_HARDCODED_TEXT =
+  "界面文案要放进 src/i18n/messages 并用 t() 取，代码里不写死中文；日志请用英文。";
+const HAN = "/[\\u4e00-\\u9fff\\u3400-\\u4dbf\\uff01-\\uff5e\\u3000-\\u303f]/";
+const NO_HARDCODED_TEXT_RULES = [
+  { selector: `Literal[value=${HAN}]`, message: NO_HARDCODED_TEXT },
+  { selector: `TemplateElement[value.cooked=${HAN}]`, message: NO_HARDCODED_TEXT },
+  { selector: `JSXText[value=${HAN}]`, message: NO_HARDCODED_TEXT },
+];
+
 export default tseslint.config(
   // 非前端源码一律排除。少一条的代价不是"多几条告警"而是这条命令没法用：
   // `target` 里是 Rust 的构建产物（打包进去的第三方 JS），`pnpm exec eslint .`
@@ -56,13 +77,7 @@ export default tseslint.config(
         "error",
         { patterns: [{ group: ["@tauri-apps/*"], message: BRIDGE_ONLY }] },
       ],
-      "no-restricted-syntax": [
-        "error",
-        {
-          selector: "ImportExpression[source.value=/^@tauri-apps/]",
-          message: BRIDGE_ONLY,
-        },
-      ],
+      "no-restricted-syntax": ["error", NO_TAURI_DYNAMIC_IMPORT, ...NO_HARDCODED_TEXT_RULES],
 
       // 下划线前缀 = 有意不用（解构丢弃、占位参数）。
       "@typescript-eslint/no-unused-vars": [
@@ -72,12 +87,20 @@ export default tseslint.config(
     },
   },
 
-  // bridge 是唯一的例外，它的职责就是把宿主 API 包起来。
+  // bridge 是唯一的例外，它的职责就是把宿主 API 包起来。文案的规则照常。
   {
     files: ["src/bridge/**/*.ts"],
     rules: {
       "no-restricted-imports": "off",
-      "no-restricted-syntax": "off",
+      "no-restricted-syntax": ["error", ...NO_HARDCODED_TEXT_RULES],
+    },
+  },
+
+  // 词典就是放中文的地方；语言清单里各语言的本名同理。
+  {
+    files: ["src/i18n/messages/**/*.ts", "src/i18n/locales.ts"],
+    rules: {
+      "no-restricted-syntax": ["error", NO_TAURI_DYNAMIC_IMPORT],
     },
   },
 

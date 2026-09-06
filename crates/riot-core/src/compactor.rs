@@ -444,9 +444,7 @@ mod layered_tests {
     async fn 总结失败但轻档有进步时退回轻档() {
         // 有进步就别当失败 —— Failed 会把熔断计数往前推一格。
         let provider = Arc::new(ScriptedProvider::new(vec![vec![ProviderEvent::Error(
-            riot_protocol::provider::ProviderError::Transport {
-                message: "断网".into(),
-            },
+            riot_protocol::provider::ProviderError::transport("断网"),
         )]]));
         let layered = Layered::new(
             Arc::clone(&provider) as Arc<dyn riot_protocol::provider::Provider>,
@@ -489,9 +487,7 @@ mod layered_tests {
     #[tokio::test]
     async fn 两档都不行才算失败() {
         let provider = Arc::new(ScriptedProvider::new(vec![vec![ProviderEvent::Error(
-            riot_protocol::provider::ProviderError::Transport {
-                message: "断网".into(),
-            },
+            riot_protocol::provider::ProviderError::transport("断网"),
         )]]));
         let layered = Layered::new(
             Arc::clone(&provider) as Arc<dyn riot_protocol::provider::Provider>,

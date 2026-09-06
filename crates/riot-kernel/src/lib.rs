@@ -55,7 +55,8 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
-use riot_protocol::rpc::{RpcError, RpcErrorCode, RpcNotification, RpcRequest, RpcResponse};
+use riot_protocol::rpc::{RpcError, RpcNotification, RpcRequest, RpcResponse};
+use riot_protocol::ui_error;
 
 /// 向宿主推一条内核级错误通知。
 ///
@@ -146,7 +147,7 @@ where
                         .unwrap_or_else(|e| {
                             riot_protocol::hostcall::HostResponse::Error {
                                 kind: riot_protocol::hostcall::HostCallErrorKind::Unavailable,
-                                message: format!("宿主应答解析失败:{e}"),
+                                message: format!("failed to parse host response: {e}"),
                             }
                         });
                         if !br.resolve(id, resp).await {
@@ -208,10 +209,7 @@ async fn handle_line(line: &str, manager: &manager::SessionManager) -> Option<St
     let response = match parse_request(&value) {
         Ok(request) => dispatch(request, manager).await,
         Err(e) => RpcResponse::Error {
-            error: RpcError {
-                code: RpcErrorCode::InvalidParams,
-                message: format!("请求解析失败:{e}"),
-            },
+            error: RpcError::invalid_params(ui_error!("kernel.rpc.badRequest"; e)),
         },
     };
 
@@ -291,12 +289,7 @@ async fn dispatch(request: RpcRequest, manager: &manager::SessionManager) -> Rpc
             config,
         } => match manager.submit(session_id.as_str(), input, *config).await {
             Ok(queued_id) => RpcResponse::TurnSubmitted { queued_id },
-            Err(e) => RpcResponse::Error {
-                error: RpcError {
-                    code: RpcErrorCode::Internal,
-                    message: e,
-                },
-            },
+            Err(error) => RpcResponse::Error { error },
         },
         Req::TurnRegenerate {
             session_id,
@@ -307,16 +300,7 @@ async fn dispatch(request: RpcRequest, manager: &manager::SessionManager) -> Rpc
             .await
         {
             Ok(()) => RpcResponse::Ok,
-            Err(e) => RpcResponse::Error {
-                error: RpcError {
-                    code: if e.contains("正在跑") {
-                        RpcErrorCode::TurnInProgress
-                    } else {
-                        RpcErrorCode::Internal
-                    },
-                    message: e,
-                },
-            },
+            Err(error) => RpcResponse::Error { error },
         },
         Req::TurnResend {
             session_id,
@@ -328,16 +312,7 @@ async fn dispatch(request: RpcRequest, manager: &manager::SessionManager) -> Rpc
             .await
         {
             Ok(()) => RpcResponse::Ok,
-            Err(e) => RpcResponse::Error {
-                error: RpcError {
-                    code: if e.contains("正在跑") {
-                        RpcErrorCode::TurnInProgress
-                    } else {
-                        RpcErrorCode::Internal
-                    },
-                    message: e,
-                },
-            },
+            Err(error) => RpcResponse::Error { error },
         },
         Req::TurnInterrupt { session_id, .. } => {
             manager.interrupt(session_id.as_str()).await;
@@ -394,12 +369,7 @@ async fn dispatch(request: RpcRequest, manager: &manager::SessionManager) -> Rpc
         Req::SessionCompact { session_id, model } => {
             match manager.compact(session_id.as_str(), *model).await {
                 Ok(()) => RpcResponse::Ok,
-                Err(e) => RpcResponse::Error {
-                    error: RpcError {
-                        code: RpcErrorCode::Internal,
-                        message: e,
-                    },
-                },
+                Err(error) => RpcResponse::Error { error },
             }
         }
         Req::HistoryEdit {
@@ -411,16 +381,7 @@ async fn dispatch(request: RpcRequest, manager: &manager::SessionManager) -> Rpc
             .await
         {
             Ok(()) => RpcResponse::Ok,
-            Err(e) => RpcResponse::Error {
-                error: RpcError {
-                    code: if e.contains("正在跑") {
-                        RpcErrorCode::TurnInProgress
-                    } else {
-                        RpcErrorCode::Internal
-                    },
-                    message: e,
-                },
-            },
+            Err(error) => RpcResponse::Error { error },
         },
         Req::HistoryDelete {
             session_id,
@@ -430,16 +391,7 @@ async fn dispatch(request: RpcRequest, manager: &manager::SessionManager) -> Rpc
             .await
         {
             Ok(()) => RpcResponse::Ok,
-            Err(e) => RpcResponse::Error {
-                error: RpcError {
-                    code: if e.contains("正在跑") {
-                        RpcErrorCode::TurnInProgress
-                    } else {
-                        RpcErrorCode::Internal
-                    },
-                    message: e,
-                },
-            },
+            Err(error) => RpcResponse::Error { error },
         },
         Req::SessionChanges { session_id } => RpcResponse::Changes {
             changes: manager.changes(session_id.as_str()).await,
@@ -480,20 +432,14 @@ async fn dispatch(request: RpcRequest, manager: &manager::SessionManager) -> Rpc
                 RpcResponse::Ok
             } else {
                 RpcResponse::Error {
-                    error: RpcError {
-                        code: RpcErrorCode::InvalidParams,
-                        message: format!("没有叫「{id}」的 MCP 服务器在运行。先在设置里启用它。"),
-                    },
+                    error: RpcError::invalid_params(ui_error!("kernel.mcp.notRunning", id = id)),
                 }
             }
         }
         // 其余方法(session.list、tools.list)随宿主翻转按需接上;
         // 在那之前明确报未实现。
         _ => RpcResponse::Error {
-            error: RpcError {
-                code: RpcErrorCode::Internal,
-                message: format!("方法「{method}」尚未在内核实现(阶段 B 施工中)"),
-            },
+            error: RpcError::internal(ui_error!("kernel.rpc.unimplemented", method = method)),
         },
     }
 }
@@ -548,11 +494,27 @@ mod tests {
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["id"], 2);
         assert_eq!(v["result"]["result"], "error");
-        // RpcResponse::Error { error } → data.error.message(变体字段再套一层)。
-        let msg = v["result"]["data"]["error"]["message"]
-            .as_str()
-            .unwrap_or_default();
-        assert!(msg.contains("tools.list"), "错误要点名是哪个方法:{out}");
+        // RpcResponse::Error { error } → data.error(变体字段再套一层)；
+        // 错误是词典键 + 参数，不是文案。
+        let err = &v["result"]["data"]["error"];
+        assert_eq!(err["key"], "kernel.rpc.unimplemented", "{out}");
+        assert_eq!(
+            err["args"]["method"], "tools.list",
+            "错误要点名是哪个方法:{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_session_reports_session_not_found() {
+        // 会话不存在要用专门的 code，宿主据此分支（不是笼统的 internal）。
+        let mgr = test_manager();
+        let line = r#"{"jsonrpc":"2.0","id":3,"method":"history.delete","params":{"session_id":"nope","message_id":"m1"}}"#;
+        let out = handle_line(line, &mgr).await.expect("要有应答");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let err = &v["result"]["data"]["error"];
+        assert_eq!(err["code"], "session_not_found", "{out}");
+        assert_eq!(err["key"], "kernel.session.notFound", "{out}");
+        assert_eq!(err["args"]["id"], "nope", "{out}");
     }
 
     #[tokio::test]

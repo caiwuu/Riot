@@ -1,0 +1,146 @@
+import type { Dict } from "..";
+import type zh from "../zh-CN/app";
+
+export default {
+  "app.newSession": "新會話",
+  "app.openDir": "開啟資料夾…",
+
+  "app.boot.failed": "出錯了",
+  "app.boot.reload": "重新載入",
+  "app.boot.starting": "啟動中",
+
+  "app.update.released": "Riot {version} 已發布",
+  "app.update.download": "前往下載",
+
+  "app.dialog.gotIt": "知道了",
+  "app.error.createSession": "無法建立會話",
+  "app.error.openDir": "無法開啟這個資料夾",
+  "app.error.removeProject": "無法移除專案",
+  "app.error.rerun": "補跑失敗",
+  "app.error.runNow": "沒有跑起來",
+  "app.error.pause": "暫停失敗",
+  "app.error.resume": "恢復失敗",
+  "app.error.delete": "刪除失敗",
+  "app.error.clearDone": "清理失敗",
+
+  "app.notify.turnDone": "任務完成了，回來看看結果吧。",
+
+  "app.notify.scheduleDone.title": "排程任務完成",
+
+  "app.notify.scheduleDone.body": "「{name}」已跑完，回來看看結果。",
+
+  "app.notify.scheduleFailed.title": "排程任務沒有執行成功",
+
+  "app.notify.scheduleFailed.body": "「{name}」：{error}",
+
+  "app.hero.title": "今天要做點什麼？",
+  "app.hero.dirGone": "資料夾已不存在，按這裡處理",
+
+  "app.treeMenu.preview": "預覽",
+  "app.treeMenu.addToChat": "加入對話",
+  "app.treeMenu.copyRelPath": "複製相對路徑",
+  "app.treeMenu.copyFullPath": "複製完整路徑",
+  "app.treeMenu.revealInFileManager": "在 Finder / 檔案總管中顯示",
+
+  "app.sessionMenu.rename": "重新命名",
+  "app.sessionMenu.delete": "刪除會話",
+  "app.sessionMenu.deleteTitle": "刪除這個會話？",
+  "app.sessionMenu.deleteBody": "「{title}」的歷史記錄會遺失。",
+
+  "app.projectMenu.copyPath": "複製路徑",
+  "app.projectMenu.removeTitle": "移除 {name}？",
+  "app.projectMenu.removeBodyCount": "下面 {count} 個會話會被關閉。資料夾不會被刪除。",
+  "app.projectMenu.removeBody": "資料夾不會被刪除。",
+
+  "app.scheduleMenu.rerunMissed": "補跑一次（錯過 {count} 次）",
+  "app.scheduleMenu.ignoreMissed": "忽略這次錯過",
+  "app.scheduleMenu.runNow": "立即執行",
+  "app.scheduleMenu.pause": "暫停",
+  "app.scheduleMenu.resume": "恢復",
+  "app.scheduleMenu.viewLastRun": "查看上次執行",
+  "app.scheduleMenu.delete": "刪除任務",
+  "app.scheduleMenu.deleteTitle": "刪除「{name}」？",
+  "app.scheduleMenu.deleteBody": "到時間就不會再執行了。已經跑過的會話不受影響。",
+  "app.scheduleCreate.manual": "手動建立…",
+  "app.scheduleCreate.byRiot": "讓 Riot 建立",
+  "app.scheduleCreate.prompt": "幫我設一個排程任務：",
+  "app.schedules.clearDoneTitle": "清理 {count} 個已完成的任務？",
+  "app.schedules.clearDoneBody": "一次性任務跑完的記錄會從列表中移除。已經跑過的會話不受影響。",
+  "app.schedules.clearDone": "清理",
+
+  "app.sidebar.expand": "展開側邊欄",
+  "app.sidebar.expandTitle": "展開側邊欄（⌘B）",
+  "app.sidebar.collapse": "收合側邊欄",
+  "app.sidebar.collapseTitle": "收合側邊欄（⌘B）",
+  "app.sidebar.schedules": "排程任務",
+  "app.sidebar.missedTitle": "有 {count} 個任務在 App 關閉時錯過了",
+  "app.sidebar.projects": "專案",
+  "app.sidebar.settings": "設定",
+
+  "app.project.collapsed": "已收合",
+  "app.project.expanded": "已展開",
+  "app.project.ariaLabel": "{name}，{state}",
+  "app.project.ariaLabelGone": "{name}，{state}，資料夾已不存在",
+  "app.project.titleGone": "{root}（資料夾已不存在）",
+  "app.project.dirGone": "資料夾已不存在",
+  "app.project.gone": "已失效",
+  "app.project.busy": "有會話正在執行",
+  "app.project.newSessionIn": "在 {name} 開新會話",
+  "app.project.actions": "專案操作",
+  "app.project.removeFromList": "從列表移除",
+  "app.session.actions": "會話操作",
+
+  "app.topbar.sessionSettings": "會話設定",
+  "app.topbar.needSession": "請先開啟一個會話",
+  "app.win.terminal": "終端機面板",
+  "app.win.terminalTitle": "終端機面板（⌘J）",
+  "app.win.terminalNeedSession": "請先開啟一個會話再使用終端機",
+  "app.win.drawer": "側邊面板",
+  "app.scopeBadge.title": "{count} 個網站已授權侵入性滲透操作 —— 點擊查看與撤銷",
+  "app.scopeBadge.label": "滲透授權 {count} 個網站",
+  "app.resizer.title": "拖曳調整大小，按兩下恢復預設",
+
+  "app.welcome.tagline": "每個會話綁定一個專案資料夾。",
+  "app.welcome.recent": "最近",
+  "app.welcome.dirMissing": "找不到這個資料夾",
+
+  "app.workbench.browser": "瀏覽器",
+  "app.workbench.browserStarting": "瀏覽器啟動中…",
+  "app.workbench.changes": "Git 變更",
+  "app.workbench.files": "檔案",
+  "app.workbench.newTab": "新分頁",
+  "app.workbench.subagent": "子 agent {id}",
+  "app.workbench.addPanel": "新增面板",
+  "app.workbench.closeTab": "關閉 {title}",
+
+  "app.remote.connecting": "正在連線",
+  "app.remote.connectingHost": "正在連線到主機…",
+  "app.remote.reconnecting": "與主機的連線中斷了，正在重新連線…",
+  "app.remote.title": "連線到 Riot",
+  "app.remote.hint": "輸入桌面版「設定 → 遠端存取」裡顯示的存取權杖。掃描那裡的 QR Code 可以跳過這一步。",
+  "app.remote.denied": "主機拒絕了上一次連線：{reason}",
+  "app.remote.tokenPlaceholder": "存取權杖",
+  "app.remote.connect": "連線",
+
+  "app.missingProject.title": "找不到專案資料夾",
+  "app.missingProject.body": "這個資料夾已經不在磁碟上了。會話必須綁定一個仍存在的工作區。",
+  "app.missingProject.relocate": "另選資料夾",
+
+  "app.dirPicker.label": "選擇資料夾",
+  "app.dirPicker.title": "選擇伺服器上的資料夾",
+  "app.dirPicker.up": "上一層",
+  "app.dirPicker.placeholder": "輸入絕對路徑後按 Enter",
+  "app.dirPicker.missing": "沒有這個資料夾：{missing}，已回到 {path}。",
+  "app.dirPicker.empty": "這裡沒有子資料夾。",
+  "app.dirPicker.choose": "選擇目前資料夾",
+
+  "app.ctx.ariaLabel": "上下文佔用 {pct}%，點開看明細",
+  "app.ctx.title": "上下文 {used} / {threshold}（{pct}%）",
+  "app.ctx.usage": "上下文用量",
+  "app.ctx.current": "目前佔用",
+  "app.ctx.window": "模型視窗",
+  "app.ctx.total": "本會話累計",
+  "app.ctx.note": "到 {threshold} 會自動摘要壓縮。",
+
+  "app.hintTip.label": "說明",
+} satisfies Dict<typeof zh>;

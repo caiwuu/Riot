@@ -9,8 +9,10 @@ import {
   mcpImportJson,
   mcpRestart,
   mcpStatus,
+  renderUiError,
   setConfig,
 } from "../../bridge";
+import { useT } from "../../i18n";
 import { ResizableTextarea } from "../ResizableTextarea";
 import { Card, CardBlock, Group, Row } from "./layout";
 import { type AskConfirm, type LeaveGuard, FormError, Switch, blurOnEnter } from "./shared";
@@ -35,6 +37,7 @@ export function McpPane({
   registerLeaveGuard: (g: LeaveGuard | null) => void;
   onSaved: () => void;
 }) {
+  const { t, tn, tx } = useT();
   const cfg = status.config;
   const servers = cfg.mcpServers;
   const [selId, setSelId] = useState(servers[0]?.id ?? "");
@@ -57,14 +60,14 @@ export function McpPane({
     registerLeaveGuard(
       jsonDirty
         ? () => ({
-            title: "放弃未保存的 JSON 配置？",
-            body: "JSON 视图里的改动还没保存，离开会丢掉它们。",
-            confirmLabel: "放弃",
+            title: t("settings.mcp.leave.title"),
+            body: t("settings.mcp.leave.body"),
+            confirmLabel: t("settings.mcp.leave.discard"),
           })
         : null,
     );
     return () => registerLeaveGuard(null);
-  }, [jsonDirty, registerLeaveGuard]);
+  }, [jsonDirty, registerLeaveGuard, t]);
 
   const openJson = async () => {
     setError("");
@@ -153,9 +156,9 @@ export function McpPane({
     if (!sel) return;
     const target = sel;
     askConfirm({
-      title: `删除 MCP 服务器「${target.name || target.id}」？`,
-      body: "它的进程会被停掉，工具在下一轮对话消失。",
-      confirmLabel: "删除",
+      title: t("settings.mcp.remove.title", { name: target.name || target.id }),
+      body: t("settings.mcp.remove.body"),
+      confirmLabel: t("common.delete"),
       action: () => {
         const rest = servers.filter((s) => s.id !== target.id);
         void commit({ ...cfg, mcpServers: rest }).then((ok) => {
@@ -169,13 +172,8 @@ export function McpPane({
   if (jsonDraft !== null) {
     return (
       <Group
-        title="JSON 配置"
-        desc={
-          <>
-            标准格式，和 Claude Desktop / Cursor / Cline 通用。README 里的{" "}
-            <code>mcpServers</code> 片段可以整段粘贴。保存会整体替换当前列表。
-          </>
-        }
+        title={t("settings.mcp.json.title")}
+        desc={tx("settings.mcp.json.desc", { code: <code>mcpServers</code> })}
       >
         <ResizableTextarea
           className="mcp-json-input"
@@ -195,9 +193,9 @@ export function McpPane({
                 };
                 if (jsonDirty) {
                   askConfirm({
-                    title: "放弃未保存的 JSON 配置？",
-                    body: "改动还没保存，返回表单视图会丢掉它们。",
-                    confirmLabel: "放弃",
+                    title: t("settings.mcp.leave.title"),
+                    body: t("settings.mcp.leave.backBody"),
+                    confirmLabel: t("settings.mcp.leave.discard"),
                     action: back,
                   });
                 } else {
@@ -206,10 +204,10 @@ export function McpPane({
               }}
               disabled={jsonBusy}
             >
-              取消
+              {t("common.cancel")}
             </button>
             <button className="primary" onClick={() => void applyJson()} disabled={jsonBusy}>
-              {jsonBusy ? "保存中…" : "保存"}
+              {jsonBusy ? t("common.saving") : t("common.save")}
             </button>
           </div>
         </div>
@@ -219,18 +217,15 @@ export function McpPane({
 
   if (!sel) {
     return (
-      <Group title="服务器">
+      <Group title={t("settings.mcp.servers")}>
         <div className="empty-state">
-          <p className="empty-title">还没有 MCP 服务器</p>
-          <p className="hint">
-            通过 MCP 接入外部工具（文件、数据库、API……）。服务器跑在本机的
-            独立进程里，工具和内置工具走同一套权限询问。
-          </p>
+          <p className="empty-title">{t("settings.mcp.empty.title")}</p>
+          <p className="hint">{t("settings.mcp.empty.hint")}</p>
           <div className="empty-actions">
             <button className="primary" onClick={addServer}>
-              添加服务器
+              {t("settings.mcp.addServer")}
             </button>
-            <button onClick={() => void openJson()}>粘贴 JSON 配置</button>
+            <button onClick={() => void openJson()}>{t("settings.mcp.pasteJson")}</button>
           </div>
           {error ? <p className="form-error">{error}</p> : null}
         </div>
@@ -241,22 +236,19 @@ export function McpPane({
   return (
     <>
       <Group
-        title="服务器"
-        desc={
-          <>
-            工具名是 <code>mcp__服务器id__…</code>
-            ，权限规则按它匹配。每个工具首次调用会像内置工具一样询问。
-          </>
-        }
+        title={t("settings.mcp.servers")}
+        desc={tx("settings.mcp.servers.desc", {
+          pattern: <code>{t("settings.mcp.toolNamePattern")}</code>,
+        })}
         action={
           <div className="set-group-actions">
             <button className="btn-compact" onClick={addServer}>
-              添加
+              {t("common.add")}
             </button>
             <button
               className="btn-compact"
               onClick={() => void openJson()}
-              title="以标准 JSON 格式查看和编辑"
+              title={t("settings.mcp.jsonView.title")}
             >
               JSON
             </button>
@@ -271,13 +263,13 @@ export function McpPane({
             const state = s.enabled === false ? "off" : (st?.state ?? "off");
             const meta =
               s.enabled === false
-                ? "已停用"
+                ? t("common.disabled")
                 : state === "connected"
-                  ? `${st?.tools.length ?? 0} 个工具`
+                  ? tn("settings.mcp.toolCount", st?.tools.length ?? 0)
                   : state === "connecting"
-                    ? "连接中…"
+                    ? t("settings.mcp.status.connecting")
                     : state === "failed"
-                      ? "连接失败"
+                      ? t("settings.mcp.status.failedShort")
                       : "";
             return (
               <li key={s.id}>
@@ -340,6 +332,7 @@ function McpServerEditor({
   onRemove: () => void;
   onError: (e: string) => void;
 }) {
+  const { t, tn } = useT();
   const [name, setName] = useState(server.name ?? "");
   const [command, setCommand] = useState(server.command);
   const [args, setArgs] = useState((server.args ?? []).join("\n"));
@@ -362,14 +355,14 @@ function McpServerEditor({
   const commitEnv = () => {
     const map: Record<string, string> = {};
     for (const line of env.split("\n")) {
-      const t = line.trim();
-      if (!t) continue;
-      const eq = t.indexOf("=");
+      const item = line.trim();
+      if (!item) continue;
+      const eq = item.indexOf("=");
       if (eq <= 0) {
-        onError(`环境变量要写成 KEY=VALUE：「${t}」`);
+        onError(t("settings.mcp.env.format", { line: item }));
         return;
       }
-      map[t.slice(0, eq).trim()] = t.slice(eq + 1).trim();
+      map[item.slice(0, eq).trim()] = item.slice(eq + 1).trim();
     }
     if (JSON.stringify(map) !== JSON.stringify(server.env ?? {})) onPatch({ env: map });
   };
@@ -387,15 +380,21 @@ function McpServerEditor({
 
   const state = server.enabled === false ? "off" : (live?.state ?? "off");
   const stateText: Record<string, string> = {
-    connected: `已连接${live?.detail ? ` · ${live.detail}` : ""} · ${live?.tools.length ?? 0} 个工具`,
-    connecting: "连接中…",
-    failed: `连接失败：${live?.detail ?? "未知原因"}`,
+    connected: tn("settings.mcp.status.connected", live?.tools.length ?? 0, {
+      detail: live?.detail ? ` · ${live.detail}` : "",
+    }),
+    connecting: t("settings.mcp.status.connecting"),
+    failed: t("settings.mcp.status.failed", {
+      reason: live?.error
+        ? renderUiError(live.error)
+        : live?.detail || t("settings.mcp.status.unknownReason"),
+    }),
     off:
       server.enabled === false
-        ? "已停用"
+        ? t("common.disabled")
         : server.command.trim()
-          ? "未启动（保存配置后自动连接）"
-          : "填好启动命令后自动连接",
+          ? t("settings.mcp.status.notStarted")
+          : t("settings.mcp.status.needCommand"),
   };
 
   return (
@@ -404,17 +403,17 @@ function McpServerEditor({
       action={
         <div className="set-group-actions">
           <button className="btn-compact ghost-danger" onClick={onRemove}>
-            删除服务器
+            {t("settings.mcp.removeServer")}
           </button>
         </div>
       }
     >
       <Card>
-        <Row title="启用" desc="关掉后进程会停，它的工具在下一轮对话里消失。">
+        <Row title={t("common.enable")} desc={t("settings.mcp.enable.desc")}>
           <Switch
             on={server.enabled !== false}
             onChange={(v) => onPatch({ enabled: v })}
-            label="启用这个服务器"
+            label={t("settings.mcp.enable.label")}
           />
         </Row>
         <CardBlock>
@@ -423,16 +422,16 @@ function McpServerEditor({
             <span className="mcp-status-text">{stateText[state]}</span>
             {server.enabled !== false ? (
               <button className="ghost" onClick={() => void doRestart()} disabled={restarting}>
-                {restarting ? "重连中…" : "重连"}
+                {restarting ? t("settings.mcp.reconnecting") : t("settings.mcp.reconnect")}
               </button>
             ) : null}
           </div>
           {state === "connected" && live && live.tools.length > 0 ? (
             <ul className="mcp-tools">
-              {(toolsOpen ? live.tools : live.tools.slice(0, MCP_TOOLS_SHOWN)).map((t) => (
-                <li key={t}>
-                  <span className="mcp-tool-chip" title={t}>
-                    {mcpToolShortName(t)}
+              {(toolsOpen ? live.tools : live.tools.slice(0, MCP_TOOLS_SHOWN)).map((tool) => (
+                <li key={tool}>
+                  <span className="mcp-tool-chip" title={tool}>
+                    {mcpToolShortName(tool)}
                   </span>
                 </li>
               ))}
@@ -443,14 +442,16 @@ function McpServerEditor({
                     className="mcp-tools-more"
                     onClick={() => setToolsOpen(!toolsOpen)}
                   >
-                    {toolsOpen ? "收起" : `还有 ${live.tools.length - MCP_TOOLS_SHOWN} 个`}
+                    {toolsOpen
+                      ? t("common.less")
+                      : tn("settings.mcp.moreTools", live.tools.length - MCP_TOOLS_SHOWN)}
                   </button>
                 </li>
               ) : null}
             </ul>
           ) : null}
         </CardBlock>
-        <Row title="名称" desc="只在界面上显示。工具名用的是服务器 id。">
+        <Row title={t("settings.mcp.name")} desc={t("settings.mcp.name.desc")}>
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
@@ -459,42 +460,42 @@ function McpServerEditor({
             autoFocus={autoFocusName}
             placeholder={server.id}
             spellCheck={false}
-            aria-label="名称"
+            aria-label={t("settings.mcp.name")}
           />
         </Row>
-        <Row title="启动命令">
+        <Row title={t("settings.mcp.command")}>
           <input
             value={command}
             onChange={(e) => setCommand(e.target.value)}
             onBlur={() => command.trim() !== server.command && onPatch({ command: command.trim() })}
             onKeyDown={blurOnEnter}
-            placeholder="npx / uvx / 可执行文件路径"
+            placeholder={t("settings.mcp.command.placeholder")}
             spellCheck={false}
-            aria-label="启动命令"
+            aria-label={t("settings.mcp.command")}
           />
         </Row>
-        <Row title="参数" desc="一行一个。" stack>
+        <Row title={t("settings.mcp.args")} desc={t("settings.mcp.args.desc")} stack>
           <ResizableTextarea
             className="paths-input"
             value={args}
             onChange={(e) => setArgs(e.target.value)}
             onBlur={commitArgs}
-            placeholder={"如：\n-y\n@modelcontextprotocol/server-filesystem\n/tmp"}
+            placeholder={t("settings.mcp.args.placeholder")}
             rows={4}
             spellCheck={false}
-            aria-label="参数"
+            aria-label={t("settings.mcp.args")}
           />
         </Row>
-        <Row title="环境变量" desc="一行一个 KEY=VALUE。" stack>
+        <Row title={t("settings.mcp.env")} desc={t("settings.mcp.env.desc")} stack>
           <ResizableTextarea
             className="paths-input"
             value={env}
             onChange={(e) => setEnv(e.target.value)}
             onBlur={commitEnv}
-            placeholder={"如：\nGITHUB_TOKEN=ghp_..."}
+            placeholder={t("settings.mcp.env.placeholder")}
             rows={2}
             spellCheck={false}
-            aria-label="环境变量"
+            aria-label={t("settings.mcp.env")}
           />
         </Row>
       </Card>

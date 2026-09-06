@@ -268,9 +268,9 @@ impl StreamDecoder {
 
         let Some(id) = self.message_id.clone() else {
             // 有 message_stop 却没有 message_start。中间代理制造的脏状态。
-            return vec![ProviderEvent::Error(ProviderError::Transport {
-                message: "流里没有 message_start".into(),
-            })];
+            return vec![ProviderEvent::Error(crate::errors::stream_broken(
+                "stream has no message_start",
+            ))];
         };
 
         let mut content = Vec::new();
@@ -302,13 +302,12 @@ impl StreamDecoder {
                     let input = match parse_tool_input(&partial_json) {
                         Ok(v) => v,
                         Err(e) => {
-                            return vec![ProviderEvent::Error(ProviderError::Transport {
-                                message: format!(
-                                    "工具 {name} 的参数不是合法 JSON（{e}）。\
-                                     原始内容：{}",
+                            return vec![ProviderEvent::Error(crate::errors::stream_broken(
+                                format!(
+                                    "tool {name} input is not valid JSON ({e}); raw: {}",
                                     truncate(&partial_json, 200)
                                 ),
-                            })];
+                            ))];
                         }
                     };
                     content.push(AssistantContent::ToolUse { id, name, input });
@@ -344,16 +343,16 @@ impl StreamDecoder {
             return Vec::new();
         }
         if !self.saw_message_start {
-            return vec![ProviderEvent::Error(ProviderError::Transport {
-                message: "流在收到任何数据前就结束了".into(),
-            })];
+            return vec![ProviderEvent::Error(crate::errors::stream_broken(
+                "stream ended before any data arrived",
+            ))];
         }
         // 有内容但没收到 message_stop：把已有的吐出去，同时报错。
         // 半条消息比没有消息有用 —— 至少用户能看到模型说到哪了。
         let mut out = self.finish_message();
-        out.push(ProviderEvent::Error(ProviderError::Transport {
-            message: "流被截断：没有收到 message_stop".into(),
-        }));
+        out.push(ProviderEvent::Error(crate::errors::stream_broken(
+            "stream truncated: no message_stop received",
+        )));
         out
     }
 
@@ -381,31 +380,22 @@ fn parse_tool_input(raw: &str) -> Result<serde_json::Value, serde_json::Error> {
     serde_json::from_str(raw)
 }
 
+/// 事件流里服务端报的错（`event: error`）。已经在流阶段，不会重试。
 fn map_error(kind: &str, message: &str) -> ProviderError {
     match kind {
-        "overloaded_error" => ProviderError::RetriesExhausted {
-            message: format!("服务过载：{message}"),
-        },
-        "authentication_error" | "permission_error" => ProviderError::Auth {
-            message: message.to_owned(),
-        },
+        "overloaded_error" => crate::errors::overloaded(message),
+        "authentication_error" | "permission_error" => crate::errors::auth(message),
         "invalid_request_error" if message.contains("context limit") => {
             match crate::retry::parse_context_overflow(message) {
                 Some(o) => ProviderError::ContextOverflow {
                     used: o.input_tokens,
                     limit: o.context_limit,
                 },
-                None => ProviderError::Transport {
-                    message: message.to_owned(),
-                },
+                None => ProviderError::transport(message),
             }
         }
-        "rate_limit_error" => ProviderError::RetriesExhausted {
-            message: format!("限流：{message}"),
-        },
-        _ => ProviderError::Transport {
-            message: format!("{kind}: {message}"),
-        },
+        "rate_limit_error" => crate::errors::rate_limited(message),
+        _ => ProviderError::transport(format!("{kind}: {message}")),
     }
 }
 
@@ -770,8 +760,9 @@ mod tests {
         ]);
 
         match events.iter().find(|e| matches!(e, ProviderEvent::Error(_))) {
-            Some(ProviderEvent::Error(ProviderError::Transport { message })) => {
-                assert!(message.contains("Edit"), "错误要指出是哪个工具：{message}");
+            Some(ProviderEvent::Error(ProviderError::Transport { error })) => {
+                let detail = error.detail.as_deref().unwrap_or_default();
+                assert!(detail.contains("Edit"), "错误要指出是哪个工具：{detail}");
             }
             other => panic!("应该报错而不是塞一个半成品 tool_use 进去：{other:?}"),
         }

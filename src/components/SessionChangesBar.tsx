@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { type FileChange, sessionChanges } from "../bridge";
+import { useT } from "../i18n";
 import { Chevron } from "./Chevron";
 import { FileChangeList } from "./FileChangeList";
 
@@ -26,6 +27,7 @@ export function SessionChangesBar({
   /** 保活但不可见时别轮询。切回来 refreshKey 会再推一次。 */
   paused?: boolean;
 }) {
+  const { t, tn } = useT();
   const [changes, setChanges] = useState<FileChange[] | null>(null);
   const [open, setOpen] = useState(false);
 
@@ -67,10 +69,12 @@ export function SessionChangesBar({
           className="changes-bar-head"
           onClick={() => setOpen(!open)}
           aria-expanded={open}
-          title="本次会话经编辑工具落盘的净改动。提交到 git 之后这里依然保留,直到会话结束。"
+          title={t("transcript.changesBar.title")}
         >
           <Chevron open={open} />
-          <span className="changes-bar-title">本次改动 {changes.length} 个文件</span>
+          <span className="changes-bar-title">
+            {tn("transcript.changesBar.label", changes.length)}
+          </span>
           <span className="changes-bar-stat">
             <span className="add">+{total.added}</span> <span className="del">−{total.removed}</span>
           </span>

@@ -25,6 +25,7 @@ mod install;
 
 use std::path::PathBuf;
 
+use riot_protocol::{UiError, UiText, ui_error, ui_text};
 use serde::{Deserialize, Serialize};
 
 pub use install::InstallError;
@@ -58,7 +59,7 @@ const MANIFEST_URL_ENV: &str = "RIOT_PACKS_MANIFEST_URL";
 fn manifest_url() -> String {
     #[cfg(debug_assertions)]
     if let Some(u) = override_url(std::env::var(MANIFEST_URL_ENV).ok()) {
-        tracing::warn!(url = %u, "能力包清单地址被环境变量覆盖（仅 debug 构建）");
+        tracing::warn!(url = %u, "pack manifest URL overridden by env (debug builds only)");
         return u;
     }
     MANIFEST_URL.to_owned()
@@ -72,7 +73,7 @@ fn override_url(raw: Option<String>) -> Option<String> {
     if raw.starts_with("https://") || is_loopback_http(&raw) {
         return Some(raw);
     }
-    tracing::warn!(url = %raw, "{MANIFEST_URL_ENV} 不是 https，已忽略");
+    tracing::warn!(url = %raw, "{MANIFEST_URL_ENV} is not https; ignored");
     None
 }
 
@@ -95,19 +96,20 @@ fn is_loopback_http(url: &str) -> bool {
 
 /// 内置的能力包目录。目前只有文档一个,但结构留给后来的。
 ///
-/// 说明文字放这里而不放远端清单:没网或清单拉不到时,设置页也该能告诉用户
-/// 这个包是干什么的。
+/// 名字和说明放这里而不放远端清单:没网或清单拉不到时,设置页也该能告诉用户
+/// 这个包是干什么的。它们是词典键（前端按界面语言查词）—— 写成返回
+/// [`UiText`] 的函数而不是裸键字符串，是为了让词典对齐测试扫得到
+/// `ui_text!` 里的字面量。
 pub const CATALOG: &[CatalogEntry] = &[CatalogEntry {
     id: "doc-runtime",
-    name: "文档能力",
-    description: "创建和编辑 Word、Excel、PowerPoint、PDF。自带 Python、Node、\
-                  LibreOffice 和中文字体,不需要你的电脑上装任何开发环境。",
+    name: || ui_text!("host.pack.docRuntime.name"),
+    description: || ui_text!("host.pack.docRuntime.description"),
 }];
 
 pub struct CatalogEntry {
     pub id: &'static str,
-    pub name: &'static str,
-    pub description: &'static str,
+    pub name: fn() -> UiText,
+    pub description: fn() -> UiText,
 }
 
 // ── 目录 ──────────────────────────────────────────────
@@ -168,23 +170,21 @@ pub fn platform_key() -> String {
     format!("{os}-{arch}")
 }
 
+/// 拉远端清单。错误是技术细节（英文 / 机器话），调用方包成带键的错误。
 async fn fetch_manifest() -> Result<RemoteManifest, String> {
     let res = reqwest::Client::new()
         .get(manifest_url())
         .timeout(std::time::Duration::from_secs(20))
         .send()
         .await
-        .map_err(|e| format!("拉取能力包清单失败：{e}"))?;
+        .map_err(|e| format!("fetch: {e}"))?;
     if !res.status().is_success() {
-        return Err(format!("能力包清单返回 {}", res.status()));
+        return Err(format!("HTTP {}", res.status()));
     }
     // 不用 reqwest 的 json()：那要开 `json` feature，而 workspace 里的 reqwest
     // 是所有 crate 共用的，为一处调用加特性不划算。
-    let body = res
-        .text()
-        .await
-        .map_err(|e| format!("读取能力包清单失败：{e}"))?;
-    serde_json::from_str(&body).map_err(|e| format!("能力包清单解析失败：{e}"))
+    let body = res.text().await.map_err(|e| format!("read body: {e}"))?;
+    serde_json::from_str(&body).map_err(|e| format!("parse: {e}"))
 }
 
 // ── 给前端的状态 ──────────────────────────────────────
@@ -193,8 +193,8 @@ async fn fetch_manifest() -> Result<RemoteManifest, String> {
 #[serde(rename_all = "camelCase")]
 pub struct PackStatus {
     pub id: String,
-    pub name: String,
-    pub description: String,
+    pub name: UiText,
+    pub description: UiText,
     /// 已装版本。null = 没装。
     pub installed_version: Option<String>,
     /// 远端可装版本。null = 清单没拉到,或这个平台没有对应的包。
@@ -206,7 +206,7 @@ pub struct PackStatus {
     /// 这个平台有没有对应的包。
     pub supported: bool,
     /// 清单拉取失败的原因。有值时前端显示"离线",而不是"没有可用更新"。
-    pub manifest_error: Option<String>,
+    pub manifest_error: Option<UiError>,
 }
 
 /// 能力包列表。设置页轮询它。
@@ -218,8 +218,8 @@ pub async fn status() -> Vec<PackStatus> {
     let (remote, err) = match fetch_manifest().await {
         Ok(m) => (Some(m), None),
         Err(e) => {
-            tracing::debug!(error = %e, "能力包清单拉取失败");
-            (None, Some(e))
+            tracing::debug!(error = %e, "failed to fetch pack manifest");
+            (None, Some(ui_error!("host.pack.manifestFailed"; e)))
         }
     };
 
@@ -232,8 +232,8 @@ pub async fn status() -> Vec<PackStatus> {
                 .and_then(|p| p.platforms.get(&platform).map(|a| (p.version.clone(), a)));
             PackStatus {
                 id: entry.id.to_owned(),
-                name: entry.name.to_owned(),
-                description: entry.description.to_owned(),
+                name: (entry.name)(),
+                description: (entry.description)(),
                 installed_version: installed(entry.id).map(|p| p.manifest.version),
                 available_version: asset.as_ref().map(|(v, _)| v.clone()),
                 download_size: asset.as_ref().map_or(0, |(_, a)| a.size),
@@ -271,7 +271,7 @@ pub enum PackProgress {
         version: String,
     },
     Failed {
-        error: String,
+        error: UiError,
     },
 }
 
@@ -304,7 +304,7 @@ pub async fn install(
     }
 
     let cache = cache_dir();
-    std::fs::create_dir_all(&cache).map_err(|e| InstallError::Io("建缓存目录".into(), e))?;
+    std::fs::create_dir_all(&cache).map_err(|e| InstallError::Io("create cache dir".into(), e))?;
     let archive = cache.join(format!("{id}-{}.tar.zst", pack.version));
 
     download::fetch(&asset.url, &archive, asset.size, &asset.sha256, &progress).await?;
@@ -318,12 +318,12 @@ pub async fn install(
     let (src, dest) = (archive.clone(), pack_dir(id));
     let root = tokio::task::spawn_blocking(move || install::unpack(&src, &dest))
         .await
-        .map_err(|e| InstallError::Task(format!("解压任务没跑完：{e}")))??;
+        .map_err(|e| InstallError::Task(format!("unpack task did not finish: {e}")))??;
 
     progress(PackProgress::SelfCheck);
     let installed = tokio::task::spawn_blocking(move || install::finalize(&root))
         .await
-        .map_err(|e| InstallError::Task(format!("自检任务没跑完：{e}")))??;
+        .map_err(|e| InstallError::Task(format!("self-check task did not finish: {e}")))??;
 
     // 装完就把压缩包删掉。它和解压出来的内容加起来是两份几百 MB,
     // 留着只在"同一版本重装"这一个场景有用,不值这个盘。
@@ -339,7 +339,7 @@ pub async fn install(
 pub fn uninstall(id: &str) -> Result<(), InstallError> {
     let dir = pack_dir(id);
     if dir.exists() {
-        std::fs::remove_dir_all(&dir).map_err(|e| InstallError::Io("删除能力包目录".into(), e))?;
+        std::fs::remove_dir_all(&dir).map_err(|e| InstallError::Io("remove pack dir".into(), e))?;
     }
     Ok(())
 }
@@ -391,11 +391,13 @@ fn sync_mcp_in(config: &mut riot_kernel::config::AppConfig, root: &std::path::Pa
                     .display()
                     .to_string()
             });
+            // 显示名落在用户可手编的 config.json 里，装不下词典键；用包 id
+            // 这个语言中立的标识，设置页想标"来自能力包"按 command 路径判。
             config
                 .mcp_servers
                 .push(riot_kernel::config::McpServerConfig {
                     id: spec.id.clone(),
-                    name: format!("{}（能力包）", entry.name),
+                    name: entry.id.to_owned(),
                     command: pack.resolve(&spec.command).display().to_string(),
                     args: spec.args.iter().map(|a| resolve_arg(&pack, a)).collect(),
                     env,

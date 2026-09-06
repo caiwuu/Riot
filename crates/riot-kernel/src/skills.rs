@@ -49,6 +49,8 @@
 
 use std::path::{Path, PathBuf};
 
+use riot_protocol::text::UiError;
+use riot_protocol::ui_error;
 use riot_tools::tools::skill::SkillCard;
 use serde::Serialize;
 
@@ -124,7 +126,8 @@ impl Discovered {
 #[derive(Clone)]
 pub struct Problem {
     pub path: PathBuf,
-    pub reason: String,
+    /// 设置页要显示的原因（词典键 + 细节）。
+    pub reason: UiError,
 }
 
 /// 给设置页看的技能清单条目。
@@ -137,9 +140,9 @@ pub struct SkillInfo {
     pub path: String,
     /// `builtin` / `pack` / `global` / `project`。
     pub source: String,
-    /// 解析失败的原因。None = 这个技能可用。
+    /// 解析失败的原因（词典键 + 细节）。None = 这个技能可用。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub error: Option<UiError>,
 }
 
 /// 全局技能目录（`<配置目录>/riot/skills`）。
@@ -245,7 +248,7 @@ fn scan_dir(dir: &Path, out: &mut Discovered) {
             Err(e) => {
                 out.problems.push(Problem {
                     path: skill_md,
-                    reason: format!("读不出来：{e}"),
+                    reason: ui_error!("kernel.config.unreadable"; e),
                 });
                 continue;
             }
@@ -296,7 +299,7 @@ fn scan_builtin(out: &mut Discovered) {
                 }
             }
             Err(reason) => out.problems.push(Problem {
-                path: PathBuf::from(format!("<内置技能 {name}>")),
+                path: PathBuf::from(format!("<builtin {name}>")),
                 reason,
             }),
         }
@@ -304,13 +307,13 @@ fn scan_builtin(out: &mut Discovered) {
 }
 
 /// 解析一个 SKILL.md。返回 `(卡片, 是否只给用户调)`。
-fn parse_skill(raw: &str, fallback_name: &str, dir: &Path) -> Result<(SkillCard, bool), String> {
+fn parse_skill(raw: &str, fallback_name: &str, dir: &Path) -> Result<(SkillCard, bool), UiError> {
     let rest = raw
         .strip_prefix("---")
-        .ok_or("缺 frontmatter：文件要以 --- 开头，里面至少写一行 description")?;
+        .ok_or_else(|| ui_error!("kernel.skill.noFrontmatter"))?;
     let (front, body) = rest
         .split_once("\n---")
-        .ok_or("frontmatter 没有结束的 ---")?;
+        .ok_or_else(|| ui_error!("kernel.skill.unterminatedFrontmatter"))?;
 
     let mut name = None;
     let mut description = None;
@@ -333,7 +336,7 @@ fn parse_skill(raw: &str, fallback_name: &str, dir: &Path) -> Result<(SkillCard,
 
     let description = description
         .filter(|d| !d.is_empty())
-        .ok_or("缺 description —— 它是模型决定要不要加载的唯一依据")?;
+        .ok_or_else(|| ui_error!("kernel.skill.noDescription"))?;
     let name = name
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| fallback_name.to_owned());
@@ -344,7 +347,7 @@ fn parse_skill(raw: &str, fallback_name: &str, dir: &Path) -> Result<(SkillCard,
         body.push_str("\n\n[正文超长已截断。数据文件应该放在技能目录里让模型按需读取，而不是全部写进 SKILL.md]");
     }
     if body.trim().is_empty() {
-        return Err("正文是空的：frontmatter 之后要写这个技能的具体做法".into());
+        return Err(ui_error!("kernel.skill.emptyBody"));
     }
 
     Ok((
@@ -486,8 +489,9 @@ mod tests {
         let d = discover_dirs(&project, &global);
         assert!(d.cards.is_empty());
         assert_eq!(d.problems.len(), 1);
-        assert!(
-            d.problems[0].reason.contains("description"),
+        assert_eq!(
+            d.problems[0].reason.key(),
+            "kernel.skill.noDescription",
             "{}",
             d.problems[0].reason
         );
@@ -536,8 +540,9 @@ mod tests {
         write_skill(&global, "plain", "就是一段普通 markdown\n");
         let d = discover_dirs(&project, &global);
         assert!(d.cards.is_empty());
-        assert!(
-            d.problems[0].reason.contains("---"),
+        assert_eq!(
+            d.problems[0].reason.key(),
+            "kernel.skill.noFrontmatter",
             "{}",
             d.problems[0].reason
         );

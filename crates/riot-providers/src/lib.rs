@@ -13,6 +13,7 @@
 
 pub mod anthropic;
 pub mod endpoint;
+pub(crate) mod errors;
 pub mod http;
 pub mod openai;
 pub mod retry;

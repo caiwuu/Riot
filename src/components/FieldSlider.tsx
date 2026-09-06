@@ -1,6 +1,7 @@
 import { useRef } from "react";
 
 import type { Sampling } from "../bridge";
+import { useT } from "../i18n";
 import {
   type SamplingDraft,
   type SamplingField,
@@ -15,9 +16,6 @@ import { FieldNumber } from "./FieldNumber";
 import { HintTip } from "./HintTip";
 
 const SLIDER_STEPS = 1000;
-
-/** 「不发这个参数」在界面上的说法。三处设置共用一个词。 */
-const DEFAULT_LABEL = "模型默认";
 
 function parseDraft(raw: string): number | null {
   const t = raw.trim();
@@ -62,6 +60,9 @@ export function FieldSlider({
   /** 带上刚写下的值，避免父组件 setState 还没落地就拿旧草稿去提交。 */
   onCommit?: ((next: string | null) => void) | undefined;
 }) {
+  const { t } = useT();
+  /** 「不发这个参数」在界面上的说法。三处设置共用一个词。 */
+  const defaultLabel = t("composer.sampling.modelDefault");
   const off = value === null;
   const set = off ? null : parseDraft(value);
   /** 上层最终会发的值。没有就是 null —— 此时继承和模型默认合流。 */
@@ -77,8 +78,8 @@ export function FieldSlider({
     set != null
       ? formatSamplingValue(field, visual)
       : off || inheritLabel == null
-        ? DEFAULT_LABEL
-        : `继承 ${inheritLabel}`;
+        ? defaultLabel
+        : t("composer.sampling.inherit", { value: inheritLabel });
 
   const pending = useRef<string | null>(null);
 
@@ -106,7 +107,7 @@ export function FieldSlider({
       <div className="field-slider-head">
         <label>
           {field.label}
-          {hint ? <HintTip>{field.hint}</HintTip> : null}
+          {hint ? <HintTip>{t(field.hintKey)}</HintTip> : null}
         </label>
         {/* 继承值走 placeholder 而不是 value：框里留空，用户点进去直接敲。
             填成真值的话，想设的数恰好等于继承值时敲不出变化 —— 而
@@ -114,7 +115,7 @@ export function FieldSlider({
         <FieldNumber
           className="field-slider-num"
           value={value ?? ""}
-          placeholder={off || inheritLabel == null ? DEFAULT_LABEL : inheritLabel}
+          placeholder={off || inheritLabel == null ? defaultLabel : inheritLabel}
           onChange={(e) => onChange(e.target.value)}
           onBlur={() => {
             if (value === null) return;
@@ -138,8 +139,11 @@ export function FieldSlider({
             type="button"
             className="field-slider-clear"
             onClick={() => put("")}
-            aria-label={`清除${field.label}，回到${inheritLabel ?? DEFAULT_LABEL}`}
-            title={inheritLabel ?? DEFAULT_LABEL}
+            aria-label={t("composer.sampling.clear", {
+              field: field.label,
+              value: inheritLabel ?? defaultLabel,
+            })}
+            title={inheritLabel ?? defaultLabel}
           >
             ×
           </button>
@@ -216,30 +220,33 @@ function StateTag({
   inheritLabel: string | null;
   onPick: (next: string | null) => void;
 }) {
-  if (set) return <span className="field-slider-state">自定义</span>;
+  const { t } = useT();
+  const defaultLabel = t("composer.sampling.modelDefault");
+  if (set) return <span className="field-slider-state">{t("composer.sampling.custom")}</span>;
   // 顶层没有第二个选择：这是缺省状态，不是谁选出来的，别比刻度更抢眼。
   if (inheritLabel == null) {
-    return <span className="field-slider-state">{DEFAULT_LABEL}</span>;
+    return <span className="field-slider-state">{defaultLabel}</span>;
   }
+  const vars = { field: field.label, value: inheritLabel };
   return off ? (
     <button
       type="button"
       className="field-slider-state on"
       onClick={() => onPick("")}
-      aria-label={`${field.label} 当前是${DEFAULT_LABEL}，点击改回继承 ${inheritLabel}`}
-      title={`改回继承（${inheritLabel}）`}
+      aria-label={t("composer.sampling.state.offAria", vars)}
+      title={t("composer.sampling.state.offTitle", vars)}
     >
-      {DEFAULT_LABEL}
+      {defaultLabel}
     </button>
   ) : (
     <button
       type="button"
       className="field-slider-state"
       onClick={() => onPick(null)}
-      aria-label={`${field.label} 当前继承 ${inheritLabel}，点击改用${DEFAULT_LABEL}`}
-      title={`改用${DEFAULT_LABEL}：这一项不发给服务方，由模型自己定`}
+      aria-label={t("composer.sampling.state.inheritAria", vars)}
+      title={t("composer.sampling.state.inheritTitle")}
     >
-      继承 {inheritLabel}
+      {t("composer.sampling.inherit", vars)}
     </button>
   );
 }

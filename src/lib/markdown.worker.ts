@@ -26,7 +26,7 @@ self.onmessage = (e: MessageEvent<{ id: number; text: string }>) => {
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;");
     html = `<pre>${escaped}</pre>`;
-    console.warn("[markdown.worker] 解析失败，按纯文本显示", err);
+    console.warn("[markdown.worker] parse failed, showing as plain text", err);
   }
   self.postMessage({ id, html });
 };

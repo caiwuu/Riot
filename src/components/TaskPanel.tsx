@@ -1,7 +1,8 @@
 import { memo, useState } from "react";
 
-import type { BackgroundTaskStatus, BackgroundTaskView } from "../bridge";
+import { type BackgroundTaskStatus, type BackgroundTaskView, renderUiText } from "../bridge";
 import type { Item } from "../hooks/useSession";
+import { type MessageKey, t, useT } from "../i18n";
 import { openSubagent } from "../lib/subagentLink";
 import { Chevron } from "./Chevron";
 import { StopIcon } from "./icons";
@@ -10,27 +11,42 @@ import { SmoothFold } from "./SmoothFold";
 
 type NoticeItem = Extract<Item, { kind: "task_notice" }>;
 
+/** 状态词。渲染时才查词，调用方所在的组件负责订阅语言。 */
 export function statusLabel(s: BackgroundTaskStatus): string {
   switch (s) {
     case "running":
-      return "运行中";
+      return t("common.running");
     case "completed":
-      return "完成";
+      return t("transcript.task.status.completed");
     case "failed":
-      return "失败";
+      return t("common.failed");
     case "cancelled":
-      return "已停止";
+      return t("transcript.task.status.cancelled");
   }
 }
 
 export function kindLabel(kind: string): string {
   switch (kind) {
     case "explore":
-      return "侦察";
+      return t("transcript.task.kind.explore");
     case "fork":
-      return "分叉";
+      return t("transcript.task.kind.fork");
     default:
-      return "执行";
+      return t("transcript.task.kind.run");
+  }
+}
+
+/** 通知卡标题："后台任务 + 结束态"，各语言按整句翻。 */
+function noticeLabelKey(s: BackgroundTaskStatus): MessageKey {
+  switch (s) {
+    case "running":
+      return "transcript.taskNotice.running";
+    case "completed":
+      return "transcript.taskNotice.completed";
+    case "failed":
+      return "transcript.taskNotice.failed";
+    case "cancelled":
+      return "transcript.taskNotice.cancelled";
   }
 }
 
@@ -43,6 +59,7 @@ export function kindLabel(kind: string): string {
  * 用户当下最想知道的。
  */
 export const TaskNoticeCard = memo(function TaskNoticeCard({ item }: { item: NoticeItem }) {
+  const { t } = useT();
   const [open, setOpen] = useState(item.status === "failed");
   return (
     <div className={`task-notice task-notice-${item.status}`}>
@@ -57,7 +74,7 @@ export const TaskNoticeCard = memo(function TaskNoticeCard({ item }: { item: Not
         <span className={`task-notice-icon task-notice-icon-${item.status}`} aria-hidden>
           {item.status === "completed" ? "✓" : item.status === "cancelled" ? "◦" : "✕"}
         </span>
-        <span className="task-notice-label">后台任务{statusLabel(item.status)}</span>
+        <span className="task-notice-label">{t(noticeLabelKey(item.status))}</span>
         <span className="task-notice-title" title={item.title}>
           {item.title}
         </span>
@@ -67,7 +84,7 @@ export const TaskNoticeCard = memo(function TaskNoticeCard({ item }: { item: Not
           className="task-notice-id task-link"
           role="link"
           tabIndex={0}
-          title="打开这个子 agent 的会话"
+          title={t("transcript.task.openSession")}
           onClick={(e) => {
             e.stopPropagation();
             openSubagent(item.agentId, item.title);
@@ -79,7 +96,7 @@ export const TaskNoticeCard = memo(function TaskNoticeCard({ item }: { item: Not
             }
           }}
         >
-          查看会话
+          {t("transcript.taskNotice.view")}
         </span>
       </button>
       <SmoothFold open={open}>
@@ -110,24 +127,25 @@ export function BackgroundTasksPanel({
   tasks: BackgroundTaskView[];
   onCancel: (agentId: string) => void;
 }) {
+  const { t, tn } = useT();
   const [open, setOpen] = useState(true);
   const [dismissedAt, setDismissedAt] = useState<number | null>(null);
   // 只画后台的：同步子 agent 在对话流里有自己的 Task 卡片直播，再进面板是重复。
-  const background = tasks.filter((t) => t.background);
-  const running = background.filter((t) => t.status === "running");
+  const background = tasks.filter((x) => x.background);
+  const running = background.filter((x) => x.status === "running");
   // "收起"只收结束的：记下收起那一刻，之后结束的任务照常出现。
   const shown = background.filter(
-    (t) =>
-      t.status === "running" ||
+    (x) =>
+      x.status === "running" ||
       dismissedAt === null ||
-      (t.finished_at_ms ?? 0) > dismissedAt,
+      (x.finished_at_ms ?? 0) > dismissedAt,
   );
   if (shown.length === 0) return null;
 
   const head =
     running.length > 0
-      ? `${running.length} 个后台任务在跑`
-      : `${shown.length} 个后台任务已结束`;
+      ? tn("transcript.taskPanel.running", running.length)
+      : tn("transcript.taskPanel.finished", shown.length);
 
   return (
     <div className="queue-panel task-panel">
@@ -141,43 +159,43 @@ export function BackgroundTasksPanel({
             type="button"
             className="task-panel-dismiss"
             onClick={() => setDismissedAt(Date.now())}
-            title="收起已结束的任务"
+            title={t("transcript.taskPanel.dismissTitle")}
           >
-            收起
+            {t("transcript.taskPanel.dismiss")}
           </button>
         ) : null}
       </div>
       {open
-        ? shown.map((t) => (
-            <div className={`queue-row task-row task-row-${t.status}`} key={t.id}>
+        ? shown.map((task) => (
+            <div className={`queue-row task-row task-row-${task.status}`} key={task.id}>
               <span
-                className={t.status === "running" ? "task-dot tool-icon-spin" : "task-dot"}
+                className={task.status === "running" ? "task-dot tool-icon-spin" : "task-dot"}
                 aria-hidden
               >
-                {t.status === "running" ? "◐" : t.status === "completed" ? "✓" : "✕"}
+                {task.status === "running" ? "◐" : task.status === "completed" ? "✓" : "✕"}
               </span>
-              <span className="task-kind">{kindLabel(t.kind)}</span>
+              <span className="task-kind">{kindLabel(task.kind)}</span>
               <button
                 type="button"
                 className="task-title task-link"
-                title="打开这个子 agent 的会话"
-                onClick={() => openSubagent(t.id, t.title)}
+                title={t("transcript.task.openSession")}
+                onClick={() => openSubagent(task.id, task.title)}
               >
-                {t.title}
+                {task.title}
               </button>
-              <span className="task-activity" title={t.activity}>
-                {t.status === "running" ? t.activity : statusLabel(t.status)}
+              <span className="task-activity" title={renderUiText(task.activity)}>
+                {task.status === "running" ? renderUiText(task.activity) : statusLabel(task.status)}
               </span>
               <span className="task-meta">
-                {t.tool_uses > 0 ? `${t.tool_uses} 步` : ""}
+                {task.tool_uses > 0 ? tn("transcript.steps", task.tool_uses) : ""}
               </span>
-              {t.status === "running" ? (
+              {task.status === "running" ? (
                 <span className="queue-actions task-actions">
                   <button
                     type="button"
-                    title="停止这个后台任务"
-                    aria-label="停止"
-                    onClick={() => onCancel(t.id)}
+                    title={t("transcript.taskPanel.stopTitle")}
+                    aria-label={t("common.stop")}
+                    onClick={() => onCancel(task.id)}
                   >
                     <StopIcon />
                   </button>

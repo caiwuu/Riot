@@ -15,12 +15,15 @@ use std::path::Path;
 use riot_protocol::permission::{
     PermissionContext, PermissionUpdate, RuleDecision, SafetyKind, UpdateScope,
 };
+use riot_protocol::text::UiText;
 use riot_protocol::tool::Tool;
+use riot_protocol::ui_text;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SafetyFinding {
     pub kind: SafetyKind,
-    pub message: String,
+    /// 弹窗标题上那句「为什么拦你」。词典键，翻译在前端做。
+    pub message: UiText,
     pub suggestions: Vec<PermissionUpdate>,
 }
 
@@ -303,36 +306,22 @@ fn looks_like_credentials(path: &str) -> bool {
 /// `pub` 是给 Bash 用的:它没有单一目标路径，走的是
 /// [`crate::bash::write_targets`] 那条参数扫描,但拦下来之后要说的话
 /// 和这里完全一样 —— 两处各写一份迟早漂移，而漂移的那侧不会报错。
-pub fn describe(kind: SafetyKind, path: &Path) -> String {
+pub fn describe(kind: SafetyKind, path: &Path) -> UiText {
     let p = path.display();
     match kind {
-        SafetyKind::GitInternals => {
-            format!("这会修改 Git 内部文件 {p}。写 .git/hooks/ 等于让下次提交自动执行代码。")
-        }
-        SafetyKind::SshConfig => format!("这会读写 SSH 配置或密钥 {p}。"),
-        SafetyKind::ShellRc => {
-            format!(
-                "这会修改自动执行的配置 {p}。改这个等于取得持久化执行权 —— \
-                 下次开终端、下次登录或下次敲那个命令时就会运行。"
-            )
-        }
-        SafetyKind::AgentConfig => {
-            format!("这会修改本应用自己的配置 {p}，可能影响后续的权限判断。")
-        }
-        SafetyKind::ToolchainConfig => format!(
-            "这会修改构建工具链的配置或可执行文件 {p}。改这个等于取得持久化执行权 —— \
-             下次构建就会运行，而那次构建不在沙箱里。"
-        ),
-        SafetyKind::Credentials => format!("{p} 看起来是凭证文件。"),
-        SafetyKind::CommandInjection => format!("命令里检测到注入模式：{p}"),
-        SafetyKind::UnparseableCommand => format!("无法解析这个命令：{p}"),
+        SafetyKind::GitInternals => ui_text!("tools.safety.gitInternals", path = p),
+        SafetyKind::SshConfig => ui_text!("tools.safety.sshConfig", path = p),
+        SafetyKind::ShellRc => ui_text!("tools.safety.shellRc", path = p),
+        SafetyKind::AgentConfig => ui_text!("tools.safety.agentConfig", path = p),
+        SafetyKind::ToolchainConfig => ui_text!("tools.safety.toolchainConfig", path = p),
+        SafetyKind::Credentials => ui_text!("tools.safety.credentials", path = p),
+        SafetyKind::CommandInjection => ui_text!("tools.safety.commandInjection", path = p),
+        SafetyKind::UnparseableCommand => ui_text!("tools.safety.unparseableCommand", path = p),
         // scope 不走文件路径的 safety::check，这一分支只为穷尽匹配存在;
         // 真正的 scope 提示由渗透工具自己拼（带目标域名）。
-        SafetyKind::OutOfScope => format!("目标 {p} 不在授权的渗透范围内。"),
+        SafetyKind::OutOfScope => ui_text!("tools.safety.outOfScope", path = p),
         // 出沙箱同样不走文件路径,真正的提示由 Bash 自己拼（带整条命令）。
-        SafetyKind::SandboxEscape => {
-            format!("{p} 会在 OS 沙箱之外执行，文件系统边界对它不生效。")
-        }
+        SafetyKind::SandboxEscape => ui_text!("tools.safety.sandboxEscape", path = p),
     }
 }
 

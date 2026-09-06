@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { useTimedFlag } from "../hooks/useTimedFlag";
+import { type MessageKey, useT } from "../i18n";
 import { useEscLayer } from "./Modal";
 
 /**
@@ -49,25 +50,26 @@ function load(): Promise<MermaidApi> {
 }
 
 /** 读屏和放大按钮要报图的名字。从源码首个关键词猜，猜不出统一叫流程图。 */
-const KIND_LABELS: [RegExp, string][] = [
-  [/^(graph|flowchart)\b/, "流程图"],
-  [/^sequenceDiagram/, "时序图"],
-  [/^classDiagram/, "类图"],
-  [/^stateDiagram/, "状态图"],
-  [/^erDiagram/, "ER 图"],
-  [/^gantt/, "甘特图"],
-  [/^pie\b/, "饼图"],
+const KIND_LABELS: [RegExp, MessageKey][] = [
+  [/^(graph|flowchart)\b/, "transcript.mermaid.flowchart"],
+  [/^sequenceDiagram/, "transcript.mermaid.sequence"],
+  [/^classDiagram/, "transcript.mermaid.class"],
+  [/^stateDiagram/, "transcript.mermaid.state"],
+  [/^erDiagram/, "transcript.mermaid.er"],
+  [/^gantt/, "transcript.mermaid.gantt"],
+  [/^pie\b/, "transcript.mermaid.pie"],
 ];
 
-function kindOf(src: string): string {
+function kindOf(src: string): MessageKey {
   const head = src.trimStart();
-  for (const [re, label] of KIND_LABELS) {
-    if (re.test(head)) return label;
+  for (const [re, key] of KIND_LABELS) {
+    if (re.test(head)) return key;
   }
-  return "流程图";
+  return "transcript.mermaid.flowchart";
 }
 
 export function MermaidBlock({ source }: { source: string }) {
+  const { t } = useT();
   const uid = useId().replace(/[^a-zA-Z0-9]/g, "");
   const [svg, setSvg] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
@@ -86,7 +88,7 @@ export function MermaidBlock({ source }: { source: string }) {
     }
     let alive = true;
     // 流式时每个 token 都重跑。短延迟等一小截写完再画，别每个字符都渲染。
-    const t = window.setTimeout(() => {
+    const timer = window.setTimeout(() => {
       const id = `mmd-${uid}-${++seq}`;
       void load()
         .then((api) => api.render(id, src))
@@ -105,11 +107,11 @@ export function MermaidBlock({ source }: { source: string }) {
     }, 180);
     return () => {
       alive = false;
-      window.clearTimeout(t);
+      window.clearTimeout(timer);
     };
   }, [source, uid]);
 
-  const label = kindOf(source);
+  const label = t(kindOf(source));
 
   const copySrc = () => {
     navigator.clipboard.writeText(source).then(
@@ -126,7 +128,7 @@ export function MermaidBlock({ source }: { source: string }) {
           type="button"
           className="md-mermaid-zoom"
           onClick={() => setViewer(true)}
-          aria-label={`放大查看${label}`}
+          aria-label={t("transcript.image.zoomNamed", { name: label })}
         >
           <div
             className="md-mermaid"
@@ -137,7 +139,11 @@ export function MermaidBlock({ source }: { source: string }) {
         </button>
         {/* 渲染成图之后源码就没处看了，hover 给条复制的路 */}
         <button type="button" className="md-mermaid-copy" onClick={copySrc}>
-          {copied === "ok" ? "已复制" : copied === "fail" ? "复制失败" : "复制源码"}
+          {copied === "ok"
+            ? t("common.copied")
+            : copied === "fail"
+              ? t("transcript.md.copyFailed")
+              : t("transcript.mermaid.copySource")}
         </button>
         {viewer ? (
           <MermaidViewer svg={svg} label={label} onClose={() => setViewer(false)} />
@@ -149,7 +155,7 @@ export function MermaidBlock({ source }: { source: string }) {
   if (!settled && source.trim()) {
     return (
       <div className="md-mermaid-loading" role="status">
-        图渲染中…
+        {t("transcript.mermaid.rendering")}
       </div>
     );
   }
@@ -159,7 +165,7 @@ export function MermaidBlock({ source }: { source: string }) {
       <div className="codeblock-bar">
         <span className="codeblock-lang">mermaid</span>
         {/* 退回源码时得说一声"这本来是张图"，不然像模型就只写了段代码 */}
-        {failed ? <span className="codeblock-fail">图渲染失败</span> : null}
+        {failed ? <span className="codeblock-fail">{t("transcript.mermaid.failed")}</span> : null}
       </div>
       <pre>
         <code>{source}</code>
@@ -181,6 +187,7 @@ function MermaidViewer({
   label: string;
   onClose: () => void;
 }) {
+  const { t } = useT();
   // Esc 走公共栈 —— 查看器开在权限卡之上时，Esc 只关查看器
   useEscLayer(onClose);
 
@@ -191,7 +198,12 @@ function MermaidViewer({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <button className="shot-viewer-close" onClick={onClose} type="button" aria-label="关闭">
+      <button
+        className="shot-viewer-close"
+        onClick={onClose}
+        type="button"
+        aria-label={t("common.close")}
+      >
         <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
           <path
             d="M2 2l8 8M10 2L2 10"
@@ -205,7 +217,7 @@ function MermaidViewer({
       <div
         className="mermaid-viewer-body"
         role="img"
-        aria-label={`${label}（放大）`}
+        aria-label={t("transcript.image.zoomed", { name: label })}
         onClick={(e) => {
           if (e.target === e.currentTarget) onClose();
         }}

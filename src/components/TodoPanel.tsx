@@ -13,6 +13,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 
 import type { Item } from "../hooks/useSession";
+import { useT } from "../i18n";
 import { Chevron } from "./Chevron";
 
 /** TodoWrite 输入里的一项。宽松解析 —— 拿到什么画什么。 */
@@ -56,6 +57,7 @@ export function hasActiveTodos(items: Item[]): boolean {
  * 内部这次 useMemo —— 但组件本身够便宜，这里主要是和别的卡片保持一致。
  */
 export const TodoPanel = memo(function TodoPanel({ items }: { items: Item[] }) {
+  const { t } = useT();
   const found = useMemo(() => latest(items), [items]);
   /**
    * 手动关闭记的是**那一次调用的 id**，不是一个布尔。模型再次更新清单
@@ -105,7 +107,7 @@ export const TodoPanel = memo(function TodoPanel({ items }: { items: Item[] }) {
         >
           <Chevron open={open} />
           <span className="todo-panel-title">
-            任务 {done}/{todos.length}
+            {t("transcript.todo.title", { done, total: todos.length })}
           </span>
           {/* 收起时把"正在做什么"提到标题上 —— 折叠不该让进度彻底消失。
               展开时清单里那行本来就高亮着，标题再说一遍是重复。 */}
@@ -117,8 +119,8 @@ export const TodoPanel = memo(function TodoPanel({ items }: { items: Item[] }) {
           type="button"
           className="todo-panel-close"
           onClick={() => setDismissedAt(callId)}
-          title="关闭（清单再次更新时会重新出现）"
-          aria-label="关闭任务面板"
+          title={t("transcript.todo.closeTitle")}
+          aria-label={t("transcript.todo.close")}
         >
           ✕
         </button>

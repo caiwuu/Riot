@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState } from "react";
 
 import type { Item } from "../hooks/useSession";
+import { t, tn, useT } from "../i18n";
 import { Chevron } from "./Chevron";
 import { Markdown } from "./Markdown";
 import { SmoothFold } from "./SmoothFold";
@@ -130,18 +131,18 @@ function foldSummary(items: FoldItem[]): string {
   const parts: string[] = [];
   const first = readNames[0];
   if (reads > 0) {
-    if (!first) parts.push(`读取 ${reads} 个文件`);
-    else if (readNames.length === 1) parts.push(`读取 ${first}`);
-    else parts.push(`读取 ${first} 等 ${readNames.length} 个文件`);
+    if (!first) parts.push(tn("transcript.fold.readFiles", reads));
+    else if (readNames.length === 1) parts.push(t("transcript.fold.readOne", { name: first }));
+    else parts.push(tn("transcript.fold.readMore", readNames.length, { name: first }));
   }
-  if (searches) parts.push(`搜索 ${searches} 次`);
-  if (cmds) parts.push(`命令 ${cmds} 条`);
-  if (tasks) parts.push(`子任务 ${tasks} 个`);
-  if (web) parts.push(`联网 ${web} 次`);
-  if (browser) parts.push(`浏览器 ${browser} 步`);
-  if (other) parts.push(`其他 ${other} 步`);
+  if (searches) parts.push(tn("transcript.fold.searches", searches));
+  if (cmds) parts.push(tn("transcript.fold.commands", cmds));
+  if (tasks) parts.push(tn("transcript.fold.subtasks", tasks));
+  if (web) parts.push(tn("transcript.fold.web", web));
+  if (browser) parts.push(tn("transcript.fold.browser", browser));
+  if (other) parts.push(tn("transcript.fold.other", other));
   // 全是思考没有工具时，摘要落到思考本身。
-  if (parts.length === 0) return `思考过程 · 共 ${thinkChars} 字`;
+  if (parts.length === 0) return tn("transcript.fold.thinkingOnly", thinkChars);
   return parts.join(" · ");
 }
 
@@ -162,7 +163,7 @@ function liveActivity(
       return { label: it.name, peek: oneLine(tail || summarize(it)) };
     }
   }
-  if (thinkingText) return { label: "思考中…", peek: oneLine(thinkingText) };
+  if (thinkingText) return { label: t("transcript.thinking.live"), peek: oneLine(thinkingText) };
   return null;
 }
 
@@ -189,6 +190,7 @@ export const ProcessGroup = memo(
     /** 正在流式输出、还没落成条目的思考。直播在组头，展开时排在组尾。 */
     thinkingText?: string;
   }) {
+    const { tn } = useT();
     const [open, setOpen] = useState(false);
     const summary = foldSummary(items);
     // 失败数常驻头部但**弱化** —— 探索里的中途失败（grep 没命中、
@@ -231,10 +233,10 @@ export const ProcessGroup = memo(
               {summary}
             </span>
           )}
-          <span className="fold-count">{items.length} 步</span>
+          <span className="fold-count">{tn("transcript.steps", items.length)}</span>
           {fails > 0 ? (
             <span className={endedFail ? "fold-fail fold-fail-final" : "fold-fail"}>
-              {fails} 项失败
+              {tn("transcript.fold.failed", fails)}
             </span>
           ) : null}
         </button>
@@ -305,6 +307,7 @@ function rememberThink(key: string, open: boolean) {
  * 不挂载孩子，历史里的思考不会白白 parse 一遍。
  */
 export function ThinkingBlock({ text, live }: { text: string; live?: boolean }) {
+  const { t, tn } = useT();
   const [open, setOpen] = useState(() => expandedThinks.has(thinkKey(text)));
 
   // 直播期间正文在长，短思考的前缀会跟着变（长到 80 字后才定）。
@@ -336,8 +339,10 @@ export function ThinkingBlock({ text, live }: { text: string; live?: boolean }) 
         }}
       >
         <Chevron open={open} />
-        <span className="think-label">{live ? "思考中…" : "思考过程"}</span>
-        <span className="think-chars">{text.length} 字</span>
+        <span className="think-label">
+          {live ? t("transcript.thinking.live") : t("transcript.thinking.label")}
+        </span>
+        <span className="think-chars">{tn("common.chars", text.length)}</span>
         {peek ? (
           <span className="think-peek" aria-hidden>
             <span className="think-peek-text">{peek}</span>

@@ -13,6 +13,7 @@
  */
 
 import type { PanelState } from "../bridge";
+import { type MessageKey, useT } from "../i18n";
 import { basename } from "../pathDisplay";
 import { BrowserIcon, DiffIcon, FileDocIcon, FolderIcon } from "./icons";
 
@@ -57,7 +58,7 @@ export function tabId(t: WorkbenchTab): string {
 }
 
 /** 还没加载出标题（或停在空白页）的页面显示成这个。 */
-const PAGE_PLACEHOLDER = "新标签页";
+const PAGE_PLACEHOLDER: MessageKey = "app.workbench.newTab";
 
 export function WorkbenchTabs({
   tabs,
@@ -85,6 +86,7 @@ export function WorkbenchTabs({
   /** 右端附加（窗口开关已钉在 .shell 上，这里一般不传）。 */
   trailing?: React.ReactNode;
 }) {
+  const { t: tr } = useT();
   return (
     <div className="wb-tabs">
       {/* 标签单独一层可横滚：整条栏滚的话，右端的窗口开关会被一排标签
@@ -100,8 +102,8 @@ export function WorkbenchTabs({
                   key="browser"
                   active={active === "browser"}
                   icon={<BrowserIcon />}
-                  title="浏览器"
-                  tooltip="浏览器启动中…"
+                  title={tr("app.workbench.browser")}
+                  tooltip={tr("app.workbench.browserStarting")}
                   onSelect={() => onSelect("browser")}
                   onClose={() => onClose("browser")}
                 />
@@ -113,8 +115,8 @@ export function WorkbenchTabs({
                 // 页面标签的高亮 = 浏览器在前台 && 正是这一页。
                 active={active === "browser" && p.id === pages.active}
                 icon={<GlobeIcon />}
-                title={p.title || PAGE_PLACEHOLDER}
-                tooltip={p.url || PAGE_PLACEHOLDER}
+                title={p.title || tr(PAGE_PLACEHOLDER)}
+                tooltip={p.url || tr(PAGE_PLACEHOLDER)}
                 onSelect={() => onSelectPage(p.id)}
                 onClose={() => onClosePage(p.id)}
               />
@@ -123,9 +125,9 @@ export function WorkbenchTabs({
           const id = tabId(t);
           const label =
             t.kind === "changes"
-              ? "Git 改动"
+              ? tr("app.workbench.changes")
               : t.kind === "files"
-                ? "文件"
+                ? tr("app.workbench.files")
                 : t.kind === "subagent"
                   ? t.title
                   : basename(t.path);
@@ -146,7 +148,11 @@ export function WorkbenchTabs({
               }
               title={label}
               tooltip={
-                t.kind === "preview" ? t.path : t.kind === "subagent" ? `子 agent ${t.agentId}` : label
+                t.kind === "preview"
+                  ? t.path
+                  : t.kind === "subagent"
+                    ? tr("app.workbench.subagent", { id: t.agentId })
+                    : label
               }
               onSelect={() => onSelect(id)}
               onClose={() => onClose(id)}
@@ -156,7 +162,12 @@ export function WorkbenchTabs({
         {/* 一个标签都没有时不给"+"：那时下面的空状态本身就是添加菜单，
             两个入口并排只会让人犹豫点哪个。 */}
         {tabs.length > 0 ? (
-          <button className="icon" onClick={onAdd} title="添加面板" aria-label="添加面板">
+          <button
+            className="icon"
+            onClick={onAdd}
+            title={tr("app.workbench.addPanel")}
+            aria-label={tr("app.workbench.addPanel")}
+          >
             <PlusIcon />
           </button>
         ) : null}
@@ -183,27 +194,28 @@ export function WorkbenchEmpty({
   onBrowser: () => void;
   onFiles: () => void;
 }) {
+  const { t } = useT();
   return (
     <div className="wb-empty">
       <button type="button" className="wb-empty-item" onClick={onChanges}>
         <span className="wb-empty-icon">
           <DiffIcon />
         </span>
-        <span className="wb-empty-label">Git 改动</span>
+        <span className="wb-empty-label">{t("app.workbench.changes")}</span>
         <kbd className="wb-empty-kbd">⌘⇧G</kbd>
       </button>
       <button type="button" className="wb-empty-item" onClick={onBrowser}>
         <span className="wb-empty-icon">
           <BrowserIcon />
         </span>
-        <span className="wb-empty-label">浏览器</span>
+        <span className="wb-empty-label">{t("app.workbench.browser")}</span>
         <kbd className="wb-empty-kbd">⌘T</kbd>
       </button>
       <button type="button" className="wb-empty-item" onClick={onFiles}>
         <span className="wb-empty-icon">
           <FolderIcon />
         </span>
-        <span className="wb-empty-label">文件</span>
+        <span className="wb-empty-label">{t("app.workbench.files")}</span>
         <kbd className="wb-empty-kbd">⌘⇧E</kbd>
       </button>
     </div>
@@ -226,6 +238,7 @@ function StripTab({
   onSelect: () => void;
   onClose: () => void;
 }) {
+  const { t } = useT();
   const close = (e: React.SyntheticEvent) => {
     // 不冒泡给外层的"切到这个标签" —— 否则关掉的同时又切了过去。
     e.stopPropagation();
@@ -241,7 +254,7 @@ function StripTab({
         className="wb-tab-close"
         role="button"
         tabIndex={0}
-        aria-label={`关闭 ${title}`}
+        aria-label={t("app.workbench.closeTab", { title })}
         onClick={close}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {

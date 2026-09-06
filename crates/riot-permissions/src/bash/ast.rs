@@ -258,10 +258,12 @@ struct Wrapper {
 }
 
 pub fn analyze(command: &str) -> Analysis {
+    // `detail` 是给用户看的**片段**,不是句子 —— 句子由词典按 reason 给
+    // （见 `decide::explain`）。这里只放数字、命令名这类不用翻译的东西。
     if command.len() > MAX_COMMAND_LEN {
         return too_complex(
             ComplexReason::TooLong,
-            format!("命令有 {} 字节,上限 {MAX_COMMAND_LEN}", command.len()),
+            format!("{} B > {MAX_COMMAND_LEN} B", command.len()),
         );
     }
 
@@ -271,19 +273,16 @@ pub fn analyze(command: &str) -> Analysis {
         .is_err()
     {
         // 语言版本不匹配。这是构建期问题,但运行时遇到只能 fail-closed。
-        return too_complex(ComplexReason::ParseError, "解析器初始化失败".into());
+        return too_complex(ComplexReason::ParseError, "parser init failed".into());
     }
 
     let Some(tree) = parser.parse(command, None) else {
-        return too_complex(ComplexReason::ParseError, "解析器没有返回语法树".into());
+        return too_complex(ComplexReason::ParseError, "no syntax tree".into());
     };
 
     let root = tree.root_node();
     if root.has_error() || root.is_missing() {
-        return too_complex(
-            ComplexReason::ParseError,
-            "命令有语法错误,无法确定它会执行什么".into(),
-        );
+        return too_complex(ComplexReason::ParseError, "syntax error".into());
     }
 
     let src = command.as_bytes();
@@ -317,7 +316,7 @@ pub fn analyze(command: &str) -> Analysis {
     if subs.len() > MAX_SUB_COMMANDS {
         return too_complex(
             ComplexReason::TooManyCommands,
-            format!("拆出 {} 条子命令,上限 {MAX_SUB_COMMANDS}", subs.len()),
+            format!("{} > {MAX_SUB_COMMANDS}", subs.len()),
         );
     }
 
@@ -384,7 +383,7 @@ fn scan_forbidden(root: tree_sitter::Node, src: &[u8]) -> Option<Complexity> {
         {
             return Some(Complexity {
                 reason: ComplexReason::DangerousAssignment,
-                detail: format!("`{text}=` 会改变动态链接、命令查找或分词行为"),
+                detail: format!("{text}="),
             });
         }
 
@@ -675,7 +674,7 @@ fn parse_command(node: tree_sitter::Node, src: &[u8]) -> Result<SubCommand, Comp
     if DYNAMIC_COMMANDS.contains(&name.as_str()) {
         return Err(Complexity {
             reason: ComplexReason::DynamicExecution,
-            detail: format!("`{name}` 执行的内容在运行时才确定"),
+            detail: name.clone(),
         });
     }
 
@@ -718,7 +717,7 @@ fn unwrap_wrappers(
         if DYNAMIC_COMMANDS.contains(&inner.as_str()) {
             return Err(Complexity {
                 reason: ComplexReason::DynamicExecution,
-                detail: format!("包装里藏着 `{inner}`,执行内容在运行时才确定"),
+                detail: inner,
             });
         }
 
@@ -728,7 +727,7 @@ fn unwrap_wrappers(
 
     Err(Complexity {
         reason: ComplexReason::NestedWrappers,
-        detail: "包装器嵌套过深".into(),
+        detail: name,
     })
 }
 

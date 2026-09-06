@@ -5,6 +5,7 @@
 //! 见 ARCHITECTURE.md §9.2
 
 use crate::id::{RequestId, ToolUseId};
+use crate::text::UiText;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -49,7 +50,10 @@ pub enum PermissionResult {
         reason: DecisionReason,
     },
     Ask {
-        message: String,
+        /// 弹窗标题上那一句："是否允许运行 `npm test`？"、"这会修改 SSH 配置"。
+        /// 给用户看，所以是词典键；给模型看的拒绝理由在 [`Self::Deny`] 里，
+        /// 那个仍是成句。
+        message: UiText,
         /// UI 的"永久同意"候选项。结构化而非自由文本，
         /// 这样同一套类型能同时驱动弹窗、会话状态和配置持久化。
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -57,6 +61,8 @@ pub enum PermissionResult {
         reason: DecisionReason,
     },
     Deny {
+        /// 给模型的话，会作为 tool_result 发回去 —— 写成模型能据此改变
+        /// 行为的句子。不进界面，所以不走词典。
         message: String,
         reason: DecisionReason,
     },
@@ -305,8 +311,16 @@ pub enum UpdateScope {
 pub struct PermissionAsk {
     pub tool_use_id: ToolUseId,
     pub tool_name: String,
-    /// 给用户看的一句话描述，如 "运行 npm test"。
-    pub summary: String,
+    /// 弹窗标题：给用户看的一句话，如 "是否允许运行 `npm test`？"。
+    /// 词典键 —— 翻译在前端做。
+    pub summary: UiText,
+    /// 这次询问来自哪个后台子 agent（任务标题）。`None` = 主对话自己的。
+    ///
+    /// 后台任务的弹窗出现时父轮次多半已经结束，用户正在聊别的 —— 一句光秃秃
+    /// 的 "运行 rm -rf build" 他不知道是谁要干。前端拿它画归属前缀；不塞进
+    /// `summary`，因为那是词典键，拼不了字符串。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_label: Option<String>,
     /// 结构化预览：diff、命令、URL。UI 据此渲染。
     pub preview: AskPreview,
     pub suggestions: Vec<PermissionUpdate>,
@@ -348,7 +362,17 @@ pub enum AskPreview {
     NetworkFetch {
         url: String,
     },
+    /// 一句给用户看的话（词典键），通常就是 [`crate::tool::Tool::describe`]
+    /// 的结果。没有更具体的预览形状时用它。
     Plain {
+        text: UiText,
+    },
+    /// 模型写的原文，不翻译。计划批准卡用它显示计划**正文** —— 摘要等于
+    /// 让用户盲签一份实施方案。
+    ///
+    /// 和 [`Self::Plain`] 分开是因为两者一个要查词典、一个不能查：把模型
+    /// 写的 markdown 当键去查，前端只能显示一个裸键名。
+    Raw {
         text: String,
     },
     /// 模型主动提的结构化问题（`AskUserQuestion` 工具）。
@@ -482,5 +506,50 @@ mod tests {
         assert!(RuleSource::Policy < RuleSource::CliArg);
         assert!(RuleSource::CliArg < RuleSource::Local);
         assert!(RuleSource::Project < RuleSource::User);
+    }
+
+    /// 弹窗详情往返：summary 是词典键，Plain 是键、Raw 是原文，两者不能
+    /// 在 JSON 里混成一个形状 —— 前端按 `kind` 决定查不查词典。
+    #[test]
+    fn permission_ask_roundtrips_with_ui_text() {
+        let ask = PermissionAsk {
+            tool_use_id: ToolUseId::from_raw("u1"),
+            tool_name: "Bash".into(),
+            summary: crate::ui_text!("tools.ask.runCommand", command = "npm test"),
+            agent_label: Some("跑测试".into()),
+            preview: AskPreview::Plain {
+                text: crate::ui_text!("tools.bash.run", command = "npm test"),
+            },
+            suggestions: vec![],
+            reason: DecisionReason::UserChoice { remembered: false },
+        };
+        let json = serde_json::to_value(&ask).unwrap();
+        assert_eq!(json["summary"]["key"], "tools.ask.runCommand");
+        assert_eq!(json["summary"]["args"]["command"], "npm test");
+        assert_eq!(json["agent_label"], "跑测试");
+        assert_eq!(json["preview"]["kind"], "plain");
+        assert_eq!(json["preview"]["text"]["key"], "tools.bash.run");
+        let back: PermissionAsk = serde_json::from_value(json).unwrap();
+        assert_eq!(back, ask);
+
+        let raw = AskPreview::Raw {
+            text: "# 计划\n1. 改代码".into(),
+        };
+        let json = serde_json::to_value(&raw).unwrap();
+        assert_eq!(json["kind"], "raw");
+        assert_eq!(json["text"], "# 计划\n1. 改代码");
+        assert_eq!(serde_json::from_value::<AskPreview>(json).unwrap(), raw);
+
+        // 主对话自己的询问没有归属，字段整个不出现。
+        let plain = PermissionAsk {
+            agent_label: None,
+            ..ask
+        };
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("agent_label").is_none(), "{json}");
+        assert_eq!(
+            serde_json::from_value::<PermissionAsk>(json).unwrap(),
+            plain
+        );
     }
 }

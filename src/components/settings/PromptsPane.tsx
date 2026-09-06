@@ -6,6 +6,7 @@ import {
   type PromptPreset,
   setConfig,
 } from "../../bridge";
+import { useT } from "../../i18n";
 import { newPresetId, presetLabel, presetSummary } from "../../lib/prompts";
 import { ResizableTextarea } from "../ResizableTextarea";
 import { Card, Group, Row } from "./layout";
@@ -29,6 +30,7 @@ export function PromptsPane({
   askConfirm: AskConfirm;
   onSaved: () => void;
 }) {
+  const { t } = useT();
   const cfg = status.config;
   const prompts = cfg.prompts ?? [];
   const [selId, setSelId] = useState(prompts[0]?.id ?? "");
@@ -71,7 +73,11 @@ export function PromptsPane({
   const duplicate = () => {
     if (!sel) return;
     const id = newPresetId(prompts);
-    const copy: PromptPreset = { id, title: `${presetLabel(sel)} 副本`, body: sel.body };
+    const copy: PromptPreset = {
+      id,
+      title: t("settings.prompts.copyName", { name: presetLabel(sel) }),
+      body: sel.body,
+    };
     void commit({ ...cfg, prompts: [...prompts, copy] }).then((ok) => {
       if (ok) {
         setSelId(id);
@@ -84,9 +90,9 @@ export function PromptsPane({
     if (!sel) return;
     const target = sel;
     askConfirm({
-      title: `删除提示词「${presetLabel(target)}」？`,
-      body: "已经选用过它的会话不受影响 —— 那些会话里存的是当时复制过去的正文。",
-      confirmLabel: "删除",
+      title: t("settings.prompts.remove.title", { name: presetLabel(target) }),
+      body: t("settings.prompts.remove.body"),
+      confirmLabel: t("common.delete"),
       action: () => {
         const rest = prompts.filter((p) => p.id !== target.id);
         void commit({ ...cfg, prompts: rest }).then((ok) => {
@@ -98,16 +104,13 @@ export function PromptsPane({
 
   if (!sel) {
     return (
-      <Group title="提示词">
+      <Group title={t("settings.tab.prompts.title")}>
         <div className="empty-state">
-          <p className="empty-title">还没有收藏的提示词</p>
-          <p className="hint">
-            把常用的角色设定、输出格式要求、项目背景存在这里，开会话时挑一条填进
-            「系统提示词」，不用每次重打一遍。
-          </p>
+          <p className="empty-title">{t("settings.prompts.empty.title")}</p>
+          <p className="hint">{t("settings.prompts.empty.hint")}</p>
           <div className="empty-actions">
             <button className="primary" onClick={add}>
-              添加提示词
+              {t("settings.prompts.add")}
             </button>
           </div>
           {error ? <p className="form-error">{error}</p> : null}
@@ -119,12 +122,12 @@ export function PromptsPane({
   return (
     <>
       <Group
-        title="提示词"
-        desc="会话设置的「系统提示词」里可以挑一条填进去。选中那一刻正文被复制过去，之后改这里不影响已有会话。"
+        title={t("settings.tab.prompts.title")}
+        desc={t("settings.prompts.desc")}
         action={
           <div className="set-group-actions">
             <button className="btn-compact" onClick={add}>
-              添加
+              {t("common.add")}
             </button>
           </div>
         }
@@ -177,47 +180,44 @@ function PresetEditor({
   onDuplicate: () => void;
   onRemove: () => void;
 }) {
+  const { t } = useT();
   const [title, setTitle] = useState(preset.title ?? "");
   const [body, setBody] = useState(preset.body);
 
   return (
     <Group title={presetLabel(preset)}>
       <Card>
-        <Row title="名称" desc="只在挑选的时候显示。留空就用正文首行。">
+        <Row title={t("settings.common.name")} desc={t("settings.prompts.name.desc")}>
           <input
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             onBlur={() => title.trim() !== (preset.title ?? "") && onPatch({ title: title.trim() })}
             onKeyDown={blurOnEnter}
             autoFocus={autoFocusTitle}
-            placeholder="如：代码审查、翻译腔纠正"
+            placeholder={t("settings.prompts.name.placeholder")}
             spellCheck={false}
-            aria-label="名称"
+            aria-label={t("settings.common.name")}
           />
         </Row>
-        <Row
-          title="内容"
-          desc="原样追加在内置提示词之后。适合放长期有效的指令（做什么、什么口吻、输出成什么样）；一次性的要求直接在对话里说更省事。"
-          stack
-        >
+        <Row title={t("settings.prompts.body")} desc={t("settings.prompts.body.desc")} stack>
           <ResizableTextarea
             className="preset-body-input"
             value={body}
             onChange={(e) => setBody(e.target.value)}
             onBlur={() => body.trim() !== preset.body && onPatch({ body: body.trim() })}
             rows={12}
-            placeholder="给模型的指令…"
+            placeholder={t("settings.prompts.body.placeholder")}
             spellCheck={false}
-            aria-label="内容"
+            aria-label={t("settings.prompts.body")}
           />
         </Row>
       </Card>
       <div className="editor-foot">
         <span />
         <div className="editor-foot-actions">
-          <button onClick={onDuplicate}>复制一份</button>
+          <button onClick={onDuplicate}>{t("settings.prompts.duplicate")}</button>
           <button className="btn-danger ghost-danger" onClick={onRemove}>
-            删除提示词
+            {t("settings.prompts.remove")}
           </button>
         </div>
       </div>

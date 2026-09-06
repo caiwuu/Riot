@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use riot_protocol::schedule::{MissedRun, Repeat, ScheduleRunRecord, ScheduledTask, WhenSpec};
+use riot_protocol::{UiError, ui_error};
 
 /// 每个任务保留的运行历史条数。"每五分钟"一天就是近三百次，全留着
 /// schedules.json 会一路涨；最近这些足够回答"最近几次跑成了没"。
@@ -40,8 +41,13 @@ pub struct PersistedRun {
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    /// 旧文件里是一句话，新的是带键的结构；读法见 `deserialize_lenient_ui_error`。
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "riot_protocol::text::deserialize_lenient_ui_error"
+    )]
+    pub error: Option<UiError>,
 }
 
 impl PersistedRun {
@@ -87,7 +93,12 @@ impl PersistedTask {
     /// 记一次开跑（或开跑即失败）。新的插在最前，超出上限的从尾部掐掉。
     /// 顺手维护 `last_run_ms` / `last_session_id` —— 它们是历史的头一条
     /// 的投影，两处分开写迟早对不上。
-    pub fn push_run(&mut self, started_at_ms: u64, session_id: Option<String>, error: Option<String>) {
+    pub fn push_run(
+        &mut self,
+        started_at_ms: u64,
+        session_id: Option<String>,
+        error: Option<UiError>,
+    ) {
         self.last_run_ms = Some(started_at_ms);
         if session_id.is_some() {
             self.last_session_id = session_id.clone();
@@ -157,14 +168,14 @@ pub fn load(sessions_dir: &Path) -> ScheduleBook {
         Ok(raw) => match serde_json::from_str::<ScheduleBook>(&raw) {
             Ok(book) => book,
             Err(e) => {
-                tracing::error!(error = %e, "任务表读不懂，备份后从空表开始");
+                tracing::error!(error = %e, "schedules.json unreadable; backing up and starting empty");
                 backup_unreadable(&p);
                 ScheduleBook::default()
             }
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => ScheduleBook::default(),
         Err(e) => {
-            tracing::error!(error = %e, "任务表读取失败，从空表开始（文件保留原样）");
+            tracing::error!(error = %e, "failed to read schedules.json; starting empty (file left as is)");
             ScheduleBook::default()
         }
     }
@@ -189,7 +200,7 @@ fn backup_unreadable(p: &Path) {
     // 豁免理由：宿主持久化层。
     #[allow(clippy::disallowed_methods)]
     if let Err(e) = std::fs::rename(p, &bak) {
-        tracing::error!(error = %e, "任务表备份失败，保留原文件");
+        tracing::error!(error = %e, "failed to back up schedules.json; keeping the original");
     }
 }
 
@@ -203,23 +214,21 @@ pub const MISS_GRACE_MS: u64 = 90_000;
 
 /// 解析创建说法：返回（存储用的重复规则，首次运行时刻）。
 ///
-/// 错误文案带上当前本地时间 —— 模型对"现在几点"没有可靠感知，给了
-/// 过去的时刻就把钟报给它，照着改一次就对。
-pub fn resolve_spec(when: &WhenSpec, now_ms: u64) -> Result<(Repeat, u64), String> {
+/// 错误带上当前本地时间（`now` 参数）—— 模型对"现在几点"没有可靠感知，
+/// 给了过去的时刻就把钟报给它，照着改一次就对。
+pub fn resolve_spec(when: &WhenSpec, now_ms: u64) -> Result<(Repeat, u64), UiError> {
     match when {
         WhenSpec::Once { at } => {
             let ts = parse_local(at)?;
             if ts <= now_ms {
-                return Err(format!(
-                    "{at} 已经过了（现在是 {}）。给一个未来的时刻，或者用 after 相对分钟数。",
-                    local_text(now_ms)
-                ));
+                let now = local_text(now_ms);
+                return Err(ui_error!("host.schedule.timePast", at = at, now = now));
             }
             Ok((Repeat::Once, ts))
         }
         WhenSpec::After { minutes } => {
             if *minutes == 0 {
-                return Err("after 的 minutes 至少是 1。".to_owned());
+                return Err(ui_error!("host.schedule.afterTooSmall"));
             }
             // 一年封顶：更久的多半是单位写错了（分钟当成了秒）。
             let m = (*minutes).min(60 * 24 * 366) as u64;
@@ -227,12 +236,16 @@ pub fn resolve_spec(when: &WhenSpec, now_ms: u64) -> Result<(Repeat, u64), Strin
         }
         WhenSpec::Every { minutes } => {
             if *minutes < MIN_EVERY_MINUTES {
-                return Err(format!("every 的 minutes 至少是 {MIN_EVERY_MINUTES}。"));
+                return Err(ui_error!(
+                    "host.schedule.everyTooSmall",
+                    min = MIN_EVERY_MINUTES
+                ));
             }
             // 和 after 同一个封顶：超过一年的间隔多半是单位写错了。
             let m = (*minutes).min(60 * 24 * 366);
             let repeat = Repeat::Every { minutes: m };
-            let first = next_run(&repeat, now_ms).ok_or_else(|| "间隔算不出下一次。".to_owned())?;
+            let first =
+                next_run(&repeat, now_ms).ok_or_else(|| ui_error!("host.schedule.noNextRun"))?;
             Ok((repeat, first))
         }
         WhenSpec::Daily { time } => {
@@ -247,9 +260,7 @@ pub fn resolve_spec(when: &WhenSpec, now_ms: u64) -> Result<(Repeat, u64), Strin
         }
         WhenSpec::Weekly { weekday, time } => {
             if !(1..=7).contains(weekday) {
-                return Err(format!(
-                    "weekday 要在 1（周一）到 7（周日）之间，收到 {weekday}。"
-                ));
+                return Err(ui_error!("host.schedule.badWeekday", weekday = weekday));
             }
             let repeat = Repeat::Weekly {
                 weekday: *weekday,
@@ -261,9 +272,99 @@ pub fn resolve_spec(when: &WhenSpec, now_ms: u64) -> Result<(Repeat, u64), Strin
     }
 }
 
-fn bad_time(time: &str) -> String {
-    format!("时间「{time}」不是 HH:MM 格式（例：08:00、15:30）。")
+fn bad_time(time: &str) -> UiError {
+    ui_error!("host.schedule.badTime", time = time)
 }
+
+/// 调度错误给模型看的那一面。
+///
+/// 内核的 Schedule 工具把宿主的拒绝原话塞进 tool_result；模型没有词典，
+/// 只给它 `host.schedule.nameEmpty` 这种键它改不了参数。这里按键给一句
+/// 英文（给模型的文本一律英文，见 riot_protocol::text 模块头），占位符用
+/// UiError 自带的参数填。前端那条路不经过这里 —— 它拿结构化的 UiError
+/// 查词典，不受影响；也正因如此，不把这句英文塞进 `detail`，否则设置页
+/// 会把它当技术细节追加在译文后面。
+///
+/// 没登记的键退回 `Display`（键 + 参数）：信息不丢，只是不好读。
+/// 登记表和词典的对齐由 [`tests::每个调度键都有给模型的英文`] 盯着。
+pub fn for_model(e: &UiError) -> String {
+    let Some((_, template)) = MODEL_TEXT.iter().find(|(k, _)| *k == e.key()) else {
+        return e.to_string();
+    };
+    let mut out = (*template).to_owned();
+    for (name, value) in &e.text.args {
+        out = out.replace(&format!("{{{name}}}"), value);
+    }
+    out
+}
+
+/// 键 → 给模型的英文。意思跟 `src/i18n/messages/en-US/host.ts` 里对应的
+/// 那句一致，措辞面向模型（说它能做的动作：改参数、list、delete）。
+const MODEL_TEXT: &[(&str, &str)] = &[
+    (
+        "host.schedule.originMissing",
+        "The originating session no longer exists; cannot create a scheduled task.",
+    ),
+    (
+        "host.schedule.sessionMissing",
+        "The specified session does not exist (it may have been deleted).",
+    ),
+    (
+        "host.schedule.nameEmpty",
+        "The task name is empty; give it a short name.",
+    ),
+    (
+        "host.schedule.promptEmpty",
+        "The prompt is empty; it is the message sent when the task runs.",
+    ),
+    (
+        "host.schedule.limitReached",
+        "There are already {max} scheduled tasks (the limit). Delete unused ones first.",
+    ),
+    (
+        "host.schedule.notFound",
+        "No scheduled task with id {id}. Use list to look up ids.",
+    ),
+    (
+        "host.schedule.oncePast",
+        "This one-off task's time has already passed, so it cannot be resumed. \
+         Delete it and create a new one with a future time.",
+    ),
+    (
+        "host.schedule.timePast",
+        "{at} is already in the past (it is now {now}). Give a future time, \
+         or use a relative number of minutes.",
+    ),
+    (
+        "host.schedule.afterTooSmall",
+        "The relative delay must be at least 1 minute.",
+    ),
+    (
+        "host.schedule.everyTooSmall",
+        "The repeat interval must be at least {min} minute(s).",
+    ),
+    (
+        "host.schedule.noNextRun",
+        "Could not compute the next run time for this interval.",
+    ),
+    (
+        "host.schedule.badTime",
+        "Time \"{time}\" is not in HH:MM format (e.g. 08:00, 15:30).",
+    ),
+    (
+        "host.schedule.badWeekday",
+        "Weekday must be between 1 (Monday) and 7 (Sunday); got {weekday}.",
+    ),
+    (
+        "host.schedule.badDateTime",
+        "Could not parse time \"{time}\". Use YYYY-MM-DD HH:MM (e.g. 2026-09-01 15:30).",
+    ),
+    (
+        "host.schedule.dstGap",
+        "Time \"{time}\" does not exist in the local time zone (skipped by daylight saving); \
+         pick another time.",
+    ),
+];
 
 /// 周期任务在 `after_ms` 之后最近的一次运行时刻。`Once` 没有下一次。
 pub fn next_run(repeat: &Repeat, after_ms: u64) -> Option<u64> {
@@ -346,19 +447,17 @@ fn parse_hhmm(s: &str) -> Option<(u32, u32)> {
 }
 
 /// "YYYY-MM-DD HH:MM"（也认 `/` 分隔和带秒）→ Unix 毫秒。
-fn parse_local(s: &str) -> Result<u64, String> {
+fn parse_local(s: &str) -> Result<u64, UiError> {
     use chrono::{Local, NaiveDateTime, TimeZone};
     let t = s.trim().replace('/', "-");
     let naive = NaiveDateTime::parse_from_str(&t, "%Y-%m-%d %H:%M")
         .or_else(|_| NaiveDateTime::parse_from_str(&t, "%Y-%m-%d %H:%M:%S"))
-        .map_err(|_| {
-            format!("时间「{s}」读不懂。用 \"YYYY-MM-DD HH:MM\"（例：2026-09-01 15:30）。")
-        })?;
+        .map_err(|_| ui_error!("host.schedule.badDateTime", time = s))?;
     Local
         .from_local_datetime(&naive)
         .earliest()
         .map(|dt| dt.timestamp_millis() as u64)
-        .ok_or_else(|| format!("时间「{s}」在本地时区不存在（夏令时跳过的区间），换一个时刻。"))
+        .ok_or_else(|| ui_error!("host.schedule.dstGap", time = s))
 }
 
 /// 当前 Unix 毫秒。
@@ -522,8 +621,10 @@ mod tests {
             now,
         )
         .expect_err("过去的时刻该拒绝");
-        assert!(
-            err.contains("2026-09-02 12:00"),
+        assert_eq!(err.key(), "host.schedule.timePast");
+        assert_eq!(
+            err.text.args.get("now").map(String::as_str),
+            Some("2026-09-02 12:00"),
             "要报当前时刻让模型自纠：{err}"
         );
 
@@ -556,7 +657,7 @@ mod tests {
             0,
         )
         .expect_err("坏格式该拒绝");
-        assert!(err.contains("HH:MM"), "{err}");
+        assert_eq!(err.key(), "host.schedule.badTime", "{err}");
 
         let err = resolve_spec(
             &WhenSpec::Weekly {
@@ -566,7 +667,71 @@ mod tests {
             0,
         )
         .expect_err("weekday 越界该拒绝");
-        assert!(err.contains("周日"), "{err}");
+        assert_eq!(err.key(), "host.schedule.badWeekday", "{err}");
+    }
+
+    #[test]
+    fn 给模型的文本_填参数_不认识的键退回键名() {
+        let err = ui_error!(
+            "host.schedule.timePast",
+            at = "2026-09-02 08:00",
+            now = "2026-09-02 12:00"
+        );
+        let text = for_model(&err);
+        assert!(
+            text.contains("2026-09-02 08:00") && text.contains("2026-09-02 12:00"),
+            "参数要填进句子：{text}"
+        );
+        assert!(!text.contains('{'), "不能留下没填的占位符：{text}");
+        assert!(
+            !text.contains("host.schedule."),
+            "给模型的是句子，不是键：{text}"
+        );
+
+        // 不走宏：词典对齐测试会扫宏里的字面量，而这个键就是要不存在。
+        let unknown = UiError::new("host.schedule.somethingNew").arg("id", "t9");
+        assert_eq!(
+            for_model(&unknown),
+            unknown.to_string(),
+            "没登记的键至少不丢信息"
+        );
+    }
+
+    /// 宿主每个可能回给模型的调度键都要有一句英文；反过来登记表里也
+    /// 不能留着词典已删的键。`run.*` 是运行历史，只进前端，不算。
+    #[test]
+    fn 每个调度键都有给模型的英文() {
+        let dict_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("仓库根")
+            .join("src/i18n/messages/zh-CN/host.ts");
+        let src = std::fs::read_to_string(&dict_path).expect("读 zh-CN 词典");
+        let dict_keys: Vec<&str> = src
+            .lines()
+            .filter_map(|l| {
+                let rest = l.trim_start().strip_prefix('"')?;
+                let end = rest.find('"')?;
+                rest[end + 1..]
+                    .trim_start()
+                    .starts_with(':')
+                    .then_some(&rest[..end])
+            })
+            .filter(|k| k.starts_with("host.schedule.") && !k.starts_with("host.schedule.run."))
+            .collect();
+        assert!(
+            !dict_keys.is_empty(),
+            "没读到调度键：{}",
+            dict_path.display()
+        );
+
+        let table: Vec<&str> = MODEL_TEXT.iter().map(|(k, _)| *k).collect();
+        let missing: Vec<&&str> = dict_keys.iter().filter(|k| !table.contains(k)).collect();
+        assert!(
+            missing.is_empty(),
+            "这些调度键没有给模型的英文：{missing:?}"
+        );
+        let stale: Vec<&&str> = table.iter().filter(|k| !dict_keys.contains(k)).collect();
+        assert!(stale.is_empty(), "登记表里这些键词典已经没有了：{stale:?}");
     }
 
     #[test]
@@ -642,7 +807,10 @@ mod tests {
         // 关机一天的"每 5 分钟"：错过两百多次，计数封顶在 60 别空转；
         // next_run 推到 now + 间隔，不能开机就补跑。
         let now = ms(2026, 9, 5, 12, 0);
-        let mut tasks = vec![task(Repeat::Every { minutes: 5 }, Some(ms(2026, 9, 4, 12, 0)))];
+        let mut tasks = vec![task(
+            Repeat::Every { minutes: 5 },
+            Some(ms(2026, 9, 4, 12, 0)),
+        )];
         let (missed, dirty) = reconcile_on_start(&mut tasks, now);
         assert!(dirty);
         assert_eq!(missed[0].count, 60);
@@ -663,15 +831,26 @@ mod tests {
 
         // 只有对应会话上那条没结束的被标成跑完，别的不动。
         t.finish_run("s53", 999);
-        let done = t.runs.iter().find(|r| r.session_id.as_deref() == Some("s53")).expect("有");
+        let done = t
+            .runs
+            .iter()
+            .find(|r| r.session_id.as_deref() == Some("s53"))
+            .expect("有");
         assert_eq!(done.finished_at_ms, Some(999));
         assert!(t.runs[0].finished_at_ms.is_none(), "最新那次还在跑");
 
         // 开跑即失败：没会话、error 有值、当场算结束。
-        t.push_run(1000, None, Some("建不了会话".into()));
-        assert_eq!(t.runs[0].error.as_deref(), Some("建不了会话"));
+        t.push_run(1000, None, Some(ui_error!("host.session.missing")));
+        assert_eq!(
+            t.runs[0].error.as_ref().map(|e| e.key()),
+            Some("host.session.missing")
+        );
         assert_eq!(t.runs[0].finished_at_ms, Some(1000));
-        assert_eq!(t.last_session_id.as_deref(), Some("s54"), "失败没会话，last_session 不动");
+        assert_eq!(
+            t.last_session_id.as_deref(),
+            Some("s54"),
+            "失败没会话，last_session 不动"
+        );
     }
 
     #[test]

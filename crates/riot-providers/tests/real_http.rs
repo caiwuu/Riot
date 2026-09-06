@@ -238,10 +238,11 @@ async fn 认证失败不重试() {
     let events = collect(&provider(url), request()).await;
 
     match events.last().expect("要有事件") {
-        ProviderEvent::Error(ProviderError::Auth { message }) => {
+        ProviderEvent::Error(ProviderError::Auth { error }) => {
+            let detail = error.detail.as_deref().unwrap_or_default();
             assert!(
-                message.contains("Authentication"),
-                "错误原文要带上：{message}"
+                detail.contains("Authentication"),
+                "错误原文要带上：{detail}"
             );
         }
         other => panic!("401 应该映射成 Auth 错误：{other:?}"),

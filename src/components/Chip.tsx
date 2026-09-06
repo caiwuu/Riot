@@ -8,6 +8,7 @@
 
 import { type CSSProperties, useContext } from "react";
 
+import { useT } from "../i18n";
 import { type ChipSeg, chipAttrs, chipClass, chipVars } from "../lib/chips";
 import { isDirRef, joinRoot, looksAbsPath } from "../pathDisplay";
 import { openFilePreview } from "./FilePreview";
@@ -48,11 +49,14 @@ export function Chip({
  * （button 嵌 button 不合法，点击语义也归外层）。
  */
 export function FileChip({ path, preview = false }: { path: string; preview?: boolean }) {
+  const { t } = useT();
   // 引用块记的是项目内相对路径，预览要拼成绝对的。
   const root = useContext(ProjectRootContext);
   const seg: ChipSeg = { kind: "ref", value: path };
   // 目录没有单文件内容可预览，点开只会落到"打不开"。
   if (!preview || isDirRef(path)) return <Chip seg={seg} />;
   const full = looksAbsPath(path) ? path : joinRoot(root, path);
-  return <Chip seg={seg} title={`预览 ${path}`} onClick={() => openFilePreview(full)} />;
+  return (
+    <Chip seg={seg} title={t("composer.chip.preview", { path })} onClick={() => openFilePreview(full)} />
+  );
 }

@@ -16,10 +16,12 @@
 use async_trait::async_trait;
 use riot_protocol::message::ToolResultContent;
 use riot_protocol::permission::{PermissionContext, PermissionResult};
+use riot_protocol::text::UiText;
 use riot_protocol::tool::{
     InterruptBehavior, PromptContext, ResultBudget, Tool, ToolContext, ToolOutcome, UiPayload,
     ValidationError,
 };
+use riot_protocol::ui_text;
 use riot_protocol::web::WebError;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -83,14 +85,14 @@ impl Tool for WebFetch {
             .to_owned()
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         let url = input.get("url").and_then(|v| v.as_str()).unwrap_or("");
         match url::Url::parse(url)
             .ok()
             .and_then(|u| u.host_str().map(str::to_owned))
         {
-            Some(h) => format!("抓取 {h}"),
-            None => "抓取网页".to_owned(),
+            Some(h) => ui_text!("tools.webFetch.host", host = h),
+            None => ui_text!("tools.webFetch.any"),
         }
     }
 

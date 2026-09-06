@@ -21,6 +21,8 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::text::UiError;
+
 /// 重复规则。
 ///
 /// `Once` 不带时刻 —— 一次性任务的时刻就是 [`ScheduledTask::next_run_ms`]，
@@ -169,8 +171,12 @@ pub struct ScheduleRunRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at_ms: Option<u64>,
     /// 失败原因。Some = 这次没跑成。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::text::deserialize_lenient_ui_error"
+    )]
+    pub error: Option<crate::text::UiError>,
 }
 
 /// 启动时发现的错过运行（上次 App 没开着，到点没跑成）。
@@ -198,7 +204,7 @@ pub struct ScheduleRun {
     /// 开跑失败时的原因（会话没了、模型没配好）。phase=Done 且它为
     /// Some 时，前端把它当失败显示。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub error: Option<crate::text::UiError>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -208,10 +214,24 @@ pub enum ScheduleRunPhase {
     Done,
 }
 
-/// 调度操作失败。一句给模型（或前端）的人话，能直接照着改。
+/// 调度操作失败。
+///
+/// 读者是模型：Schedule 工具把 `Display`（键 + `detail`）放进 tool_result。
+/// 模型没有词典，所以 `detail` 必须是一句它能照着改参数的英文 —— 宿主
+/// 拒绝时那句由宿主给（`kernel.schedule.hostRejected` 的细节就是宿主的
+/// 原话），内核自己构造的错误也照此办。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
-pub struct ScheduleError(pub String);
+pub struct ScheduleError(pub UiError);
+
+/// 让持有 `ScheduleError` 内层的调用方能直接把它塞进 `impl Into<String>`
+/// 的参数（`ToolOutcome::failed(e.0)`）。得到的是 `Display` 文本 —— 给模型
+/// 读的那一面。
+impl From<UiError> for String {
+    fn from(e: UiError) -> Self {
+        e.to_string()
+    }
+}
 
 /// 定时任务的操作入口。内核里的 `Schedule` 工具经它的远程实现调宿主。
 #[async_trait]
@@ -229,20 +249,25 @@ pub struct NoSchedule;
 #[async_trait]
 impl ScheduleAccess for NoSchedule {
     async fn create(&self, _spec: ScheduleSpec) -> Result<ScheduledTask, ScheduleError> {
-        Err(ScheduleError(NO_SCHEDULE_MSG.to_owned()))
+        Err(no_schedule())
     }
     async fn list(&self) -> Result<Vec<ScheduledTask>, ScheduleError> {
-        Err(ScheduleError(NO_SCHEDULE_MSG.to_owned()))
+        Err(no_schedule())
     }
     async fn set_enabled(&self, _id: &str, _enabled: bool) -> Result<ScheduledTask, ScheduleError> {
-        Err(ScheduleError(NO_SCHEDULE_MSG.to_owned()))
+        Err(no_schedule())
     }
     async fn delete(&self, _id: &str) -> Result<(), ScheduleError> {
-        Err(ScheduleError(NO_SCHEDULE_MSG.to_owned()))
+        Err(no_schedule())
     }
 }
 
-const NO_SCHEDULE_MSG: &str = "这个环境没有接入定时任务调度器，创建不了定时任务。";
+fn no_schedule() -> ScheduleError {
+    ScheduleError(crate::ui_error!(
+        "kernel.schedule.unavailable";
+        "No schedule service is wired into this environment; scheduled tasks cannot be created here."
+    ))
+}
 
 #[cfg(test)]
 mod tests {

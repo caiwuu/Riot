@@ -27,6 +27,7 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message, Utf8Bytes, WebSocket};
 use futures::{SinkExt, StreamExt};
+use riot_protocol::{UiText, ui_text};
 use serde_json::Value;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Listener, Manager};
@@ -57,7 +58,10 @@ const FORWARDED_EVENTS: &[&str] = &["schedule_run", "schedule_changed", "session
 enum Out {
     Msg(Message),
     /// 通道上的原始字节。带通道号是为了写完之后把该通道的积压计数减回去。
-    Raw { ch: u32, msg: Message },
+    Raw {
+        ch: u32,
+        msg: Message,
+    },
 }
 
 /// 连接的出口。`Send + Sync`，命令处理任务和各条 Channel 都拿着它。
@@ -138,7 +142,7 @@ impl Outbound {
         let Ok(id32) = u32::try_from(id) else {
             return self.send_frame(&ServerFrame::Err {
                 id,
-                error: "请求号溢出，请刷新页面".to_owned(),
+                error: riot_protocol::ui_error!("host.remote.idOverflow"),
             });
         };
         self.enqueue(Out::Msg(Message::Binary(
@@ -167,7 +171,7 @@ impl ConnCtx {
             sent.map_err(|()| {
                 tauri::Error::Io(std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,
-                    "远程连接已断开",
+                    "remote connection closed",
                 ))
             })
         })
@@ -196,20 +200,11 @@ pub async fn serve(
         _ => None,
     };
     let Some(token) = token else {
-        let _ = ws_tx
-            .send(Message::Text(
-                serde_json::to_string(&ServerFrame::Denied {
-                    reason: "第一帧必须是鉴权",
-                })
-                .unwrap_or_default()
-                .into(),
-            ))
-            .await;
-        let _ = ws_tx.close().await;
+        deny(&mut ws_tx, ui_text!("host.remote.authFirst")).await;
         return;
     };
     if !shared.throttle.allows(peer) {
-        deny(&mut ws_tx, "尝试太频繁，请一分钟后再试").await;
+        deny(&mut ws_tx, ui_text!("host.remote.throttled")).await;
         return;
     }
     let expected = shared.token.lock().expect("令牌锁").clone();
@@ -218,8 +213,8 @@ pub async fn serve(
         .is_some_and(|exp| super::auth::token_matches(exp, &token));
     if !ok {
         shared.throttle.record_failure(peer);
-        tracing::warn!(%peer, "远程连接鉴权失败");
-        deny(&mut ws_tx, "令牌不对").await;
+        tracing::warn!(%peer, "remote connection failed auth");
+        deny(&mut ws_tx, ui_text!("host.remote.badToken")).await;
         return;
     }
     shared.throttle.record_success(peer);
@@ -275,7 +270,12 @@ pub async fn serve(
             let msg = match item {
                 Out::Msg(m) => m,
                 Out::Raw { ch, msg } => {
-                    if let Some(n) = writer_out.raw_pending.lock().expect("积压表锁").get_mut(&ch) {
+                    if let Some(n) = writer_out
+                        .raw_pending
+                        .lock()
+                        .expect("积压表锁")
+                        .get_mut(&ch)
+                    {
                         *n = n.saturating_sub(1);
                     }
                     msg
@@ -371,10 +371,7 @@ pub async fn serve(
     tracing::info!(viewer, "远程连接已关闭");
 }
 
-async fn deny(
-    ws_tx: &mut futures::stream::SplitSink<WebSocket, Message>,
-    reason: &str,
-) {
+async fn deny(ws_tx: &mut futures::stream::SplitSink<WebSocket, Message>, reason: UiText) {
     let _ = ws_tx
         .send(Message::Text(
             serde_json::to_string(&ServerFrame::Denied { reason })

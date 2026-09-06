@@ -160,7 +160,7 @@ mod tests {
     async fn provider报错原样传出() {
         let e = distiller(vec![ProviderEvent::Error(
             riot_protocol::provider::ProviderError::Auth {
-                message: "key 不对".into(),
+                error: riot_protocol::ui_error!("kernel.provider.auth"; "key 不对"),
             },
         )])
         .run(req(), &CancellationToken::new())

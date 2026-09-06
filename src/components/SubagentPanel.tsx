@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { type BackgroundTaskView, type TaskHistory, taskCancel, taskHistory } from "../bridge";
 import { type Item, messagesToItems } from "../hooks/useSession";
+import { useT } from "../i18n";
 import { SubagentsContext } from "../lib/subagentLink";
 import { StopIcon } from "./icons";
 import { groupBlocks, ProcessGroup } from "./ProcessFold";
@@ -31,6 +32,7 @@ export function SubagentPanel({
   /** 拉到视图后把真名报回去（标签栏上可能还只是 id）。 */
   onTitle?: (title: string) => void;
 }) {
+  const { t } = useT();
   const [hist, setHist] = useState<TaskHistory | null>(null);
   const [error, setError] = useState<string | null>(null);
   const onTitleRef = useRef(onTitle);
@@ -79,12 +81,12 @@ export function SubagentPanel({
   }, [items.length, running]);
 
   if (!hist) {
-    return <div className="subagent-panel subagent-empty">{error ?? "加载中…"}</div>;
+    return <div className="subagent-panel subagent-empty">{error ?? t("common.loading")}</div>;
   }
   if (!task) {
     return (
       <div className="subagent-panel subagent-empty">
-        这个子 agent 的记录已经不在内核里（内核重启后旧 id 会失效）。
+        {t("transcript.subagent.gone")}
         <br />
         <code>{agentId}</code>
       </div>
@@ -107,7 +109,7 @@ export function SubagentPanel({
       >
         {prompt ? (
           <div className="subagent-prompt">
-            <div className="subagent-prompt-label">任务</div>
+            <div className="subagent-prompt-label">{t("transcript.subagent.prompt")}</div>
             <div className="subagent-prompt-text">{prompt}</div>
           </div>
         ) : null}
@@ -121,7 +123,9 @@ export function SubagentPanel({
                 <ProcessGroup key={b.id} items={b.items} live={b.live} />
               ),
             )}
-            {running && items.length === 0 ? <div className="msg notice">正在启动…</div> : null}
+            {running && items.length === 0 ? (
+              <div className="msg notice">{t("transcript.subagent.starting")}</div>
+            ) : null}
           </div>
         </SubagentsContext.Provider>
       </div>
@@ -136,6 +140,7 @@ function SubagentHeader({
   task: BackgroundTaskView;
   onStop: (() => void) | null;
 }) {
+  const { t, tn } = useT();
   const running = task.status === "running";
   return (
     <div className={`subagent-head subagent-head-${task.status}`}>
@@ -148,11 +153,13 @@ function SubagentHeader({
         </div>
         <div className="subagent-head-meta">
           <span className="task-kind">{kindLabel(task.kind)}</span>
-          {task.background ? <span className="task-kind">后台</span> : null}
+          {task.background ? (
+            <span className="task-kind">{t("transcript.task.background")}</span>
+          ) : null}
           <span>{task.model}</span>
           <span>·</span>
           <span>{statusLabel(task.status)}</span>
-          {task.tool_uses > 0 ? <span>· {task.tool_uses} 步</span> : null}
+          {task.tool_uses > 0 ? <span>· {tn("transcript.steps", task.tool_uses)}</span> : null}
           {task.tokens > 0 ? <span>· {fmtK(task.tokens)} tokens</span> : null}
           <span className="subagent-head-id" title={task.id}>
             {task.id}
@@ -160,9 +167,14 @@ function SubagentHeader({
         </div>
       </div>
       {onStop ? (
-        <button type="button" className="subagent-stop" onClick={onStop} title="停止这个子 agent">
+        <button
+          type="button"
+          className="subagent-stop"
+          onClick={onStop}
+          title={t("transcript.subagent.stopTitle")}
+        >
           <StopIcon />
-          <span>停止</span>
+          <span>{t("common.stop")}</span>
         </button>
       ) : null}
     </div>

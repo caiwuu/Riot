@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::event::StreamDelta;
 use crate::message::{Attachment, Message, ToolResultContent, Usage, UserContent};
+use crate::text::UiError;
 
 pub type ProviderStream = Pin<Box<dyn Stream<Item = ProviderEvent> + Send>>;
 
@@ -329,37 +330,71 @@ pub enum ProviderEvent {
     Error(ProviderError),
 }
 
+/// 一次模型调用为什么失败。
+///
+/// 变体是**主循环分支的依据**（可恢复 / 不可恢复、要不要压缩），带文案的
+/// 变体里装的 [`UiError`] 才是给人看的：键由构造方按它当时知道的原因选
+/// （限流、过载、余额不足、模型不存在……都在同一个变体下），`detail` 放
+/// 服务方回的原文。`Display` 是日志和模型用的英文表示，不进界面。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProviderError {
     /// 上下文溢出。可恢复：压缩后重试。
-    #[error("上下文溢出：用了 {used}，上限 {limit}")]
+    #[error("context overflow: used {used}, limit {limit}")]
     ContextOverflow { used: u32, limit: u32 },
 
     /// 输出 token 耗尽。可恢复：调低 max_output_tokens 后重试。
-    #[error("输出 token 耗尽")]
+    #[error("output token limit reached")]
     OutputLimit,
 
     /// 附件过大。可恢复：剥离媒体后重试。
-    #[error("媒体过大：{bytes} 字节")]
+    #[error("media too large: {bytes} bytes")]
     MediaTooLarge { bytes: u64 },
 
     /// 重试耗尽。不可恢复 —— provider 内部已经试过了。
-    #[error("重试耗尽：{message}")]
-    RetriesExhausted { message: String },
+    #[error("retries exhausted: {error}")]
+    RetriesExhausted { error: UiError },
 
-    #[error("认证失败：{message}")]
-    Auth { message: String },
+    #[error("authentication failed: {error}")]
+    Auth { error: UiError },
 
-    #[error("传输错误：{message}")]
-    Transport { message: String },
+    #[error("transport error: {error}")]
+    Transport { error: UiError },
 
     /// 模型拒绝服务（内容策略等）。
-    #[error("请求被拒绝：{message}")]
-    Refused { message: String },
+    #[error("request refused: {error}")]
+    Refused { error: UiError },
 }
 
 impl ProviderError {
+    /// 给界面的那一面。数值变体在这里配键；带文案的变体原样交出去。
+    pub fn ui_error(&self) -> UiError {
+        match self {
+            ProviderError::ContextOverflow { used, limit } => {
+                crate::ui_error!(
+                    "kernel.provider.contextOverflow",
+                    used = used,
+                    limit = limit
+                )
+            }
+            ProviderError::OutputLimit => crate::ui_error!("kernel.provider.outputLimit"),
+            ProviderError::MediaTooLarge { bytes } => {
+                crate::ui_error!("kernel.provider.mediaTooLarge", bytes = bytes)
+            }
+            ProviderError::RetriesExhausted { error }
+            | ProviderError::Auth { error }
+            | ProviderError::Transport { error }
+            | ProviderError::Refused { error } => error.clone(),
+        }
+    }
+
+    /// 传输层失败的快捷构造：键固定，原因进 `detail`。
+    pub fn transport(detail: impl ToString) -> Self {
+        ProviderError::Transport {
+            error: crate::ui_error!("kernel.provider.transport"; detail),
+        }
+    }
+
     /// 是否值得主循环尝试恢复。
     ///
     /// `[约束]` 这个判断决定了错误走扣留路径还是直接终止。判错的后果：
@@ -427,17 +462,35 @@ mod tests {
 
         assert!(
             !ProviderError::RetriesExhausted {
-                message: "502".into()
+                error: UiError::new("kernel.provider.retriesExhausted").detail("502")
             }
             .is_recoverable(),
             "provider 内部已经退避重试过，主循环再试一遍只是重复同样的失败"
         );
         assert!(
             !ProviderError::Auth {
-                message: "401".into()
+                error: UiError::new("kernel.provider.auth").detail("401")
             }
             .is_recoverable(),
             "认证失败重试一百次也不会成功"
+        );
+    }
+
+    /// 数值变体的界面表示要带上数字（前端模板靠 `{used}` / `{limit}` 填空）。
+    #[test]
+    fn 数值错误的界面表示带参数() {
+        let e = ProviderError::ContextOverflow {
+            used: 200_000,
+            limit: 180_000,
+        }
+        .ui_error();
+        assert_eq!(e.key(), "kernel.provider.contextOverflow");
+        assert_eq!(e.text.args["used"], "200000");
+        assert_eq!(e.text.args["limit"], "180000");
+        assert!(
+            ProviderError::transport("boom")
+                .to_string()
+                .contains("boom")
         );
     }
 

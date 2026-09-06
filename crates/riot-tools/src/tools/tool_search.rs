@@ -33,7 +33,9 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use serde::Deserialize;
 
+use riot_protocol::text::UiText;
 use riot_protocol::tool::{PromptContext, Tool, ToolContext, ToolOutcome, UiPayload};
+use riot_protocol::ui_text;
 
 /// 启用延迟加载的门槛（延迟候选的描述 + schema 总字符数）。
 ///
@@ -278,9 +280,9 @@ impl Tool for ToolSearch {
         p
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         let q = input.get("query").and_then(|v| v.as_str()).unwrap_or("?");
-        format!("查找工具：{q}")
+        ui_text!("tools.toolSearch.query", query = q)
     }
 
     fn is_read_only(&self, _input: &serde_json::Value) -> bool {
@@ -327,8 +329,8 @@ impl Tool for ToolSearch {
                 text.push_str(&format!("\n\n（没找到：{}）", missing.join("、")));
             }
             return ToolOutcome::Ok {
-                ui_payload: Some(UiPayload::Plain {
-                    text: format!("已加载 {} 个工具：{}", names.len(), names.join("、")),
+                ui_payload: Some(UiPayload::Message {
+                    text: loaded_message(&names),
                 }),
                 model_content: riot_protocol::message::ToolResultContent::text(text),
                 side_messages: Vec::new(),
@@ -341,8 +343,8 @@ impl Tool for ToolSearch {
             let name = e.name.clone();
             let text = self.render_matches(&[name.as_str()]);
             return ToolOutcome::Ok {
-                ui_payload: Some(UiPayload::Plain {
-                    text: format!("已加载工具：{name}"),
+                ui_payload: Some(UiPayload::Message {
+                    text: loaded_message(&[name.as_str()]),
                 }),
                 model_content: riot_protocol::message::ToolResultContent::text(text),
                 side_messages: Vec::new(),
@@ -403,13 +405,22 @@ impl Tool for ToolSearch {
             .collect();
         let text = self.render_matches(&names);
         ToolOutcome::Ok {
-            ui_payload: Some(UiPayload::Plain {
-                text: format!("已加载 {} 个工具：{}", names.len(), names.join("、")),
+            ui_payload: Some(UiPayload::Message {
+                text: loaded_message(&names),
             }),
             model_content: riot_protocol::message::ToolResultContent::text(text),
             side_messages: Vec::new(),
         }
     }
+}
+
+/// 卡片上那句"已加载 N 个工具：…"。名字用逗号连，不按语言变。
+fn loaded_message(names: &[&str]) -> UiText {
+    ui_text!(
+        "tools.toolSearch.loaded",
+        count = names.len(),
+        names = names.join(", ")
+    )
 }
 
 #[cfg(test)]
@@ -438,8 +449,8 @@ mod tests {
         fn prompt(&self, _: &PromptContext) -> String {
             self.desc.clone()
         }
-        fn describe(&self, _: &serde_json::Value) -> String {
-            "d".into()
+        fn describe(&self, _: &serde_json::Value) -> UiText {
+            UiText::new("d")
         }
         fn should_defer(&self) -> bool {
             true

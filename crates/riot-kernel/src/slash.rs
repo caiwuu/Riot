@@ -40,6 +40,8 @@
 
 use std::path::{Path, PathBuf};
 
+use riot_protocol::text::UiText;
+use riot_protocol::ui_text;
 use serde::Serialize;
 
 /// 单个模板的上限，同技能一个量级。
@@ -51,7 +53,12 @@ const MAX_BODY_CHARS: usize = 64 * 1024;
 pub struct SlashCommand {
     /// 不带斜杠的名字（可能含命名空间，如 `git:pr`）。
     pub name: String,
+    /// 用户自己在 frontmatter 里写的说明，原样显示。内置命令这里为空。
     pub description: String,
+    /// 内置命令的说明（词典键）。只有 `source == "builtin"` 才有 ——
+    /// 用户写的说明不翻译，内置的那几句跟界面语言走。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description_text: Option<UiText>,
     /// 补全菜单里的参数提示，如 `[分支名]`。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub argument_hint: Option<String>,
@@ -142,6 +149,7 @@ fn add_skills(root: Option<&Path>, out: &mut Vec<SlashCommand>) {
         out.push(SlashCommand {
             name: card.name,
             description: card.description,
+            description_text: None,
             argument_hint: None,
             body: card.body,
             source: "skill".to_owned(),
@@ -253,7 +261,8 @@ fn split_args(args: &str) -> Vec<String> {
 fn builtin() -> Vec<SlashCommand> {
     vec![SlashCommand {
         name: "compact".into(),
-        description: "把对话历史压缩成摘要，腾出上下文窗口".into(),
+        description: String::new(),
+        description_text: Some(ui_text!("kernel.slash.compact")),
         argument_hint: None,
         body: String::new(),
         source: "builtin".into(),
@@ -289,6 +298,7 @@ fn scan(dir: &Path, source: &str, out: &mut Vec<SlashCommand>) {
             Ok((description, argument_hint, body)) => out.push(SlashCommand {
                 name,
                 description,
+                description_text: None,
                 argument_hint,
                 body,
                 source: source.into(),
@@ -325,7 +335,7 @@ fn parse(raw: &str) -> Result<(String, Option<String>, String), String> {
     let (front, body) = match raw.strip_prefix("---") {
         Some(rest) => match rest.split_once("\n---") {
             Some((f, b)) => (Some(f), b),
-            None => return Err("frontmatter 没有结束的 ---".into()),
+            None => return Err("unterminated frontmatter: no closing ---".into()),
         },
         None => (None, raw),
     };
@@ -348,7 +358,7 @@ fn parse(raw: &str) -> Result<(String, Option<String>, String), String> {
 
     let mut body = body.trim_start_matches('\n').trim_end().to_owned();
     if body.trim().is_empty() {
-        return Err("正文是空的".into());
+        return Err("body is empty".into());
     }
     if body.chars().count() > MAX_BODY_CHARS {
         body = body.chars().take(MAX_BODY_CHARS).collect();

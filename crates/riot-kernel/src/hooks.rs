@@ -45,6 +45,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use riot_protocol::text::UiError;
+use riot_protocol::ui_error;
 use serde::Deserialize;
 
 /// 单个 hook 的默认超时。CC 给 10 分钟 —— 桌面应用里一个卡死的检查
@@ -102,7 +104,8 @@ fn default_type() -> String {
 /// 配置文件解析问题（给设置页/日志）。
 pub struct Problem {
     pub path: PathBuf,
-    pub reason: String,
+    /// 设置页要显示的原因（词典键 + 解析器原话）。
+    pub reason: UiError,
 }
 
 /// 设置页看的一条 hook。
@@ -119,7 +122,7 @@ pub struct HookInfo {
     pub source: String,
     /// 配置文件级的问题（这条不是 hook，是一条错误提示）。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub error: Option<UiError>,
 }
 
 /// 设置页的 hooks 清单：两层配置里配了什么，加上解析失败的文件。
@@ -185,7 +188,7 @@ fn load_file(path: &Path, problems: &mut Vec<Problem>) -> HooksFile {
         Err(e) => {
             problems.push(Problem {
                 path: path.to_path_buf(),
-                reason: format!("读不出来：{e}"),
+                reason: ui_error!("kernel.config.unreadable"; e),
             });
             return HooksFile::default();
         }
@@ -196,7 +199,7 @@ fn load_file(path: &Path, problems: &mut Vec<Problem>) -> HooksFile {
         Err(e) => {
             problems.push(Problem {
                 path: path.to_path_buf(),
-                reason: format!("JSON 解析失败：{e}"),
+                reason: ui_error!("kernel.config.badJson"; e),
             });
             return HooksFile::default();
         }
@@ -210,7 +213,7 @@ fn load_file(path: &Path, problems: &mut Vec<Problem>) -> HooksFile {
         Err(e) => {
             problems.push(Problem {
                 path: path.to_path_buf(),
-                reason: format!("结构不对：{e}"),
+                reason: ui_error!("kernel.hook.badShape"; e),
             });
             HooksFile::default()
         }

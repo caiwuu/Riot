@@ -135,7 +135,7 @@ fn build_http_request(
     endpoint: &Endpoint,
 ) -> Result<HttpRequest, HttpError> {
     let body = serde_json::to_vec(wire)
-        .map_err(|e| HttpError::transport(format!("请求序列化失败: {e}")))?;
+        .map_err(|e| HttpError::transport(format!("failed to serialize request: {e}")))?;
 
     Ok(HttpRequest {
         // 路径优先用用户配的；空着才按 base 猜。见 endpoint 模块。
@@ -191,9 +191,7 @@ impl Provider for OpenAiProvider {
                 let http_req = match build_http_request(&wire, &endpoint) {
                     Ok(r) => r,
                     Err(e) => {
-                        yield ProviderEvent::Error(ProviderError::Transport {
-                            message: e.to_string(),
-                        });
+                        yield ProviderEvent::Error(ProviderError::transport(e));
                         return;
                     }
                 };
@@ -286,9 +284,7 @@ fn decode_stream(mut bytes: ByteStream) -> impl futures_core::Stream<Item = Prov
                             for ev in decoder.finish() {
                                 yield ev;
                             }
-                            yield ProviderEvent::Error(ProviderError::Transport {
-                                message: e.to_string(),
-                            });
+                            yield ProviderEvent::Error(crate::errors::stream_broken(e));
                             return;
                         }
                     };
@@ -303,9 +299,9 @@ fn decode_stream(mut bytes: ByteStream) -> impl futures_core::Stream<Item = Prov
                     for ev in decoder.finish() {
                         yield ev;
                     }
-                    yield ProviderEvent::Error(ProviderError::Transport {
-                        message: format!("读取响应流失败: {e}"),
-                    });
+                    yield ProviderEvent::Error(crate::errors::stream_broken(format!(
+                        "failed to read response stream: {e}"
+                    )));
                     return;
                 }
             }
@@ -322,44 +318,14 @@ fn decode_stream(mut bytes: ByteStream) -> impl futures_core::Stream<Item = Prov
     }
 }
 
+/// 放弃重试后的错误映射。键的选择在 [`crate::errors`]；这里只贡献
+/// OpenAI 系认上下文超长的那一手：400 + 特定文案。各家措辞不同，认几个
+/// 最常见的；认不出来就当普通拒绝 —— 那样主循环不会尝试压缩恢复，
+/// 但至少不会误判。
 fn map_giveup(reason: GiveUpReason, e: &HttpError) -> ProviderError {
-    match reason {
-        GiveUpReason::AuthUnrecoverable => ProviderError::Auth {
-            message: format!("凭证无效：{}", e.body),
-        },
-        GiveUpReason::SubscriptionRateLimit => ProviderError::RetriesExhausted {
-            message: format!("已达用量上限：{}", e.body),
-        },
-        GiveUpReason::BackgroundOverload => ProviderError::RetriesExhausted {
-            message: "服务过载，后台任务已跳过".into(),
-        },
-        GiveUpReason::Exhausted => ProviderError::RetriesExhausted {
-            message: e.to_string(),
-        },
-        GiveUpReason::ServerSaidNo | GiveUpReason::NotRetryable => match e.status {
-            Some(401) | Some(403) => ProviderError::Auth {
-                message: if e.body.is_empty() {
-                    "API key 无效或已过期".to_owned()
-                } else {
-                    e.body.clone()
-                },
-            },
-            // OpenAI 系用 400 + 特定文案表示上下文超长。各家措辞不同，
-            // 这里认几个最常见的。认不出来就当普通错误 —— 那样主循环
-            // 不会尝试压缩恢复，但至少不会误判。
-            Some(400) if is_context_overflow(&e.body) => {
-                ProviderError::ContextOverflow { used: 0, limit: 0 }
-            }
-            // 服务端明确拒绝（参数错误、内容策略）。**没有重试过** ——
-            // 报"重试耗尽"会让用户以为是网络问题，往错误的方向排查。
-            Some(_) => ProviderError::Refused {
-                message: e.to_string(),
-            },
-            None => ProviderError::Transport {
-                message: e.to_string(),
-            },
-        },
-    }
+    crate::errors::map_giveup(reason, e, |body| {
+        is_context_overflow(body).then_some(ProviderError::ContextOverflow { used: 0, limit: 0 })
+    })
 }
 
 fn is_context_overflow(body: &str) -> bool {
@@ -377,10 +343,9 @@ mod giveup_tests {
     fn http(status: Option<u16>, body: &str) -> HttpError {
         HttpError {
             status,
-            retry_after_secs: None,
-            x_should_retry: None,
             body: body.into(),
             transport: status.is_none(),
+            ..Default::default()
         }
     }
 
@@ -390,8 +355,16 @@ mod giveup_tests {
         // 往完全错误的方向排查。
         let e = http(Some(400), r#"{"error":{"message":"bad model name"}}"#);
         match map_giveup(GiveUpReason::NotRetryable, &e) {
-            ProviderError::Refused { message } => {
-                assert!(message.contains("bad model name"))
+            ProviderError::Refused { error } => {
+                assert_eq!(error.key(), "kernel.provider.refused");
+                assert_eq!(error.text.args["status"], "400");
+                assert!(
+                    error
+                        .detail
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("bad model name")
+                );
             }
             other => panic!("400 应该是 Refused，得到 {other:?}"),
         }

@@ -58,8 +58,7 @@ pub async fn read_image(path: &str) -> Result<ImageOutput, String> {
         "webp" => "image/webp",
         other => {
             return Err(format!(
-                "不支持 .{other} —— 只能附 png / jpg / gif / webp。\
-                 其它文件可以用「附加文件」，模型会自己去读。"
+                "unsupported image type .{other}; only png / jpg / gif / webp can be attached as images"
             ));
         }
     };
@@ -69,10 +68,10 @@ pub async fn read_image(path: &str) -> Result<ImageOutput, String> {
     #[allow(clippy::disallowed_methods)]
     let meta = tokio::fs::metadata(p)
         .await
-        .map_err(|e| format!("读不到 {path}：{e}"))?;
+        .map_err(|e| format!("cannot read {path}: {e}"))?;
     if meta.len() > MAX_IMAGE_FILE {
         return Err(format!(
-            "这张图有 {} MB，太大了（上限约 {} MB）。裁剪或缩小之后再附。",
+            "image is {} MB, over the {} MB limit; crop or shrink it first",
             meta.len() / 1_000_000,
             MAX_IMAGE_FILE / 1_000_000,
         ));
@@ -81,7 +80,7 @@ pub async fn read_image(path: &str) -> Result<ImageOutput, String> {
     #[allow(clippy::disallowed_methods)]
     let bytes = tokio::fs::read(p)
         .await
-        .map_err(|e| format!("读不到 {path}：{e}"))?;
+        .map_err(|e| format!("cannot read {path}: {e}"))?;
 
     use base64::Engine as _;
     Ok(ImageOutput {

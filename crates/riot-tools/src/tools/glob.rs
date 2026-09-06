@@ -12,9 +12,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use riot_protocol::permission::{PermissionContext, PermissionResult};
+use riot_protocol::text::UiText;
 use riot_protocol::tool::{
     PromptContext, ResultBudget, Tool, ToolContext, ToolOutcome, UiPayload, ValidationError,
 };
+use riot_protocol::ui_text;
 use serde::Deserialize;
 
 use super::names::{BASH, GLOB, GREP, READ};
@@ -117,14 +119,14 @@ impl Tool for Glob {
         )
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         let pat = input
             .get("pattern")
             .and_then(|v| v.as_str())
             .unwrap_or("...");
         match input.get("path").and_then(|v| v.as_str()) {
-            Some(p) => format!("在 {p} 里查找 {pat}"),
-            None => format!("查找 {pat}"),
+            Some(p) => ui_text!("tools.glob.in", pattern = pat, path = p),
+            None => ui_text!("tools.glob.find", pattern = pat),
         }
     }
 

@@ -184,12 +184,13 @@ pub fn detour_risk(raw: &str, resolved: &Path, cwd: &Path, read_only: bool) -> O
     }
 
     let kind = write_target_risk(resolved, read_only)?;
+    // 给模型看的。`safety::describe` 现在返回的是给界面的词典键，这里只
+    // 带上类别名 —— 模型要的是"为什么拦"的分类，不是弹窗上那句话。
     Some(format!(
-        "{raw} 解析之后指向 {}，而这是一个敏感目标（{}）。\
+        "{raw} 解析之后指向 {}，而这是一个敏感目标（{kind:?}）。\
          授权是按你给的那个路径做的，和实际会被改动的文件不是同一个，\
          所以这次调用没有执行。如果确实要动它，请直接用真实路径重新调用。",
         resolved.display(),
-        riot_permissions::safety::describe(kind, resolved)
     ))
 }
 

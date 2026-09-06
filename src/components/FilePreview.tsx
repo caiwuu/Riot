@@ -20,6 +20,7 @@ import { lazy, Suspense, useContext, useEffect, useRef, useState } from "react";
 
 import { openPath, readFileBytes, revealInFinder } from "../bridge";
 import { useTimedFlag } from "../hooks/useTimedFlag";
+import { type Locale, useT } from "../i18n";
 import { basename, looksAbsPath, parentOf, relativeTo, tildify } from "../pathDisplay";
 import { Resizer } from "./chrome";
 // CodeView 组件本身很小可以直接进主 bundle；大头 highlight.js
@@ -50,7 +51,6 @@ const VIEWER_OPTIONS = {
   // 固定浅色：文档天然是白纸（Quick Look 同款）。深色皮各管线底色
   // 硬编码不一，追着对齐不值得。
   theme: "light",
-  locale: "zh-CN",
   // 宿主接管样式：渲染进普通 DOM，styles.css 压内置样式的边距、残留
   // 控件。代价（Riot 全局控件样式渗入）在 styles.css 里就地中和。
   styleIsolation: "none",
@@ -69,6 +69,23 @@ const VIEWER_OPTIONS = {
   // read() 悬死，探针钉死过），真 Worker 的干净线程环境没这个问题。
   spreadsheet: { worker: true, resizableColumns: true, resizableRows: true },
 } as const;
+
+/**
+ * 渲染库的界面语言跟 Riot 的走。它内置 zh-CN / en-US / ja-JP / de-DE：
+ * 繁体落到简体、韩文落到英文。每种语言只造一份 options 对象 —— 引用
+ * 稳定的约束（见上）要求不能每次渲染都 spread 一个新对象。
+ */
+const VIEWER_OPTIONS_BY_LOCALE = new Map<Locale, typeof VIEWER_OPTIONS & { locale: string }>();
+function viewerOptions(locale: Locale) {
+  let o = VIEWER_OPTIONS_BY_LOCALE.get(locale);
+  if (!o) {
+    const viewerLocale =
+      locale === "zh-TW" ? "zh-CN" : locale === "ko-KR" ? "en-US" : locale;
+    o = { ...VIEWER_OPTIONS, locale: viewerLocale };
+    VIEWER_OPTIONS_BY_LOCALE.set(locale, o);
+  }
+  return o;
+}
 
 /**
  * 走 @file-viewer 渲染的扩展名 —— 有意收窄的白名单，不是渲染库的
@@ -287,6 +304,7 @@ export function FilePreviewPanel({
   /** 变一次就把焦点放进树的筛选框（⌘P）。 */
   filterFocus: number;
 }) {
+  const { t } = useT();
   const [openErr, flashOpenErr] = useTimedFlag(false, 2000);
   const root = useContext(ProjectRootContext);
   const [treeW, setTreeW] = useState(loadTreeW);
@@ -314,14 +332,14 @@ export function FilePreviewPanel({
           <span className="preview-panel-spacer" />
           {openErr ? (
             <span className="preview-panel-err" role="status">
-              打不开
+              {t("panels.filePreview.openFailed")}
             </span>
           ) : null}
           <button
             type="button"
             className="icon"
             onClick={sysOpen}
-            title="用系统默认应用打开"
+            title={t("common.openInSystemApp")}
           >
             <LaunchIcon />
           </button>
@@ -329,7 +347,7 @@ export function FilePreviewPanel({
             type="button"
             className="icon"
             onClick={() => void revealInFinder(active)}
-            title="在访达 / 资源管理器中显示"
+            title={t("common.revealInFinder")}
           >
             <FolderMarkIcon />
           </button>
@@ -337,7 +355,7 @@ export function FilePreviewPanel({
             type="button"
             className={tree ? "icon on" : "icon"}
             onClick={onToggleTree}
-            title={tree ? "隐藏文件树" : "显示文件树"}
+            title={tree ? t("panels.filePreview.hideTree") : t("panels.filePreview.showTree")}
             aria-pressed={tree}
           >
             <FolderIcon />
@@ -347,7 +365,9 @@ export function FilePreviewPanel({
 
       <div className="preview-split">
         <div className="preview-main">
-          {active ? null : <div className="preview-panel-state">从右侧选择一个文件</div>}
+          {active ? null : (
+            <div className="preview-panel-state">{t("panels.filePreview.pickOne")}</div>
+          )}
 
           {/* 全部标签保活：切换只切 display（终端面板同款手法）。渲染器、
               滚动位置、表格列宽都留在原地，切回即所见；关闭标签才卸载
@@ -413,6 +433,7 @@ export function FilePreviewPanel({
  * 打开那一刻的字节，用户得关掉标签再开一次才看得到新内容。
  */
 function PreviewBody({ path, visible, rev }: { path: string; visible: boolean; rev: number }) {
+  const { t, locale } = useT();
   const [buf, setBuf] = useState<ArrayBuffer | null>(null);
   const [err, setErr] = useState<string | null>(null);
   /** 错误态"系统应用打开"的失败提示。 */
@@ -490,11 +511,11 @@ function PreviewBody({ path, visible, rev }: { path: string; visible: boolean; r
           <p>{err}</p>
           {openErr ? (
             <span className="preview-panel-err" role="status">
-              打不开
+              {t("panels.filePreview.openFailed")}
             </span>
           ) : null}
           <button type="button" className="preview-panel-fallback" onClick={sysOpen}>
-            用系统应用打开
+            {t("common.openInSystemApp")}
           </button>
         </div>
       ) : buf ? (
@@ -504,7 +525,11 @@ function PreviewBody({ path, visible, rev }: { path: string; visible: boolean; r
           // 代码走自制视图：深色、highlight.js，和聊天代码块同一套配色。
           <CodeView key={path} buf={buf} ext={extOf(path)} name={basename(path)} />
         ) : PREVIEWABLE_EXTS.has(extOf(path)) ? (
-          <Suspense fallback={<div className="preview-panel-state">正在加载预览器…</div>}>
+          <Suspense
+            fallback={
+              <div className="preview-panel-state">{t("panels.filePreview.loadingViewer")}</div>
+            }
+          >
             <Viewer
               // 换文件整个重挂：renderer 管线各自管理 Worker / 缓存，
               // 重挂比原地换 source 走的路径少得多。
@@ -512,7 +537,7 @@ function PreviewBody({ path, visible, rev }: { path: string; visible: boolean; r
               className="preview-panel-viewer"
               file={buf}
               filename={basename(path)}
-              options={VIEWER_OPTIONS}
+              options={viewerOptions(locale)}
             />
           </Suspense>
         ) : looksLikeText(buf) ? (
@@ -521,19 +546,19 @@ function PreviewBody({ path, visible, rev }: { path: string; visible: boolean; r
           <CodeView key={path} buf={buf} ext={extOf(path)} name={basename(path)} />
         ) : (
           <div className="preview-panel-state">
-            <p>这是二进制文件，应用内看不了。</p>
+            <p>{t("panels.filePreview.binary")}</p>
             {openErr ? (
               <span className="preview-panel-err" role="status">
-                打不开
+                {t("panels.filePreview.openFailed")}
               </span>
             ) : null}
             <button type="button" className="preview-panel-fallback" onClick={sysOpen}>
-              用系统应用打开
+              {t("common.openInSystemApp")}
             </button>
           </div>
         )
       ) : (
-        <div className="preview-panel-state">正在读取文件…</div>
+        <div className="preview-panel-state">{t("panels.filePreview.reading")}</div>
       )}
     </div>
   );

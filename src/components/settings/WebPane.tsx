@@ -6,6 +6,7 @@ import {
   setConfig,
   testSearchBackend,
 } from "../../bridge";
+import { useT } from "../../i18n";
 import { FieldSelect } from "../FieldSelect";
 import { Card, CardBlock, Group, Row } from "./layout";
 import { FormError, Switch, blurOnEnter } from "./shared";
@@ -25,6 +26,7 @@ export function WebPane({
   onStatus: (s: ConfigStatus) => void;
   onSaved: () => void;
 }) {
+  const { t, tx } = useT();
   const web = status.config.web;
   const [url, setUrl] = useState(web.searxngUrl);
   const [error, setError] = useState("");
@@ -52,7 +54,8 @@ export function WebPane({
     setTesting(true);
     setTestResult(null);
     try {
-      setTestResult({ ok: true, text: await testSearchBackend(url) });
+      const detail = await testSearchBackend(url);
+      setTestResult({ ok: true, text: t("settings.web.test.ok", { detail }) });
     } catch (e) {
       setTestResult({ ok: false, text: String(e) });
     } finally {
@@ -71,33 +74,29 @@ export function WebPane({
 
   return (
     <>
-      <Group title="网页访问">
+      <Group title={t("settings.web.access")}>
         <Card>
-          <Row
-            title="抓取网页"
-            desc="允许模型打开链接读正文（WebFetch）。首次访问每个域名会询问，内网地址一律拒绝。"
-          >
+          <Row title={t("settings.web.fetch")} desc={t("settings.web.fetch.desc")}>
             <Switch
               on={web.fetchEnabled}
               onChange={(v) => void patch({ fetchEnabled: v })}
-              label="抓取网页"
+              label={t("settings.web.fetch")}
             />
           </Row>
-          <Row title="联网搜索" desc="允许模型自己发起搜索并读取结果（WebSearch）。">
+          <Row title={t("settings.web.search")} desc={t("settings.web.search.desc")}>
             <Switch
               on={web.searchEnabled}
               onChange={(v) => void patch({ searchEnabled: v })}
-              label="联网搜索"
+              label={t("settings.web.search")}
             />
           </Row>
           <Row
-            title="自定义 SearXNG"
-            desc={
-              <>
-                留空使用内置搜索。自建实例要求 <code>server.limiter: false</code>，且{" "}
-                <code>search.formats</code> 含 <code>json</code>。
-              </>
-            }
+            title={t("settings.web.searxng")}
+            desc={tx("settings.web.searxng.desc", {
+              limiter: <code>server.limiter: false</code>,
+              formats: <code>search.formats</code>,
+              json: <code>json</code>,
+            })}
             stack
           >
             <div className="input-with-btn">
@@ -113,7 +112,7 @@ export function WebPane({
                   });
                 }}
                 onKeyDown={blurOnEnter}
-                placeholder="留空则使用内置搜索"
+                placeholder={t("settings.web.searxng.placeholder")}
                 spellCheck={false}
                 disabled={!web.searchEnabled}
               />
@@ -121,10 +120,10 @@ export function WebPane({
                 className="tip-wrap"
                 title={
                   !web.searchEnabled
-                    ? "先打开上面的搜索开关"
+                    ? t("settings.web.test.needsSearch")
                     : url.trim()
-                      ? "会真发一次查询"
-                      : "会测内置搜索"
+                      ? t("settings.web.test.custom")
+                      : t("settings.web.test.builtin")
                 }
               >
                 <button
@@ -132,7 +131,7 @@ export function WebPane({
                   onClick={() => void doTest()}
                   disabled={testing || !web.searchEnabled}
                 >
-                  {testing ? "测试中…" : "测试"}
+                  {testing ? t("settings.common.testing") : t("settings.web.test")}
                 </button>
               </span>
             </div>
@@ -145,22 +144,19 @@ export function WebPane({
         </Card>
       </Group>
 
-      <Group title="正文蒸馏">
+      <Group title={t("settings.web.distill")}>
         <Card>
-          <Row
-            title="辅助模型"
-            desc="用便宜的模型把网页压成摘要，省上下文。不选则直接截断正文。"
-          >
+          <Row title={t("settings.web.distill.model")} desc={t("settings.web.distill.model.desc")}>
             <FieldSelect
               value={allModels.some((m) => m.value === web.distillModel) ? web.distillModel : ""}
               onChange={(v) => void patch({ distillModel: v })}
-              options={[{ value: "", label: "不蒸馏（返回截断的正文）" }, ...allModels]}
+              options={[{ value: "", label: t("settings.web.distill.none") }, ...allModels]}
             />
           </Row>
           {web.distillModel && !allModels.some((m) => m.value === web.distillModel) ? (
             <CardBlock>
               <p className="key-state warn" style={{ margin: 0 }}>
-                <code>{web.distillModel}</code> 已不存在，当前不会蒸馏。
+                {tx("settings.web.distill.gone", { model: <code>{web.distillModel}</code> })}
               </p>
             </CardBlock>
           ) : null}

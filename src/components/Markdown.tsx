@@ -13,6 +13,7 @@ import remarkGfm from "remark-gfm";
 
 import { openInBrowser, openPath } from "../bridge";
 import { useTimedFlag } from "../hooks/useTimedFlag";
+import { t, useT } from "../i18n";
 import { openSession, sessionIdFromHref } from "../lib/sessionLink";
 import { AGENT_LINK_SCHEME, openSubagent } from "../lib/subagentLink";
 import { joinRoot, looksAbsPath } from "../pathDisplay";
@@ -327,6 +328,7 @@ function MdLink({
   href?: string | undefined;
   children?: React.ReactNode;
 }) {
+  const { t } = useT();
   const root = useContext(ProjectRootContext);
   const [err, flashErr] = useTimedFlag(false, 2000);
   const label = extractText(children);
@@ -352,7 +354,8 @@ function MdLink({
   };
 
   const chip = target.kind === "agent" || target.kind === "session";
-  const errText = target.kind === "session" ? "该会话已删除" : "打不开";
+  const errText =
+    target.kind === "session" ? t("transcript.md.sessionDeleted") : t("transcript.md.cantOpen");
 
   return (
     <>
@@ -396,13 +399,18 @@ function resolveMdLink(href: string | undefined, label: string, root: string): M
   if (raw.toLowerCase().startsWith(AGENT_LINK_SCHEME)) {
     const id = raw.slice(AGENT_LINK_SCHEME.length).trim();
     if (!id) return null;
-    return { kind: "agent", value: id, href: raw, title: `打开子 agent ${id} 的会话` };
+    return {
+      kind: "agent",
+      value: id,
+      href: raw,
+      title: t("transcript.md.openSubagent", { id }),
+    };
   }
 
   // `riot://session/ses_xxx`：历史会话（系统提示词 past_sessions 一节）。
   const sessionId = sessionIdFromHref(raw);
   if (sessionId) {
-    return { kind: "session", value: sessionId, href: raw, title: "切到这个会话" };
+    return { kind: "session", value: sessionId, href: raw, title: t("transcript.md.switchSession") };
   }
 
   if (raw.startsWith("file://")) {
@@ -469,6 +477,7 @@ function fileUrlToPath(url: string): string | null {
 
 /** 代码块：语言标签（或代码引用的路径）+ 复制按钮。 */
 function CodeBlock(props: React.HTMLAttributes<HTMLPreElement>) {
+  const { t } = useT();
   const [copied, flashCopied] = useTimedFlag<"idle" | "ok" | "fail">("idle", 1500);
   const [refErr, flashRefErr] = useTimedFlag(false, 2000);
   const root = useContext(ProjectRootContext);
@@ -524,14 +533,14 @@ function CodeBlock(props: React.HTMLAttributes<HTMLPreElement>) {
               className="codeblock-ref"
               // 相对路径以项目根为基准。模型偶尔会写绝对路径，那时直接用。
               onClick={openRef}
-              title={`用默认应用打开 ${refPath}`}
+              title={t("transcript.md.openWithDefault", { path: refPath })}
             >
               <span className="codeblock-ref-path">{refPath}</span>
               <span className="codeblock-ref-lines">:{lines}</span>
             </button>
             {refErr ? (
               <span className="codeblock-ref-err" role="status">
-                打不开
+                {t("transcript.md.cantOpen")}
               </span>
             ) : null}
           </>
@@ -539,7 +548,11 @@ function CodeBlock(props: React.HTMLAttributes<HTMLPreElement>) {
           <span className="codeblock-lang">{lang}</span>
         )}
         <button type="button" className="codeblock-copy" onClick={copy}>
-          {copied === "ok" ? "已复制" : copied === "fail" ? "复制失败" : "复制"}
+          {copied === "ok"
+            ? t("common.copied")
+            : copied === "fail"
+              ? t("transcript.md.copyFailed")
+              : t("common.copy")}
         </button>
       </div>
       <pre {...props} />

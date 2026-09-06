@@ -48,7 +48,7 @@ if (!host.nativeWindow) {
 }
 
 const root = document.getElementById("root");
-if (!root) throw new Error("#root 不存在");
+if (!root) throw new Error("#root element not found");
 
 /* macOS 系统 overlay 滚动条在深色底上偏亮，又不能用 ::-webkit-scrollbar
    改颜色（一写就把 overlay 打成占位槽）。藏掉原生条，滚动时自己画一条

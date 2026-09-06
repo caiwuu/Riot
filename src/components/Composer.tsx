@@ -31,11 +31,13 @@ import {
   setSessionMultitask,
   type SlashCommand,
   slashCommands,
+  renderUiText,
   slashExpand,
   subscribeDragDrop,
   turnNudge,
 } from "../bridge";
 import { type QueuedItem, type WithdrawnPrompt } from "../hooks/useSession";
+import { t, useT } from "../i18n";
 import {
   SLASH_SUBMIT_RE,
   type Seg,
@@ -184,9 +186,13 @@ function looksAbsolute(line: string): boolean {
 /** 块后面默认跟的那一个空格：块和正文之间本来就该有一格，不让用户自己敲。 */
 const SPACE: Seg = { kind: "text", value: " " };
 
-/** 斜杠菜单的分组标题：技能一组，其余（内置 / 项目 / 全局命令）一组。 */
-function slashGroup(c: SlashCommand): "技能" | "命令" {
-  return c.source === "skill" ? "技能" : "命令";
+/** 斜杠菜单的分组：技能一组，其余（内置 / 项目 / 全局命令）一组。标题文案见 `slashGroupLabel`。 */
+function slashGroup(c: SlashCommand): "skill" | "command" {
+  return c.source === "skill" ? "skill" : "command";
+}
+
+function slashGroupLabel(g: ReturnType<typeof slashGroup>): string {
+  return g === "skill" ? t("composer.slash.group.skills") : t("composer.slash.group.commands");
 }
 
 function hasAttachment(dt: DataTransfer | null): boolean {
@@ -204,7 +210,7 @@ async function toShot(file: File): Promise<Shot> {
   const buf = await file.arrayBuffer();
   return {
     id: `${file.name}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    name: file.name || "粘贴的图片",
+    name: file.name || t("composer.attach.pastedImage"),
     mediaType: file.type || "image/png",
     data: bytesToBase64(new Uint8Array(buf)),
   };
@@ -272,46 +278,52 @@ export function QueuePanel({
   onSendNow: (id: string) => void;
   onDelete: (id: string) => void;
 }) {
+  const { t, tn } = useT();
   const [open, setOpen] = useState(true);
   return (
     <div className="queue-panel">
       <button type="button" className="queue-head" onClick={() => setOpen((v) => !v)}>
         <Chevron open={open} />
-        {queued.length} 条排队
+        {tn("composer.queue.count", queued.length)}
       </button>
       {open
         ? queued.map((q) => (
             <div className="queue-row" key={q.id}>
               <span className="queue-ring" aria-hidden />
               <span className="queue-text" title={q.text}>
-                {q.text || "（仅图片）"}
+                {q.text || t("composer.queue.imageOnly")}
               </span>
               {q.images.length > 0 ? (
-                <span className="queue-imgs">{q.images.length} 图</span>
+                <span className="queue-imgs">{tn("composer.queue.images", q.images.length)}</span>
               ) : null}
               {q.refs.length > 0 ? (
                 <span className="queue-imgs" title={q.refs.join("\n")}>
-                  {q.refs.length} 文件
+                  {tn("common.files", q.refs.length)}
                 </span>
               ) : null}
               <span className="queue-actions">
                 <button
                   type="button"
-                  title="编辑（放回输入框）"
-                  aria-label="编辑"
+                  title={t("composer.queue.edit.title")}
+                  aria-label={t("common.edit")}
                   onClick={() => onEdit(q.id)}
                 >
                   <PencilIcon />
                 </button>
                 <button
                   type="button"
-                  title="立即发送（停止当前轮，优先处理这条）"
-                  aria-label="立即发送"
+                  title={t("composer.queue.sendNow.title")}
+                  aria-label={t("composer.queue.sendNow")}
                   onClick={() => onSendNow(q.id)}
                 >
                   <ArrowUpIcon />
                 </button>
-                <button type="button" title="删除" aria-label="删除" onClick={() => onDelete(q.id)}>
+                <button
+                  type="button"
+                  title={t("common.delete")}
+                  aria-label={t("common.delete")}
+                  onClick={() => onDelete(q.id)}
+                >
                   <TrashIcon />
                 </button>
               </span>
@@ -397,6 +409,7 @@ export function Composer({
   /** 前台才接全局拖放 / 粘贴。隐藏的保活实例不能跟前台抢。 */
   armed?: boolean;
 }) {
+  const { t } = useT();
   // 编辑区是**非受控**的：内容住在 DOM 里，这些 state 只是它的投影。
   // 受控写法（每次输入都回写 innerHTML）会在每一次按键后重置光标，
   // 中文输入法更是直接不能用。
@@ -609,11 +622,11 @@ export function Composer({
 
   const windowSection: PickerSection | undefined = activeModelCfg
     ? {
-        title: "上下文窗口",
+        title: t("composer.contextWindow"),
         items: [
           {
             id: "",
-            label: "跟随设置",
+            label: t("composer.contextWindow.followSettings"),
             active: !activeModelCfg.contextWindow,
             note: fmtTokens(cfg.compactThresholdTokens ?? DEFAULT_COMPACT_THRESHOLD),
           },
@@ -778,8 +791,8 @@ export function Composer({
           // 排在包含匹配前面（敲 `co` 时 `compact` 该在最上面）。
           .sort((a, b) => {
             const q = slashQuery.toLowerCase();
-            const ag = slashGroup(a) === "技能" ? 0 : 1;
-            const bg = slashGroup(b) === "技能" ? 0 : 1;
+            const ag = slashGroup(a) === "skill" ? 0 : 1;
+            const bg = slashGroup(b) === "skill" ? 0 : 1;
             const ap = a.name.toLowerCase().startsWith(q) ? 0 : 1;
             const bp = b.name.toLowerCase().startsWith(q) ? 0 : 1;
             return ag - bg || ap - bp || a.name.localeCompare(b.name);
@@ -864,9 +877,7 @@ export function Composer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [menuKind, menuPick, menuId]);
   /** 输入框的可及名。`data-placeholder` 只是 CSS 伪元素，读屏取不到。 */
-  const placeholder = busy
-    ? "它正在做事…此刻发送会排队，当前任务完成后自动发出"
-    : "描述一个任务，或问点什么";
+  const placeholder = busy ? t("composer.placeholder.busy") : t("composer.placeholder");
 
   /** 选中一个文件：把光标处的 `@查询` 换成一个块，就地插在句子里。 */
   const chooseFile = (p: string) => {
@@ -980,7 +991,7 @@ export function Composer({
     try {
       const prompt = await slashExpand(sessionId, cmd.name, args);
       if (!prompt) {
-        setSlashNote(`/${cmd.name} 展开失败：命令可能刚被删掉`);
+        setSlashNote(t("composer.slash.expandFailed", { name: `/${cmd.name}` }));
         restore();
         return;
       }
@@ -1027,7 +1038,7 @@ export function Composer({
   const editQueued = async (id: string) => {
     const input = await onQueueEdit(id);
     if (!input) return;
-    putBack(input, "排队图片");
+    putBack(input, t("composer.queue.imageLabel"));
   };
 
   // 撤回的提问回到输入框：模型一个字都没给出就被停了，那句话从没被
@@ -1042,7 +1053,7 @@ export function Composer({
   useEffect(() => {
     if (!withdrawn || restoredId.current === withdrawn.id) return;
     restoredId.current = withdrawn.id;
-    putBack(withdrawn, "撤回图片");
+    putBack(withdrawn, t("composer.withdrawn.imageLabel"));
     restoredRef.current();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [withdrawn]);
@@ -1066,7 +1077,9 @@ export function Composer({
       const merged = [...prev, ...scaled];
       // 超上限要说出来 —— 静默丢掉的话，用户以为十张全发出去了。
       if (merged.length > MAX_SHOTS) {
-        setDropError(`一条消息最多 ${MAX_SHOTS} 张图，已忽略多出的 ${merged.length - MAX_SHOTS} 张。`);
+        setDropError(
+          t("composer.attach.tooMany", { max: MAX_SHOTS, extra: merged.length - MAX_SHOTS }),
+        );
       }
       return merged.slice(0, MAX_SHOTS);
     });
@@ -1085,8 +1098,7 @@ export function Composer({
       // 走到这里说明系统没给出路径（`File` 对象自己是没有的）。非图片文件
       // 只能靠路径进对话 —— 引用块认的就是路径。
       setDropError(
-        `${rest[0]?.name ?? "这个文件"} 不是图片，而系统没给出它的路径。` +
-          `请用左下角的「+」选择，或者在输入框里打 @ 找它。`,
+        t("composer.attach.notImage", { name: rest[0]?.name ?? t("composer.attach.thisFile") }),
       );
     }
   };
@@ -1192,13 +1204,11 @@ export function Composer({
         // 读内容；别的由 takeFiles 说清为什么收不了。
         void filesRef.current(e.files);
       } else {
-        setDropError(
-          "拖进来的东西在磁盘上没有对应文件（多半是从网页里直接拖的图）。" +
-            `复制它，再回到这里 ${PASTE_KEY}。`,
-        );
+        setDropError(t("composer.attach.noDiskFile", { key: PASTE_KEY }));
       }
     });
-  }, [armed]);
+    // `t` 是模块级函数、身份稳定（见 i18n 的 useT），列进来只为满足 lint。
+  }, [armed, t]);
 
   /** 网页版的「+」：浏览器自己的文件选择器，只收图片（见 pickAttachments）。 */
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -1346,13 +1356,13 @@ export function Composer({
           会让人以为必须拖到那一条上。 */}
       {dragging ? (
         <div className="drop-veil" aria-hidden>
-          <div className="drop-veil-card">松手，加进输入框</div>
+          <div className="drop-veil-card">{t("composer.drop.hint")}</div>
         </div>
       ) : null}
 
       {workspaceMissing ? (
         <button className="key-banner" onClick={onMissingWorkspace}>
-          项目目录已经不在磁盘上。点这里移除或另选目录。
+          {t("composer.banner.workspaceMissing")}
         </button>
       ) : null}
 
@@ -1360,26 +1370,38 @@ export function Composer({
           一个服务方都没有的新用户会去找那个根本不存在的 key 输入框。 */}
       {cfg.providers.length === 0 ? (
         <button className="key-banner" onClick={onOpenSettings}>
-          还没有配置服务方，点这里添加
+          {t("composer.banner.noProvider")}
         </button>
       ) : !hasKey ? (
         <button className="key-banner" onClick={onOpenSettings}>
-          {activeProvider?.name ?? "当前服务方"}还没有 API key，点这里配置
+          {t("composer.banner.noKey", {
+            provider: activeProvider?.name ?? t("composer.banner.currentProvider"),
+          })}
         </button>
       ) : !cfg.activeModel ? (
         <button className="key-banner" onClick={onOpenSettings}>
-          {activeProvider?.name ?? "当前服务方"}还没有选中模型，点这里配置
+          {t("composer.banner.noModel", {
+            provider: activeProvider?.name ?? t("composer.banner.currentProvider"),
+          })}
         </button>
       ) : null}
 
       {dropError ? (
-        <button className="key-banner" onClick={() => setDropError("")} title="点击关闭">
+        <button
+          className="key-banner"
+          onClick={() => setDropError("")}
+          title={t("composer.banner.dismiss")}
+        >
           {dropError}
         </button>
       ) : null}
 
       {slashNote ? (
-        <button className="key-banner" onClick={() => setSlashNote("")} title="点击关闭">
+        <button
+          className="key-banner"
+          onClick={() => setSlashNote("")}
+          title={t("composer.banner.dismiss")}
+        >
           {slashNote}
         </button>
       ) : null}
@@ -1395,7 +1417,7 @@ export function Composer({
           没有这层语义，屏幕上高亮在动，读屏那边一片安静。焦点始终在
           编辑区，所以当前项靠它的 aria-activedescendant 指过来。 */}
       {matches.length > 0 ? (
-        <div className="slash-menu" role="listbox" id={menuId} aria-label="斜杠命令">
+        <div className="slash-menu" role="listbox" id={menuId} aria-label={t("composer.slash.menuLabel")}>
           {matches.map((c, i) => {
             // 分组标题（Cursor 同款）：matches 已按组排好，组一换就画一个。
             const group = slashGroup(c);
@@ -1405,7 +1427,7 @@ export function Composer({
               <Fragment key={c.name}>
                 {head ? (
                   <div className={i === 0 ? "slash-group" : "slash-group slash-group-next"} role="presentation">
-                    {group}
+                    {slashGroupLabel(group)}
                   </div>
                 ) : null}
                 <button
@@ -1428,7 +1450,9 @@ export function Composer({
                     <span className="slash-cmd-name">/{c.name}</span>
                     {c.argumentHint ? <span className="slash-hint">{c.argumentHint}</span> : null}
                   </span>
-                  <span className="slash-desc">{c.description}</span>
+                  <span className="slash-desc">
+                    {c.descriptionText ? renderUiText(c.descriptionText) : c.description}
+                  </span>
                 </button>
               </Fragment>
             );
@@ -1439,7 +1463,7 @@ export function Composer({
       {/* 和上面那个菜单共用一个 id：两者互斥（这个分支要求 matches 为空），
           同一时刻只有一个在 DOM 里。 */}
       {fileMatches.length > 0 && matches.length === 0 ? (
-        <div className="slash-menu" role="listbox" id={menuId} aria-label="文件引用">
+        <div className="slash-menu" role="listbox" id={menuId} aria-label={t("composer.mention.menuLabel")}>
           {fileMatches.map((p, i) => {
             // 文件名在前、目录在后：一屏候选里先扫到的是名字。类型图标 +
             // 名字 + 灰色目录（Cursor 的 @ 菜单同款）—— 候选是"还没选"的
@@ -1484,7 +1508,7 @@ export function Composer({
                   type="button"
                   className="attachment-view"
                   onClick={() => setViewShot(s)}
-                  aria-label={`查看 ${s.name}`}
+                  aria-label={t("composer.attach.view", { name: s.name })}
                 >
                   <img src={`data:${s.mediaType};base64,${s.data}`} alt={s.name} />
                 </button>
@@ -1492,7 +1516,7 @@ export function Composer({
                   type="button"
                   className="attachment-remove"
                   onClick={() => setShots((prev) => prev.filter((x) => x.id !== s.id))}
-                  aria-label="移除"
+                  aria-label={t("common.remove")}
                 >
                   ✕
                 </button>
@@ -1657,8 +1681,8 @@ export function Composer({
               type="button"
               className="composer-icon"
               onClick={pickAttachments}
-              title={host.nativePaths ? "附加图片或文件" : "附加图片（文件请用 @ 引用）"}
-              aria-label="附加图片或文件"
+              title={host.nativePaths ? t("composer.attach.title") : t("composer.attach.title.web")}
+              aria-label={t("composer.attach.title")}
             >
               <PlusIcon />
             </button>
@@ -1676,13 +1700,15 @@ export function Composer({
             {/* 窄列藏起来：三个 pill 并排是挤的源头，换服务方/模型去设置里也能做。 */}
             <div className="composer-picks">
               <Picker
-                title="切换服务方"
-                label={activeProvider?.name ?? "选择服务方"}
+                title={t("composer.provider.switch")}
+                label={activeProvider?.name ?? t("composer.provider.pick")}
                 items={cfg.providers.map((p) => ({
                   id: p.id,
                   label: p.name,
                   active: p.id === cfg.activeProvider,
-                  ...(config.keyStatus[p.id] ? {} : { note: "未配置 key", warn: true }),
+                  ...(config.keyStatus[p.id]
+                    ? {}
+                    : { note: t("composer.provider.noKey"), warn: true }),
                 }))}
                 onPick={(id) => {
                   const p = cfg.providers.find((x) => x.id === id);
@@ -1690,8 +1716,8 @@ export function Composer({
                 }}
               />
               <Picker
-                title="切换模型"
-                label={modelLabel(activeProvider, cfg.activeModel) || "选择模型"}
+                title={t("composer.model.switch")}
+                label={modelLabel(activeProvider, cfg.activeModel) || t("composer.model.pick")}
                 items={(activeProvider?.models ?? []).map((m) => ({
                   id: m.id,
                   // 有显示名就用它。菜单里那一列越短越好读，模型 ID 常常很长。
@@ -1701,7 +1727,7 @@ export function Composer({
                   ...(m.contextWindow ? { note: fmtTokens(m.contextWindow) } : {}),
                 }))}
                 {...(windowSection ? { section: windowSection } : {})}
-                emptyHint="这个服务方还没有模型"
+                emptyHint={t("composer.model.empty")}
                 onEmpty={onOpenSettings}
                 onPick={switchModel}
               />
@@ -1730,19 +1756,23 @@ export function Composer({
                 onClick={handoff}
                 disabled={handoffPending}
                 title={
-                  handoffPending
-                    ? "已经告诉模型了。它做完手上这一步就会把任务分叉到后台"
-                    : "把手头的任务交给后台子 agent 继续，对话腾出来聊别的"
+                  handoffPending ? t("composer.handoff.pendingTitle") : t("composer.handoff.title")
                 }
               >
                 <span className="handoff-icon" aria-hidden>
                   ⑂
                 </span>
-                {handoffPending ? "正在转到后台…" : "转到后台"}
+                {handoffPending ? t("composer.handoff.pending") : t("composer.handoff")}
               </button>
             ) : null}
             {busy ? (
-              <button type="button" className="send stop" onClick={onStop} title="停止 (Esc)" aria-label="停止">
+              <button
+                type="button"
+                className="send stop"
+                onClick={onStop}
+                title={t("composer.stop.title")}
+                aria-label={t("common.stop")}
+              >
                 <StopIcon />
               </button>
             ) : null}
@@ -1752,9 +1782,19 @@ export function Composer({
                 className="send"
                 disabled={!canSend || !hasKey || !cfg.activeModel}
                 title={
-                  busy ? "排队发送（当前任务完成后自动发出）" : cfg.activeModel ? "发送" : "先选择一个模型"
+                  busy
+                    ? t("composer.send.queueTitle")
+                    : cfg.activeModel
+                      ? t("composer.send")
+                      : t("composer.send.pickModel")
                 }
-                aria-label={busy ? "排队发送" : cfg.activeModel ? "发送" : "先选择一个模型"}
+                aria-label={
+                  busy
+                    ? t("composer.send.queue")
+                    : cfg.activeModel
+                      ? t("composer.send")
+                      : t("composer.send.pickModel")
+                }
               >
                 <ArrowUpIcon />
               </button>

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { type GitChanges, sessionGitChanges } from "../bridge";
+import { useT } from "../i18n";
 import { FieldSelect } from "./FieldSelect";
 import { FileChangeList } from "./FileChangeList";
 
@@ -23,6 +24,7 @@ export function GitChangesPanel({
   sessionId: string;
   refreshKey: number;
 }) {
+  const { t, tn } = useT();
   const [git, setGit] = useState<GitChanges | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -82,12 +84,12 @@ export function GitChangesPanel({
           {git?.repo && git.refs?.length ? (
             <FieldSelect
               className="changes-branch"
-              title="对比基线。只换看哪条分支,不会 checkout。"
+              title={t("panels.git.base.title")}
               menuMinWidth={240}
               value={base ?? git.base ?? git.refs[0] ?? ""}
               options={git.refs.map((r) =>
                 r === git.branch
-                  ? { value: r, label: r, hint: "当前分支" }
+                  ? { value: r, label: r, hint: t("panels.git.currentBranch") }
                   : { value: r, label: r },
               )}
               onChange={setBase}
@@ -96,7 +98,7 @@ export function GitChangesPanel({
           ) : null}
           {changes?.length && total ? (
             <span className="changes-total">
-              {changes.length} 个文件 <span className="add">+{total.added}</span>{" "}
+              {tn("common.files", changes.length)} <span className="add">+{total.added}</span>{" "}
               <span className="del">−{total.removed}</span>
             </span>
           ) : null}
@@ -105,7 +107,7 @@ export function GitChangesPanel({
             className={loading ? "icon loading" : "icon"}
             onClick={() => setManual((n) => n + 1)}
             disabled={loading}
-            title="重新比对"
+            title={t("panels.git.recompare")}
           >
             <RefreshIcon />
           </button>
@@ -115,28 +117,27 @@ export function GitChangesPanel({
       <div className="changes-body">
         {error ? (
           <div className="msg error">
-            比对失败：{error}
+            {t("panels.git.failed", { error })}
             {/* 失败不清旧列表（旧的也比空白有用），但得说清下面是旧的 */}
-            {git ? <div className="changes-stale">下方显示的是上次的结果。</div> : null}
+            {git ? <div className="changes-stale">{t("panels.git.stale")}</div> : null}
           </div>
         ) : null}
-        {!git && !error ? <div className="changes-empty">正在比对…</div> : null}
+        {!git && !error ? <div className="changes-empty">{t("panels.git.comparing")}</div> : null}
         {git && !git.repo ? (
           <div className="changes-empty">
-            这个目录不是 git 仓库。
-            <div className="changes-hint">初始化仓库（git init）之后，这里会显示未提交的改动。</div>
+            {t("panels.git.notRepo")}
+            <div className="changes-hint">{t("panels.git.notRepo.hint")}</div>
           </div>
         ) : null}
         {changes?.length === 0 ? (
           <div className="changes-empty">
             {git?.base && git.base !== git.branch
-              ? `相对 ${git.base} 没有差异。`
-              : "工作区干净，没有未提交的改动。"}
-            <div
-              className="changes-hint"
-              title="工作区（含未提交）相对所选分支的差异。换分支只换对比基线，不会 checkout。只看本次会话动了什么，用输入框上方的改动条。"
-            >
-              {git?.base ? `对比基线：${git.base}` : "显示的是 git 未提交的全部改动"}
+              ? t("panels.git.noDiffAgainst", { base: git.base })
+              : t("panels.git.clean")}
+            <div className="changes-hint" title={t("panels.git.scope.title")}>
+              {git?.base
+                ? t("panels.git.baseLabel", { base: git.base })
+                : t("panels.git.allUncommitted")}
             </div>
           </div>
         ) : null}

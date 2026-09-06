@@ -5,6 +5,8 @@ import {
   type PackStatus,
   packsStatus,
   packsUninstall,
+  renderUiError,
+  renderUiText,
 } from "../../bridge";
 import {
   clearDonePackProgress,
@@ -13,8 +15,11 @@ import {
   startPackInstall,
   usePackInstalls,
 } from "../../hooks/usePackInstalls";
+import { useT } from "../../i18n";
 import { Card, CardBlock, Group } from "./layout";
 import type { AskConfirm } from "./shared";
+
+type Translate = ReturnType<typeof useT>["t"];
 
 /** 字节数写成人话。包是几百 MB 量级，一位小数够用。 */
 function humanSize(bytes: number): string {
@@ -27,26 +32,30 @@ function humanSize(bytes: number): string {
  * 安装进度的一句话描述。下载有百分比，后面三步没有 —— 它们相对下载
  * 短得多，硬凑一个总进度只会让进度条在末尾诡异地卡住。
  */
-function progressText(p: PackProgress): string {
+function progressText(p: PackProgress, t: Translate): string {
   switch (p.kind) {
     case "downloading":
       return p.total > 0
-        ? `下载中 ${humanSize(p.received)} / ${humanSize(p.total)}`
-        : `下载中 ${humanSize(p.received)}`;
+        ? t("settings.packs.progress.downloading", {
+            received: humanSize(p.received),
+            total: humanSize(p.total),
+          })
+        : t("settings.packs.progress.downloadingNoTotal", { received: humanSize(p.received) });
     case "verifying":
-      return "校验中…";
+      return t("settings.packs.progress.verifying");
     case "extracting":
-      return "解压中…";
+      return t("settings.packs.progress.extracting");
     case "selfCheck":
-      return "自检中…";
+      return t("settings.packs.progress.selfCheck");
     case "done":
-      return "完成";
+      return t("common.done");
     case "failed":
-      return p.error;
+      return renderUiError(p.error);
   }
 }
 
 export function PacksPane({ askConfirm }: { askConfirm: AskConfirm }) {
+  const { t } = useT();
   const [packs, setPacks] = useState<PackStatus[] | null>(null);
   const [loadError, setLoadError] = useState("");
   /** 安装的进度和"正在装"标记在模块级 —— 关掉设置面板不该把它们连同组件一起丢掉。 */
@@ -72,9 +81,9 @@ export function PacksPane({ askConfirm }: { askConfirm: AskConfirm }) {
 
   const uninstall = (p: PackStatus) => {
     askConfirm({
-      title: `卸载「${p.name}」？`,
-      body: "会删掉整个包，连带摘掉它注册的 MCP 服务器和技能。可以随时重新下载。",
-      confirmLabel: "卸载",
+      title: t("settings.packs.uninstall.title", { name: renderUiText(p.name) }),
+      body: t("settings.packs.uninstall.body"),
+      confirmLabel: t("settings.packs.uninstall"),
       action: () => {
         setUninstalling(p.id);
         void (async () => {
@@ -83,7 +92,7 @@ export function PacksPane({ askConfirm }: { askConfirm: AskConfirm }) {
             clearPackProgress(p.id);
             await refresh();
           } catch (e) {
-            reportPackFailure(p.id, String(e));
+            reportPackFailure(p.id, e);
           } finally {
             setUninstalling(null);
           }
@@ -93,22 +102,19 @@ export function PacksPane({ askConfirm }: { askConfirm: AskConfirm }) {
   };
 
   return (
-    <Group
-      title="可下载的包"
-      desc="装上之后模型自己会用 —— 相关技能和工具自动注册，不用在别处再配一遍。包体较大，建议在网络稳定时装；装的过程中可以关掉设置去干别的，回来还能看到进度。下载中断可以重来，已下好的部分会接着传。"
-    >
+    <Group title={t("settings.packs.available")} desc={t("settings.packs.available.desc")}>
       {loadError ? (
         <div className="empty-state">
           <p className="form-error" style={{ margin: 0 }}>
-            读取失败：{loadError}
+            {t("settings.ext.loadFailed", { error: loadError })}
           </p>
-          <button onClick={() => void refresh()}>重试</button>
+          <button onClick={() => void refresh()}>{t("common.retry")}</button>
         </div>
       ) : packs === null ? (
         <Card>
           <CardBlock>
             <p className="hint" style={{ margin: 0 }}>
-              读取中…
+              {t("settings.ext.loading")}
             </p>
           </CardBlock>
         </Card>
@@ -116,7 +122,7 @@ export function PacksPane({ askConfirm }: { askConfirm: AskConfirm }) {
         <Card>
           <CardBlock>
             <p className="hint" style={{ margin: 0 }}>
-              当前没有可用的能力包。
+              {t("settings.packs.empty")}
             </p>
           </CardBlock>
         </Card>
@@ -133,31 +139,35 @@ export function PacksPane({ askConfirm }: { askConfirm: AskConfirm }) {
             return (
               <li key={p.id} className="pack-item">
                 <div className="pack-head">
-                  <span className="pack-name">{p.name}</span>
+                  <span className="pack-name">{renderUiText(p.name)}</span>
                   {p.installedVersion ? (
-                    <span className="pack-badge on">已装 {p.installedVersion}</span>
+                    <span className="pack-badge on">
+                      {t("settings.packs.installed", { version: p.installedVersion })}
+                    </span>
                   ) : null}
                   {upgradable ? (
-                    <span className="pack-badge">可升级到 {p.availableVersion}</span>
+                    <span className="pack-badge">
+                      {t("settings.packs.upgradable", { version: p.availableVersion ?? "" })}
+                    </span>
                   ) : null}
                 </div>
                 <p className="hint" style={{ margin: "2px 0 0" }}>
-                  {p.description}
+                  {renderUiText(p.description)}
                 </p>
 
                 {!p.supported ? (
                   <p className="hint" style={{ margin: "6px 0 0" }}>
-                    这个包没有适配当前系统的版本。
+                    {t("settings.packs.unsupported")}
                   </p>
                 ) : p.manifestError && !p.installedVersion ? (
                   <p className="form-error" style={{ margin: "6px 0 0" }}>
-                    拉不到清单：{p.manifestError}
+                    {t("settings.packs.manifestError", { error: renderUiError(p.manifestError) })}
                   </p>
                 ) : !p.availableVersion && !p.installedVersion ? (
                   // 清单拉到了、但里面还没有这个包。不说话的话这一行就只剩名字和
                   // 描述、没有任何按钮，用户分不清是在加载、坏了、还是没发布。
                   <p className="hint" style={{ margin: "6px 0 0" }}>
-                    还没有发布可下载的版本。
+                    {t("settings.packs.notReleased")}
                   </p>
                 ) : null}
 
@@ -172,7 +182,7 @@ export function PacksPane({ askConfirm }: { askConfirm: AskConfirm }) {
                       </div>
                     ) : null}
                     <span className={prog.kind === "failed" ? "form-error" : "hint"}>
-                      {progressText(prog)}
+                      {progressText(prog, t)}
                     </span>
                   </div>
                 ) : null}
@@ -183,13 +193,15 @@ export function PacksPane({ askConfirm }: { askConfirm: AskConfirm }) {
                       disabled={busy || !p.supported}
                       onClick={() => startPackInstall(p.id)}
                     >
-                      {p.installedVersion ? "升级" : "下载安装"}
-                      {p.downloadSize > 0 ? `（${humanSize(p.downloadSize)}）` : null}
+                      {p.installedVersion ? t("settings.packs.upgrade") : t("settings.packs.install")}
+                      {p.downloadSize > 0
+                        ? t("settings.packs.size", { size: humanSize(p.downloadSize) })
+                        : null}
                     </button>
                   ) : null}
                   {p.installedVersion ? (
                     <button className="ghost" disabled={busy} onClick={() => uninstall(p)}>
-                      卸载
+                      {t("settings.packs.uninstall")}
                     </button>
                   ) : null}
                 </div>

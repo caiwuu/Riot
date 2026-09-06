@@ -22,6 +22,8 @@ use riot_protocol::permission::{
     DecisionReason, PermissionContext, PermissionResult, PermissionUpdate, RuleDecision,
     SafetyKind, UpdateScope,
 };
+use riot_protocol::text::UiText;
+use riot_protocol::ui_text;
 
 use super::ast::{Analysis, ComplexReason, Complexity, SubCommand, analyze};
 use super::readonly::is_read_only;
@@ -52,7 +54,7 @@ pub fn decide(command: &str, ctx: &PermissionContext, rules: &RuleSet) -> Permis
 /// 「全部放行」会退化成一个 `echo $HOME` 都跑不过去的模式,而同一时刻
 /// `rm -rf node_modules` 却是静默放行的。那个倒置真实发生过。
 fn too_complex(c: &Complexity) -> PermissionResult {
-    let message = format!("{}\n\n{}", explain(c.reason), c.detail);
+    let message = explain(c.reason, &c.detail);
 
     let reason = match c.reason {
         // 精确且危险:目标明确,不是启发式猜测
@@ -80,23 +82,38 @@ fn too_complex(c: &Complexity) -> PermissionResult {
 /// 弹窗标题上那一句。
 ///
 /// 短。完整命令就在下面的预览里,这里只点出"为什么拦你" —— 不解释
-/// shell 语法,也不教育用户。
-fn explain(r: ComplexReason) -> &'static str {
+/// shell 语法,也不教育用户。`detail` 是触发的那个片段,词典把它接在
+/// 句子后面。
+fn explain(r: ComplexReason, detail: &str) -> UiText {
     match r {
-        ComplexReason::CommandSubstitution => "含命令替换,执行内容运行时才确定。",
-        ComplexReason::ProcessSubstitution => "含进程替换（`<(...)`）。",
-        ComplexReason::Expansion => "含变量展开,结果取决于当前环境。",
-        ComplexReason::Background => "会在后台运行（`&`）。",
-        ComplexReason::Redirect => "会重定向写入文件。",
-        ComplexReason::SensitiveRedirect(_) => "会写入 shell 启动脚本、密钥或凭证。",
-        ComplexReason::ControlFlow => "含子 shell、循环或条件结构。",
-        ComplexReason::DynamicExecution => "会执行运行时才确定的内容（`eval` / `source`）。",
-        ComplexReason::DangerousAssignment => "设置了改变动态链接或命令查找的环境变量。",
-        ComplexReason::ParseError => "无法解析这条命令。",
-        ComplexReason::TooManyCommands => "子命令太多,无法逐条审查。",
-        ComplexReason::TooLong => "命令过长。",
-        ComplexReason::NestedWrappers => "包装嵌套过深。",
-        ComplexReason::UnknownNode => "含无法识别的 shell 结构。",
+        ComplexReason::CommandSubstitution => {
+            ui_text!("tools.bash.complex.commandSubstitution", detail = detail)
+        }
+        ComplexReason::ProcessSubstitution => {
+            ui_text!("tools.bash.complex.processSubstitution", detail = detail)
+        }
+        ComplexReason::Expansion => ui_text!("tools.bash.complex.expansion", detail = detail),
+        ComplexReason::Background => ui_text!("tools.bash.complex.background", detail = detail),
+        ComplexReason::Redirect => ui_text!("tools.bash.complex.redirect", detail = detail),
+        ComplexReason::SensitiveRedirect(_) => {
+            ui_text!("tools.bash.complex.sensitiveRedirect", detail = detail)
+        }
+        ComplexReason::ControlFlow => ui_text!("tools.bash.complex.controlFlow", detail = detail),
+        ComplexReason::DynamicExecution => {
+            ui_text!("tools.bash.complex.dynamicExecution", detail = detail)
+        }
+        ComplexReason::DangerousAssignment => {
+            ui_text!("tools.bash.complex.dangerousAssignment", detail = detail)
+        }
+        ComplexReason::ParseError => ui_text!("tools.bash.complex.parseError", detail = detail),
+        ComplexReason::TooManyCommands => {
+            ui_text!("tools.bash.complex.tooManyCommands", detail = detail)
+        }
+        ComplexReason::TooLong => ui_text!("tools.bash.complex.tooLong", detail = detail),
+        ComplexReason::NestedWrappers => {
+            ui_text!("tools.bash.complex.nestedWrappers", detail = detail)
+        }
+        ComplexReason::UnknownNode => ui_text!("tools.bash.complex.unknownNode", detail = detail),
     }
 }
 
@@ -126,7 +143,7 @@ fn decide_subs(subs: &[SubCommand], ctx: &PermissionContext, rules: &RuleSet) ->
             SubVerdict::Ask { pattern, source } => {
                 all_allowed = false;
                 pending_ask.get_or_insert_with(|| PermissionResult::Ask {
-                    message: format!("是否允许运行 `{}`？", sub.matchable),
+                    message: ui_text!("tools.ask.runCommand", command = &sub.matchable),
                     suggestions: vec![allow_suggestion(&sub.matchable)],
                     reason: DecisionReason::Rule { source, pattern },
                 });

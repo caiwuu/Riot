@@ -1,0 +1,147 @@
+/**
+ * 应用壳：启动 / 出错页、侧栏、顶栏与窗口开关、欢迎页、工作台标签栏、
+ * 右键菜单与确认框，以及网页版的连接门、目录选择器等全局件的文案。
+ */
+export default {
+  "app.newSession": "新会话",
+  "app.openDir": "打开目录…",
+
+  "app.boot.failed": "出错了",
+  "app.boot.reload": "重新加载",
+  "app.boot.starting": "启动中",
+
+  "app.update.released": "Riot {version} 已发布",
+  "app.update.download": "去下载",
+
+  "app.dialog.gotIt": "知道了",
+  "app.error.createSession": "无法创建会话",
+  "app.error.openDir": "打不开这个目录",
+  "app.error.removeProject": "无法移除项目",
+  "app.error.rerun": "补跑没成",
+  "app.error.runNow": "没跑起来",
+  "app.error.pause": "暂停失败",
+  "app.error.resume": "恢复失败",
+  "app.error.delete": "删除失败",
+  "app.error.clearDone": "清理失败",
+
+  "app.notify.turnDone": "任务完成了，回来看看结果吧。",
+
+  "app.notify.scheduleDone.title": "定时任务完成",
+
+  "app.notify.scheduleDone.body": "「{name}」跑完了，回来看看结果。",
+
+  "app.notify.scheduleFailed.title": "定时任务没跑成",
+
+  "app.notify.scheduleFailed.body": "「{name}」：{error}",
+
+  "app.hero.title": "今天做点什么？",
+  "app.hero.dirGone": "目录已不存在，点这里处理",
+
+  "app.treeMenu.preview": "预览",
+  "app.treeMenu.addToChat": "添加到对话",
+  "app.treeMenu.copyRelPath": "复制相对路径",
+  "app.treeMenu.copyFullPath": "复制完整路径",
+  "app.treeMenu.revealInFileManager": "在访达 / 资源管理器中显示",
+
+  "app.sessionMenu.rename": "重命名",
+  "app.sessionMenu.delete": "删除会话",
+  "app.sessionMenu.deleteTitle": "删除这个会话？",
+  "app.sessionMenu.deleteBody": "「{title}」的历史会丢失。",
+
+  "app.projectMenu.copyPath": "复制路径",
+  "app.projectMenu.removeTitle": "移除 {name}？",
+  "app.projectMenu.removeBodyCount": "下面 {count} 个会话会被关闭。目录不会被删除。",
+  "app.projectMenu.removeBody": "目录不会被删除。",
+
+  "app.scheduleMenu.rerunMissed": "补跑一次（错过 {count} 次）",
+  "app.scheduleMenu.ignoreMissed": "忽略这次错过",
+  "app.scheduleMenu.runNow": "立即运行",
+  "app.scheduleMenu.pause": "暂停",
+  "app.scheduleMenu.resume": "恢复",
+  "app.scheduleMenu.viewLastRun": "看上次运行",
+  "app.scheduleMenu.delete": "删除任务",
+  "app.scheduleMenu.deleteTitle": "删除「{name}」？",
+  "app.scheduleMenu.deleteBody": "到点就不会再跑了。已经跑过的会话不受影响。",
+  "app.scheduleCreate.manual": "手动创建…",
+  "app.scheduleCreate.byRiot": "让 Riot 创建",
+  "app.scheduleCreate.prompt": "帮我设一个定时任务：",
+  "app.schedules.clearDoneTitle": "清理 {count} 个已完成的任务？",
+  "app.schedules.clearDoneBody": "一次性任务跑完的记录会从列表里去掉。已经跑过的会话不受影响。",
+  "app.schedules.clearDone": "清理",
+
+  "app.sidebar.expand": "展开侧边栏",
+  "app.sidebar.expandTitle": "展开侧边栏（⌘B）",
+  "app.sidebar.collapse": "收起侧边栏",
+  "app.sidebar.collapseTitle": "收起侧边栏（⌘B）",
+  "app.sidebar.schedules": "定时任务",
+  "app.sidebar.missedTitle": "有 {count} 个任务在 App 关着时错过了",
+  "app.sidebar.projects": "项目",
+  "app.sidebar.settings": "设置",
+
+  "app.project.collapsed": "已折叠",
+  "app.project.expanded": "已展开",
+  "app.project.ariaLabel": "{name}，{state}",
+  "app.project.ariaLabelGone": "{name}，{state}，目录已不存在",
+  "app.project.titleGone": "{root}（目录已不存在）",
+  "app.project.dirGone": "目录已不存在",
+  "app.project.gone": "已失效",
+  "app.project.busy": "有会话正在运行",
+  "app.project.newSessionIn": "在 {name} 开新会话",
+  "app.project.actions": "项目操作",
+  "app.project.removeFromList": "从列表移除",
+  "app.session.actions": "会话操作",
+
+  "app.topbar.sessionSettings": "会话设置",
+  "app.topbar.needSession": "先打开一个会话",
+  "app.win.terminal": "终端面板",
+  "app.win.terminalTitle": "终端面板（⌘J）",
+  "app.win.terminalNeedSession": "先打开一个会话再用终端",
+  "app.win.drawer": "侧边面板",
+  "app.scopeBadge.title": "{count} 个站点授权了侵入性渗透操作 —— 点击查看和撤销",
+  "app.scopeBadge.label": "渗透授权 {count} 个站点",
+  "app.resizer.title": "拖动调整大小，双击恢复默认",
+
+  "app.welcome.tagline": "每个会话绑定一个项目目录。",
+  "app.welcome.recent": "最近",
+  "app.welcome.dirMissing": "找不到这个目录",
+
+  "app.workbench.browser": "浏览器",
+  "app.workbench.browserStarting": "浏览器启动中…",
+  "app.workbench.changes": "Git 改动",
+  "app.workbench.files": "文件",
+  "app.workbench.newTab": "新标签页",
+  "app.workbench.subagent": "子 agent {id}",
+  "app.workbench.addPanel": "添加面板",
+  "app.workbench.closeTab": "关闭 {title}",
+
+  "app.remote.connecting": "正在连接",
+  "app.remote.connectingHost": "正在连接宿主…",
+  "app.remote.reconnecting": "与宿主的连接断了，正在重连…",
+  "app.remote.title": "连接到 Riot",
+  "app.remote.hint": "输入桌面端「设置 → 远程访问」里显示的访问令牌。扫那里的二维码可以跳过这一步。",
+  "app.remote.denied": "宿主拒绝了上一次连接：{reason}",
+  "app.remote.tokenPlaceholder": "访问令牌",
+  "app.remote.connect": "连接",
+
+  "app.missingProject.title": "找不到项目目录",
+  "app.missingProject.body": "这个目录已经不在磁盘上了。会话必须绑一个还在的工作区。",
+  "app.missingProject.relocate": "另选目录",
+
+  "app.dirPicker.label": "选择目录",
+  "app.dirPicker.title": "选择服务器上的目录",
+  "app.dirPicker.up": "上一级",
+  "app.dirPicker.placeholder": "输入绝对路径后回车",
+  "app.dirPicker.missing": "没有这个目录：{missing}，已回到 {path}。",
+  "app.dirPicker.empty": "这里没有子目录。",
+  "app.dirPicker.choose": "选择当前目录",
+
+  "app.ctx.ariaLabel": "上下文占用 {pct}%，点开看明细",
+  "app.ctx.title": "上下文 {used} / {threshold}（{pct}%）",
+  "app.ctx.usage": "上下文用量",
+  "app.ctx.current": "当前占用",
+  "app.ctx.window": "模型窗口",
+  "app.ctx.total": "本会话累计",
+  "app.ctx.note": "到 {threshold} 会自动摘要压缩。",
+
+  "app.hintTip.label": "说明",
+};

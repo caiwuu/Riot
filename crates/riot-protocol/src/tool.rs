@@ -10,6 +10,7 @@ use crate::event::ProgressPayload;
 use crate::id::{SessionId, ToolUseId};
 use crate::message::{Message, ToolResultContent};
 use crate::permission::{PermissionContext, PermissionResult};
+use crate::text::UiText;
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -39,7 +40,10 @@ pub trait Tool: Send + Sync + 'static {
     fn prompt(&self, ctx: &PromptContext) -> String;
 
     /// 给 UI 看的一句话描述，如 "读取 src/main.rs"。
-    fn describe(&self, input: &serde_json::Value) -> String;
+    ///
+    /// 返回词典键而不是成句：界面支持多种语言，翻译只在前端做（见
+    /// [`crate::text`]）。用 `ui_text!("tools.read.file", path = p)` 造。
+    fn describe(&self, input: &serde_json::Value) -> UiText;
 
     /// 执行。
     ///
@@ -139,6 +143,16 @@ pub trait Tool: Send + Sync + 'static {
         self.name()
     }
 
+    /// 这次调用归属于哪个后台子 agent（任务标题）。
+    ///
+    /// 权限弹窗用它标出"是谁想干这件事"：后台任务的询问弹出来时父轮次
+    /// 多半已经结束、用户正在聊别的。只有归属包装（`riot_kernel::subagent::
+    /// Attributed`）返回 Some；它没法塞进 [`Self::describe`] —— 那句话是
+    /// 词典键，前缀得由前端拼。
+    fn agent_label(&self) -> Option<&str> {
+        None
+    }
+
     /// 兼容改名 —— 旧 transcript 里的名字还能被解析。
     fn aliases(&self) -> &[&'static str] {
         &[]
@@ -223,8 +237,16 @@ pub enum UiPayload {
         total: usize,
         truncated: bool,
     },
+    /// 原始文本：命令输出、文件清单、抓回来的网页……不翻译，照原样显示。
     Plain {
         text: String,
+    },
+    /// 一句给用户看的话（词典键）："计划已批准"、"已加载 3 个工具"。
+    ///
+    /// 和 [`Self::Plain`] 分开是因为翻译只在前端做：这里放的是键和参数，
+    /// 前端按当前语言查词填空。工具的结果**数据**不走这里。
+    Message {
+        text: UiText,
     },
 }
 
@@ -513,8 +535,8 @@ mod tests {
         fn prompt(&self, _: &PromptContext) -> String {
             "dummy".into()
         }
-        fn describe(&self, _: &serde_json::Value) -> String {
-            "dummy".into()
+        fn describe(&self, _: &serde_json::Value) -> UiText {
+            UiText::new("dummy")
         }
         async fn call(&self, _: serde_json::Value, _: ToolContext) -> ToolOutcome {
             ToolOutcome::ok_text("ok")
@@ -534,5 +556,10 @@ mod tests {
             PermissionResult::Passthrough
         );
         assert_eq!(t.classifier_input(&input), None);
+        assert_eq!(
+            t.agent_label(),
+            None,
+            "没包装的工具不该自称属于某个后台任务"
+        );
     }
 }

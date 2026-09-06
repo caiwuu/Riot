@@ -49,7 +49,7 @@ impl ReqwestTransport {
             // 在多轮工具调用的会话里这个差别很明显。
             .pool_idle_timeout(Duration::from_secs(90))
             .build()
-            .map_err(|e| HttpError::transport(format!("初始化 HTTP 客户端失败：{e}")))?;
+            .map_err(|e| HttpError::transport(format!("failed to build HTTP client: {e}")))?;
         Ok(Self { client })
     }
 }
@@ -70,7 +70,7 @@ impl HttpTransport for ReqwestTransport {
         let resp = tokio::select! {
             r = sending => r.map_err(from_reqwest)?,
             _ = cancel.cancelled() => {
-                return Err(HttpError::transport("请求已取消"));
+                return Err(HttpError::transport("request cancelled"));
             }
         };
 
@@ -88,6 +88,7 @@ impl HttpTransport for ReqwestTransport {
                 x_should_retry: should_retry,
                 body,
                 transport: false,
+                timed_out: false,
             });
         }
 
@@ -121,6 +122,7 @@ impl HttpTransport for ReqwestTransport {
 
 fn from_reqwest(e: reqwest::Error) -> HttpError {
     let status = e.status();
+    let timed_out = e.is_timeout();
     // `[约束]` 先剥 URL 再取文案。reqwest 的 Display 会把请求 URL 整条
     // 拼进去，而少数中转把密钥放在查询串里 —— 那种配置下 URL 本身就是
     // 密钥，而这段文案会进 UI 和日志。
@@ -139,7 +141,10 @@ fn from_reqwest(e: reqwest::Error) -> HttpError {
     // `[约束]` 这里必须置 transport=true。漏了的话 retry 层会把它当成
     // "拿到了响应但没有状态码"，走不可重试分支，于是一次网络抖动就
     // 让整轮对话失败。
-    HttpError::transport(body)
+    HttpError {
+        timed_out,
+        ..HttpError::transport(body)
+    }
 }
 
 fn describe(e: &reqwest::Error) -> String {
@@ -149,19 +154,16 @@ fn describe(e: &reqwest::Error) -> String {
     //
     // source 链里的底层错误（hyper / rustls / io）只带 host:port，不带
     // 查询串 —— 主机名要留着，用户排查 base URL 配错时全靠它。
+    //
+    // 这段是技术细节（前端放括号里），不翻译；"超时"和"连不上"给用户的
+    // 解释由词典键负责（见 `errors.rs`），这里不再追加中文提示。
     let mut parts = vec![e.to_string()];
     let mut src = std::error::Error::source(e);
     while let Some(s) = src {
         parts.push(s.to_string());
         src = s.source();
     }
-    if e.is_timeout() {
-        parts.push("连接超时".to_owned());
-    }
-    if e.is_connect() {
-        parts.push("无法建立连接，请检查网络或 base URL".to_owned());
-    }
-    parts.join("：")
+    parts.join(": ")
 }
 
 fn header_u64(resp: &reqwest::Response, name: &str) -> Option<u64> {
@@ -237,7 +239,7 @@ mod tests {
             .err()
             .expect("已取消");
 
-        assert!(err.body.contains("取消"));
+        assert!(err.body.contains("cancelled"));
     }
 
     /// 起一个只回一次响应的 TCP 服务器，返回它的地址和"收到几个连接"的计数。

@@ -785,12 +785,19 @@ async fn describe_优先用模型给的描述() {
         "command": "cargo test --workspace --all-features",
         "description": "跑全量测试"
     }));
-    assert_eq!(d, "跑全量测试");
+    assert_eq!(d.key, "tools.raw", "模型的原话走直通键，不查词典：{d:?}");
+    assert_eq!(d.args.get("text").map(String::as_str), Some("跑全量测试"));
 }
 
 #[tokio::test]
 async fn describe_在没有描述时截断命令() {
     let long = "x".repeat(200);
     let d = Bash.describe(&serde_json::json!({ "command": long }));
-    assert!(d.chars().count() <= 61, "太长了：{}", d.chars().count());
+    assert_eq!(d.key, "tools.bash.run");
+    let shown = d.args.get("command").expect("要带命令");
+    assert!(
+        shown.chars().count() <= 61,
+        "太长了：{}",
+        shown.chars().count()
+    );
 }

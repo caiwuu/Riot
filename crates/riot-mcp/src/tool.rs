@@ -14,7 +14,9 @@ use riot_protocol::permission::{
     DecisionReason, PermissionContext, PermissionMode, PermissionResult, PermissionUpdate,
     RuleDecision, UpdateScope,
 };
+use riot_protocol::text::UiText;
 use riot_protocol::tool::{PromptContext, Tool, ToolContext, ToolOutcome, UiPayload};
+use riot_protocol::ui_text;
 use riot_protocol::vision::{DescribeRequest, VisionError};
 
 use crate::client::{Client, ClientError};
@@ -184,20 +186,26 @@ impl Tool for McpTool {
         )
     }
 
-    fn describe(&self, input: &Value) -> String {
+    fn describe(&self, input: &Value) -> UiText {
         // 挑一个最像"目标"的字符串参数带上，弹窗里光有工具名不够用户判断。
         let arg = input
             .as_object()
             .and_then(|o| o.values().find_map(Value::as_str))
-            .map(|s| {
-                let mut s = s.chars().take(60).collect::<String>();
-                if !s.is_empty() {
-                    s = format!("：{s}");
-                }
-                s
-            })
-            .unwrap_or_default();
-        format!("调用 {} 的 {}{arg}", self.server_id, self.remote_name)
+            .map(|s| s.chars().take(60).collect::<String>())
+            .filter(|s| !s.is_empty());
+        match arg {
+            Some(arg) => ui_text!(
+                "tools.mcp.callWith",
+                server = &self.server_id,
+                name = &self.remote_name,
+                arg = arg
+            ),
+            None => ui_text!(
+                "tools.mcp.call",
+                server = &self.server_id,
+                name = &self.remote_name
+            ),
+        }
     }
 
     /// `[约束]` 永远是 `false`，**不看 `readOnlyHint`**。
@@ -264,10 +272,10 @@ impl Tool for McpTool {
         }
 
         PermissionResult::Ask {
-            message: format!(
-                "是否允许调用外部 MCP 服务器「{}」的 {}？\
-                 它跑在本机的独立进程里，能做什么由那个服务器决定。",
-                self.server_id, self.remote_name,
+            message: ui_text!(
+                "tools.ask.mcp",
+                server = &self.server_id,
+                name = &self.remote_name
             ),
             // 整工具粒度：MCP 工具没有内容维度（`target_path` 给不出路径），
             // 给不出更细的建议。会话级 —— 写进配置文件是更重的决定，

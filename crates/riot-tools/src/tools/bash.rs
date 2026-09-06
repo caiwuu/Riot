@@ -11,15 +11,15 @@ use riot_protocol::permission::{
     DecisionReason, PermissionContext, PermissionResult, PermissionUpdate, RuleDecision,
     SafetyKind, UpdateScope,
 };
+use riot_protocol::text::UiText;
 use riot_protocol::tool::{
     InterruptBehavior, ProcessSpec, PromptContext, Tool, ToolContext, ToolOutcome, UiPayload,
     ValidationError,
 };
+use riot_protocol::ui_text;
 use serde::Deserialize;
 
-use super::names::{
-    BASH, EDIT, GLOB, GREP, READ, Siblings, TERMINAL_KILL, TERMINAL_OUTPUT, WRITE,
-};
+use super::names::{BASH, EDIT, GLOB, GREP, READ, Siblings, TERMINAL_KILL, TERMINAL_OUTPUT, WRITE};
 
 /// 默认超时。
 ///
@@ -190,15 +190,17 @@ impl Tool for Bash {
         )
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
+        // 模型给的描述是它的原话，原样透传（`tools.raw` 是 "{text}" 的
+        // 直通键）—— 它不跟界面语言走，翻译层拿它也没法查词。
         if let Some(d) = input.get("description").and_then(|v| v.as_str())
             && !d.trim().is_empty()
         {
-            return d.to_owned();
+            return ui_text!("tools.raw", text = d);
         }
         match input.get("command").and_then(|v| v.as_str()) {
-            Some(c) => clamp_chars(c.trim(), 60),
-            None => "执行命令".to_owned(),
+            Some(c) => ui_text!("tools.bash.run", command = clamp_chars(c.trim(), 60)),
+            None => ui_text!("tools.bash.runAny"),
         }
     }
 
@@ -307,10 +309,7 @@ impl Tool for Bash {
         // 让人把沙箱关掉。
         if escapes && matches!(verdict, PermissionResult::Passthrough) {
             return PermissionResult::Ask {
-                message: format!(
-                    "`{cmd}` 会在 OS 沙箱**之外**执行。\n\n\
-                     沙箱的文件系统边界对它不生效 —— 它能写工作区以外的任何地方。"
-                ),
+                message: ui_text!("tools.ask.sandboxEscape", command = cmd),
                 suggestions: vec![PermissionUpdate::AddRule {
                     tool: "Bash".to_owned(),
                     pattern: Some(cmd.to_owned()),

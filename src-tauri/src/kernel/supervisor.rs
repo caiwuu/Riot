@@ -54,16 +54,19 @@ const RESTART_BACKOFF: [Duration; 4] = [
     Duration::from_millis(10000),
 ];
 
+/// 和内核打交道时的错误。`Display` 只给日志；给前端的键在
+/// `HostError::to_ui` 里配。
 #[derive(Debug, thiserror::Error)]
 pub enum KernelError {
-    #[error("内核未运行")]
+    #[error("kernel not running")]
     NotRunning,
-    #[error("内核连续崩溃 {0} 次，已停止重启")]
+    #[error("kernel crashed {0} times in a row; giving up on restarts")]
     RestartExhausted(usize),
-    #[error("内核响应超时: {method}")]
+    #[error("kernel did not respond in time: {method}")]
     Timeout { method: String },
-    #[error("内核返回错误: {0}")]
-    Rpc(String),
+    /// 内核明确回的错。键由内核定，宿主原样转交前端。
+    #[error("kernel error: {0}")]
+    Rpc(riot_protocol::UiError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -100,7 +103,11 @@ impl KernelHandle {
         match rx.await {
             Ok(msg) => {
                 if let Some(err) = msg.get("error") {
-                    return Err(KernelError::Rpc(err.to_string()));
+                    // JSON-RPC 信封层的错（不是 RpcResponse::Error）：内核连
+                    // 请求都没认出来。没有键可给，细节原样带回。
+                    return Err(KernelError::Rpc(
+                        riot_protocol::ui_error!("host.kernel.rpc"; err),
+                    ));
                 }
                 Ok(msg.get("result").cloned().unwrap_or(Value::Null))
             }

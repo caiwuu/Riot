@@ -975,6 +975,7 @@ mod tests {
                 id: MessageId::from_raw("s1"),
                 level: riot_protocol::message::SystemLevel::Error,
                 text: "上次请求失败了".into(),
+                ui: None,
             },
             user("b"),
         ];

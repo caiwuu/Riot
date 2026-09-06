@@ -23,8 +23,9 @@ use riot_protocol::event::AgentEvent;
 use riot_protocol::id::{IdGenerator, NanoIdGenerator, SessionId};
 use riot_protocol::message::Message;
 use riot_protocol::permission::{PermissionResponse, SafetyClassifier};
-use riot_protocol::rpc::RpcNotification;
+use riot_protocol::rpc::{RpcError, RpcErrorCode, RpcNotification};
 use riot_protocol::turn::{SandboxKind, TurnConfig, TurnInput as RpcTurnInput};
+use riot_protocol::ui_error;
 
 use crate::content::ImageInput;
 use crate::session::{
@@ -379,6 +380,16 @@ impl SessionManager {
         (caps, limits)
     }
 
+    /// 按 id 找活会话；不在就是一条 `SessionNotFound`。
+    async fn require(&self, session_id: &str) -> Result<Arc<Session>, RpcError> {
+        self.get(session_id).await.ok_or_else(|| {
+            RpcError::new(
+                RpcErrorCode::SessionNotFound,
+                ui_error!("kernel.session.notFound", id = session_id),
+            )
+        })
+    }
+
     /// 提交一轮:从 [`TurnConfig`] 现装能力,跑主循环,事件经出口回流。
     /// 返回 `Some(条目 id)` = 上一轮在跑、进了插话队列;`None` = 直接开轮。
     pub async fn submit(
@@ -386,8 +397,8 @@ impl SessionManager {
         session_id: &str,
         input: RpcTurnInput,
         config: TurnConfig,
-    ) -> Result<Option<String>, String> {
-        let session = self.get(session_id).await.ok_or("会话不存在")?;
+    ) -> Result<Option<String>, RpcError> {
+        let session = self.require(session_id).await?;
         let (caps, limits) = self.setup_turn(&session, &config).await;
 
         // UserPromptSubmit hooks:能拦下这条消息或给它附加上下文。
@@ -397,7 +408,11 @@ impl SessionManager {
             for o in engine.user_prompt_submit(&input.text).await {
                 match o {
                     crate::hooks::Outcome::Block { reason } => {
-                        return Err(format!("消息被 UserPromptSubmit hook 拦下：{reason}"));
+                        // 理由是用户自己 hook 脚本的输出，作为参数原样带上。
+                        return Err(RpcError::invalid_params(ui_error!(
+                            "kernel.hook.promptBlocked",
+                            reason = reason
+                        )));
                     }
                     crate::hooks::Outcome::Context { text } => extra_context.push(text),
                     _ => {}
@@ -430,13 +445,13 @@ impl SessionManager {
         session_id: &str,
         message_id: &str,
         config: TurnConfig,
-    ) -> Result<(), String> {
-        let session = self.get(session_id).await.ok_or("会话不存在")?;
+    ) -> Result<(), RpcError> {
+        let session = self.require(session_id).await?;
         let (caps, limits) = self.setup_turn(&session, &config).await;
         let sink = session.sink();
-        session
+        Ok(session
             .regenerate(message_id, config.model, caps, sink, limits)
-            .await
+            .await?)
     }
 
     /// 编辑一条用户提问并从它重新开始：换文字、丢掉之后的一切、再跑一轮。
@@ -446,13 +461,13 @@ impl SessionManager {
         message_id: &str,
         text: &str,
         config: TurnConfig,
-    ) -> Result<(), String> {
-        let session = self.get(session_id).await.ok_or("会话不存在")?;
+    ) -> Result<(), RpcError> {
+        let session = self.require(session_id).await?;
         let (caps, limits) = self.setup_turn(&session, &config).await;
         let sink = session.sink();
-        session
+        Ok(session
             .resend_from(message_id, text, config.model, caps, sink, limits)
-            .await
+            .await?)
     }
 
     /// 手动压缩(/compact)。空闲时才能做,session 内部会拒绝并发。
@@ -460,10 +475,10 @@ impl SessionManager {
         &self,
         session_id: &str,
         model: riot_protocol::ModelEndpoint,
-    ) -> Result<(), String> {
-        let s = self.get(session_id).await.ok_or("会话不存在")?;
+    ) -> Result<(), RpcError> {
+        let s = self.require(session_id).await?;
         let sink = s.sink();
-        s.compact_now(model, sink).await
+        Ok(s.compact_now(model, sink).await?)
     }
 
     /// 上下文编辑:替换一条活历史消息的文本段。空闲时才能做。
@@ -472,16 +487,16 @@ impl SessionManager {
         session_id: &str,
         message_id: &str,
         text: &str,
-    ) -> Result<(), String> {
-        let s = self.get(session_id).await.ok_or("会话不存在")?;
-        s.edit_message(message_id, text).await
+    ) -> Result<(), RpcError> {
+        let s = self.require(session_id).await?;
+        Ok(s.edit_message(message_id, text).await?)
     }
 
     /// 上下文删除:抹掉一条活历史消息的可见内容,空心则整条移除。
     /// 空闲时才能做。
-    pub async fn delete_message(&self, session_id: &str, message_id: &str) -> Result<(), String> {
-        let s = self.get(session_id).await.ok_or("会话不存在")?;
-        s.delete_message(message_id).await
+    pub async fn delete_message(&self, session_id: &str, message_id: &str) -> Result<(), RpcError> {
+        let s = self.require(session_id).await?;
+        Ok(s.delete_message(message_id).await?)
     }
 
     pub async fn queue_list(&self, session_id: &str) -> Vec<riot_protocol::QueuedSummary> {
@@ -599,6 +614,7 @@ impl SessionManager {
                 id: s.id,
                 state: s.state,
                 detail: s.detail,
+                error: s.error,
                 tools: s.tools,
             })
             .collect()

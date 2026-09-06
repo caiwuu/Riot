@@ -134,7 +134,16 @@ export type Message =
       id: string;
       level: SystemLevel;
       role: "system";
+      /**
+       * 技术细节（服务方原话、hook 输出）。`ui` 在时它是次要信息；
+       * 老 transcript 里只有它，界面就原样显示。
+       */
       text: string;
+      /**
+       * 给界面翻译的那句话（词典键）。新写的 System 消息都要带 ——
+       * `text` 不翻译。`default` 是为了老 transcript 能读回来。
+       */
+      ui?: UiText | null;
     };
 export type UserContent =
   | {
@@ -298,6 +307,10 @@ export type ProgressPayload =
       text: string;
     }
   | {
+      kind: "message";
+      text: UiText;
+    }
+  | {
       event: AgentEvent;
       kind: "nested";
     };
@@ -327,6 +340,10 @@ export type AskPreview =
     }
   | {
       kind: "plain";
+      text: UiText;
+    }
+  | {
+      kind: "raw";
       text: string;
     }
   | {
@@ -459,6 +476,13 @@ export type TerminalReason =
       reason: "error";
     };
 export type AbortSource = "user" | "user_interjection" | "sibling_failure" | "permission_denied" | "shutdown";
+/**
+ * 一轮为什么以错误收场。前端把它画在对话里。
+ *
+ * 带文案的变体装的是 [`UiError`]：词典键给界面翻译，`detail` 是服务方
+ * 的原话 / HTTP 正文 / 内核的技术细节，前端放在次要位置。这里没有任何
+ * 一种语言的文案（见 [`crate::text`]）。
+ */
 export type AgentError =
   | {
       kind: "context_exhausted";
@@ -470,13 +494,13 @@ export type AgentError =
       kind: "compact_circuit_open";
     }
   | {
+      error: UiError;
       kind: "provider";
-      message: string;
       retryable: boolean;
     }
   | {
+      error: UiError;
       kind: "internal";
-      message: string;
     };
 /**
  * 宿主对权限请求的应答。
@@ -526,6 +550,14 @@ export type ProviderEventUsage = Usage & {
 export type ProviderEventError = ProviderError & {
   event: "error";
 };
+/**
+ * 一次模型调用为什么失败。
+ *
+ * 变体是**主循环分支的依据**（可恢复 / 不可恢复、要不要压缩），带文案的
+ * 变体里装的 [`UiError`] 才是给人看的：键由构造方按它当时知道的原因选
+ * （限流、过载、余额不足、模型不存在……都在同一个变体下），`detail` 放
+ * 服务方回的原文。`Display` 是日志和模型用的英文表示，不进界面。
+ */
 export type ProviderError =
   | {
       kind: "context_overflow";
@@ -540,20 +572,20 @@ export type ProviderError =
       kind: "media_too_large";
     }
   | {
+      error: UiError;
       kind: "retries_exhausted";
-      message: string;
     }
   | {
+      error: UiError;
       kind: "auth";
-      message: string;
     }
   | {
+      error: UiError;
       kind: "transport";
-      message: string;
     }
   | {
+      error: UiError;
       kind: "refused";
-      message: string;
     };
 /**
  * 内核 → 宿主，单向推送。
@@ -1159,9 +1191,32 @@ export interface Usage {
   output_tokens: number;
 }
 /**
+ * 一句给人看的话：词典键 + 占位参数。前端 `t(key, args)` 得到译文。
+ */
+export interface UiText {
+  /**
+   * 填进译文 `{name}` 占位符的值。全部是字符串 —— 数字由调用方格式化好。
+   */
+  args?: {
+    [k: string]: string;
+  };
+  /**
+   * 词典键，如 `host.session.missing`。
+   */
+  key: string;
+}
+/**
  * 发给 UI 的权限请求详情。
  */
 export interface PermissionAsk {
+  /**
+   * 这次询问来自哪个后台子 agent（任务标题）。`None` = 主对话自己的。
+   *
+   * 后台任务的弹窗出现时父轮次多半已经结束，用户正在聊别的 —— 一句光秃秃
+   * 的 "运行 rm -rf build" 他不知道是谁要干。前端拿它画归属前缀；不塞进
+   * `summary`，因为那是词典键，拼不了字符串。
+   */
+  agent_label?: string | null;
   /**
    * 结构化预览：diff、命令、URL。UI 据此渲染。
    */
@@ -1169,9 +1224,10 @@ export interface PermissionAsk {
   reason: DecisionReason;
   suggestions: PermissionUpdate[];
   /**
-   * 给用户看的一句话描述，如 "运行 npm test"。
+   * 弹窗标题：给用户看的一句话，如 "是否允许运行 `npm test`？"。
+   * 词典键 —— 翻译在前端做。
    */
-  summary: string;
+  summary: UiText;
   tool_name: string;
   tool_use_id: string;
 }
@@ -1204,9 +1260,11 @@ export interface AskChoiceOption {
  */
 export interface BackgroundTaskView {
   /**
-   * 最近一行活动（正在调哪个工具、刚说的第一句话）。面板上滚动显示。
+   * 最近一行活动（正在调哪个工具、刚说的第一句话、已收场）。面板上滚动
+   * 显示。是词典键：工具名和模型原话作为参数带进去，"启动 / 完成 / 失败"
+   * 这类状态词由前端翻译。
    */
-  activity: string;
+  activity: UiText;
   /**
    * 后台跑的（进面板、完成时发通知）还是同步跑的（只在 Task 卡片上）。
    */
@@ -1238,6 +1296,26 @@ export interface BackgroundTaskView {
    */
   tool_use_id?: string;
   tool_uses: number;
+}
+/**
+ * 给人看的错误：一句 [`UiText`]，外加一段可选的技术细节。
+ *
+ * `detail` 是原始原因 —— 操作系统的错误文本、HTTP 状态、内核的原话。
+ * 它不翻译（多半是英文，或者本来就是机器话），前端放在次要位置。
+ * 给模型看的那一面也用它：模型读 `detail`，不读词典键。
+ */
+export interface UiError {
+  /**
+   * 填进译文 `{name}` 占位符的值。全部是字符串 —— 数字由调用方格式化好。
+   */
+  args?: {
+    [k: string]: string;
+  };
+  detail?: string | null;
+  /**
+   * 词典键，如 `host.session.missing`。
+   */
+  key: string;
 }
 /**
  * 启动时发现的错过运行（上次 App 没开着，到点没跑成）。
@@ -1532,9 +1610,13 @@ export interface GitChanges {
  */
 export interface McpServerStatus {
   /**
-   * connected 时是服务器自报的名字和版本;failed 时是错误原因。
+   * connected 时是服务器自报的名字和版本(原样显示,不翻译);其余状态为空。
    */
   detail: string;
+  /**
+   * failed 时的原因(词典键 + 技术细节)。其余状态为 None。
+   */
+  error?: UiError | null;
   id: string;
   /**
    * `connecting` / `connected` / `failed`
@@ -1550,9 +1632,25 @@ export interface ToolInfo {
   name: string;
   user_facing_name: string;
 }
+/**
+ * 内核回给宿主的错误。
+ *
+ * `code` 给宿主分支用（比如"这一轮还在跑"要不要重试）；`error` 是给前端
+ * 翻译的键和参数，见 [`crate::text`]。这里没有任何一种语言的文案。
+ */
 export interface RpcError {
+  /**
+   * 填进译文 `{name}` 占位符的值。全部是字符串 —— 数字由调用方格式化好。
+   */
+  args?: {
+    [k: string]: string;
+  };
   code: RpcErrorCode;
-  message: string;
+  detail?: string | null;
+  /**
+   * 词典键，如 `host.session.missing`。
+   */
+  key: string;
 }
 /**
  * 前端表单手动创建一个任务的完整说法。
@@ -1587,7 +1685,7 @@ export interface ScheduleRun {
    * 开跑失败时的原因（会话没了、模型没配好）。phase=Done 且它为
    * Some 时，前端把它当失败显示。
    */
-  error?: string | null;
+  error?: UiError | null;
   name: string;
   phase: ScheduleRunPhase;
   sessionId: string;
@@ -1643,7 +1741,7 @@ export interface ScheduleRunRecord {
   /**
    * 失败原因。Some = 这次没跑成。
    */
-  error?: string | null;
+  error?: UiError | null;
   /**
    * 跑完的时刻。None = 还在跑（或 App 中途退出，没等到结束）。
    */

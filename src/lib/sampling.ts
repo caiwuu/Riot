@@ -1,4 +1,5 @@
 import type { AppConfig, Sampling } from "../bridge";
+import type { MessageKey } from "../i18n";
 
 /**
  * 采样参数的范围和展示。三处 UI（会话覆盖、服务方默认、模型覆盖）共用，
@@ -14,8 +15,10 @@ export type SamplingScale = "linear" | "log";
 
 export interface SamplingField {
   key: SamplingKey;
+  /** 参数名本身（temperature / top_p…），各语言通用，不进词典。 */
   label: string;
-  hint: string;
+  /** 说明文案的词典键。渲染时再 `t()`，不在这里缓存翻译结果。 */
+  hintKey: MessageKey;
   min: number;
   max: number;
   step: number;
@@ -29,7 +32,7 @@ export const SAMPLING_FIELDS: SamplingField[] = [
   {
     key: "temperature",
     label: "temperature",
-    hint: "0–2。越高越发散。",
+    hintKey: "composer.sampling.temperature.hint",
     min: 0,
     max: 2,
     step: 0.05,
@@ -38,7 +41,7 @@ export const SAMPLING_FIELDS: SamplingField[] = [
   {
     key: "topP",
     label: "top_p",
-    hint: "0–1。核采样。一般不与 temperature 同调。",
+    hintKey: "composer.sampling.topP.hint",
     min: 0,
     max: 1,
     step: 0.05,
@@ -47,7 +50,7 @@ export const SAMPLING_FIELDS: SamplingField[] = [
   {
     key: "topK",
     label: "top_k",
-    hint: "仅 Anthropic 协议发送。",
+    hintKey: "composer.sampling.topK.hint",
     min: 1,
     max: 100,
     step: 1,
@@ -57,7 +60,7 @@ export const SAMPLING_FIELDS: SamplingField[] = [
   {
     key: "maxOutputTokens",
     label: "max tokens",
-    hint: "单次回复的输出上限。",
+    hintKey: "composer.sampling.maxOutputTokens.hint",
     min: 256,
     max: 128_000,
     step: 256,

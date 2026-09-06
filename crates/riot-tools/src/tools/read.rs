@@ -6,10 +6,12 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use riot_protocol::message::ToolResultContent;
 use riot_protocol::permission::{PermissionContext, PermissionResult};
+use riot_protocol::text::UiText;
 use riot_protocol::tool::{
     FileState, FileView, PromptContext, ResultBudget, Tool, ToolContext, ToolOutcome, UiPayload,
     ValidationError,
 };
+use riot_protocol::ui_text;
 use serde::Deserialize;
 
 use super::names::{BASH, EDIT, GLOB, GREP, READ, Siblings, WRITE};
@@ -157,10 +159,10 @@ impl Tool for Read {
         )
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         match input.get("path").and_then(|v| v.as_str()) {
-            Some(p) => format!("读取 {p}"),
-            None => "读取文件".to_owned(),
+            Some(p) => ui_text!("tools.read.file", path = p),
+            None => ui_text!("tools.read.any"),
         }
     }
 
@@ -357,8 +359,12 @@ async fn read_image(
                 data,
                 path: Some(resolved.to_path_buf()),
             },
-            ui_payload: Some(UiPayload::Plain {
-                text: format!("图片（{media_type}，{} KB）", bytes.len() / 1024),
+            ui_payload: Some(UiPayload::Message {
+                text: ui_text!(
+                    "tools.read.image",
+                    media = media_type,
+                    kb = bytes.len() / 1024
+                ),
             }),
             side_messages: Vec::new(),
         };

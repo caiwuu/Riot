@@ -1,0 +1,146 @@
+import type { Dict } from "..";
+import type zh from "../zh-CN/app";
+
+export default {
+  "app.newSession": "新しいセッション",
+  "app.openDir": "フォルダを開く…",
+
+  "app.boot.failed": "エラーが発生しました",
+  "app.boot.reload": "再読み込み",
+  "app.boot.starting": "起動中",
+
+  "app.update.released": "Riot {version} が公開されました",
+  "app.update.download": "ダウンロード",
+
+  "app.dialog.gotIt": "OK",
+  "app.error.createSession": "セッションを作成できません",
+  "app.error.openDir": "このフォルダを開けません",
+  "app.error.removeProject": "プロジェクトを削除できません",
+  "app.error.rerun": "再実行に失敗しました",
+  "app.error.runNow": "実行を開始できませんでした",
+  "app.error.pause": "一時停止に失敗しました",
+  "app.error.resume": "再開に失敗しました",
+  "app.error.delete": "削除に失敗しました",
+  "app.error.clearDone": "クリアに失敗しました",
+
+  "app.notify.turnDone": "タスクが完了しました。戻って結果を確認してください。",
+
+  "app.notify.scheduleDone.title": "スケジュールタスクが完了しました",
+
+  "app.notify.scheduleDone.body": "「{name}」が完了しました。結果を確認してください。",
+
+  "app.notify.scheduleFailed.title": "スケジュールタスクが失敗しました",
+
+  "app.notify.scheduleFailed.body": "「{name}」：{error}",
+
+  "app.hero.title": "今日は何をしますか？",
+  "app.hero.dirGone": "フォルダが存在しません。ここをクリックして対処",
+
+  "app.treeMenu.preview": "プレビュー",
+  "app.treeMenu.addToChat": "チャットに追加",
+  "app.treeMenu.copyRelPath": "相対パスをコピー",
+  "app.treeMenu.copyFullPath": "フルパスをコピー",
+  "app.treeMenu.revealInFileManager": "Finder / エクスプローラーで表示",
+
+  "app.sessionMenu.rename": "名前を変更",
+  "app.sessionMenu.delete": "セッションを削除",
+  "app.sessionMenu.deleteTitle": "このセッションを削除しますか？",
+  "app.sessionMenu.deleteBody": "「{title}」の履歴は失われます。",
+
+  "app.projectMenu.copyPath": "パスをコピー",
+  "app.projectMenu.removeTitle": "{name} を削除しますか？",
+  "app.projectMenu.removeBodyCount": "配下の {count} 件のセッションが閉じられます。フォルダ自体は削除されません。",
+  "app.projectMenu.removeBody": "フォルダ自体は削除されません。",
+
+  "app.scheduleMenu.rerunMissed": "今すぐ 1 回実行（{count} 回未実行）",
+  "app.scheduleMenu.ignoreMissed": "未実行分を無視",
+  "app.scheduleMenu.runNow": "今すぐ実行",
+  "app.scheduleMenu.pause": "一時停止",
+  "app.scheduleMenu.resume": "再開",
+  "app.scheduleMenu.viewLastRun": "前回の実行を見る",
+  "app.scheduleMenu.delete": "タスクを削除",
+  "app.scheduleMenu.deleteTitle": "「{name}」を削除しますか？",
+  "app.scheduleMenu.deleteBody": "今後は実行されません。すでに実行されたセッションには影響しません。",
+  "app.scheduleCreate.manual": "手動で作成…",
+  "app.scheduleCreate.byRiot": "Riot に作成させる",
+  "app.scheduleCreate.prompt": "スケジュールタスクを設定してください：",
+  "app.schedules.clearDoneTitle": "完了した {count} 件のタスクをクリアしますか？",
+  "app.schedules.clearDoneBody": "実行済みの 1 回限りのタスクが一覧から削除されます。すでに実行されたセッションには影響しません。",
+  "app.schedules.clearDone": "クリア",
+
+  "app.sidebar.expand": "サイドバーを表示",
+  "app.sidebar.expandTitle": "サイドバーを表示（⌘B）",
+  "app.sidebar.collapse": "サイドバーを隠す",
+  "app.sidebar.collapseTitle": "サイドバーを隠す（⌘B）",
+  "app.sidebar.schedules": "スケジュールタスク",
+  "app.sidebar.missedTitle": "アプリ終了中に {count} 件のタスクが未実行でした",
+  "app.sidebar.projects": "プロジェクト",
+  "app.sidebar.settings": "設定",
+
+  "app.project.collapsed": "折りたたみ",
+  "app.project.expanded": "展開",
+  "app.project.ariaLabel": "{name}、{state}",
+  "app.project.ariaLabelGone": "{name}、{state}、フォルダが存在しません",
+  "app.project.titleGone": "{root}（フォルダが存在しません）",
+  "app.project.dirGone": "フォルダが存在しません",
+  "app.project.gone": "無効",
+  "app.project.busy": "実行中のセッションがあります",
+  "app.project.newSessionIn": "{name} で新しいセッション",
+  "app.project.actions": "プロジェクト操作",
+  "app.project.removeFromList": "一覧から削除",
+  "app.session.actions": "セッション操作",
+
+  "app.topbar.sessionSettings": "セッション設定",
+  "app.topbar.needSession": "先にセッションを開いてください",
+  "app.win.terminal": "ターミナルパネル",
+  "app.win.terminalTitle": "ターミナルパネル（⌘J）",
+  "app.win.terminalNeedSession": "ターミナルを使うには先にセッションを開いてください",
+  "app.win.drawer": "サイドパネル",
+  "app.scopeBadge.title": "{count} 件のサイトで侵入的なペネトレーション操作が許可されています —— クリックして確認・取り消し",
+  "app.scopeBadge.label": "ペンテスト許可：{count} サイト",
+  "app.resizer.title": "ドラッグでサイズ変更、ダブルクリックで初期値に戻す",
+
+  "app.welcome.tagline": "各セッションはプロジェクトフォルダに紐づきます。",
+  "app.welcome.recent": "最近",
+  "app.welcome.dirMissing": "フォルダが見つかりません",
+
+  "app.workbench.browser": "ブラウザ",
+  "app.workbench.browserStarting": "ブラウザを起動中…",
+  "app.workbench.changes": "Git の変更",
+  "app.workbench.files": "ファイル",
+  "app.workbench.newTab": "新しいタブ",
+  "app.workbench.subagent": "サブエージェント {id}",
+  "app.workbench.addPanel": "パネルを追加",
+  "app.workbench.closeTab": "{title} を閉じる",
+
+  "app.remote.connecting": "接続中",
+  "app.remote.connectingHost": "ホストに接続中…",
+  "app.remote.reconnecting": "ホストとの接続が切れました。再接続中…",
+  "app.remote.title": "Riot に接続",
+  "app.remote.hint": "デスクトップ版の「設定 → リモートアクセス」に表示されているアクセストークンを入力してください。そこの QR コードを読み取ればこの手順は不要です。",
+  "app.remote.denied": "ホストが前回の接続を拒否しました：{reason}",
+  "app.remote.tokenPlaceholder": "アクセストークン",
+  "app.remote.connect": "接続",
+
+  "app.missingProject.title": "プロジェクトフォルダが見つかりません",
+  "app.missingProject.body": "このフォルダはディスク上に存在しません。セッションは実在するワークスペースに紐づける必要があります。",
+  "app.missingProject.relocate": "別のフォルダを選ぶ",
+
+  "app.dirPicker.label": "フォルダを選択",
+  "app.dirPicker.title": "サーバー上のフォルダを選択",
+  "app.dirPicker.up": "上の階層へ",
+  "app.dirPicker.placeholder": "絶対パスを入力して Enter",
+  "app.dirPicker.missing": "フォルダがありません：{missing}。{path} に戻りました。",
+  "app.dirPicker.empty": "サブフォルダはありません。",
+  "app.dirPicker.choose": "このフォルダを選択",
+
+  "app.ctx.ariaLabel": "コンテキスト使用率 {pct}%。開いて詳細を表示",
+  "app.ctx.title": "コンテキスト {used} / {threshold}（{pct}%）",
+  "app.ctx.usage": "コンテキスト使用量",
+  "app.ctx.current": "現在の使用量",
+  "app.ctx.window": "モデルのウィンドウ",
+  "app.ctx.total": "このセッションの累計",
+  "app.ctx.note": "{threshold} に達すると自動で要約・圧縮されます。",
+
+  "app.hintTip.label": "説明",
+} satisfies Dict<typeof zh>;

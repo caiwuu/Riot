@@ -42,6 +42,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::{Arc, Mutex};
 
+use riot_protocol::{UiError, ui_error};
 use serde::Serialize;
 use tauri::AppHandle;
 use tokio::sync::{oneshot, watch};
@@ -80,7 +81,7 @@ pub struct Remote {
     shared: Arc<Shared>,
     running: tokio::sync::Mutex<Option<Running>>,
     /// 上次启动失败的原因（端口被占之类）。设置页要能看到。
-    last_error: Mutex<Option<String>>,
+    last_error: Mutex<Option<UiError>>,
 }
 
 impl Default for Remote {
@@ -131,9 +132,9 @@ impl Remote {
             None => {
                 let t = auth::generate_token();
                 if let Err(e) = crate::config::save_key(REMOTE_TOKEN_KEY, &t) {
-                    let msg = format!("令牌写不进 auth.json：{e}");
-                    tracing::error!("{msg}");
-                    *self.last_error.lock().expect("错误锁") = Some(msg);
+                    tracing::error!(error = %e, "remote token could not be written to auth.json");
+                    *self.last_error.lock().expect("错误锁") =
+                        Some(ui_error!("host.remote.tokenSaveFailed"; e));
                     return;
                 }
                 t
@@ -149,9 +150,9 @@ impl Remote {
         let listener = match tokio::net::TcpListener::bind(addr).await {
             Ok(l) => l,
             Err(e) => {
-                let msg = format!("监听 {addr} 失败：{e}");
-                tracing::error!("{msg}");
-                *self.last_error.lock().expect("错误锁") = Some(msg);
+                tracing::error!(%addr, error = %e, "remote access failed to bind");
+                *self.last_error.lock().expect("错误锁") =
+                    Some(ui_error!("host.remote.bindFailed", addr = addr; e));
                 return;
             }
         };
@@ -246,7 +247,10 @@ async fn stop(mut r: Running) {
     if let Some(tx) = r.stop.take() {
         let _ = tx.send(());
     }
-    if tokio::time::timeout(STOP_DEADLINE, &mut r.task).await.is_err() {
+    if tokio::time::timeout(STOP_DEADLINE, &mut r.task)
+        .await
+        .is_err()
+    {
         tracing::warn!("远程服务没在期限内退出,不再等它");
         r.task.abort();
     }
@@ -272,7 +276,8 @@ pub struct RemoteStatus {
     /// 当前令牌。只给设置页显示 —— 拿得到这条命令的人已经是主人。
     pub token: Option<String>,
     pub connections: usize,
-    pub error: Option<String>,
+    /// 上次起服务失败的原因（端口被占、令牌写不进 auth.json）。
+    pub error: Option<UiError>,
 }
 
 /// 能打开网页版的地址。
@@ -334,7 +339,10 @@ mod tests {
 
     #[test]
     fn 二维码能编下登录链接() {
-        let url = format!("http://192.168.1.100:7823/#token={}", auth::generate_token());
+        let url = format!(
+            "http://192.168.1.100:7823/#token={}",
+            auth::generate_token()
+        );
         let svg = qr_svg(&url).expect("能编");
         assert!(svg.contains("<svg"), "输出是 SVG 文档：{}", &svg[..60]);
     }

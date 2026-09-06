@@ -52,20 +52,22 @@ const BUILD_SCRIPT: &str = "scripts/build-browser.ps1";
 #[cfg(not(windows))]
 const BUILD_SCRIPT: &str = "scripts/build-browser.sh";
 
+/// 浏览器进程 / CDP 层的错误。`Display` 是技术细节（英文）：给日志，也作为
+/// `BrowserUnavailable` 的原文交给模型和面板 —— 面板那边它是
+/// `host.browser.unavailable` 译文后面的次要细节，不翻译。
 #[derive(Debug, thiserror::Error)]
 pub enum BrowserError {
-    #[error("浏览器进程未运行")]
+    #[error("browser process is not running")]
     NotRunning,
     #[error(
-        "找不到浏览器程序 {path}。\
-         开发时先跑 {script} 打包 —— CEF 的运行时不随主应用一起构建。",
+        "browser binary not found at {path}; run {script} first — the CEF runtime is not built with the app",
         path = .0.display(),
         script = BUILD_SCRIPT
     )]
     NotBundled(PathBuf),
-    #[error("CDP `{method}` 超过 {}s 没有响应", CDP_TIMEOUT.as_secs())]
+    #[error("CDP `{method}` did not respond within {}s", CDP_TIMEOUT.as_secs())]
     CdpTimeout { method: String },
-    #[error("CDP `{method}` 返回错误：{message}")]
+    #[error("CDP `{method}` returned an error: {message}")]
     Cdp { method: String, message: String },
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -273,7 +275,7 @@ impl Browser {
             let message = err
                 .get("message")
                 .and_then(Value::as_str)
-                .unwrap_or("未知错误")
+                .unwrap_or("unknown error")
                 .to_owned();
             return Err(BrowserError::Cdp {
                 method: method.to_owned(),

@@ -27,6 +27,7 @@ use super::protocol::channel_id;
 use crate::state::AppState;
 use crate::term::Terminals;
 use crate::{HostError, HostResult};
+use riot_protocol::{UiError, ui_error};
 
 /// 一条命令的结果。
 pub enum Outcome {
@@ -43,33 +44,33 @@ struct Args<'c> {
 
 impl Args<'_> {
     /// 取一个普通参数。缺的当 `null`（`Option<T>` 因此能省略），和 Tauri 一致。
-    fn take<T: DeserializeOwned>(&mut self, key: &str) -> Result<T, String> {
+    fn take<T: DeserializeOwned>(&mut self, key: &str) -> Result<T, UiError> {
         let v = self.map.remove(key).unwrap_or(Value::Null);
-        serde_json::from_value(v).map_err(|e| format!("参数 {key} 不合法：{e}"))
+        serde_json::from_value(v).map_err(|e| ui_error!("host.remote.badParam", name = key; e))
     }
 
     /// 取一个通道参数：占位串 → 挂在这条连接上的 [`Channel`]。
-    fn chan<T>(&mut self, key: &str) -> Result<Channel<T>, String> {
+    fn chan<T>(&mut self, key: &str) -> Result<Channel<T>, UiError> {
         let v = self.map.remove(key).unwrap_or(Value::Null);
-        let id = channel_id(&v).ok_or_else(|| format!("参数 {key} 不是通道"))?;
+        let id = channel_id(&v).ok_or_else(|| ui_error!("host.remote.badParam", name = key))?;
         Ok(self.ctx.channel(id))
     }
 }
 
-/// `HostResult<T>` → 结果帧。错误按 [`HostError`] 的 `Display`，和桌面那边
-/// `serde::Serialize for HostError` 给前端的是同一句话。
-fn ok<T: Serialize>(r: HostResult<T>) -> Result<Outcome, String> {
+/// `HostResult<T>` → 结果帧。错误按 [`HostError::to_ui`]，和桌面那边
+/// `serde::Serialize for HostError` 给前端的是同一份结构。
+fn ok<T: Serialize>(r: HostResult<T>) -> Result<Outcome, UiError> {
     match r {
         Ok(v) => val(v),
-        Err(e) => Err(e.to_string()),
+        Err(e) => Err(e.to_ui()),
     }
 }
 
 /// 不会失败的返回值。
-fn val<T: Serialize>(v: T) -> Result<Outcome, String> {
+fn val<T: Serialize>(v: T) -> Result<Outcome, UiError> {
     serde_json::to_value(v)
         .map(Outcome::Json)
-        .map_err(|e| format!("结果序列化失败：{e}"))
+        .map_err(|e| ui_error!("host.remote.encode"; e))
 }
 
 /// 分发一条命令。
@@ -78,11 +79,11 @@ pub async fn dispatch(
     ctx: &ConnCtx,
     cmd: &str,
     args: Value,
-) -> Result<Outcome, String> {
+) -> Result<Outcome, UiError> {
     let map = match args {
         Value::Object(m) => m,
         Value::Null => serde_json::Map::new(),
-        _ => return Err("args 必须是对象".to_owned()),
+        _ => return Err(ui_error!("host.remote.badParam", name = "args")),
     };
     let mut a = Args { map, ctx };
     let st = app.state::<AppState>();
@@ -149,34 +150,32 @@ pub async fn dispatch(
 
         // ── 斜杠命令 / 文件 ──
         "slash_commands" => ok(crate::slash_commands(a.take("root")?).await),
-        "slash_expand" => ok(crate::slash_expand(
-            st,
-            a.take("sessionId")?,
-            a.take("name")?,
-            a.take("args")?,
-        )
-        .await),
+        "slash_expand" => {
+            ok(
+                crate::slash_expand(st, a.take("sessionId")?, a.take("name")?, a.take("args")?)
+                    .await,
+            )
+        }
         "hooks_list" => ok(crate::hooks_list(a.take("root")?).await),
         "skills_list" => ok(crate::skills_list(a.take("root")?).await),
-        "search_files" => ok(crate::search_files(
-            st,
-            a.take("sessionId")?,
-            a.take("query")?,
-            a.take("limit")?,
-        )
-        .await),
+        "search_files" => {
+            ok(
+                crate::search_files(st, a.take("sessionId")?, a.take("query")?, a.take("limit")?)
+                    .await,
+            )
+        }
         "list_dir" => ok(crate::list_dir(st, a.take("sessionId")?, a.take("rel")?).await),
         "browse_dirs" => ok(crate::browse_dirs(a.take("path")?).await),
         "read_image" => ok(crate::read_image(st, a.take("path")?).await),
         "read_file_bytes" => match crate::read_file_bytes(st, a.take("path")?).await {
             Ok(resp) => match resp.body() {
                 Ok(tauri::ipc::InvokeResponseBody::Raw(bytes)) => Ok(Outcome::Raw(bytes)),
-                Ok(tauri::ipc::InvokeResponseBody::Json(s)) => {
-                    serde_json::from_str(&s).map(Outcome::Json).map_err(|e| e.to_string())
-                }
-                Err(e) => Err(e.to_string()),
+                Ok(tauri::ipc::InvokeResponseBody::Json(s)) => serde_json::from_str(&s)
+                    .map(Outcome::Json)
+                    .map_err(|e| ui_error!("host.remote.encode"; e)),
+                Err(e) => Err(ui_error!("host.remote.encode"; e)),
             },
-            Err(e) => Err(e.to_string()),
+            Err(e) => Err(e.to_ui()),
         },
         "probe_dirs" => val(crate::probe_dirs(a.take("paths")?)),
         "path_exists" => val(crate::path_exists(a.take("path")?)),
@@ -210,12 +209,9 @@ pub async fn dispatch(
         "set_session_python_venv" => {
             ok(crate::set_session_python_venv(st, a.take("sessionId")?, a.take("path")?).await)
         }
-        "set_session_system_prompt" => ok(crate::set_session_system_prompt(
-            st,
-            a.take("sessionId")?,
-            a.take("prompt")?,
-        )
-        .await),
+        "set_session_system_prompt" => {
+            ok(crate::set_session_system_prompt(st, a.take("sessionId")?, a.take("prompt")?).await)
+        }
         "set_session_thinking" => {
             ok(crate::set_session_thinking(st, a.take("sessionId")?, a.take("thinking")?).await)
         }
@@ -274,13 +270,12 @@ pub async fn dispatch(
         "browser_pick" => {
             ok(crate::browser_pick(st, a.take("sessionId")?, a.take("x")?, a.take("y")?).await)
         }
-        "browser_pick_hover" => ok(crate::browser_pick_hover(
-            st,
-            a.take("sessionId")?,
-            a.take("x")?,
-            a.take("y")?,
-        )
-        .await),
+        "browser_pick_hover" => {
+            ok(
+                crate::browser_pick_hover(st, a.take("sessionId")?, a.take("x")?, a.take("y")?)
+                    .await,
+            )
+        }
         "browser_pick_clear" => ok(crate::browser_pick_clear(st, a.take("sessionId")?).await),
         "browser_scope_list" => ok(crate::browser_scope_list(st, a.take("sessionId")?).await),
         "browser_scope_revoke" => {
@@ -296,10 +291,10 @@ pub async fn dispatch(
                 viewer,
                 a.chan("onEvent")?,
             )
-            .map_err(HostError::Term)),
+            .map_err(HostError::Ui)),
         "term_attach" => ok(terms
             .attach(viewer, a.take("id")?, a.chan("onEvent")?)
-            .map_err(HostError::Term)),
+            .map_err(HostError::Ui)),
         "term_write" => ok(crate::term_write(terms, a.take("id")?, a.take("data")?).await),
         "term_resize" => {
             ok(crate::term_resize(terms, a.take("id")?, a.take("cols")?, a.take("rows")?).await)
@@ -323,9 +318,7 @@ pub async fn dispatch(
         "sandbox_install" => ok(crate::sandbox_install().await),
         "sandbox_uninstall" => ok(crate::sandbox_uninstall().await),
         "packs_status" => ok(crate::packs_status().await),
-        "packs_install" => {
-            ok(crate::packs_install(st, a.take("id")?, a.chan("onProgress")?).await)
-        }
+        "packs_install" => ok(crate::packs_install(st, a.take("id")?, a.chan("onProgress")?).await),
         "packs_uninstall" => ok(crate::packs_uninstall(st, a.take("id")?).await),
         "test_connection" => {
             ok(crate::test_connection(st, a.take("providerId")?, a.take("model")?).await)
@@ -335,6 +328,6 @@ pub async fn dispatch(
         "remote_status" => ok(crate::remote_status(app.clone()).await),
         "remote_rotate_token" => ok(crate::remote_rotate_token(app.clone()).await),
 
-        other => Err(format!("未知命令：{other}")),
+        other => Err(ui_error!("host.remote.unknownCommand", command = other)),
     }
 }

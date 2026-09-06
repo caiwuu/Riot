@@ -77,10 +77,9 @@ where
                     // 频率可观再排期，别为没证实的场景先付一套非流式解析。
                     tracing::warn!(idle_secs = idle.as_secs(), "流式静默超时，结束本条流");
                     yield ProviderEvent::Error(ProviderError::Transport {
-                        message: format!(
-                            "流静默超过 {} 秒。连接还在，但服务端不发数据了 —— \
-                             通常是中间代理或网关的问题。",
-                            idle.as_secs()
+                        error: riot_protocol::ui_error!(
+                            "kernel.provider.idle", secs = idle.as_secs();
+                            "stream idle: connection still open but the server stopped sending data (usually a proxy or gateway issue)"
                         ),
                     });
                     break;
@@ -154,7 +153,7 @@ mod tests {
     fn is_idle_error(ev: &ProviderEvent) -> bool {
         matches!(
             ev,
-            ProviderEvent::Error(ProviderError::Transport { message }) if message.contains("静默")
+            ProviderEvent::Error(ProviderError::Transport { error }) if error.key() == "kernel.provider.idle"
         )
     }
 
@@ -224,7 +223,7 @@ mod tests {
         // 错误是终止事件。继续等下一个只会白白多耗一个 idle 周期，
         // 用户要多等 90 秒才看到那个本该立刻显示的错误。
         let inner = stream! {
-            yield ProviderEvent::Error(ProviderError::Auth { message: "401".into() });
+            yield ProviderEvent::Error(crate::errors::auth("401"));
             futures::future::pending::<()>().await;
             yield delta("不可达");
         };

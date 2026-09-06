@@ -10,6 +10,7 @@
 //! 状态枚举、通知消息上的标记。执行本身在内核。
 
 use crate::id::AgentId;
+use crate::text::UiText;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -67,8 +68,10 @@ pub struct BackgroundTaskView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<AgentId>,
     pub status: BackgroundTaskStatus,
-    /// 最近一行活动（正在调哪个工具、刚说的第一句话）。面板上滚动显示。
-    pub activity: String,
+    /// 最近一行活动（正在调哪个工具、刚说的第一句话、已收场）。面板上滚动
+    /// 显示。是词典键：工具名和模型原话作为参数带进去，"启动 / 完成 / 失败"
+    /// 这类状态词由前端翻译。
+    pub activity: UiText,
     pub tool_uses: u32,
     pub tokens: u32,
     pub started_at_ms: u64,

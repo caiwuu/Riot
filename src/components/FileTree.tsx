@@ -18,6 +18,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { type DirEntry, listDir, searchFiles } from "../bridge";
+import { useT } from "../i18n";
 import { startFileDrag } from "../lib/fileDrag";
 import { basename, joinRoot, relativeTo } from "../pathDisplay";
 import { Chevron } from "./Chevron";
@@ -33,6 +34,12 @@ export interface TreeTarget {
 /** 一层目录的加载结果。undefined（不在 Map 里）= 还没加载。 */
 type Listing = { entries: DirEntry[]; truncated: number } | { error: string };
 
+/** 说明行的内容。文案在渲染时查词典，这里只记"是哪种说明"。 */
+type Note =
+  | { note: "loading" }
+  | { note: "truncated"; count: number }
+  | { note: "error"; text: string };
+
 /** 可见行：一个条目，或条目下面的一行说明（加载中 / 出错 / 截断）。 */
 type Row =
   | {
@@ -44,7 +51,7 @@ type Row =
       isSymlink: boolean;
       open: boolean;
     }
-  | { kind: "note"; key: string; depth: number; text: string; error?: boolean };
+  | ({ kind: "note"; key: string; depth: number } & Note);
 
 /** 筛选结果最多几条。一屏几十条，滚两屏还找不到就该换关键词了。 */
 const FILTER_LIMIT = 200;
@@ -94,6 +101,7 @@ export function FileTree({
   /** 变一次就把焦点放进筛选框并全选（⌘P 快速打开）。 */
   filterFocus?: number;
 }) {
+  const { t, tn } = useT();
   const [listings, setListings] = useState<Map<string, Listing>>(() => new Map());
   const [expanded, setExpanded] = useState<Set<string>>(
     () => new Set(expandedBySession.get(sessionId) ?? []),
@@ -198,8 +206,8 @@ export function FileTree({
   // 筛选词防抖 → 搜索。
   useEffect(() => {
     const q = filter.trim();
-    const t = window.setTimeout(() => setQuery(q), FILTER_DEBOUNCE_MS);
-    return () => window.clearTimeout(t);
+    const timer = window.setTimeout(() => setQuery(q), FILTER_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
   }, [filter]);
 
   useEffect(() => {
@@ -245,11 +253,11 @@ export function FileTree({
     const walk = (dir: string, depth: number) => {
       const l = listings.get(dir);
       if (!l) {
-        out.push({ kind: "note", key: `${dir}\u0000loading`, depth, text: "正在读取…" });
+        out.push({ kind: "note", key: `${dir}\u0000loading`, depth, note: "loading" });
         return;
       }
       if ("error" in l) {
-        out.push({ kind: "note", key: `${dir}\u0000error`, depth, text: l.error, error: true });
+        out.push({ kind: "note", key: `${dir}\u0000error`, depth, note: "error", text: l.error });
         return;
       }
       for (const e of l.entries) {
@@ -271,7 +279,8 @@ export function FileTree({
           kind: "note",
           key: `${dir}\u0000more`,
           depth,
-          text: `还有 ${l.truncated} 项未显示`,
+          note: "truncated",
+          count: l.truncated,
         });
       }
     };
@@ -415,12 +424,17 @@ export function FileTree({
               }
             }
           }}
-          placeholder="筛选文件…"
-          aria-label="筛选文件"
+          placeholder={t("panels.fileTree.filter.placeholder")}
+          aria-label={t("panels.fileTree.filter")}
           spellCheck={false}
         />
         {filter ? (
-          <button type="button" className="icon file-tree-clear" onClick={() => setFilter("")} title="清除">
+          <button
+            type="button"
+            className="icon file-tree-clear"
+            onClick={() => setFilter("")}
+            title={t("panels.fileTree.clear")}
+          >
             <ClearIcon />
           </button>
         ) : null}
@@ -429,8 +443,8 @@ export function FileTree({
             type="button"
             className="icon file-tree-disk"
             onClick={onPickFromDisk}
-            title="从磁盘打开…（⌘O）"
-            aria-label="从磁盘打开"
+            title={t("panels.fileTree.openFromDisk.title")}
+            aria-label={t("panels.fileTree.openFromDisk")}
           >
             <DiskOpenIcon />
           </button>
@@ -442,13 +456,13 @@ export function FileTree({
         className="file-tree-list"
         role="tree"
         tabIndex={0}
-        aria-label="项目文件"
+        aria-label={t("panels.fileTree.label")}
         aria-activedescendant={cursor ? `${uid}-${idFor(cursor)}` : undefined}
         onKeyDown={onKeyDown}
       >
         {hits ? (
           hits.length === 0 ? (
-            <div className="file-tree-empty">没有匹配的文件</div>
+            <div className="file-tree-empty">{t("panels.fileTree.noMatch")}</div>
           ) : (
             hits.map((rel) => (
               <div
@@ -479,10 +493,14 @@ export function FileTree({
             r.kind === "note" ? (
               <div
                 key={r.key}
-                className={r.error ? "tree-note error" : "tree-note"}
+                className={r.note === "error" ? "tree-note error" : "tree-note"}
                 style={{ paddingLeft: indent(r.depth) }}
               >
-                {r.text}
+                {r.note === "loading"
+                  ? t("panels.fileTree.loading")
+                  : r.note === "truncated"
+                    ? tn("panels.fileTree.truncated", r.count)
+                    : r.text}
               </div>
             ) : (
               <div
@@ -508,7 +526,11 @@ export function FileTree({
                 </span>
                 <span className="tree-name">{r.name}</span>
                 {r.isSymlink ? (
-                  <span className="tree-link" title="符号链接" aria-label="符号链接">
+                  <span
+                    className="tree-link"
+                    title={t("panels.fileTree.symlink")}
+                    aria-label={t("panels.fileTree.symlink")}
+                  >
                     ↗
                   </span>
                 ) : null}

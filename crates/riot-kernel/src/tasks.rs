@@ -26,6 +26,8 @@ use riot_protocol::event::AgentEvent;
 use riot_protocol::id::{AgentId, MessageId};
 use riot_protocol::message::{Attachment, Message, MessageMeta, UserContent};
 use riot_protocol::task::{BackgroundTaskStatus, BackgroundTaskView, TaskNotice};
+use riot_protocol::text::UiText;
+use riot_protocol::ui_text;
 use tokio_util::sync::CancellationToken;
 
 use crate::session::SessionSink;
@@ -117,7 +119,7 @@ impl BackgroundTasks {
     }
 
     /// 子 agent 有了新动静：调了个工具 / 说了句话。
-    pub fn activity(&self, id: &AgentId, line: String, tool_uses: u32, tokens: u32) {
+    pub fn activity(&self, id: &AgentId, line: UiText, tool_uses: u32, tokens: u32) {
         let mut g = self.lock();
         let Some(e) = g.iter_mut().find(|e| &e.view.id == id) else {
             return;
@@ -182,9 +184,9 @@ impl BackgroundTasks {
         e.view.tokens = tokens;
         e.view.activity = match status {
             BackgroundTaskStatus::Running => e.view.activity.clone(),
-            BackgroundTaskStatus::Completed => "完成".into(),
-            BackgroundTaskStatus::Failed => "失败".into(),
-            BackgroundTaskStatus::Cancelled => "已停止".into(),
+            BackgroundTaskStatus::Completed => ui_text!("kernel.task.activity.completed"),
+            BackgroundTaskStatus::Failed => ui_text!("kernel.task.activity.failed"),
+            BackgroundTaskStatus::Cancelled => ui_text!("kernel.task.activity.cancelled"),
         };
         e.messages = Some(messages);
         let view = e.view.clone();
@@ -365,7 +367,7 @@ mod tests {
             tool_use_id: riot_protocol::id::ToolUseId::from_raw(format!("tu_{id}")),
             parent: None,
             status: BackgroundTaskStatus::Running,
-            activity: String::new(),
+            activity: ui_text!("kernel.task.activity.started"),
             tool_uses: 0,
             tokens: 0,
             started_at_ms: 0,

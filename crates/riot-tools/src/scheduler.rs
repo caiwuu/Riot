@@ -1081,8 +1081,8 @@ mod tests {
             fn prompt(&self, _: &PromptContext) -> String {
                 "外部工具".into()
             }
-            fn describe(&self, _: &serde_json::Value) -> String {
-                "d".into()
+            fn describe(&self, _: &serde_json::Value) -> riot_protocol::text::UiText {
+                riot_protocol::text::UiText::new("d")
             }
             fn should_defer(&self) -> bool {
                 true
@@ -1208,8 +1208,8 @@ mod tests {
             fn prompt(&self, _: &PromptContext) -> String {
                 "boom".into()
             }
-            fn describe(&self, _: &serde_json::Value) -> String {
-                "boom".into()
+            fn describe(&self, _: &serde_json::Value) -> riot_protocol::text::UiText {
+                riot_protocol::text::UiText::new("boom")
             }
             async fn call(&self, _: serde_json::Value, _: ToolContext) -> ToolOutcome {
                 panic!("工具炸了");
@@ -1257,8 +1257,8 @@ mod tests {
             fn prompt(&self, _: &PromptContext) -> String {
                 "picky".into()
             }
-            fn describe(&self, _: &serde_json::Value) -> String {
-                "picky".into()
+            fn describe(&self, _: &serde_json::Value) -> riot_protocol::text::UiText {
+                riot_protocol::text::UiText::new("picky")
             }
             async fn validate_input(
                 &self,

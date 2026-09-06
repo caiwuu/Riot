@@ -23,7 +23,9 @@ use riot_protocol::permission::{
     PermissionGate, PermissionMode, PermissionModeState, PermissionResponse, PermissionResult,
     PermissionRule, SafetyVerdict,
 };
+use riot_protocol::text::UiText;
 use riot_protocol::tool::Tool;
+use riot_protocol::ui_text;
 
 use crate::session::SessionSink;
 
@@ -108,7 +110,8 @@ impl PendingAsks {
 /// 三个参数散着传，就给了调用点"只带一部分、剩下的现编"的机会 ——
 /// `reason` 曾经就是这么被写死成 `Mode` 的。
 struct AskSpec {
-    message: String,
+    /// 弹窗标题。词典键 —— 翻译在前端做。
+    message: UiText,
     suggestions: Vec<riot_protocol::permission::PermissionUpdate>,
     reason: DecisionReason,
 }
@@ -224,7 +227,7 @@ impl PermissionGate for HostGate {
             hook_ask.filter(|_| !matches!(decided, PermissionResult::Deny { .. }))
         {
             let spec = AskSpec {
-                message: format!("PreToolUse hook 要求确认：{reason}"),
+                message: ui_text!("tools.ask.hook", reason = reason),
                 suggestions: vec![],
                 reason: DecisionReason::Hook {
                     name: "PreToolUse".into(),
@@ -246,7 +249,7 @@ impl PermissionGate for HostGate {
                 },
                 PermissionResult::Passthrough => {
                     let spec = AskSpec {
-                        message: "需要确认这次调用".into(),
+                        message: ui_text!("tools.ask.confirm"),
                         suggestions: vec![],
                         reason: DecisionReason::Unverifiable {
                             what: tool.name().to_owned(),
@@ -411,11 +414,10 @@ impl HostGate {
         let ask = PermissionAsk {
             tool_use_id: tool_use_id.clone(),
             tool_name: tool.name().to_owned(),
-            summary: if spec.message.trim().is_empty() {
-                tool.describe(input)
-            } else {
-                spec.message
-            },
+            summary: spec.message,
+            // 后台子 agent 的工具带归属（见 subagent::Attributed）；前端拿它
+            // 画"后台任务「x」"前缀。summary 是词典键，拼不进去。
+            agent_label: tool.agent_label().map(str::to_owned),
             preview: preview_of(tool, input, &self.cwd),
             suggestions: spec.suggestions,
             reason: spec.reason,
@@ -689,12 +691,14 @@ pub(crate) fn preview_of(
             },
         ),
         // 计划批准卡显示计划**原文** —— 摘要等于让用户盲签一份实施方案。
-        "ExitPlanMode" => AskPreview::Plain {
-            text: input
-                .get("plan")
-                .and_then(|v| v.as_str())
-                .unwrap_or("（计划为空 —— 这不该发生，拒绝并让模型重新提交）")
-                .to_owned(),
+        // 原文是模型写的，走 Raw（不查词典）；空计划那句提示才是界面文案。
+        "ExitPlanMode" => match input.get("plan").and_then(|v| v.as_str()) {
+            Some(plan) => AskPreview::Raw {
+                text: plan.to_owned(),
+            },
+            None => AskPreview::Plain {
+                text: ui_text!("tools.plan.empty"),
+            },
         },
         _ => AskPreview::Plain {
             text: tool.describe(input),

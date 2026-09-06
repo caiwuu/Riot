@@ -13,10 +13,12 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use riot_protocol::message::ToolResultContent;
 use riot_protocol::permission::{PermissionContext, PermissionResult};
+use riot_protocol::text::UiText;
 use riot_protocol::tool::{
     DiffHunk, FileState, FileView, PromptContext, Tool, ToolContext, ToolOutcome, UiPayload,
     ValidationError,
 };
+use riot_protocol::ui_text;
 use serde::Deserialize;
 
 use super::names::{BASH, EDIT, GREP, READ, WRITE};
@@ -130,10 +132,10 @@ impl Tool for Edit {
         )
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         match input.get("path").and_then(|v| v.as_str()) {
-            Some(p) => format!("修改 {p}"),
-            None => "修改文件".to_owned(),
+            Some(p) => ui_text!("tools.edit.file", path = p),
+            None => ui_text!("tools.edit.any"),
         }
     }
 

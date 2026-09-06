@@ -1,5 +1,7 @@
 import { type PointerEvent, type TextareaHTMLAttributes, useRef, useState } from "react";
 
+import { useT } from "../i18n";
+
 const H = { min: 72, max: 720 };
 
 /**
@@ -16,6 +18,7 @@ export function ResizableTextarea({
   minHeight?: number;
   maxHeight?: number;
 }) {
+  const { t } = useT();
   const ref = useRef<HTMLTextAreaElement>(null);
   const [h, setH] = useState<number>();
   const drag = useRef<{ y: number; h: number } | null>(null);
@@ -56,8 +59,8 @@ export function ResizableTextarea({
         type="button"
         className="ta-resize-grip"
         tabIndex={-1}
-        aria-label="拖动调整高度"
-        title="拖动调整高度"
+        aria-label={t("composer.textarea.resize")}
+        title={t("composer.textarea.resize")}
         onPointerDown={onGripDown}
         onPointerMove={onGripMove}
         onPointerUp={onGripUp}

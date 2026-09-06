@@ -337,9 +337,7 @@ async fn 流中断留下的_tool_use_要补齐配对() {
             "Read",
             serde_json::json!({ "path": "a" }),
         )),
-        ProviderEvent::Error(ProviderError::Transport {
-            message: "读取响应流失败: 连接被重置".into(),
-        }),
+        ProviderEvent::Error(ProviderError::transport("connection reset")),
     ]]));
     let tools = Arc::new(ScriptedToolRunner::new(Default::default()));
     let deps = mock_deps_with(provider, tools, Arc::new(FakeCompactor::default()));

@@ -13,6 +13,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
+use riot_protocol::text::UiError;
+use riot_protocol::ui_error;
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -63,18 +65,39 @@ impl Default for Timeouts {
     }
 }
 
+/// 和一个 MCP 服务器说话时出的错。
+///
+/// `Display` 是英文，给模型（工具结果）和日志；设置页显示走
+/// [`Self::ui_error`]（词典键 + 细节）。
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
-    #[error("连接已断开（服务器进程可能退出了）")]
+    #[error("connection closed (the server process may have exited)")]
     Closed,
-    #[error("{method} 等了 {secs} 秒没有响应")]
+    #[error("{method} got no response within {secs}s")]
     Timeout { method: String, secs: u64 },
-    #[error("服务器报错（{code}）：{message}")]
+    #[error("server error ({code}): {message}")]
     Rpc { code: i64, message: String },
-    #[error("已取消")]
+    #[error("cancelled")]
     Cancelled,
-    #[error("响应不是预期的形状：{0}")]
+    #[error("unexpected response shape: {0}")]
     Protocol(String),
+}
+
+impl ClientError {
+    /// 给设置页看的那一面。
+    pub fn ui_error(&self) -> UiError {
+        match self {
+            ClientError::Closed => ui_error!("kernel.mcp.closed"),
+            ClientError::Timeout { method, secs } => {
+                ui_error!("kernel.mcp.timeout", method = method, secs = secs)
+            }
+            ClientError::Rpc { code, message } => {
+                ui_error!("kernel.mcp.serverError", code = code; message)
+            }
+            ClientError::Cancelled => ui_error!("kernel.mcp.cancelled"),
+            ClientError::Protocol(detail) => ui_error!("kernel.mcp.badResponse"; detail),
+        }
+    }
 }
 
 impl From<RpcError> for ClientError {
@@ -200,7 +223,7 @@ impl Client {
             )
             .await?;
         let init: InitializeResult = serde_json::from_value(init)
-            .map_err(|e| ClientError::Protocol(format!("initialize 响应：{e}")))?;
+            .map_err(|e| ClientError::Protocol(format!("initialize response: {e}")))?;
         client.notify("notifications/initialized", None);
 
         let hello = ServerHello {
@@ -235,7 +258,7 @@ impl Client {
                 .request("tools/list", params, self.timeouts.request, None)
                 .await?;
             let page: ListToolsResult = serde_json::from_value(raw)
-                .map_err(|e| ClientError::Protocol(format!("tools/list 响应：{e}")))?;
+                .map_err(|e| ClientError::Protocol(format!("tools/list response: {e}")))?;
             tools.extend(page.tools);
 
             // `[约束]` 页数上限拦不住"一页塞几十万条"。每条都带描述和
@@ -277,7 +300,7 @@ impl Client {
             )
             .await?;
         serde_json::from_value(raw)
-            .map_err(|e| ClientError::Protocol(format!("tools/call 响应：{e}")))
+            .map_err(|e| ClientError::Protocol(format!("tools/call response: {e}")))
     }
 
     async fn request(
@@ -327,7 +350,7 @@ impl Client {
                     _ = c.cancelled() => {
                         self.notify("notifications/cancelled", Some(json!({
                             "requestId": id,
-                            "reason": "用户中断",
+                            "reason": "cancelled by the user",
                         })));
                         Err(ClientError::Cancelled)
                     }
@@ -409,7 +432,7 @@ async fn route_line(
                 result: None,
                 error: Some(OutgoingError {
                     code: wire::METHOD_NOT_FOUND,
-                    message: format!("riot 不支持 {method}"),
+                    message: format!("riot does not support {method}"),
                 }),
             }
         };

@@ -394,7 +394,7 @@ rl.on('line', (l) => {
             tokio::time::sleep(Duration::from_millis(50)).await;
             let s = hub.statuses().await;
             if let Some(first) = s.first() {
-                assert_ne!(first.state, "failed", "不该失败：{}", first.detail);
+                assert_ne!(first.state, "failed", "不该失败：{:?}", first.error);
                 if first.state == "connected" {
                     assert_eq!(first.tools, vec!["mcp__node__hello"]);
                     connected = true;
@@ -426,7 +426,7 @@ rl.on('line', (l) => {
         // 启动失败是同步可见的（spawn 直接报错），但状态写入在任务里，
         // 给它一点时间。
         let mut state = String::new();
-        let mut detail = String::new();
+        let mut error = None;
         for _ in 0..50 {
             tokio::time::sleep(Duration::from_millis(20)).await;
             let s = hub.statuses().await;
@@ -434,7 +434,7 @@ rl.on('line', (l) => {
                 && first.state != "connecting"
             {
                 state = first.state.clone();
-                detail = first.detail.clone();
+                error = first.error.clone();
                 break;
             }
         }
@@ -442,9 +442,10 @@ rl.on('line', (l) => {
             state, "failed",
             "起不来的服务器必须报 failed 而不是永远 connecting"
         );
-        assert!(
-            detail.contains("找不到命令"),
-            "找不到二进制要把 PATH 问题说清楚：{detail}"
+        assert_eq!(
+            error.as_ref().map(|e| e.key()),
+            Some("kernel.mcp.commandNotFound"),
+            "找不到二进制要把 PATH 问题说清楚：{error:?}"
         );
         assert!(hub.tools().await.is_empty(), "失败的服务器不该贡献工具");
 

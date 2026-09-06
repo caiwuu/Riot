@@ -22,9 +22,11 @@
 use std::path::Path;
 
 use async_trait::async_trait;
+use riot_protocol::text::UiText;
 use riot_protocol::tool::{
     ProcessSpec, PromptContext, ResultBudget, Tool, ToolContext, ToolOutcome, ValidationError,
 };
+use riot_protocol::ui_text;
 use serde::Deserialize;
 
 /// 一次最多报多少条。
@@ -258,10 +260,10 @@ impl Tool for Diagnostics {
             .to_owned()
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         match input.get("path").and_then(|v| v.as_str()) {
-            Some(p) => format!("检查诊断（{p}）"),
-            None => "检查诊断".to_owned(),
+            Some(p) => ui_text!("tools.diagnostics.path", path = p),
+            None => ui_text!("tools.diagnostics.all"),
         }
     }
 

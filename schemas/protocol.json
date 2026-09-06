@@ -30,6 +30,7 @@
       ]
     },
     "AgentError": {
+      "description": "一轮为什么以错误收场。前端把它画在对话里。\n\n带文案的变体装的是 [`UiError`]：词典键给界面翻译，`detail` 是服务方\n的原话 / HTTP 正文 / 内核的技术细节，前端放在次要位置。这里没有任何\n一种语言的文案（见 [`crate::text`]）。",
       "oneOf": [
         {
           "description": "上下文溢出且所有压缩手段都失败了。",
@@ -79,11 +80,11 @@
         {
           "description": "Provider 层不可恢复错误（重试耗尽、认证失败等）。",
           "properties": {
+            "error": {
+              "$ref": "#/$defs/UiError"
+            },
             "kind": {
               "const": "provider",
-              "type": "string"
-            },
-            "message": {
               "type": "string"
             },
             "retryable": {
@@ -92,7 +93,7 @@
           },
           "required": [
             "kind",
-            "message",
+            "error",
             "retryable"
           ],
           "type": "object"
@@ -100,17 +101,17 @@
         {
           "description": "内核内部错误（含被捕获的 panic）。",
           "properties": {
+            "error": {
+              "$ref": "#/$defs/UiError"
+            },
             "kind": {
               "const": "internal",
-              "type": "string"
-            },
-            "message": {
               "type": "string"
             }
           },
           "required": [
             "kind",
-            "message"
+            "error"
           ],
           "type": "object"
         }
@@ -502,9 +503,27 @@
           "type": "object"
         },
         {
+          "description": "一句给用户看的话（词典键），通常就是 [`crate::tool::Tool::describe`]\n的结果。没有更具体的预览形状时用它。",
           "properties": {
             "kind": {
               "const": "plain",
+              "type": "string"
+            },
+            "text": {
+              "$ref": "#/$defs/UiText"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "模型写的原文，不翻译。计划批准卡用它显示计划**正文** —— 摘要等于\n让用户盲签一份实施方案。\n\n和 [`Self::Plain`] 分开是因为两者一个要查词典、一个不能查：把模型\n写的 markdown 当键去查，前端只能显示一个裸键名。",
+          "properties": {
+            "kind": {
+              "const": "raw",
               "type": "string"
             },
             "text": {
@@ -791,8 +810,12 @@
       "description": "一个子 agent 在界面上的样子（同步的、后台的都有一份）。\n\n随 [`crate::event::AgentEvent::BackgroundTask`] 每次变化推一份全量；\n切回会话时随 `session.resume` 快照整批回来。不进 transcript ——\n它描述的是一个活状态，落盘重放会长出永远\"运行中\"的幽灵；\"跑过、\n结果是什么\"由通知消息（[`TaskNotice`]）和 Task 的 tool_result 记在\n历史里。\n\n名字里的 Background 是历史包袱：最初只给后台任务用，后来同步子 agent\n也要在 Task 卡片上直播\"标题 · 模型 · 正在做什么\"，于是全都登记，\n靠 `background` 区分该不该进后台任务面板。",
       "properties": {
         "activity": {
-          "description": "最近一行活动（正在调哪个工具、刚说的第一句话）。面板上滚动显示。",
-          "type": "string"
+          "allOf": [
+            {
+              "$ref": "#/$defs/UiText"
+            }
+          ],
+          "description": "最近一行活动（正在调哪个工具、刚说的第一句话、已收场）。面板上滚动\n显示。是词典键：工具名和模型原话作为参数带进去，\"启动 / 完成 / 失败\"\n这类状态词由前端翻译。"
         },
         "background": {
           "default": false,
@@ -1332,8 +1355,19 @@
       "description": "MCP 连接状态快照,给设置页看。",
       "properties": {
         "detail": {
-          "description": "connected 时是服务器自报的名字和版本;failed 时是错误原因。",
+          "description": "connected 时是服务器自报的名字和版本(原样显示,不翻译);其余状态为空。",
           "type": "string"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UiError"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "failed 时的原因(词典键 + 技术细节)。其余状态为 None。"
         },
         "id": {
           "type": "string"
@@ -1436,7 +1470,19 @@
               "type": "string"
             },
             "text": {
+              "description": "技术细节（服务方原话、hook 输出）。`ui` 在时它是次要信息；\n老 transcript 里只有它，界面就原样显示。",
               "type": "string"
+            },
+            "ui": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/UiText"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "给界面翻译的那句话（词典键）。新写的 System 消息都要带 ——\n`text` 不翻译。`default` 是为了老 transcript 能读回来。"
             }
           },
           "required": [
@@ -1619,6 +1665,13 @@
     "PermissionAsk": {
       "description": "发给 UI 的权限请求详情。",
       "properties": {
+        "agent_label": {
+          "description": "这次询问来自哪个后台子 agent（任务标题）。`None` = 主对话自己的。\n\n后台任务的弹窗出现时父轮次多半已经结束，用户正在聊别的 —— 一句光秃秃\n的 \"运行 rm -rf build\" 他不知道是谁要干。前端拿它画归属前缀；不塞进\n`summary`，因为那是词典键，拼不了字符串。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "preview": {
           "allOf": [
             {
@@ -1637,8 +1690,12 @@
           "type": "array"
         },
         "summary": {
-          "description": "给用户看的一句话描述，如 \"运行 npm test\"。",
-          "type": "string"
+          "allOf": [
+            {
+              "$ref": "#/$defs/UiText"
+            }
+          ],
+          "description": "弹窗标题：给用户看的一句话，如 \"是否允许运行 `npm test`？\"。\n词典键 —— 翻译在前端做。"
         },
         "tool_name": {
           "type": "string"
@@ -1902,7 +1959,7 @@
           "type": "object"
         },
         {
-          "description": "无法量化的状态更新。",
+          "description": "无法量化的状态更新。原样显示 —— 命令输出、服务器回话这类不翻译的东西。",
           "properties": {
             "kind": {
               "const": "status",
@@ -1910,6 +1967,23 @@
             },
             "text": {
               "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "一句给用户看的状态（词典键），如\"子代理已启动\"。和 [`Self::Status`]\n分开的理由同 [`crate::tool::UiPayload::Message`]：翻译只在前端做。",
+          "properties": {
+            "kind": {
+              "const": "message",
+              "type": "string"
+            },
+            "text": {
+              "$ref": "#/$defs/UiText"
             }
           },
           "required": [
@@ -1938,6 +2012,7 @@
       ]
     },
     "ProviderError": {
+      "description": "一次模型调用为什么失败。\n\n变体是**主循环分支的依据**（可恢复 / 不可恢复、要不要压缩），带文案的\n变体里装的 [`UiError`] 才是给人看的：键由构造方按它当时知道的原因选\n（限流、过载、余额不足、模型不存在……都在同一个变体下），`detail` 放\n服务方回的原文。`Display` 是日志和模型用的英文表示，不进界面。",
       "oneOf": [
         {
           "description": "上下文溢出。可恢复：压缩后重试。",
@@ -1999,66 +2074,66 @@
         {
           "description": "重试耗尽。不可恢复 —— provider 内部已经试过了。",
           "properties": {
+            "error": {
+              "$ref": "#/$defs/UiError"
+            },
             "kind": {
               "const": "retries_exhausted",
               "type": "string"
-            },
-            "message": {
-              "type": "string"
             }
           },
           "required": [
             "kind",
-            "message"
+            "error"
           ],
           "type": "object"
         },
         {
           "properties": {
+            "error": {
+              "$ref": "#/$defs/UiError"
+            },
             "kind": {
               "const": "auth",
               "type": "string"
-            },
-            "message": {
-              "type": "string"
             }
           },
           "required": [
             "kind",
-            "message"
+            "error"
           ],
           "type": "object"
         },
         {
           "properties": {
+            "error": {
+              "$ref": "#/$defs/UiError"
+            },
             "kind": {
               "const": "transport",
-              "type": "string"
-            },
-            "message": {
               "type": "string"
             }
           },
           "required": [
             "kind",
-            "message"
+            "error"
           ],
           "type": "object"
         },
         {
           "description": "模型拒绝服务（内容策略等）。",
           "properties": {
+            "error": {
+              "$ref": "#/$defs/UiError"
+            },
             "kind": {
               "const": "refused",
-              "type": "string"
-            },
-            "message": {
               "type": "string"
             }
           },
           "required": [
             "kind",
-            "message"
+            "error"
           ],
           "type": "object"
         }
@@ -2279,17 +2354,32 @@
       ]
     },
     "RpcError": {
+      "description": "内核回给宿主的错误。\n\n`code` 给宿主分支用（比如\"这一轮还在跑\"要不要重试）；`error` 是给前端\n翻译的键和参数，见 [`crate::text`]。这里没有任何一种语言的文案。",
       "properties": {
+        "args": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "填进译文 `{name}` 占位符的值。全部是字符串 —— 数字由调用方格式化好。",
+          "type": "object"
+        },
         "code": {
           "$ref": "#/$defs/RpcErrorCode"
         },
-        "message": {
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "description": "词典键，如 `host.session.missing`。",
           "type": "string"
         }
       },
       "required": [
         "code",
-        "message"
+        "key"
       ],
       "type": "object"
     },
@@ -3960,11 +4050,15 @@
       "description": "宿主 → 前端的全局事件：某个定时任务开跑了 / 跑完了。\n前端靠它刷新会话列表（新会话要立即出现在侧栏）和任务面板。",
       "properties": {
         "error": {
-          "description": "开跑失败时的原因（会话没了、模型没配好）。phase=Done 且它为\nSome 时，前端把它当失败显示。",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UiError"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "开跑失败时的原因（会话没了、模型没配好）。phase=Done 且它为\nSome 时，前端把它当失败显示。"
         },
         "name": {
           "type": "string"
@@ -3998,11 +4092,15 @@
       "description": "运行历史里的一条：这个任务的某一次执行。\n\n周期任务是**一个**任务反复跑，\"跑过哪几次、哪次失败了\"得有地方看 ——\n没有它，用户只能靠侧栏里一串同名会话回忆。",
       "properties": {
         "error": {
-          "description": "失败原因。Some = 这次没跑成。",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UiError"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "失败原因。Some = 这次没跑成。"
         },
         "finishedAtMs": {
           "description": "跑完的时刻。None = 还在跑（或 App 中途退出，没等到结束）。",
@@ -4811,6 +4909,52 @@
         "ask_timeout_secs",
         "max_turns",
         "compact_threshold_tokens"
+      ],
+      "type": "object"
+    },
+    "UiError": {
+      "description": "给人看的错误：一句 [`UiText`]，外加一段可选的技术细节。\n\n`detail` 是原始原因 —— 操作系统的错误文本、HTTP 状态、内核的原话。\n它不翻译（多半是英文，或者本来就是机器话），前端放在次要位置。\n给模型看的那一面也用它：模型读 `detail`，不读词典键。",
+      "properties": {
+        "args": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "填进译文 `{name}` 占位符的值。全部是字符串 —— 数字由调用方格式化好。",
+          "type": "object"
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "description": "词典键，如 `host.session.missing`。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "type": "object"
+    },
+    "UiText": {
+      "description": "一句给人看的话：词典键 + 占位参数。前端 `t(key, args)` 得到译文。",
+      "properties": {
+        "args": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "填进译文 `{name}` 占位符的值。全部是字符串 —— 数字由调用方格式化好。",
+          "type": "object"
+        },
+        "key": {
+          "description": "词典键，如 `host.session.missing`。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key"
       ],
       "type": "object"
     },

@@ -6,6 +6,7 @@
 use crate::id::{MessageId, RequestId, ToolUseId};
 use crate::message::Message;
 use crate::permission::{DecisionReason, PermissionAsk};
+use crate::text::{UiError, UiText};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -219,6 +220,11 @@ pub enum AbortSource {
     Shutdown,
 }
 
+/// 一轮为什么以错误收场。前端把它画在对话里。
+///
+/// 带文案的变体装的是 [`UiError`]：词典键给界面翻译，`detail` 是服务方
+/// 的原话 / HTTP 正文 / 内核的技术细节，前端放在次要位置。这里没有任何
+/// 一种语言的文案（见 [`crate::text`]）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentError {
@@ -227,9 +233,9 @@ pub enum AgentError {
     /// 压缩连续失败触发熔断。
     CompactCircuitOpen { attempts: u8 },
     /// Provider 层不可恢复错误（重试耗尽、认证失败等）。
-    Provider { message: String, retryable: bool },
+    Provider { error: UiError, retryable: bool },
     /// 内核内部错误（含被捕获的 panic）。
-    Internal { message: String },
+    Internal { error: UiError },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -296,8 +302,11 @@ pub enum ProgressPayload {
         total: u64,
         label: String,
     },
-    /// 无法量化的状态更新。
+    /// 无法量化的状态更新。原样显示 —— 命令输出、服务器回话这类不翻译的东西。
     Status { text: String },
+    /// 一句给用户看的状态（词典键），如"子代理已启动"。和 [`Self::Status`]
+    /// 分开的理由同 [`crate::tool::UiPayload::Message`]：翻译只在前端做。
+    Message { text: UiText },
     /// 子 agent 的嵌套事件（套娃显示）。
     Nested { event: Box<AgentEvent> },
 }
@@ -394,7 +403,13 @@ mod tests {
             AgentEvent::Progress {
                 tool_use_id: ToolUseId::from_raw("u1"),
                 payload: ProgressPayload::Status {
-                    text: "工作中".into(),
+                    text: "working".into(),
+                },
+            },
+            AgentEvent::Progress {
+                tool_use_id: ToolUseId::from_raw("u1"),
+                payload: ProgressPayload::Message {
+                    text: UiText::new("kernel.task.started").arg("title", "t"),
                 },
             },
             // 无字段变体:internally-tagged 下它序列化成一个只有 tag 的对象，
@@ -419,7 +434,7 @@ mod tests {
                     tool_use_id: ToolUseId::from_raw("u1"),
                     parent: None,
                     status: crate::task::BackgroundTaskStatus::Running,
-                    activity: "→ Grep".into(),
+                    activity: UiText::new("kernel.task.activity.tool").arg("name", "Grep"),
                     tool_uses: 1,
                     tokens: 10,
                     started_at_ms: 1,
@@ -428,6 +443,22 @@ mod tests {
             },
             AgentEvent::Done {
                 reason: TerminalReason::Completed,
+            },
+            // 带 UiError 的错误变体：flatten 出来的 key/args/detail 要能读回。
+            AgentEvent::Done {
+                reason: TerminalReason::Error {
+                    error: AgentError::Provider {
+                        error: UiError::new("kernel.provider.auth").detail("401 Unauthorized"),
+                        retryable: false,
+                    },
+                },
+            },
+            AgentEvent::Done {
+                reason: TerminalReason::Error {
+                    error: AgentError::Internal {
+                        error: UiError::new("kernel.turn.panicked"),
+                    },
+                },
             },
         ];
 

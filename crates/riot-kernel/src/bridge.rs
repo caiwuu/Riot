@@ -28,6 +28,7 @@ use riot_protocol::hostcall::{
 use riot_protocol::id::SessionId;
 use riot_protocol::schedule::{ScheduleAccess, ScheduleError, ScheduleSpec, ScheduledTask};
 use riot_protocol::terminal::{TerminalAccess, TerminalInfo, TerminalUnavailable};
+use riot_protocol::ui_error;
 
 use crate::manager::Outbound;
 
@@ -55,7 +56,8 @@ impl HostBridge {
         self.pending.lock().await.insert(id, tx);
 
         // HostRequest 是 {method, params} 形状,包上 JSON-RPC 信封。
-        let v = serde_json::to_value(&req).map_err(|e| format!("反向请求序列化失败:{e}"))?;
+        let v = serde_json::to_value(&req)
+            .map_err(|e| format!("failed to serialize host call: {e}"))?;
         let line = serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -65,9 +67,10 @@ impl HostBridge {
         .to_string();
         if self.out.send(line).is_err() {
             self.pending.lock().await.remove(&id);
-            return Err("内核出站通道已关,反向调用发不出去".to_owned());
+            return Err("kernel outbound channel is closed; host call cannot be sent".to_owned());
         }
-        rx.await.map_err(|_| "宿主没有应答(通道关闭)".to_owned())
+        rx.await
+            .map_err(|_| "host did not respond (channel closed)".to_owned())
     }
 
     /// stdin 读循环看到 `{id, result}`(无 method)时调。
@@ -105,7 +108,9 @@ impl TerminalAccess for RemoteTerminal {
         {
             HostResponse::TerminalId { id } => Ok(id),
             HostResponse::Error { message, .. } => Err(TerminalUnavailable(message)),
-            other => Err(TerminalUnavailable(format!("宿主回了意外形状:{other:?}"))),
+            other => Err(TerminalUnavailable(format!(
+                "unexpected host response: {other:?}"
+            ))),
         }
     }
 
@@ -120,7 +125,9 @@ impl TerminalAccess for RemoteTerminal {
         {
             HostResponse::Text { text } => Ok(text),
             HostResponse::Error { message, .. } => Err(TerminalUnavailable(message)),
-            other => Err(TerminalUnavailable(format!("宿主回了意外形状:{other:?}"))),
+            other => Err(TerminalUnavailable(format!(
+                "unexpected host response: {other:?}"
+            ))),
         }
     }
 
@@ -134,7 +141,9 @@ impl TerminalAccess for RemoteTerminal {
         {
             HostResponse::Ok => Ok(()),
             HostResponse::Error { message, .. } => Err(TerminalUnavailable(message)),
-            other => Err(TerminalUnavailable(format!("宿主回了意外形状:{other:?}"))),
+            other => Err(TerminalUnavailable(format!(
+                "unexpected host response: {other:?}"
+            ))),
         }
     }
 
@@ -190,8 +199,21 @@ impl RemoteSchedule {
                 call,
             })
             .await
-            .map_err(ScheduleError)
+            .map_err(|e| ScheduleError(ui_error!("kernel.schedule.hostUnavailable"; e)))
     }
+}
+
+/// 宿主拒绝了调度操作。它给的理由是一句原话（宿主自己的措辞），这里
+/// 只能当细节带上：前端按键翻"宿主没接受这次调度操作"，模型读细节照改。
+fn host_schedule_error(message: String) -> ScheduleError {
+    ScheduleError(ui_error!("kernel.schedule.hostRejected"; message))
+}
+
+fn unexpected_schedule_reply(other: &HostResponse) -> ScheduleError {
+    ScheduleError(ui_error!(
+        "kernel.schedule.hostUnavailable";
+        format!("unexpected host response: {other:?}")
+    ))
 }
 
 #[async_trait]
@@ -199,16 +221,16 @@ impl ScheduleAccess for RemoteSchedule {
     async fn create(&self, spec: ScheduleSpec) -> Result<ScheduledTask, ScheduleError> {
         match self.call(ScheduleCall::Create { spec }).await? {
             HostResponse::Schedule { task } => Ok(task),
-            HostResponse::Error { message, .. } => Err(ScheduleError(message)),
-            other => Err(ScheduleError(format!("宿主回了意外形状:{other:?}"))),
+            HostResponse::Error { message, .. } => Err(host_schedule_error(message)),
+            other => Err(unexpected_schedule_reply(&other)),
         }
     }
 
     async fn list(&self) -> Result<Vec<ScheduledTask>, ScheduleError> {
         match self.call(ScheduleCall::List).await? {
             HostResponse::Schedules { tasks } => Ok(tasks),
-            HostResponse::Error { message, .. } => Err(ScheduleError(message)),
-            other => Err(ScheduleError(format!("宿主回了意外形状:{other:?}"))),
+            HostResponse::Error { message, .. } => Err(host_schedule_error(message)),
+            other => Err(unexpected_schedule_reply(&other)),
         }
     }
 
@@ -221,8 +243,8 @@ impl ScheduleAccess for RemoteSchedule {
             .await?
         {
             HostResponse::Schedule { task } => Ok(task),
-            HostResponse::Error { message, .. } => Err(ScheduleError(message)),
-            other => Err(ScheduleError(format!("宿主回了意外形状:{other:?}"))),
+            HostResponse::Error { message, .. } => Err(host_schedule_error(message)),
+            other => Err(unexpected_schedule_reply(&other)),
         }
     }
 
@@ -232,8 +254,8 @@ impl ScheduleAccess for RemoteSchedule {
             .await?
         {
             HostResponse::Ok => Ok(()),
-            HostResponse::Error { message, .. } => Err(ScheduleError(message)),
-            other => Err(ScheduleError(format!("宿主回了意外形状:{other:?}"))),
+            HostResponse::Error { message, .. } => Err(host_schedule_error(message)),
+            other => Err(unexpected_schedule_reply(&other)),
         }
     }
 }
@@ -275,7 +297,9 @@ impl RemoteBrowser {
         match self.call(call).await {
             Ok(HostResponse::Text { text }) => Ok(text),
             Ok(HostResponse::Error { kind, message }) => Err(interact_error(kind, message)),
-            Ok(other) => Err(InteractError::Target(format!("宿主回了意外形状:{other:?}"))),
+            Ok(other) => Err(InteractError::Target(format!(
+                "unexpected host response: {other:?}"
+            ))),
             Err(e) => Err(InteractError::Unavailable(BrowserUnavailable(e))),
         }
     }
@@ -291,7 +315,9 @@ impl BrowserAccess for RemoteBrowser {
             .await?
         {
             HostResponse::Ok => Ok(()),
-            other => Err(BrowserUnavailable(format!("宿主回了意外形状:{other:?}"))),
+            other => Err(BrowserUnavailable(format!(
+                "unexpected host response: {other:?}"
+            ))),
         }
     }
 
@@ -301,14 +327,18 @@ impl BrowserAccess for RemoteBrowser {
             .await?
         {
             HostResponse::Text { text } => Ok(text),
-            other => Err(BrowserUnavailable(format!("宿主回了意外形状:{other:?}"))),
+            other => Err(BrowserUnavailable(format!(
+                "unexpected host response: {other:?}"
+            ))),
         }
     }
 
     async fn snapshot(&self) -> Result<String, BrowserUnavailable> {
         match self.simple(BrowserCall::Snapshot).await? {
             HostResponse::Text { text } => Ok(text),
-            other => Err(BrowserUnavailable(format!("宿主回了意外形状:{other:?}"))),
+            other => Err(BrowserUnavailable(format!(
+                "unexpected host response: {other:?}"
+            ))),
         }
     }
 
@@ -321,14 +351,18 @@ impl BrowserAccess for RemoteBrowser {
                 listing,
                 screenshot,
             }),
-            other => Err(BrowserUnavailable(format!("宿主回了意外形状:{other:?}"))),
+            other => Err(BrowserUnavailable(format!(
+                "unexpected host response: {other:?}"
+            ))),
         }
     }
 
     async fn console(&self) -> Result<Vec<String>, BrowserUnavailable> {
         match self.simple(BrowserCall::Console).await? {
             HostResponse::Lines { lines } => Ok(lines),
-            other => Err(BrowserUnavailable(format!("宿主回了意外形状:{other:?}"))),
+            other => Err(BrowserUnavailable(format!(
+                "unexpected host response: {other:?}"
+            ))),
         }
     }
 

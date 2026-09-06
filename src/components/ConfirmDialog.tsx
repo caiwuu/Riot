@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 
+import { useT } from "../i18n";
 import { Modal } from "./Modal";
 
 /** 破坏性操作的确认内容。 */
@@ -30,6 +31,7 @@ export function ConfirmDialog({
   portal?: boolean;
   onClose: () => void;
 }) {
+  const { t } = useT();
   return (
     <Modal className="confirm" label={c.title} alert onClose={onClose} portal={!!portal}>
       <div className="confirm-body">
@@ -38,7 +40,7 @@ export function ConfirmDialog({
       </div>
       <div className="modal-actions">
         <button autoFocus onClick={onClose}>
-          取消
+          {t("common.cancel")}
         </button>
         <button
           className={c.danger === false ? "primary" : "btn-danger"}

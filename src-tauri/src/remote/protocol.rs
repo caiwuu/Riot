@@ -8,7 +8,7 @@
 //! | `invoke(cmd, args)`               | [`ClientFrame::Call`]             |
 //! | 命令返回 JSON                     | [`ServerFrame::Ok`]               |
 //! | 命令返回 `ipc::Response`（二进制）| 二进制帧，`kind = 1`               |
-//! | 命令报错（字符串）                | [`ServerFrame::Err`]              |
+//! | 命令报错（`UiError`）             | [`ServerFrame::Err`]              |
 //! | `Channel<T>` 参数                 | args 里一个 `__RIOT_CHANNEL__:<id>` 串 |
 //! | `Channel::send(JSON)`             | [`ServerFrame::Channel`]          |
 //! | `Channel::send(Raw)`              | 二进制帧，`kind = 2`               |
@@ -19,6 +19,7 @@
 //! 是通道号。二进制不走 JSON 的理由同 Tauri 那边（浏览器面板一帧几百 KB，
 //! base64 再 `JSON.parse` 一遍是主线程上最贵的一刀）。
 
+use riot_protocol::{UiError, UiText};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -64,11 +65,24 @@ pub enum ServerFrame<'a> {
         boot: &'a str,
         version: &'a str,
     },
-    /// 鉴权失败，随后连接关闭。
-    Denied { reason: &'a str },
-    Ok { id: u64, result: Value },
-    Err { id: u64, error: String },
-    Event { name: &'a str, payload: Value },
+    /// 鉴权失败，随后连接关闭。`reason` 是词典键，前端放在令牌表单上。
+    Denied {
+        reason: UiText,
+    },
+    Ok {
+        id: u64,
+        result: Value,
+    },
+    /// 命令报错。`error` 是给前端翻译的键和参数，和 Tauri IPC 那条线上
+    /// `HostError` 序列化出来的是同一份结构。
+    Err {
+        id: u64,
+        error: UiError,
+    },
+    Event {
+        name: &'a str,
+        payload: Value,
+    },
     Pong,
     // 还有一种文本帧不在这个枚举里：通道上的 JSON 消息
     // `{"t":"channel","ch":<u32>,"data":<json>}`。它由 conn.rs 手拼 ——
@@ -87,10 +101,7 @@ pub fn binary_frame(kind: u8, id: u32, payload: &[u8]) -> Vec<u8> {
 
 /// args 里的一个值是不是通道占位。是就给出通道号。
 pub fn channel_id(v: &Value) -> Option<u32> {
-    v.as_str()?
-        .strip_prefix(CHANNEL_PREFIX)?
-        .parse()
-        .ok()
+    v.as_str()?.strip_prefix(CHANNEL_PREFIX)?.parse().ok()
 }
 
 #[cfg(test)]

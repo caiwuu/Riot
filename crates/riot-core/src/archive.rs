@@ -169,12 +169,21 @@ fn render_message(out: &mut String, m: &Message, index: usize, opts: &RenderOpti
                 }
             }
         }
-        Message::System { id, level, text } => {
+        Message::System {
+            id,
+            level,
+            text,
+            ui,
+        } => {
+            // 摘录是模型读的文件：键比译文稳定，细节原样跟着。
             out.push_str(&format!(
-                "## [{index}] 系统提示 ({}, {level:?})\n\n{}\n\n",
-                id.as_str(),
-                text.trim_end()
+                "## [{index}] 系统提示 ({}, {level:?})\n\n",
+                id.as_str()
             ));
+            if let Some(ui) = ui {
+                out.push_str(&format!("{}\n\n", ui.key));
+            }
+            out.push_str(&format!("{}\n\n", text.trim_end()));
         }
     }
 }

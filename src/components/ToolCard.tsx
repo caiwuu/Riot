@@ -1,8 +1,9 @@
 import { memo, startTransition, useContext, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { type BackgroundTaskView, readImage } from "../bridge";
+import { type BackgroundTaskView, readImage, renderUiText } from "../bridge";
 import type { Item } from "../hooks/useSession";
+import { t, tn, useT } from "../i18n";
 import { agentIdFromResult, openSubagent, SubagentsContext } from "../lib/subagentLink";
 import { Chevron } from "./Chevron";
 import { useEscLayer } from "./Modal";
@@ -17,9 +18,20 @@ interface TodoInput {
   activeForm?: string;
 }
 
-function todosOf(t: Tool): TodoInput[] {
-  const i = t.input as Record<string, unknown>;
+function todosOf(tool: Tool): TodoInput[] {
+  const i = tool.input as Record<string, unknown>;
   return Array.isArray(i?.todos) ? (i.todos as TodoInput[]) : [];
+}
+
+/** 子 agent 结束态的一行：状态词，有步数就带上。 */
+function finishedLabel(status: BackgroundTaskView["status"], toolUses: number): string {
+  const word =
+    status === "completed"
+      ? t("transcript.task.status.completed")
+      : status === "cancelled"
+        ? t("transcript.task.status.cancelled")
+        : t("common.failed");
+  return toolUses ? `${word} · ${tn("transcript.steps", toolUses)}` : word;
 }
 
 /**
@@ -57,11 +69,12 @@ export const ToolCard = memo(function ToolCard({
  * 知道它存在过。
  */
 const TaskCard = memo(function TaskCard({ tool }: { tool: Tool }) {
+  const { t } = useT();
   const tasks = useContext(SubagentsContext);
-  const task: BackgroundTaskView | undefined = tasks.find((t) => t.tool_use_id === tool.id);
+  const task: BackgroundTaskView | undefined = tasks.find((x) => x.tool_use_id === tool.id);
   const i = tool.input as Record<string, unknown>;
   const str = (k: string) => (typeof i?.[k] === "string" ? (i[k] as string) : "");
-  const title = task?.title || str("description") || "子任务";
+  const title = task?.title || str("description") || t("transcript.task.subtask");
   const agentId = task?.id ?? agentIdFromResult(tool.result) ?? null;
   const resume = str("resume");
   const background = task?.background ?? (i?.run_in_background === true || resume === "self");
@@ -77,19 +90,21 @@ const TaskCard = memo(function TaskCard({ tool }: { tool: Tool }) {
     : tool.status;
   const activity =
     status === "running"
-      ? task?.activity || tool.output[tool.output.length - 1] || "启动中…"
+      ? (task ? renderUiText(task.activity) : "") ||
+        tool.output[tool.output.length - 1] ||
+        t("transcript.task.starting")
       : task
-        ? `${task.status === "completed" ? "完成" : task.status === "cancelled" ? "已停止" : "失败"}${task.tool_uses ? ` · ${task.tool_uses} 步` : ""}`
+        ? finishedLabel(task.status, task.tool_uses)
         : tool.status === "error"
-          ? "失败"
-          : "完成";
+          ? t("common.failed")
+          : t("transcript.task.status.completed");
 
   const open = () => {
     if (agentId) openSubagent(agentId, title);
   };
   // 它派出去的子 agent，缩进挂在它下面（照 Cursor 的树形）。只挂直接
   // 孩子：孙子挂在孩子那一行下面，点进孩子的会话看。
-  const children = agentId ? tasks.filter((t) => t.parent === agentId) : [];
+  const children = agentId ? tasks.filter((x) => x.parent === agentId) : [];
 
   return (
     <div className={`tool tool-${status} tool-task`}>
@@ -98,7 +113,7 @@ const TaskCard = memo(function TaskCard({ tool }: { tool: Tool }) {
         className="tool-head task-card-head"
         onClick={open}
         disabled={!agentId}
-        title={agentId ? "打开这个子 agent 的会话" : "还没拿到子 agent 的 id"}
+        title={agentId ? t("transcript.task.openSession") : t("transcript.task.noId")}
       >
         <span className={status === "running" ? "tool-icon tool-icon-spin" : "tool-icon"}>
           {status === "running" ? "◐" : status === "ok" ? "✓" : "✕"}
@@ -107,9 +122,15 @@ const TaskCard = memo(function TaskCard({ tool }: { tool: Tool }) {
         {task?.model ? <span className="task-card-model">{task.model}</span> : null}
         <span className="task-card-tags">
           <span className="task-kind">
-            {kind === "explore" ? "侦察" : kind === "fork" ? "分叉" : resume ? "续接" : "执行"}
+            {kind === "explore"
+              ? t("transcript.task.kind.explore")
+              : kind === "fork"
+                ? t("transcript.task.kind.fork")
+                : resume
+                  ? t("transcript.task.kind.resume")
+                  : t("transcript.task.kind.run")}
           </span>
-          {background ? <span className="task-kind">后台</span> : null}
+          {background ? <span className="task-kind">{t("transcript.task.background")}</span> : null}
         </span>
         {agentId ? <span className="task-card-go" aria-hidden>›</span> : null}
       </button>
@@ -140,25 +161,30 @@ function ChildTaskRow({
   tasks: BackgroundTaskView[];
   depth: number;
 }) {
+  const { t } = useT();
   const running = task.status === "running";
   const icon = running ? "◐" : task.status === "completed" ? "✓" : "✕";
   const activity = running
-    ? task.activity || "启动中…"
-    : `${task.status === "completed" ? "完成" : task.status === "cancelled" ? "已停止" : "失败"}${task.tool_uses ? ` · ${task.tool_uses} 步` : ""}`;
-  const grandchildren = tasks.filter((t) => t.parent === task.id);
+    ? renderUiText(task.activity) || t("transcript.task.starting")
+    : finishedLabel(task.status, task.tool_uses);
+  const grandchildren = tasks.filter((x) => x.parent === task.id);
   return (
     <div className={`task-child task-child-${task.status}`}>
       <button
         type="button"
         className="task-child-head"
         onClick={() => openSubagent(task.id, task.title)}
-        title="打开这个子 agent 的会话"
+        title={t("transcript.task.openSession")}
       >
         <span className={running ? "tool-icon tool-icon-spin" : "tool-icon"}>{icon}</span>
         <span className="task-card-title">{task.title}</span>
         <span className="task-card-model">{task.model}</span>
         <span className="task-card-tags">
-          <span className="task-kind">{task.kind === "explore" ? "侦察" : "执行"}</span>
+          <span className="task-kind">
+            {task.kind === "explore"
+              ? t("transcript.task.kind.explore")
+              : t("transcript.task.kind.run")}
+          </span>
         </span>
         <span className="task-card-go" aria-hidden>
           ›
@@ -185,6 +211,7 @@ const PlainToolCard = memo(function PlainToolCard({
   tool: Tool;
   eager?: boolean;
 }) {
+  const { t } = useT();
   const [userToggle, setUserToggle] = useState<boolean | null>(null);
   const cardRef = useRef<HTMLDivElement>(null);
   const [near, setNear] = useState(eager);
@@ -237,7 +264,7 @@ const PlainToolCard = memo(function PlainToolCard({
       </span>
       <span className="tool-name">{tool.name}</span>
       {/* 失败不能只靠 12px 图标变红 —— 扫视时根本发现不了 */}
-      {tool.status === "error" ? <span className="tool-fail">失败</span> : null}
+      {tool.status === "error" ? <span className="tool-fail">{t("common.failed")}</span> : null}
       <span className="tool-summary" title={summary}>
         {summary}
       </span>
@@ -281,8 +308,8 @@ function icon(s: Tool["status"]): string {
 
 /** 一行说清这次调用在做什么。参数原样 dump 没人看得下去。
  *  导出给过程组的直播头复用 —— 组头滚的就是这句。 */
-export function summarize(t: Tool): string {
-  const i = t.input as Record<string, unknown>;
+export function summarize(tool: Tool): string {
+  const i = tool.input as Record<string, unknown>;
   const str = (k: string) => (typeof i?.[k] === "string" ? (i[k] as string) : "");
   const num = (k: string) => (typeof i?.[k] === "number" ? (i[k] as number) : 0);
   // 点击/输入的三种定位（ref/selector/text）挑给出的那个显示。
@@ -290,104 +317,137 @@ export function summarize(t: Tool): string {
     if (typeof i?.ref === "number") return `[${i.ref as number}]`;
     if (str("selector")) return `\`${str("selector")}\``;
     if (str(textKey)) return `“${str(textKey)}”`;
-    return "元素";
+    return t("transcript.tool.element");
   };
 
-  switch (t.name) {
+  switch (tool.name) {
     case "Task": {
       const resume = str("resume");
       const bg = i?.run_in_background === true || resume === "self";
       const what =
         resume === "self"
-          ? "分叉"
+          ? t("transcript.task.kind.fork")
           : resume
-            ? `续接 ${resume}`
+            ? t("transcript.tool.task.resume", { id: resume })
             : (str("subagent_type") || "general-purpose") === "explore"
-              ? "侦察"
-              : "执行";
-      return `${what}${bg ? " · 后台" : ""} · ${str("description") || "子任务"}`;
+              ? t("transcript.task.kind.explore")
+              : t("transcript.task.kind.run");
+      const bgTag = bg ? ` · ${t("transcript.task.background")}` : "";
+      return `${what}${bgTag} · ${str("description") || t("transcript.task.subtask")}`;
     }
     case "TodoWrite": {
-      const todos = todosOf(t);
+      const todos = todosOf(tool);
       const done = todos.filter((x) => x.status === "completed").length;
       const doing = todos.find((x) => x.status === "in_progress");
-      return `${done}/${todos.length} 完成${doing?.activeForm ? ` · ${doing.activeForm}` : ""}`;
+      const progress = t("transcript.tool.todo.progress", { done, total: todos.length });
+      return `${progress}${doing?.activeForm ? ` · ${doing.activeForm}` : ""}`;
     }
     case "Bash":
       return str("command");
     // 计划正文由下面的草稿卡/批准卡承担。不写这条的话会落到 default，
     // 把整份计划 dump 进摘要行。
     case "ExitPlanMode":
-      return "撰写计划";
+      return t("transcript.tool.writingPlan");
     case "AskUserQuestion":
-      return str("question") || "提问";
+      return str("question") || t("transcript.tool.question");
     case "Read":
     case "Write":
     case "Edit":
     case "PreviewFile":
       return short(str("path") || str("file_path"));
     case "Grep":
-      return `${str("pattern")}${str("path") ? ` 在 ${short(str("path"))}` : ""}`;
+      return str("path")
+        ? t("transcript.tool.grepIn", { pattern: str("pattern"), path: short(str("path")) })
+        : str("pattern");
     // 不带参数。不写这条会落到 default，摘要行是空的。
     case "ShowBrowser":
-      return "打开浏览器面板";
+      return t("transcript.tool.showBrowser");
     case "BrowserNavigate":
       return short(str("url"), 80);
     case "BrowserClick": {
-      const verb = i?.double === true ? "双击" : i?.right === true ? "右键" : "点击";
-      return `${verb} ${target()}`;
+      const key =
+        i?.double === true
+          ? "transcript.tool.click.double"
+          : i?.right === true
+            ? "transcript.tool.click.right"
+            : "transcript.tool.click.single";
+      return t(key, { target: target() });
     }
-    case "BrowserType":
-      return `在 ${target("target_text")} 输入 ${clip(str("text"), 40)}${i?.submit === true ? " ⏎" : ""}`;
+    case "BrowserType": {
+      const typed = t("transcript.tool.type", {
+        target: target("target_text"),
+        text: clip(str("text"), 40),
+      });
+      return `${typed}${i?.submit === true ? " ⏎" : ""}`;
+    }
     case "BrowserKey":
-      return `按 ${str("key")}`;
+      return t("transcript.tool.key", { key: str("key") });
     case "BrowserScroll": {
       const d = num("delta_y");
-      return d < 0 ? `向上 ${Math.round(-d)}px` : `向下 ${Math.round(d)}px`;
+      return d < 0
+        ? t("transcript.tool.scrollUp", { px: Math.round(-d) })
+        : t("transcript.tool.scrollDown", { px: Math.round(d) });
     }
     case "BrowserHover":
-      return `悬停 ${target()}`;
+      return t("transcript.tool.hover", { target: target() });
     case "BrowserSelect":
-      return `${target()} 选 ${str("value")}`;
+      return t("transcript.tool.select", { target: target(), value: str("value") });
     case "BrowserDrag":
-      return "拖拽元素";
+      return t("transcript.tool.drag");
     case "BrowserWaitFor": {
-      if (str("selector")) return `等 \`${str("selector")}\` 出现`;
-      if (str("selector_gone")) return `等 \`${str("selector_gone")}\` 消失`;
-      if (str("text")) return `等文本 “${str("text")}”`;
-      if (str("url_contains")) return `等地址含 “${str("url_contains")}”`;
-      if (i?.network_idle === true) return "等网络空闲";
-      return "等待条件";
+      if (str("selector")) return t("transcript.tool.wait.appear", { selector: str("selector") });
+      if (str("selector_gone")) {
+        return t("transcript.tool.wait.gone", { selector: str("selector_gone") });
+      }
+      if (str("text")) return t("transcript.tool.wait.text", { text: str("text") });
+      if (str("url_contains")) return t("transcript.tool.wait.url", { text: str("url_contains") });
+      if (i?.network_idle === true) return t("transcript.tool.wait.networkIdle");
+      return t("transcript.tool.wait.generic");
     }
-    case "BrowserGo":
-      return { back: "后退", forward: "前进", reload: "刷新" }[str("direction")] ?? "历史导航";
+    case "BrowserGo": {
+      const dir = str("direction");
+      return dir === "back"
+        ? t("transcript.tool.go.back")
+        : dir === "forward"
+          ? t("transcript.tool.go.forward")
+          : dir === "reload"
+            ? t("common.refresh")
+            : t("transcript.tool.go.history");
+    }
     case "BrowserTabs":
-      return `标签页: ${str("action") || "list"}`;
+      return t("transcript.tool.tabs", { action: str("action") || "list" });
     case "BrowserEvaluate":
-      return `执行 JS: ${clip(str("expression"), 60)}`;
+      return t("transcript.tool.evaluate", { expr: clip(str("expression"), 60) });
     case "BrowserCookies":
-      return "读 Cookie";
-    case "BrowserNetwork":
-      return `抓包: ${str("action") || "list"}${str("filter") ? ` (${str("filter")})` : ""}`;
+      return t("transcript.tool.cookies");
+    case "BrowserNetwork": {
+      const head = t("transcript.tool.network", { action: str("action") || "list" });
+      return `${head}${str("filter") ? ` (${str("filter")})` : ""}`;
+    }
     case "BrowserReplay":
-      return `重放 ${str("method") || "GET"} ${short(str("url"), 60)}`;
-    case "BrowserIntercept":
-      return `拦截: ${str("action")}${str("url_pattern") ? ` \`${str("url_pattern")}\`` : ""}`;
+      return t("transcript.tool.replay", {
+        method: str("method") || "GET",
+        url: short(str("url"), 60),
+      });
+    case "BrowserIntercept": {
+      const head = t("transcript.tool.intercept", { action: str("action") });
+      return `${head}${str("url_pattern") ? ` \`${str("url_pattern")}\`` : ""}`;
+    }
     case "BrowserSecrets":
-      return "扫描密钥泄露";
+      return t("transcript.tool.secrets");
     case "BrowserDiscover":
-      return "枚举表单/链接";
+      return t("transcript.tool.discover");
     case "BrowserFuzz":
       return `fuzz ${short(str("url"), 60)}`;
     case "BrowserUpload": {
       const n = Array.isArray(i?.paths) ? (i.paths as unknown[]).length : 0;
-      return `上传 ${n} 个文件`;
+      return tn("transcript.tool.upload", n);
     }
     case "BrowserCrawl":
-      return `爬取 ${short(str("url"), 60)}`;
+      return t("transcript.tool.crawl", { url: short(str("url"), 60) });
     case "BrowserReport": {
       const n = Array.isArray(i?.findings) ? (i.findings as unknown[]).length : 0;
-      return `生成渗透报告（${n} 条发现）`;
+      return tn("transcript.tool.report", n);
     }
     default:
       return clip(
@@ -405,15 +465,15 @@ function clip(s: string, max: number): string {
 }
 
 /** 有没有值得展开的内容。只读字段，不建 React 树。 */
-function hasDetail(t: Tool): boolean {
-  if (t.name === "TodoWrite") return todosOf(t).length > 0;
-  if (t.resultImage || t.resultImagePath) return true;
-  if (t.output.length > 0) return true;
-  if (t.status !== "running" && t.result) return true;
-  const i = t.input as Record<string, unknown>;
-  if (t.name === "Bash" && typeof i.command === "string" && i.command) return true;
-  if (t.name === "Edit" && (i.old_string || i.new_string)) return true;
-  if (t.name === "Write" && typeof i.content === "string" && i.content) return true;
+function hasDetail(tool: Tool): boolean {
+  if (tool.name === "TodoWrite") return todosOf(tool).length > 0;
+  if (tool.resultImage || tool.resultImagePath) return true;
+  if (tool.output.length > 0) return true;
+  if (tool.status !== "running" && tool.result) return true;
+  const i = tool.input as Record<string, unknown>;
+  if (tool.name === "Bash" && typeof i.command === "string" && i.command) return true;
+  if (tool.name === "Edit" && (i.old_string || i.new_string)) return true;
+  if (tool.name === "Write" && typeof i.content === "string" && i.content) return true;
   return false;
 }
 
@@ -421,14 +481,14 @@ function hasDetail(t: Tool): boolean {
  * 展开后的内容。按工具语义渲染，不是 JSON dump：
  * Edit 给 diff，Write 给内容预览，Bash 给实时输出或结果。
  */
-function renderDetail(t: Tool): React.ReactNode {
-  const i = t.input as Record<string, unknown>;
+function renderDetail(tool: Tool): React.ReactNode {
+  const i = tool.input as Record<string, unknown>;
   const str = (k: string) => (typeof i?.[k] === "string" ? (i[k] as string) : "");
 
   // 任务清单：从 tool_use 的输入渲染（清单在输入里；结果只是一句固定
   // 确认，显示它反而是噪音）。
-  if (t.name === "TodoWrite") {
-    const todos = todosOf(t);
+  if (tool.name === "TodoWrite") {
+    const todos = todosOf(tool);
     if (todos.length === 0) return null;
     return (
       <ul className="todo-list">
@@ -449,7 +509,7 @@ function renderDetail(t: Tool): React.ReactNode {
   const parts: React.ReactNode[] = [];
 
   // 长命令的摘要行被截断，全文在这里 —— 审计的核心信息不能在界面上无处可看。
-  if (t.name === "Bash") {
+  if (tool.name === "Bash") {
     const cmd = str("command");
     if (cmd) {
       parts.push(
@@ -460,7 +520,7 @@ function renderDetail(t: Tool): React.ReactNode {
     }
   }
 
-  if (t.name === "Edit") {
+  if (tool.name === "Edit") {
     const oldS = str("old_string");
     const newS = str("new_string");
     if (oldS || newS) {
@@ -479,40 +539,42 @@ function renderDetail(t: Tool): React.ReactNode {
         </pre>,
       );
     }
-  } else if (t.name === "Write") {
+  } else if (tool.name === "Write") {
     const content = str("content");
     if (content) {
       const lines = content.split("\n");
       // 写的过程中跟着尾巴走：定在开头的话，写到第 100 行时画面已经
       // 十几秒没动过了，和卡住一样。落定之后回到开头 —— 那时用户要
       // 确认的是"写了个什么东西"，不是逐行审阅。
-      const live = t.status === "running";
+      const live = tool.status === "running";
       const from = live ? Math.max(0, lines.length - 30) : 0;
       parts.push(
         <pre key="w" className="tool-body">
-          {from > 0 ? `… 前 ${from} 行\n` : ""}
+          {from > 0 ? `${tn("transcript.tool.write.skipped", from)}\n` : ""}
           {lines.slice(from, from + 30).join("\n")}
-          {!live && lines.length > 30 ? `\n… 共 ${lines.length} 行` : ""}
+          {!live && lines.length > 30
+            ? `\n${tn("transcript.tool.write.total", lines.length)}`
+            : ""}
         </pre>,
       );
     }
   }
 
   // 结果里的图（截图、读图）贴出来 —— 这就是用户点开想看的东西
-  if (t.resultImage || t.resultImagePath) {
+  if (tool.resultImage || tool.resultImagePath) {
     parts.push(
       <ShotImage
         key="img"
-        alt={`${t.name} 结果图`}
-        {...(t.resultImagePath !== undefined ? { path: t.resultImagePath } : {})}
-        {...(t.resultImage !== undefined ? { fallback: t.resultImage } : {})}
+        alt={t("transcript.tool.resultImageOf", { tool: tool.name })}
+        {...(tool.resultImagePath !== undefined ? { path: tool.resultImagePath } : {})}
+        {...(tool.resultImage !== undefined ? { fallback: tool.resultImage } : {})}
       />,
     );
   }
 
   // 运行中显示实时输出；结束后最终结果更权威（实时行只是进度侧影）
-  const live = t.output.length > 0 ? t.output.join("\n") : "";
-  const result = t.status === "running" ? live : t.result || live;
+  const live = tool.output.length > 0 ? tool.output.join("\n") : "";
+  const result = tool.status === "running" ? live : tool.result || live;
   if (result) {
     parts.push(
       <pre key="r" className="tool-body">
@@ -538,12 +600,14 @@ function ShotImage({
   path,
   fallback,
   // 每张结果图都叫"工具结果图片"的话，读屏用户分不清哪张是哪次调用的
-  alt = "工具结果图片",
+  alt: altProp,
 }: {
   path?: string;
   fallback?: string;
   alt?: string;
 }) {
+  const { t } = useT();
+  const alt = altProp ?? t("transcript.tool.resultImage");
   const [src, setSrc] = useState<string | undefined>(fallback);
   const [viewer, setViewer] = useState(false);
 
@@ -570,7 +634,7 @@ function ShotImage({
         type="button"
         className="tool-shot-wrap"
         onClick={() => setViewer(true)}
-        aria-label={`放大查看：${alt}`}
+        aria-label={t("transcript.image.zoomNamed", { name: alt })}
       >
         <img className="tool-shot" src={src} alt={alt} />
       </button>
@@ -587,13 +651,15 @@ function ShotImage({
  */
 export function ShotViewer({
   src,
-  alt = "工具结果图片",
+  alt: altProp,
   onClose,
 }: {
   src: string;
   alt?: string;
   onClose: () => void;
 }) {
+  const { t } = useT();
+  const alt = altProp ?? t("transcript.tool.resultImage");
   // Esc 走公共栈 —— 查看器开在权限卡之上时，Esc 只关查看器，
   // 不会顺手把底下的权限请求也拒了。
   useEscLayer(onClose);
@@ -606,7 +672,12 @@ export function ShotViewer({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <button className="shot-viewer-close" onClick={onClose} type="button" aria-label="关闭">
+      <button
+        className="shot-viewer-close"
+        onClick={onClose}
+        type="button"
+        aria-label={t("common.close")}
+      >
         <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
           <path
             d="M2 2l8 8M10 2L2 10"
@@ -617,7 +688,7 @@ export function ShotViewer({
           />
         </svg>
       </button>
-      <img src={src} alt={`${alt}（原图）`} />
+      <img src={src} alt={t("transcript.image.original", { name: alt })} />
     </div>,
     document.body,
   );

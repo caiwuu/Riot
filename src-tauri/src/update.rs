@@ -4,9 +4,10 @@
 //! 这里只回答「当前是不是旧的」和「去哪下」。CSP 不许前端直连
 //! api.github.com，所以检查必须走宿主。
 
+use riot_protocol::ui_error;
 use serde::{Deserialize, Serialize};
 
-use crate::{HostError, HostResult};
+use crate::HostResult;
 
 const RELEASES_LATEST: &str = "https://api.github.com/repos/caiwuu/Riot/releases/latest";
 const RELEASES_PAGE: &str = "https://github.com/caiwuu/Riot/releases";
@@ -43,14 +44,14 @@ pub async fn check(current: &str) -> HostResult<UpdateInfo> {
         .timeout(std::time::Duration::from_secs(12))
         .user_agent(format!("Riot/{current} (update-check)"))
         .build()
-        .map_err(|e| HostError::Update(format!("检查更新失败：{e}")))?;
+        .map_err(|e| ui_error!("host.update.failed"; e))?;
 
     let res = client
         .get(RELEASES_LATEST)
         .header("Accept", "application/vnd.github+json")
         .send()
         .await
-        .map_err(|e| HostError::Update(format!("检查更新失败：{e}")))?;
+        .map_err(|e| ui_error!("host.update.failed"; e))?;
 
     if res.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(UpdateInfo {
@@ -62,18 +63,18 @@ pub async fn check(current: &str) -> HostResult<UpdateInfo> {
         });
     }
     if !res.status().is_success() {
-        return Err(HostError::Update(format!(
-            "检查更新失败：GitHub 返回 {}",
-            res.status()
-        )));
+        return Err(
+            ui_error!("host.update.failed"; format!("GitHub returned HTTP {}", res.status()))
+                .into(),
+        );
     }
 
     let body = res
         .text()
         .await
-        .map_err(|e| HostError::Update(format!("检查更新失败：{e}")))?;
+        .map_err(|e| ui_error!("host.update.failed"; e))?;
     let rel: GhRelease = serde_json::from_str(&body)
-        .map_err(|e| HostError::Update(format!("检查更新失败：读不懂 GitHub 的回复（{e}）")))?;
+        .map_err(|e| ui_error!("host.update.failed"; format!("unexpected GitHub response: {e}")))?;
 
     Ok(from_release(current, &rel))
 }

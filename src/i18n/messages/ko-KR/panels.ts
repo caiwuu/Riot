@@ -1,0 +1,82 @@
+import type { Dict } from "..";
+import type zh from "../zh-CN/panels";
+
+export default {
+  /* ── 터미널 패널 ── */
+  "panels.terminal.title": "터미널",
+  "panels.terminal.newTab": "새 터미널",
+  "panels.terminal.closeTab": "터미널 닫기",
+  "panels.terminal.hide": "터미널 패널 접기",
+  "panels.terminal.badge.agent": "모델",
+  "panels.terminal.badge.exited": "종료됨",
+  "panels.terminal.agentTabTitle": "{title} (모델이 시작한 서비스)",
+  "panels.terminal.share.on": "agent와 공유 중: 이 터미널의 출력을 읽을 수 있습니다 (클릭하여 해제)",
+  "panels.terminal.share.off": "agent와 공유: 이 터미널의 출력을 읽을 수 있지만 중지할 수는 없습니다",
+  "panels.terminal.share.mark": "공유됨",
+  "panels.terminal.share.failed": "공유 실패",
+  "panels.terminal.sendSelection": "선택한 내용을 모델에 보내기",
+  "panels.terminal.sendSelection.hint": "먼저 터미널에서 텍스트를 선택한 뒤 여기서 모델에 보내세요",
+  "panels.terminal.closeConfirm.title": "“{title}”을(를) 닫을까요?",
+  "panels.terminal.closeConfirm.agentBody": "모델이 시작한 서비스입니다. 닫으면 즉시 종료되며, 모델이 아직 이 서비스에 의존하고 있을 수 있습니다.",
+  "panels.terminal.closeConfirm.body": "이 터미널에 실행 중인 프로세스가 있습니다. 닫으면 즉시 종료됩니다.",
+  "panels.terminal.closeConfirm.confirm": "닫고 종료",
+  "panels.terminal.reattachFailed": "다시 연결한 뒤 이 터미널에 접속할 수 없습니다. 이미 종료되었을 수 있습니다.",
+  "panels.terminal.processExited": "[프로세스가 종료되었습니다. 로그는 여기 남습니다. 탭의 ×를 클릭해 닫으세요.]",
+  "panels.terminal.attachFailed": "이 터미널에 접속할 수 없습니다. 해당 서비스가 이미 종료되었을 수 있으니 이 탭을 닫아도 됩니다.",
+  "panels.terminal.startFailed": "터미널을 시작하지 못했습니다. 이 탭을 닫고 새로 열어 다시 시도하세요.",
+
+  /* ── 브라우저 패널 ── */
+  "panels.browser.back": "뒤로",
+  "panels.browser.forward": "앞으로",
+  "panels.browser.starting": "브라우저 시작 중…",
+  "panels.browser.address": "주소 표시줄",
+  "panels.browser.address.placeholder": "URL 입력",
+  "panels.browser.viewMode": "뷰포트 모드",
+  "panels.browser.viewMode.fit": "맞춤: 패널 너비에 맞춰 페이지를 렌더링",
+  "panels.browser.viewMode.web": "Web: {width}px 데스크톱 너비로 렌더링하고 패널에 맞게 전체 축소",
+  "panels.browser.pick": "요소 선택",
+  "panels.browser.pick.title": "요소 선택: 패널 안의 요소를 클릭하면 선택자를 모델에 전달합니다",
+  "panels.browser.pick.miss": "선택된 요소가 없습니다. 페이지의 요소를 다시 클릭하세요.",
+  "panels.browser.pick.failed": "요소 선택 실패: {error}",
+  "panels.browser.navFailed": "열 수 없습니다: {error}",
+  "panels.browser.keyboard": "페이지 키보드 입력",
+  "panels.browser.empty.title": "탐색 시작",
+  "panels.browser.empty.hint": "URL을 입력하고 모델과 함께 보세요.",
+
+  /* ── 파일 미리보기 ── */
+  "panels.filePreview.openFailed": "열 수 없습니다",
+  "panels.filePreview.showTree": "파일 트리 표시",
+  "panels.filePreview.hideTree": "파일 트리 숨기기",
+  "panels.filePreview.pickOne": "오른쪽에서 파일을 선택하세요",
+  "panels.filePreview.loadingViewer": "뷰어를 불러오는 중…",
+  "panels.filePreview.reading": "파일을 읽는 중…",
+  "panels.filePreview.binary": "바이너리 파일이라 앱에서 볼 수 없습니다.",
+
+  /* ── 파일 트리 ── */
+  "panels.fileTree.label": "프로젝트 파일",
+  "panels.fileTree.loading": "읽는 중…",
+  "panels.fileTree.truncated": "{count}개 항목 더 있음",
+  "panels.fileTree.filter": "파일 필터",
+  "panels.fileTree.filter.placeholder": "파일 필터…",
+  "panels.fileTree.clear": "지우기",
+  "panels.fileTree.openFromDisk": "디스크에서 열기",
+  "panels.fileTree.openFromDisk.title": "디스크에서 열기… (⌘O)",
+  "panels.fileTree.noMatch": "일치하는 파일이 없습니다",
+  "panels.fileTree.symlink": "심볼릭 링크",
+
+  /* ── Git 변경 사항 ── */
+  "panels.git.base.title": "비교 기준입니다. 비교할 브랜치만 바꾸며 checkout하지 않습니다.",
+  "panels.git.currentBranch": "현재 브랜치",
+  "panels.git.recompare": "다시 비교",
+  "panels.git.comparing": "비교하는 중…",
+  "panels.git.failed": "비교 실패: {error}",
+  "panels.git.stale": "아래는 마지막 비교 결과입니다.",
+  "panels.git.notRepo": "이 폴더는 git 저장소가 아닙니다.",
+  "panels.git.notRepo.hint": "저장소를 초기화(git init)하면 커밋되지 않은 변경 사항이 여기에 표시됩니다.",
+  "panels.git.noDiffAgainst": "{base} 기준으로 차이가 없습니다.",
+  "panels.git.clean": "작업 공간이 깨끗합니다. 커밋되지 않은 변경 사항이 없습니다.",
+  "panels.git.scope.title":
+    "작업 공간(커밋되지 않은 내용 포함)과 선택한 브랜치의 차이입니다. 브랜치를 바꾸면 비교 기준만 바뀌며 checkout하지 않습니다. 이 세션에서 바꾼 내용만 보려면 입력창 위의 변경 사항 표시줄을 사용하세요.",
+  "panels.git.baseLabel": "비교 기준: {base}",
+  "panels.git.allUncommitted": "git의 커밋되지 않은 변경 사항 전체를 표시합니다",
+} satisfies Dict<typeof zh>;

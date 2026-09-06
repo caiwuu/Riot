@@ -3,6 +3,7 @@
 use riot_protocol::permission::{
     PermissionContext, PermissionMode, PermissionModeState, PermissionResult, PermissionRule,
 };
+use riot_protocol::text::UiText;
 use riot_protocol::tool::{PromptContext, Tool, ToolContext, ToolOutcome};
 
 use crate::rules::RuleSet;
@@ -52,8 +53,9 @@ impl Tool for PermTool {
         String::new()
     }
 
-    fn describe(&self, _input: &serde_json::Value) -> String {
-        self.name.to_owned()
+    fn describe(&self, _input: &serde_json::Value) -> UiText {
+        // 替身不进界面,键随便给 —— 词典对齐测试只扫 `ui_text!` 字面量。
+        UiText::new(self.name)
     }
 
     async fn call(&self, _input: serde_json::Value, _ctx: ToolContext) -> ToolOutcome {

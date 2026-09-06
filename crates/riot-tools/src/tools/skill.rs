@@ -16,7 +16,9 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use std::path::PathBuf;
 
+use riot_protocol::text::UiText;
 use riot_protocol::tool::{PromptContext, Tool, ToolContext, ToolOutcome, UiPayload};
+use riot_protocol::ui_text;
 
 /// 一个可用的技能。
 #[derive(Debug, Clone)]
@@ -75,9 +77,9 @@ impl Tool for SkillTool {
         p
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-        format!("加载技能 {name}")
+        ui_text!("tools.skill.load", name = name)
     }
 
     fn is_read_only(&self, _input: &serde_json::Value) -> bool {
@@ -129,11 +131,11 @@ impl Tool for SkillTool {
             )
         };
         ToolOutcome::Ok {
-            ui_payload: Some(UiPayload::Plain {
-                text: format!(
-                    "已加载技能「{}」（{} 字符）",
-                    skill.name,
-                    text.chars().count()
+            ui_payload: Some(UiPayload::Message {
+                text: ui_text!(
+                    "tools.skill.loaded",
+                    name = &skill.name,
+                    count = text.chars().count()
                 ),
             }),
             model_content: riot_protocol::message::ToolResultContent::text(text),

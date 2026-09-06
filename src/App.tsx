@@ -19,8 +19,10 @@ import {
   encodeRefForComposer,
   getConfig,
   type ImageInput,
+  isHostError,
   listSessions,
   notify,
+  renderUiError,
   type PermissionMode,
   openInBrowser,
   pickFiles,
@@ -76,6 +78,7 @@ import {
 import { useAppUpdate } from "./hooks/useAppUpdate";
 import { useBrowserPanel } from "./hooks/useBrowserPanel";
 import { isMobileNow, useIsMobile } from "./hooks/useIsMobile";
+import { t, useT } from "./i18n";
 import { newPresetId } from "./lib/prompts";
 import { inheritedSampling } from "./lib/sampling";
 import { subscribeSessionOpen } from "./lib/sessionLink";
@@ -195,10 +198,9 @@ function clamp(v: number, lo: number, hi: number): number {
   return Math.min(Math.max(v, lo), hi);
 }
 
-/** 宿主把缺目录收成 `项目目录不存在：…`；老错误文案也认，免得宿主没跟上。 */
+/** 宿主把缺目录收成 `host.project.missing`；路径解析不了的也当同一类处理。按键判，不比文案。 */
 function isMissingProjectError(e: unknown): boolean {
-  const s = String(e);
-  return s.startsWith("项目目录不存在：") || s.includes("无法解析路径");
+  return isHostError(e) && (e.is("host.project.missing") || e.is("host.fence.unresolvable"));
 }
 
 /* ── 会话列表的相等判定 ─────────────────────── */
@@ -260,6 +262,7 @@ function patchApplied(cur: SessionInfo, patch: Partial<SessionInfo>): boolean {
 }
 
 export function App() {
+  const { t, tn } = useT();
   const [config, setConfig] = useState<ConfigStatus | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -646,27 +649,30 @@ export function App() {
 
   /** 文件树的右键菜单。只读浏览：没有新建 / 改名 / 删除 —— 那些交给
    *  agent 走工具链和权限管线。 */
-  const treeMenu = (e: React.MouseEvent, t: TreeTarget) => {
+  const treeMenu = (e: React.MouseEvent, target: TreeTarget) => {
     e.preventDefault();
     e.stopPropagation();
     const entries: MenuState["entries"] = [];
-    if (!t.isDir) entries.push({ label: "预览", action: () => openFromTree(t.abs) });
+    if (!target.isDir) {
+      entries.push({ label: t("app.treeMenu.preview"), action: () => openFromTree(target.abs) });
+    }
     entries.push({
-      label: "添加到对话",
+      label: t("app.treeMenu.addToChat"),
       // 目录引用带结尾 `/`，和 `@` 菜单选目录同一约定（见 pathDisplay.isDirRef）。
-      action: () => setPickSnippet(encodeRefForComposer(t.isDir ? asDirRef(t.rel) : t.rel)),
+      action: () =>
+        setPickSnippet(encodeRefForComposer(target.isDir ? asDirRef(target.rel) : target.rel)),
     });
     entries.push({
-      label: "复制相对路径",
-      action: () => void navigator.clipboard.writeText(t.rel),
+      label: t("app.treeMenu.copyRelPath"),
+      action: () => void navigator.clipboard.writeText(target.rel),
     });
     entries.push({
-      label: "复制完整路径",
-      action: () => void navigator.clipboard.writeText(t.abs),
+      label: t("app.treeMenu.copyFullPath"),
+      action: () => void navigator.clipboard.writeText(target.abs),
     });
     entries.push({
-      label: "在访达 / 资源管理器中显示",
-      action: () => void revealInFinder(t.abs),
+      label: t("app.treeMenu.revealInFileManager"),
+      action: () => void revealInFinder(target.abs),
     });
     setMenu({ x: e.clientX, y: e.clientY, entries });
   };
@@ -867,11 +873,11 @@ export function App() {
     setConfirm({
       title,
       body: String(e),
-      confirmLabel: "知道了",
+      confirmLabel: t("app.dialog.gotIt"),
       danger: false,
       action: () => {},
     });
-  }, []);
+  }, [t]);
 
   const newSession = useCallback(async (root: string) => {
     try {
@@ -893,9 +899,9 @@ export function App() {
         setGoneRoot(root);
         return;
       }
-      noteError("无法创建会话", e);
+      noteError(t("app.error.createSession"), e);
     }
-  }, [noteError, touchSession]);
+  }, [noteError, touchSession, t]);
 
   const dirPicker = useDirectoryPicker();
   const pickDir = dirPicker.pick;
@@ -914,9 +920,9 @@ export function App() {
         setGoneRoot(dir);
         return;
       }
-      noteError("打不开这个目录", e);
+      noteError(t("app.error.openDir"), e);
     }
-  }, [newSession, noteError, pickDir]);
+  }, [newSession, noteError, pickDir, t]);
 
   /** 会话发出第一条消息后补标题。宿主的 title 来自历史，UI 上要即时。 */
   const onFirstMessage = useCallback((sessionId: string, text: string) => {
@@ -984,11 +990,26 @@ export function App() {
     scheduleMissed()
       .then(setMissedSchedules)
       .catch(() => {});
-    const offRuns = subscribeScheduleRuns(() => {
+    const offRuns = subscribeScheduleRuns((run) => {
       reloadSchedules();
       listSessions()
         .then(applySessions)
         .catch(() => {});
+      // 系统通知由前端发：文案要跟界面语言走，宿主那边没有词典。
+      // 只在跑完那一拍发，开跑不打扰。
+      if (run.phase === "done") {
+        if (run.error) {
+          void notify(
+            t("app.notify.scheduleFailed.title"),
+            t("app.notify.scheduleFailed.body", { name: run.name, error: renderUiError(run.error) }),
+          );
+        } else {
+          void notify(
+            t("app.notify.scheduleDone.title"),
+            t("app.notify.scheduleDone.body", { name: run.name }),
+          );
+        }
+      }
     });
     const offChanges = subscribeScheduleChanges(reloadSchedules);
     // 会话表：另一端（网页版 / 另一窗口）新建、删除、改名时重拉。
@@ -1006,7 +1027,7 @@ export function App() {
       offChanges();
       offSessions();
     };
-  }, [reloadSchedules, applySessions]);
+  }, [reloadSchedules, applySessions, t]);
 
   /**
    * 处理掉一条错过记录（补跑或忽略）。全部处理完才告诉宿主清空 ——
@@ -1299,7 +1320,7 @@ export function App() {
         setGoneRoot(dir);
         return;
       }
-      noteError("打不开这个目录", e);
+      noteError(t("app.error.openDir"), e);
     }
   };
 
@@ -1312,7 +1333,7 @@ export function App() {
       anchor: `session:${s.id}`,
       entries: [
         {
-          label: "重命名",
+          label: t("app.sessionMenu.rename"),
           action: () => {
             // 改名的输入框在侧栏里。从顶栏标题进来的时候侧栏可能是
             // 收起的 —— 不展开的话点了像没反应。
@@ -1321,13 +1342,13 @@ export function App() {
           },
         },
         {
-          label: "删除会话",
+          label: t("app.sessionMenu.delete"),
           danger: true,
           action: () =>
             setConfirm({
-              title: "删除这个会话？",
-              body: `「${s.title ?? "新会话"}」的历史会丢失。`,
-              confirmLabel: "删除",
+              title: t("app.sessionMenu.deleteTitle"),
+              body: t("app.sessionMenu.deleteBody", { title: s.title ?? t("app.newSession") }),
+              confirmLabel: t("common.delete"),
               action: () => void doDeleteSession(s.id).catch((err: unknown) => setBootError(String(err))),
             }),
         },
@@ -1345,23 +1366,23 @@ export function App() {
       y: e.clientY,
       anchor: `project:${root}`,
       entries: [
-        { label: "新会话", action: () => void newSession(root) },
-        { label: "在访达中显示", action: () => void revealInFinder(root) },
+        { label: t("app.newSession"), action: () => void newSession(root) },
+        { label: t("common.revealInFinder"), action: () => void revealInFinder(root) },
         {
-          label: "复制路径",
+          label: t("app.projectMenu.copyPath"),
           action: () => void navigator.clipboard.writeText(root),
         },
         {
-          label: "从列表移除",
+          label: t("app.project.removeFromList"),
           danger: true,
           action: () =>
             setConfirm({
-              title: `移除 ${name}？`,
+              title: t("app.projectMenu.removeTitle", { name }),
               body:
                 count > 0
-                  ? `下面 ${count} 个会话会被关闭。目录不会被删除。`
-                  : "目录不会被删除。",
-              confirmLabel: "移除",
+                  ? tn("app.projectMenu.removeBodyCount", count)
+                  : t("app.projectMenu.removeBody"),
+              confirmLabel: t("common.remove"),
               action: () => void doRemoveProject(root).catch((err: unknown) => setBootError(String(err))),
             }),
         },
@@ -1370,42 +1391,47 @@ export function App() {
   };
 
   /** 定时任务行的「…」/ 右键菜单。操作全收在这里，行本身只负责跳转。 */
-  const scheduleMenu = (e: React.MouseEvent, t: ScheduledTask) => {
+  const scheduleMenu = (e: React.MouseEvent, task: ScheduledTask) => {
     e.preventDefault();
     e.stopPropagation();
-    const missed = missedSchedules.find((m) => m.taskId === t.id);
+    const missed = missedSchedules.find((m) => m.taskId === task.id);
     const entries: MenuState["entries"] = [];
     if (missed) {
       entries.push({
-        label: `补跑一次（错过 ${missed.count} 次）`,
+        label: tn("app.scheduleMenu.rerunMissed", missed.count),
         action: () => {
-          settleMissed(t.id);
-          void scheduleRunNow(t.id).catch((err: unknown) => noteError("补跑没成", err));
+          settleMissed(task.id);
+          void scheduleRunNow(task.id).catch((err: unknown) =>
+            noteError(t("app.error.rerun"), err),
+          );
         },
       });
-      entries.push({ label: "忽略这次错过", action: () => settleMissed(t.id) });
+      entries.push({ label: t("app.scheduleMenu.ignoreMissed"), action: () => settleMissed(task.id) });
     }
     entries.push({
-      label: "立即运行",
-      action: () => void scheduleRunNow(t.id).catch((err: unknown) => noteError("没跑起来", err)),
+      label: t("app.scheduleMenu.runNow"),
+      action: () =>
+        void scheduleRunNow(task.id).catch((err: unknown) => noteError(t("app.error.runNow"), err)),
     });
     // 一次性任务跑完就没有"恢复"可言 —— 时刻已经过了，恢复了也不会再跑。
-    const spent = t.repeat.kind === "once" && !t.enabled && !t.nextRunMs;
+    const spent = task.repeat.kind === "once" && !task.enabled && !task.nextRunMs;
     if (!spent) {
       entries.push({
-        label: t.enabled ? "暂停" : "恢复",
+        label: task.enabled ? t("app.scheduleMenu.pause") : t("app.scheduleMenu.resume"),
         action: () =>
-          void scheduleSetEnabled(t.id, !t.enabled)
+          void scheduleSetEnabled(task.id, !task.enabled)
             .then(reloadSchedules)
-            .catch((err: unknown) => noteError(t.enabled ? "暂停失败" : "恢复失败", err)),
+            .catch((err: unknown) =>
+              noteError(task.enabled ? t("app.error.pause") : t("app.error.resume"), err),
+            ),
       });
     }
     // 和点击行同一个判定：会话还活着才给入口，跳到已删除的会话
     // 只会退回欢迎页，看起来像点坏了。
-    if (t.lastSessionId && sessions.some((s) => s.id === t.lastSessionId)) {
-      const sid = t.lastSessionId;
+    if (task.lastSessionId && sessions.some((s) => s.id === task.lastSessionId)) {
+      const sid = task.lastSessionId;
       entries.push({
-        label: "看上次运行",
+        label: t("app.scheduleMenu.viewLastRun"),
         action: () => {
           setActive(sid);
           setSchedulePage(false);
@@ -1413,20 +1439,20 @@ export function App() {
       });
     }
     entries.push({
-      label: "删除任务",
+      label: t("app.scheduleMenu.delete"),
       danger: true,
       action: () =>
         setConfirm({
-          title: `删除「${t.name}」？`,
-          body: "到点就不会再跑了。已经跑过的会话不受影响。",
-          confirmLabel: "删除",
+          title: t("app.scheduleMenu.deleteTitle", { name: task.name }),
+          body: t("app.scheduleMenu.deleteBody"),
+          confirmLabel: t("common.delete"),
           action: () =>
-            void scheduleDelete(t.id)
+            void scheduleDelete(task.id)
               .then(reloadSchedules)
-              .catch((err: unknown) => noteError("删除失败", err)),
+              .catch((err: unknown) => noteError(t("app.error.delete"), err)),
         }),
     });
-    setMenu({ x: e.clientX, y: e.clientY, anchor: `schedule:${t.id}`, entries });
+    setMenu({ x: e.clientX, y: e.clientY, anchor: `schedule:${task.id}`, entries });
   };
 
   /**
@@ -1445,7 +1471,7 @@ export function App() {
     e.preventDefault();
     const entries: MenuState["entries"] = [
       {
-        label: "手动创建…",
+        label: t("app.scheduleCreate.manual"),
         action: () => {
           setSelectedSchedule(null);
           setSchedCreating(true);
@@ -1454,8 +1480,8 @@ export function App() {
     ];
     if (activeSession) {
       entries.push({
-        label: "让 Riot 创建",
-        action: () => scheduleCompose("帮我设一个定时任务："),
+        label: t("app.scheduleCreate.byRiot"),
+        action: () => scheduleCompose(t("app.scheduleCreate.prompt")),
       });
     }
     setMenu({ x: e.clientX, y: e.clientY, anchor: "schedule:create", entries });
@@ -1464,7 +1490,7 @@ export function App() {
   /** 错过补跑：立即跑一次并把这条错过消掉。 */
   const rerunMissed = (m: MissedRun) => {
     settleMissed(m.taskId);
-    void scheduleRunNow(m.taskId).catch((err: unknown) => noteError("补跑没成", err));
+    void scheduleRunNow(m.taskId).catch((err: unknown) => noteError(t("app.error.rerun"), err));
   };
 
   /** 错过全部忽略。 */
@@ -1482,11 +1508,11 @@ export function App() {
       y: e.clientY,
       entries: [
         {
-          label: "浏览器",
+          label: t("app.workbench.browser"),
           action: () => {
             // 已经开着就再开一页（浏览器"+"的直觉）；还没开就先开起来，
             // 第一页宿主自己建。
-            const had = wb.tabs.some((t) => t.kind === "browser");
+            const had = wb.tabs.some((x) => x.kind === "browser");
             openTab({ kind: "browser" });
             if (had && browserPages.tabs.length > 0 && activeSession) {
               void browserNewTab(activeSession.id)
@@ -1495,8 +1521,8 @@ export function App() {
             }
           },
         },
-        { label: "Git 改动", action: () => openTab({ kind: "changes" }) },
-        { label: "文件", action: () => openTab({ kind: "files" }) },
+        { label: t("app.workbench.changes"), action: () => openTab({ kind: "changes" }) },
+        { label: t("app.workbench.files"), action: () => openTab({ kind: "files" }) },
       ],
     });
   };
@@ -1504,10 +1530,10 @@ export function App() {
   if (bootError) {
     return (
       <div className="boot-fail">
-        <h1>出错了</h1>
+        <h1>{t("app.boot.failed")}</h1>
         <pre className="boot-error">{bootError}</pre>
         <button className="primary" onClick={() => window.location.reload()}>
-          重新加载
+          {t("app.boot.reload")}
         </button>
       </div>
     );
@@ -1518,7 +1544,7 @@ export function App() {
     return (
       <div className="booting">
         <div className="booting-logo">Riot</div>
-        <div className="booting-spinner" aria-label="启动中" />
+        <div className="booting-spinner" aria-label={t("app.boot.starting")} />
       </div>
     );
   }
@@ -1649,15 +1675,15 @@ export function App() {
 
         {updateNotice ? (
           <div className="update-banner" role="status">
-            <span>Riot {updateNotice.latest} 已发布</span>
+            <span>{t("app.update.released", { version: updateNotice.latest ?? "" })}</span>
             <button className="ghost" onClick={() => void openInBrowser(updateNotice.url)}>
-              去下载
+              {t("app.update.download")}
             </button>
             <button
               className="update-banner-dismiss"
               onClick={update.dismiss}
-              title="关闭"
-              aria-label="关闭"
+              title={t("common.close")}
+              aria-label={t("common.close")}
             >
               ×
             </button>
@@ -1685,9 +1711,9 @@ export function App() {
                   const done = schedules.filter(isDoneSchedule);
                   if (done.length === 0) return;
                   setConfirm({
-                    title: `清理 ${done.length} 个已完成的任务？`,
-                    body: "一次性任务跑完的记录会从列表里去掉。已经跑过的会话不受影响。",
-                    confirmLabel: "清理",
+                    title: tn("app.schedules.clearDoneTitle", done.length),
+                    body: t("app.schedules.clearDoneBody"),
+                    confirmLabel: t("app.schedules.clearDone"),
                     action: () =>
                       void Promise.all(done.map((t) => scheduleDelete(t.id)))
                         .then(() => {
@@ -1696,7 +1722,7 @@ export function App() {
                           );
                           reloadSchedules();
                         })
-                        .catch((err: unknown) => noteError("清理失败", err)),
+                        .catch((err: unknown) => noteError(t("app.error.clearDone"), err)),
                   });
                 }}
                 onSuggest={scheduleCompose}
@@ -2064,7 +2090,11 @@ export function App() {
         <MissingProjectDialog
           root={goneRoot}
           onClose={() => setGoneRoot(null)}
-          onRemove={() => void doRemoveProject(goneRoot).catch((err: unknown) => noteError("无法移除项目", err))}
+          onRemove={() =>
+            void doRemoveProject(goneRoot).catch((err: unknown) =>
+              noteError(t("app.error.removeProject"), err),
+            )
+          }
           onRelocate={() => void relocateGone(goneRoot)}
         />
       ) : null}
@@ -2077,7 +2107,7 @@ export function App() {
 
 /** 长任务在后台跑完时发系统通知。权限与失败处理见 bridge 的 `notify`。 */
 function notifyTurnDone() {
-  void notify("Riot", "任务完成了，回来看看结果吧。");
+  void notify("Riot", t("app.notify.turnDone"));
 }
 
 function Chat({
@@ -2140,6 +2170,7 @@ function Chat({
   insertText?: string | null;
   onInserted?: () => void;
 }) {
+  const { t } = useT();
   const session = useSession(
     sessionId,
     onAgentBrowser || onAgentPreview
@@ -2294,7 +2325,7 @@ function Chat({
           <span className="hero-logo">
             <RiotMark />
           </span>
-          <h1 className="hero-title">今天做点什么？</h1>
+          <h1 className="hero-title">{t("app.hero.title")}</h1>
           <p className="hero-ws" title={workspace}>
             {workspaceMissing ? (
               <button
@@ -2302,7 +2333,7 @@ function Chat({
                 className="hero-ws-missing"
                 onClick={onMissingWorkspace}
               >
-                目录已不存在，点这里处理
+                {t("app.hero.dirGone")}
               </button>
             ) : (
               <>

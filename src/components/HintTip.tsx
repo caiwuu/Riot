@@ -1,11 +1,14 @@
 import { type ReactNode, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
+import { useT } from "../i18n";
+
 /**
  * 标题旁的「？」：解释性文字收在这里，悬停才展开。
  * 弹出层用 fixed，避免被设置页的 overflow 裁掉。
  */
 export function HintTip({ children }: { children: ReactNode }) {
+  const { t } = useT();
   const btn = useRef<HTMLButtonElement>(null);
   const [box, setBox] = useState<{ top: number; left: number; up: boolean } | null>(null);
 
@@ -23,7 +26,7 @@ export function HintTip({ children }: { children: ReactNode }) {
         ref={btn}
         type="button"
         className="hint-tip-btn"
-        aria-label="说明"
+        aria-label={t("app.hintTip.label")}
         onMouseEnter={show}
         onMouseLeave={() => setBox(null)}
         onFocus={show}

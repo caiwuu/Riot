@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use riot_protocol::schedule::{ScheduleAccess, ScheduleSpec, ScheduledTask, WhenSpec};
+use riot_protocol::text::UiText;
 use riot_protocol::tool::{PromptContext, Tool, ToolContext, ToolOutcome};
+use riot_protocol::ui_text;
 use serde::Deserialize;
 
 /// 名字和提示词的长度上限。超出的多半是模型把整段对话塞了进来。
@@ -112,18 +114,18 @@ impl Tool for ScheduleTool {
             .to_owned()
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         let name = input.get("name").and_then(|v| v.as_str());
         match input.get("action").and_then(|v| v.as_str()) {
             Some("create") => match name {
-                Some(n) => format!("创建定时任务「{n}」"),
-                None => "创建定时任务".to_owned(),
+                Some(n) => ui_text!("tools.schedule.create", name = n),
+                None => ui_text!("tools.schedule.createAny"),
             },
-            Some("list") => "查看定时任务".to_owned(),
-            Some("pause") => "暂停定时任务".to_owned(),
-            Some("resume") => "恢复定时任务".to_owned(),
-            Some("delete") => "删除定时任务".to_owned(),
-            _ => "管理定时任务".to_owned(),
+            Some("list") => ui_text!("tools.schedule.list"),
+            Some("pause") => ui_text!("tools.schedule.pause"),
+            Some("resume") => ui_text!("tools.schedule.resume"),
+            Some("delete") => ui_text!("tools.schedule.delete"),
+            _ => ui_text!("tools.schedule.manage"),
         }
     }
 
@@ -452,6 +454,14 @@ mod tests {
         else {
             panic!("该失败：{out:?}");
         };
-        assert!(error_for_model.contains("定时任务"), "{error_for_model}");
+        // 模型读的是 Display：键 + 英文细节。
+        assert!(
+            error_for_model.contains("kernel.schedule.unavailable"),
+            "{error_for_model}"
+        );
+        assert!(
+            error_for_model.contains("scheduled tasks"),
+            "{error_for_model}"
+        );
     }
 }

@@ -48,7 +48,7 @@ pub async fn fetch(
     if dest.exists() {
         progress(PackProgress::Verifying);
         if sha256_file(dest)? == expected_sha256 {
-            tracing::info!(path = %dest.display(), "能力包已在缓存里且校验通过");
+            tracing::info!(path = %dest.display(), "pack already cached and verified");
             return Ok(());
         }
         // 校验不过说明是坏的或旧版本,删掉重下 —— 对它做续传会拼出一堆垃圾。
@@ -88,11 +88,11 @@ pub async fn fetch(
                     error = %e,
                     saved = after,
                     stalls,
-                    "能力包下载中断，从断点重试"
+                    "pack download interrupted; resuming from offset"
                 );
                 if stalls >= MAX_STALLS {
                     return Err(InstallError::Network(format!(
-                        "{e} 已保存 {}，再点一次会从断点继续。",
+                        "{e} ({} saved; the next attempt resumes from there)",
                         pretty_bytes(after)
                     )));
                 }
@@ -157,12 +157,12 @@ async fn download_attempt(
         // 偏移对不上,半成品不可信。删掉让下一轮从头来,免得对着 416 空转。
         let _ = std::fs::remove_file(part);
         return Err(InstallError::Network(
-            "服务端拒绝续传（416），将重新下载".into(),
+            "server refused resume (416); restarting download".into(),
         ));
     }
     if !res.status().is_success() {
         return Err(InstallError::Network(format!(
-            "下载返回 {}：{url}",
+            "HTTP {} for {url}",
             res.status()
         )));
     }
@@ -176,7 +176,7 @@ async fn download_attempt(
                 Some(0) => done = 0,
                 Some(start) => {
                     return Err(InstallError::Network(format!(
-                        "续传起点对不上（本地 {done}，服务端 {start}）"
+                        "resume offset mismatch (local {done}, server {start})"
                     )));
                 }
                 // 没给 Content-Range 的 206:按声明相信它,错了校验会拦住。
@@ -204,7 +204,7 @@ async fn download_attempt(
         .append(resuming)
         .truncate(!resuming)
         .open(part)
-        .map_err(|e| InstallError::Io("打开下载临时文件".into(), e))?;
+        .map_err(|e| InstallError::Io("open download temp file".into(), e))?;
 
     let mut received = done;
     let mut last_report = std::time::Instant::now();
@@ -216,20 +216,22 @@ async fn download_attempt(
         let chunk = match next {
             Err(_) => {
                 let _ = file.flush();
-                return Err(InstallError::Network("下载中断：等待数据超时".into()));
+                return Err(InstallError::Network(
+                    "download stalled: timed out waiting for data".into(),
+                ));
             }
             Ok(None) => break,
             Ok(Some(Err(e))) => {
                 let _ = file.flush();
                 return Err(InstallError::Network(format!(
-                    "下载中断：{}",
+                    "download interrupted: {}",
                     explain_body(&e)
                 )));
             }
             Ok(Some(Ok(chunk))) => chunk,
         };
         file.write_all(&chunk)
-            .map_err(|e| InstallError::Io("写下载临时文件".into(), e))?;
+            .map_err(|e| InstallError::Io("write download temp file".into(), e))?;
         received += chunk.len() as u64;
         // 限流:一个块可能只有几 KB,每块发一次事件会把 IPC 打满,
         // 前端忙着重绘进度条反而更慢。
@@ -239,7 +241,7 @@ async fn download_attempt(
         }
     }
     file.flush()
-        .map_err(|e| InstallError::Io("flush 下载临时文件".into(), e))?;
+        .map_err(|e| InstallError::Io("flush download temp file".into(), e))?;
     drop(file);
     progress(PackProgress::Downloading {
         received,
@@ -269,19 +271,19 @@ async fn send_get(
         let res = req
             .send()
             .await
-            .map_err(|e| InstallError::Network(format!("下载失败：{e}")))?;
+            .map_err(|e| InstallError::Network(format!("request failed: {e}")))?;
         if res.status().is_redirection() {
             let loc = res
                 .headers()
                 .get(LOCATION)
                 .and_then(|v| v.to_str().ok())
-                .ok_or_else(|| InstallError::Network("重定向没有 Location".into()))?;
+                .ok_or_else(|| InstallError::Network("redirect without Location".into()))?;
             current = join_url(&current, loc)?;
             continue;
         }
         return Ok(res);
     }
-    Err(InstallError::Network("重定向次数过多".into()))
+    Err(InstallError::Network("too many redirects".into()))
 }
 
 fn finalize_part(
@@ -295,7 +297,7 @@ fn finalize_part(
     progress(PackProgress::Verifying);
     let actual = sha256_file(part)?;
     if actual == expected_sha256 {
-        std::fs::rename(part, dest).map_err(|e| InstallError::Io("重命名下载文件".into(), e))?;
+        std::fs::rename(part, dest).map_err(|e| InstallError::Io("rename download".into(), e))?;
         return Ok(());
     }
     let size = part_len(part);
@@ -303,7 +305,7 @@ fn finalize_part(
     // 必然失败 —— 但半成品是好的,删掉等于让用户从零再来。留下,下一轮 Range。
     if size < expected_size {
         return Err(InstallError::Network(format!(
-            "下载不完整（{size}/{expected_size}），已保存进度。"
+            "incomplete download ({size}/{expected_size}); progress kept"
         )));
     }
     let _ = std::fs::remove_file(part);
@@ -329,7 +331,7 @@ fn join_url(base: &str, location: &str) -> Result<String, InstallError> {
     reqwest::Url::parse(base)
         .and_then(|u| u.join(location))
         .map(|u| u.to_string())
-        .map_err(|e| InstallError::Network(format!("重定向地址无效：{e}")))
+        .map_err(|e| InstallError::Network(format!("invalid redirect location: {e}")))
 }
 
 fn retryable(err: &InstallError) -> bool {
@@ -360,18 +362,18 @@ fn pretty_bytes(n: u64) -> String {
 fn explain_body(err: &reqwest::Error) -> String {
     let raw = err.to_string();
     if raw.contains("decode") || raw.contains("connection") {
-        format!("网络中断（{raw}）")
+        format!("connection dropped ({raw})")
     } else {
         raw
     }
 }
 
 fn sha256_file(path: &Path) -> Result<String, InstallError> {
-    let mut file =
-        std::fs::File::open(path).map_err(|e| InstallError::Io("打开文件算校验和".into(), e))?;
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| InstallError::Io("open file for checksum".into(), e))?;
     let mut hasher = Sha256::new();
     std::io::copy(&mut file, &mut hasher)
-        .map_err(|e| InstallError::Io("读文件算校验和".into(), e))?;
+        .map_err(|e| InstallError::Io("read file for checksum".into(), e))?;
     Ok(format!("{:x}", hasher.finalize()))
 }
 

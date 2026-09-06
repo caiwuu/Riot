@@ -31,11 +31,13 @@ use std::path::{Component, Path, PathBuf};
 /// 字符串比较，各留一份迟早只修一边。见 [`riot_permissions::fence`]。
 pub(crate) use riot_permissions::fence::strip_verbatim;
 
+/// 围栏错误。`Display` 给日志；前端看到的形态由 `HostError::to_ui` 决定
+/// （`host.fence.*` 键），`msg` 是技术细节，不翻译。
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum FenceError {
-    #[error("路径越界: {} 不在工作区 {} 内", path.display(), root.display())]
+    #[error("path {} escapes workspace {}", path.display(), root.display())]
     Escaped { path: PathBuf, root: PathBuf },
-    #[error("无法解析路径 {}: {msg}", path.display())]
+    #[error("cannot resolve path {}: {msg}", path.display())]
     Unresolvable { path: PathBuf, msg: String },
 }
 
@@ -123,7 +125,7 @@ fn canonicalize_lexically_existing(path: &Path) -> Result<PathBuf, FenceError> {
                 let Some(name) = existing.file_name().map(std::ffi::OsString::from) else {
                     return Err(FenceError::Unresolvable {
                         path: path.to_path_buf(),
-                        msg: "向上找不到任何存在的祖先".into(),
+                        msg: "no existing ancestor".into(),
                     });
                 };
                 // `..` 和 `.` 不能当普通组件往回拼 —— 那样等于放行穿越。
@@ -136,7 +138,7 @@ fn canonicalize_lexically_existing(path: &Path) -> Result<PathBuf, FenceError> {
                     if normalized == path {
                         return Err(FenceError::Unresolvable {
                             path: path.to_path_buf(),
-                            msg: "路径无法规约".into(),
+                            msg: "path cannot be normalized".into(),
                         });
                     }
                     return canonicalize_lexically_existing(&normalized);
@@ -145,7 +147,7 @@ fn canonicalize_lexically_existing(path: &Path) -> Result<PathBuf, FenceError> {
                 if !existing.pop() {
                     return Err(FenceError::Unresolvable {
                         path: path.to_path_buf(),
-                        msg: "向上找不到任何存在的祖先".into(),
+                        msg: "no existing ancestor".into(),
                     });
                 }
             }

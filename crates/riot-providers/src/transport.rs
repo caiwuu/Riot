@@ -63,12 +63,15 @@ pub struct HttpError {
     pub body: String,
     /// 传输层错误（连接被拒、DNS 失败、读到一半断了）。
     pub transport: bool,
+    /// 传输层错误里的超时那一种。单独标出来是因为给用户的解释不同：
+    /// "连不上"要查地址和网络，"超时"多半等一等重试就好。
+    pub timed_out: bool,
 }
 
 fn describe(e: &HttpError) -> String {
     match e.status {
         Some(s) => format!("HTTP {s}: {}", truncate(&e.body, 300)),
-        None if e.transport => format!("连接失败: {}", truncate(&e.body, 300)),
+        None if e.transport => format!("connection failed: {}", truncate(&e.body, 300)),
         None => truncate(&e.body, 300),
     }
 }
@@ -193,7 +196,7 @@ impl HttpTransport for ScriptedTransport {
             // 这类断言就永远测不准，问题会被替身掩盖掉。
             None => Err(HttpError::status(
                 400,
-                "脚本已耗尽 —— 要么用例缺响应，要么 provider 多发了一次请求",
+                "script exhausted: the test case is missing a response, or the provider sent one request too many",
             )),
         }
     }

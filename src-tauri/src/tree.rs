@@ -29,6 +29,8 @@
 
 use std::path::Path;
 
+use riot_protocol::{UiError, ui_error};
+
 use crate::fence::{Fence, FenceError};
 
 /// 单目录最多返回这么多条目。5000 已经远超任何人会翻的量。
@@ -58,24 +60,32 @@ pub struct DirListing {
 
 /// 列 `root` 下的 `rel` 目录。`rel` 为空串即根本身。
 ///
-/// 错误文案是给人看的：前端把它摆在那个目录节点下面。
-pub fn list_dir(root: &Path, rel: &str) -> Result<DirListing, String> {
+/// 错误是给人看的：前端把它摆在那个目录节点下面。
+pub fn list_dir(root: &Path, rel: &str) -> Result<DirListing, UiError> {
     let fence = Fence::new(root).map_err(|e| match e {
-        FenceError::Unresolvable { .. } => "项目目录不存在或读不到".to_owned(),
-        other => other.to_string(),
+        FenceError::Unresolvable { msg, .. } => {
+            ui_error!("host.project.missing", path = root.display(); msg)
+        }
+        FenceError::Escaped { path, root } => {
+            ui_error!(
+                "host.fence.escaped",
+                path = path.display(),
+                root = root.display()
+            )
+        }
     })?;
     // 前端统一用 `/` 拼相对路径（和 `@` 引用同一约定），Windows 上
     // `Path::join` 认得 `/`，不用换。
     let dir = fence.resolve(rel).map_err(|e| match e {
-        FenceError::Escaped { .. } => "这个目录在项目之外".to_owned(),
-        FenceError::Unresolvable { .. } => "目录不存在".to_owned(),
+        FenceError::Escaped { .. } => ui_error!("host.dir.outsideProject"),
+        FenceError::Unresolvable { msg, .. } => ui_error!("host.dir.notFound"; msg),
     })?;
 
     let read = std::fs::read_dir(&dir).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => "目录不存在".to_owned(),
-        std::io::ErrorKind::PermissionDenied => "没有权限读这个目录".to_owned(),
-        std::io::ErrorKind::NotADirectory => "这不是目录".to_owned(),
-        _ => format!("读目录失败：{e}"),
+        std::io::ErrorKind::NotFound => ui_error!("host.dir.notFound"),
+        std::io::ErrorKind::PermissionDenied => ui_error!("host.dir.permissionDenied"),
+        std::io::ErrorKind::NotADirectory => ui_error!("host.dir.notDirectory"),
+        _ => ui_error!("host.dir.readFailed"; e),
     })?;
 
     let mut entries: Vec<DirEntry> = Vec::new();
@@ -177,12 +187,15 @@ mod tests {
         let t = tempfile::tempdir().expect("目录");
         std::fs::write(t.path().join("a.txt"), "").expect("写");
 
-        assert_eq!(list_dir(t.path(), "nope").unwrap_err(), "目录不存在");
+        assert_eq!(
+            list_dir(t.path(), "nope").unwrap_err().key(),
+            "host.dir.notFound"
+        );
         let err = list_dir(t.path(), "a.txt").unwrap_err();
         // 平台差异：macOS/Linux 给 NotADirectory，Windows 给别的 kind。
         assert!(
-            err == "这不是目录" || err.starts_with("读目录失败"),
-            "文案：{err}"
+            matches!(err.key(), "host.dir.notDirectory" | "host.dir.readFailed"),
+            "键：{err}"
         );
     }
 

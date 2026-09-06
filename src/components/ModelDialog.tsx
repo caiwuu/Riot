@@ -6,6 +6,7 @@ import {
   type Sampling,
   testConnection,
 } from "../bridge";
+import { useT } from "../i18n";
 import {
   MAX_CONTEXT_WINDOW,
   MIN_CONTEXT_WINDOW,
@@ -47,6 +48,7 @@ export function ModelDialog({
   onSave: (m: ModelConfig) => void;
   onClose: () => void;
 }) {
+  const { t } = useT();
   const [id, setId] = useState(model?.id ?? "");
   const [name, setName] = useState(model?.name ?? "");
   const [vision, setVision] = useState(model?.vision ?? false);
@@ -91,11 +93,13 @@ export function ModelDialog({
   // 事情 —— 用户想知道的是这个数会让压缩早一点还是晚一点发生。
   const windowNote = (() => {
     const w = contextWindow();
-    if (w === undefined) return "留空 = 跟随设置里的全局压缩阈值。";
+    if (w === undefined) return t("composer.modelDialog.window.noteEmpty");
     // 选了「模型默认」就是不发上限，和从没设过一样按没有上限算。
     const maxOut =
       mergeSampling(sampling(), provider.sampling ?? {}).maxOutputTokens ?? undefined;
-    return `历史约 ${fmtTokens(compactThresholdForWindow(w, maxOut))} 时自动压缩（窗口减去回复和摘要的预留）。`;
+    return t("composer.modelDialog.window.note", {
+      tokens: fmtTokens(compactThresholdForWindow(w, maxOut)),
+    });
   })();
 
   const doTest = async () => {
@@ -110,23 +114,25 @@ export function ModelDialog({
     }
   };
 
+  const heading = adding ? t("composer.modelDialog.add") : t("composer.modelDialog.edit");
+
   return (
-    <Modal className="model-dialog" label={adding ? "添加模型" : "编辑模型"} onClose={onClose}>
+    <Modal className="model-dialog" label={heading} onClose={onClose}>
         <div className="modal-head">
-          <span className="modal-title">{adding ? "添加模型" : "编辑模型"}</span>
+          <span className="modal-title">{heading}</span>
           <span className="bar-spacer" />
-          <button className="ghost" onClick={onClose} aria-label="关闭">
+          <button className="ghost" onClick={onClose} aria-label={t("common.close")}>
             ✕
           </button>
         </div>
 
         <div className="model-dialog-body">
           <div className="field-row">
-            <label>模型 ID</label>
+            <label>{t("composer.modelDialog.id")}</label>
             <input
               value={id}
               onChange={(e) => setId(e.target.value)}
-              placeholder="发给服务方的模型名，如 glm-4.6v"
+              placeholder={t("composer.modelDialog.id.placeholder")}
               spellCheck={false}
               // `[约束]` 编辑时不让改 ID。改它等于换了一个模型 —— 而
               // activeModel、fallbackModel、视觉兼容那条 `providerId/model`
@@ -137,24 +143,22 @@ export function ModelDialog({
             />
           </div>
           {duplicate ? (
-            <p className="form-error">这个服务方下已经有同名模型了。</p>
+            <p className="form-error">{t("composer.modelDialog.duplicate")}</p>
           ) : null}
 
           <div className="field-row">
-            <label>显示名称</label>
+            <label>{t("composer.modelDialog.name")}</label>
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder={trimmedId || "留空就直接显示模型 ID"}
+              placeholder={trimmedId || t("composer.modelDialog.name.placeholder")}
               spellCheck={false}
             />
           </div>
 
           <h3 className="model-dialog-section">
-            能力
-            <HintTip>
-              关着时，截图和附的图会先交给「视觉兼容模型」转成文字。开错了服务方会拒图。
-            </HintTip>
+            {t("composer.modelDialog.capabilities")}
+            <HintTip>{t("composer.modelDialog.vision.hint")}</HintTip>
           </h3>
           <button
             className="toggle-row"
@@ -165,30 +169,25 @@ export function ModelDialog({
             <span className={vision ? "toggle-track on" : "toggle-track"}>
               <span className="toggle-knob" />
             </span>
-            <span>视觉（能收图片）</span>
+            <span>{t("composer.modelDialog.vision")}</span>
           </button>
 
           <div className="field-row">
             <label>
-              上下文窗口
-              <HintTip>
-                模型文档上写的窗口大小。填了它，压缩时机就按这个模型算；留空则用设置里的全局阈值。
-              </HintTip>
+              {t("composer.contextWindow")}
+              <HintTip>{t("composer.modelDialog.window.hint")}</HintTip>
             </label>
             <FieldNumber
               value={ctxWindow}
               onChange={(e) => setCtxWindow(e.target.value)}
-              placeholder="如 128000"
+              placeholder={t("composer.modelDialog.window.placeholder")}
             />
           </div>
           <p className="hint model-dialog-note">{windowNote}</p>
 
           <h3 className="model-dialog-section">
-            采样参数
-            <HintTip>
-              灰字是服务方那一层的值。改过的字段才写入覆盖；想让某一项干脆别发（推理模型常拒收
-              temperature），点滑块底下那行字切到「模型默认」。
-            </HintTip>
+            {t("composer.sampling.title")}
+            <HintTip>{t("composer.modelDialog.sampling.hint")}</HintTip>
           </h3>
           <SamplingSliders
             draft={samp}
@@ -205,16 +204,16 @@ export function ModelDialog({
             </span>
           ) : (
             <span className="hint" style={{ margin: 0 }}>
-              「测试」会用这个模型真发一个最小请求。
+              {t("composer.modelDialog.test.hint")}
             </span>
           )}
           <div className="editor-foot-actions">
-            <button onClick={onClose}>取消</button>
+            <button onClick={onClose}>{t("common.cancel")}</button>
             <button onClick={() => void doTest()} disabled={testing || !trimmedId}>
-              {testing ? "测试中…" : "测试模型"}
+              {testing ? t("composer.modelDialog.testing") : t("composer.modelDialog.test")}
             </button>
             <button className="primary" onClick={save} disabled={!trimmedId || duplicate}>
-              保存
+              {t("common.save")}
             </button>
           </div>
         </div>

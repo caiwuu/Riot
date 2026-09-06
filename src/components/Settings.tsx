@@ -20,10 +20,13 @@ import {
   RemoteIcon,
   ShieldIcon,
   SkillIcon,
+  SlidersIcon,
   TerminalIcon,
 } from "./settings/navIcons";
+import { type MessageKey, useT } from "../i18n";
 import { AboutPane } from "./settings/AboutPane";
 import { CommandsPane } from "./settings/CommandsPane";
+import { GeneralPane } from "./settings/GeneralPane";
 import { HooksPane } from "./settings/HooksPane";
 import { McpPane } from "./settings/McpPane";
 import { PacksPane } from "./settings/PacksPane";
@@ -60,16 +63,13 @@ type Tab =
   | "skills"
   | "commands"
   | "hooks"
+  | "general"
   | "remote"
   | "about";
 
 interface TabDef {
   id: Tab;
-  label: string;
   icon: () => ReactElement;
-  /** 分区页头。标题和导航标签不必同字 —— 标签要短，标题可以说全。 */
-  title: string;
-  desc: string;
 }
 
 /**
@@ -77,108 +77,46 @@ interface TabDef {
  *
  * 十项平铺时每次切页都得从头读一遍标签；分成四组之后，找一项先定位组、
  * 再在两三项里挑，扫视快得多。
+ *
+ * 标签、页头标题和说明都在词典里，键由 id 派生：`settings.tab.<id>` 是
+ * 导航标签，`.title` / `.desc` 是分区页头 —— 标签要短，标题可以说全。
  */
-const NAV: { group: string; tabs: TabDef[] }[] = [
+const NAV: { group: MessageKey; tabs: TabDef[] }[] = [
   {
-    group: "模型",
+    group: "settings.group.model",
     tabs: [
-      {
-        id: "provider",
-        label: "服务方",
-        icon: ProviderIcon,
-        title: "服务方",
-        desc: "接入模型服务、保存 API key，并为每个模型设采样参数。",
-      },
-      {
-        id: "web",
-        label: "联网",
-        icon: GlobeIcon,
-        title: "联网",
-        desc: "模型能不能抓网页、能不能搜索，以及正文用什么模型压缩。",
-      },
-      {
-        id: "prompts",
-        label: "提示词",
-        icon: BookmarkIcon,
-        title: "提示词",
-        desc: "收藏常用的系统提示词，开会话时挑一条填进去，不用每次重打。",
-      },
+      { id: "provider", icon: ProviderIcon },
+      { id: "web", icon: GlobeIcon },
+      { id: "prompts", icon: BookmarkIcon },
     ],
   },
   {
-    group: "运行",
+    group: "settings.group.run",
+    tabs: [{ id: "permission", icon: ShieldIcon }],
+  },
+  {
+    group: "settings.group.ext",
     tabs: [
-      {
-        id: "permission",
-        label: "权限",
-        icon: ShieldIcon,
-        title: "权限与运行",
-        desc: "新会话的默认权限、命令隔离，以及授权超时和单轮上限。",
-      },
+      { id: "mcp", icon: PlugIcon },
+      { id: "packs", icon: PackageIcon },
+      { id: "skills", icon: SkillIcon },
+      { id: "commands", icon: TerminalIcon },
+      { id: "hooks", icon: HookIcon },
     ],
   },
   {
-    group: "扩展",
+    group: "settings.group.app",
     tabs: [
-      {
-        id: "mcp",
-        label: "MCP",
-        icon: PlugIcon,
-        title: "MCP 服务器",
-        desc: "接入外部工具服务器，连上之后模型直接就能调用。",
-      },
-      {
-        id: "packs",
-        label: "能力包",
-        icon: PackageIcon,
-        title: "能力包",
-        desc: "可选下载的运行时。装上之后相关工具和技能自动注册。",
-      },
-      {
-        id: "skills",
-        label: "Skills",
-        icon: SkillIcon,
-        title: "Skills",
-        desc: "写成 SKILL.md 的技能，模型按需加载。",
-      },
-      {
-        id: "commands",
-        label: "命令",
-        icon: TerminalIcon,
-        title: "斜杠命令",
-        desc: "输入框敲 / 调用的提示词模板。模型看不到它们，不占上下文。",
-      },
-      {
-        id: "hooks",
-        label: "Hooks",
-        icon: HookIcon,
-        title: "Hooks",
-        desc: "在固定检查点自动跑脚本，可以拦下工具调用或整轮回复。",
-      },
-    ],
-  },
-  {
-    group: "应用",
-    tabs: [
-      {
-        id: "remote",
-        label: "远程访问",
-        icon: RemoteIcon,
-        title: "远程访问",
-        desc: "在手机或另一台电脑的浏览器里用同一个 Riot。开关、监听范围、登录二维码和令牌。",
-      },
-      {
-        id: "about",
-        label: "关于",
-        icon: InfoIcon,
-        title: "关于 Riot",
-        desc: "版本、更新和配置文件位置。",
-      },
+      { id: "general", icon: SlidersIcon },
+      { id: "remote", icon: RemoteIcon },
+      { id: "about", icon: InfoIcon },
     ],
   },
 ];
 
-const ALL_TABS: TabDef[] = NAV.flatMap((g) => g.tabs);
+const tabLabel = (id: Tab): MessageKey => `settings.tab.${id}`;
+const tabTitle = (id: Tab): MessageKey => `settings.tab.${id}.title`;
+const tabDesc = (id: Tab): MessageKey => `settings.tab.${id}.desc`;
 
 /**
  * 设置整页。盖住主界面，不卸会话和终端 —— 回来还在。
@@ -200,9 +138,9 @@ export function Settings({
   onCheckUpdate,
   navWidth,
 }: Props) {
+  const { t } = useT();
   const [tab, setTab] = useState<Tab>("provider");
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
-  const current = ALL_TABS.find((t) => t.id === tab);
 
   /** 「已保存 ✓」瞬时提示。计数器当 key：连续保存也能重启淡出动画。 */
   const [savedTick, setSavedTick] = useState(0);
@@ -242,13 +180,13 @@ export function Settings({
 
   return (
     <>
-      <div className="settings-page" role="dialog" aria-modal="true" aria-label="设置">
+      <div className="settings-page" role="dialog" aria-modal="true" aria-label={t("settings.title")}>
         <aside className="settings-side" style={{ width: navWidth }}>
           <div
             className={IS_MAC ? "settings-head pad-lights" : "settings-head"}
             data-tauri-drag-region
           >
-            <button className="settings-back" onClick={requestClose} title="返回应用 (Esc)">
+            <button className="settings-back" onClick={requestClose} title={t("settings.backTitle")}>
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
                 <path
                   d="M10 3L5 8l5 5"
@@ -258,25 +196,25 @@ export function Settings({
                   strokeLinejoin="round"
                 />
               </svg>
-              返回应用
+              {t("settings.back")}
             </button>
           </div>
-          <nav className="settings-nav" role="tablist" aria-label="设置分区">
+          <nav className="settings-nav" role="tablist" aria-label={t("settings.navLabel")}>
             {NAV.map((g) => (
               <div className="settings-nav-group" key={g.group}>
-                <span className="settings-nav-label">{g.group}</span>
-                {g.tabs.map((t) => (
+                <span className="settings-nav-label">{t(g.group)}</span>
+                {g.tabs.map((def) => (
                   <button
-                    key={t.id}
+                    key={def.id}
                     role="tab"
-                    aria-selected={tab === t.id}
-                    className={tab === t.id ? "settings-tab active" : "settings-tab"}
-                    onClick={() => guarded(() => setTab(t.id))}
+                    aria-selected={tab === def.id}
+                    className={tab === def.id ? "settings-tab active" : "settings-tab"}
+                    onClick={() => guarded(() => setTab(def.id))}
                   >
                     <span className="settings-tab-icon">
-                      <t.icon />
+                      <def.icon />
                     </span>
-                    {t.label}
+                    {t(tabLabel(def.id))}
                   </button>
                 ))}
               </div>
@@ -288,17 +226,17 @@ export function Settings({
           <div className="settings-body-top" data-tauri-drag-region />
           <div className="settings-scroll">
             <div className="settings-inner">
-              {current ? <PaneHead title={current.title} desc={current.desc} /> : null}
+              <PaneHead title={t(tabTitle(tab))} desc={t(tabDesc(tab))} />
               {/* 配置读不懂被回落成默认值时，用户看到的是"我配的东西全没了"。
                   不在这儿说一句，他不会知道旁边躺着一份完好的备份。放在
                   标签页外面：无论他点开哪一页都得看见。 */}
               {status.configBackup ? (
                 <div className="recovered-note">
-                  <p className="empty-title">配置文件损坏</p>
-                  <p className="hint">已用默认设置启动，原文件备份在：</p>
+                  <p className="empty-title">{t("settings.configBroken.title")}</p>
+                  <p className="hint">{t("settings.configBroken.hint")}</p>
                   <code className="path">{status.configBackup}</code>
                   <button onClick={() => void revealInFinder(status.configBackup ?? "")}>
-                    在访达中显示
+                    {t("common.revealInFinder")}
                   </button>
                 </div>
               ) : null}
@@ -348,6 +286,7 @@ export function Settings({
               {tab === "hooks" ? (
                 <HooksPane status={status} activeRoot={activeRoot ?? null} />
               ) : null}
+              {tab === "general" ? <GeneralPane /> : null}
               {tab === "remote" ? (
                 <RemotePane
                   status={status}
@@ -372,7 +311,7 @@ export function Settings({
         {/* 低调的保存回执：各 Pane 的失焦提交原本全程静默，成功与否只能猜。 */}
         {savedTick > 0 ? (
           <span key={savedTick} className="save-flash" role="status">
-            已保存 ✓
+            {t("common.saved")}
           </span>
         ) : null}
       </div>

@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
+import { dateTimeFormat, useT } from "../i18n";
 import { Chevron } from "./Chevron";
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
@@ -128,6 +129,7 @@ export function TimePicker({
   onChange: (v: string) => void;
   className?: string;
 }) {
+  const { t } = useT();
   const { btnRef, popRef, open, setOpen, box } = usePop(148, 300);
   const [hh = "09", mm = "00"] = value.split(":");
 
@@ -141,20 +143,20 @@ export function TimePicker({
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
       >
-        <span className="field-select-label">{value || "选择时间"}</span>
+        <span className="field-select-label">{value || t("schedules.time.pick")}</span>
         <Chevron down open={open} />
       </button>
       {open && box
         ? createPortal(
             <div ref={popRef} className="field-select-menu tp-pop" style={box}>
               <ScrollCol
-                caption="时"
+                caption={t("schedules.time.hour")}
                 items={HOURS}
                 picked={hh}
                 onPick={(h) => onChange(`${h}:${mm}`)}
               />
               <ScrollCol
-                caption="分"
+                caption={t("schedules.time.minute")}
                 items={MINUTES}
                 picked={mm}
                 onPick={(m) => {
@@ -203,7 +205,11 @@ function tomorrowNine(): Dt {
   return { y: t.getFullYear(), m: t.getMonth() + 1, d: t.getDate(), hh: 9, mm: 0 };
 }
 
-const DOW = ["一", "二", "三", "四", "五", "六", "日"];
+/** 表头的星期缩写，周一起始，按当前界面语言。2024-01-01 是周一。 */
+function weekdayHeaders(): string[] {
+  const f = dateTimeFormat({ weekday: "narrow" });
+  return Array.from({ length: 7 }, (_, i) => f.format(new Date(2024, 0, 1 + i)));
+}
 
 export function DateTimePicker({
   value,
@@ -215,6 +221,7 @@ export function DateTimePicker({
   onChange: (v: string) => void;
   className?: string;
 }) {
+  const { t } = useT();
   const { btnRef, popRef, open, setOpen, box } = usePop(332, 320);
   const sel = parseDt(value);
   const base = sel ?? tomorrowNine();
@@ -249,7 +256,7 @@ export function DateTimePicker({
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
       >
-        <span className="field-select-label">{sel ? fmtDt(sel) : "选择时刻"}</span>
+        <span className="field-select-label">{sel ? fmtDt(sel) : t("schedules.time.pickDatetime")}</span>
         <Chevron down open={open} />
       </button>
       {open && box
@@ -257,19 +264,29 @@ export function DateTimePicker({
             <div ref={popRef} className="field-select-menu tp-pop dtp" style={box}>
               <div className="dtp-cal">
                 <div className="dtp-head">
-                  <button type="button" className="dtp-nav" onClick={() => shiftMonth(-1)} aria-label="上个月">
+                  <button
+                    type="button"
+                    className="dtp-nav"
+                    onClick={() => shiftMonth(-1)}
+                    aria-label={t("schedules.time.prevMonth")}
+                  >
                     ‹
                   </button>
                   <span className="dtp-title">
-                    {view.y} 年 {view.m} 月
+                    {dateTimeFormat({ year: "numeric", month: "long" }).format(new Date(view.y, view.m - 1, 1))}
                   </span>
-                  <button type="button" className="dtp-nav" onClick={() => shiftMonth(1)} aria-label="下个月">
+                  <button
+                    type="button"
+                    className="dtp-nav"
+                    onClick={() => shiftMonth(1)}
+                    aria-label={t("schedules.time.nextMonth")}
+                  >
                     ›
                   </button>
                 </div>
                 <div className="dtp-grid">
-                  {DOW.map((w) => (
-                    <span key={w} className="dtp-dow">
+                  {weekdayHeaders().map((w, i) => (
+                    <span key={i} className="dtp-dow">
                       {w}
                     </span>
                   ))}
@@ -303,13 +320,13 @@ export function DateTimePicker({
                 </div>
               </div>
               <ScrollCol
-                caption="时"
+                caption={t("schedules.time.hour")}
                 items={HOURS}
                 picked={pad2(base.hh)}
                 onPick={(h) => onChange(fmtDt({ ...base, hh: Number(h) }))}
               />
               <ScrollCol
-                caption="分"
+                caption={t("schedules.time.minute")}
                 items={MINUTES}
                 picked={pad2(base.mm)}
                 onPick={(m) => {

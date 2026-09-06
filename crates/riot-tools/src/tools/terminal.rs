@@ -8,7 +8,9 @@
 
 use async_trait::async_trait;
 use riot_protocol::message::ToolResultContent;
+use riot_protocol::text::UiText;
 use riot_protocol::tool::{PromptContext, Tool, ToolContext, ToolOutcome};
+use riot_protocol::ui_text;
 use serde::Deserialize;
 
 /// 一次最多读多少行。再多模型也读不完，只会把上下文顶掉。
@@ -80,10 +82,10 @@ impl Tool for TerminalOutput {
         )
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         match input.get("id").and_then(serde_json::Value::as_u64) {
-            Some(id) => format!("读终端 {id} 的输出"),
-            None => "读服务输出".to_owned(),
+            Some(id) => ui_text!("tools.terminal.read", id = id),
+            None => ui_text!("tools.terminal.readAny"),
         }
     }
 
@@ -444,8 +446,8 @@ impl Tool for TerminalList {
             .to_owned()
     }
 
-    fn describe(&self, _input: &serde_json::Value) -> String {
-        "列出可见的终端".to_owned()
+    fn describe(&self, _input: &serde_json::Value) -> UiText {
+        ui_text!("tools.terminal.list")
     }
 
     fn is_read_only(&self, _input: &serde_json::Value) -> bool {
@@ -511,10 +513,10 @@ impl Tool for TerminalKill {
             .to_owned()
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         match input.get("id").and_then(serde_json::Value::as_u64) {
-            Some(id) => format!("停掉终端 {id}"),
-            None => "停掉服务".to_owned(),
+            Some(id) => ui_text!("tools.terminal.kill", id = id),
+            None => ui_text!("tools.terminal.killAny"),
         }
     }
 

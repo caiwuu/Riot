@@ -79,7 +79,8 @@ impl StreamDecoder {
 
         if let Some(err) = chunk.error {
             self.error = Some(if err.message.is_empty() {
-                err.kind.unwrap_or_else(|| "服务端返回了错误".into())
+                err.kind
+                    .unwrap_or_else(|| "server returned an error".into())
             } else {
                 err.message
             });
@@ -186,9 +187,8 @@ impl StreamDecoder {
         self.finished = true;
 
         if let Some(msg) = self.error.take() {
-            return vec![ProviderEvent::Error(ProviderError::Refused {
-                message: msg,
-            })];
+            // 流里报的错没有状态码，只能按正文认原因（额度、模型名）。
+            return vec![ProviderEvent::Error(crate::errors::refused_in_stream(&msg))];
         }
 
         let mut out = Vec::new();

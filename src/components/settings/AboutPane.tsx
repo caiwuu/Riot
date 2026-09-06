@@ -4,12 +4,13 @@ import {
   openInBrowser,
   revealInFinder,
 } from "../../bridge";
+import { type MessageKey, useT } from "../../i18n";
 import { Card, CardBlock, Group, Row } from "./layout";
 
-function friendlyUpdateError(raw: string): string {
-  if (/403|429|rate limit/i.test(raw)) return "GitHub 暂时限流，过一会再试。";
-  if (/404/.test(raw)) return "还没有发布过正式版本。";
-  return "现在连不上更新服务。";
+function friendlyUpdateError(raw: string): MessageKey {
+  if (/403|429|rate limit/i.test(raw)) return "settings.about.err.rateLimit";
+  if (/404/.test(raw)) return "settings.about.err.noRelease";
+  return "settings.about.err.offline";
 }
 
 export function AboutPane({
@@ -27,6 +28,7 @@ export function AboutPane({
   error: string | null;
   onCheck: () => void;
 }) {
+  const { t, tx } = useT();
   const configDir = status.configPath.replace(/\/[^/]*$/, "");
   const statusKind = checking
     ? "pending"
@@ -39,18 +41,18 @@ export function AboutPane({
           : null;
   const statusText =
     statusKind === "pending"
-      ? "正在检查…"
+      ? t("settings.about.checkingStatus")
       : statusKind === "err"
-        ? friendlyUpdateError(error ?? "")
+        ? t(friendlyUpdateError(error ?? ""))
         : statusKind === "new"
-          ? `有新版本 ${update?.latest}`
+          ? t("settings.about.newer", { version: update?.latest ?? "" })
           : statusKind === "ok"
-            ? "已是最新版本"
+            ? t("settings.about.upToDate")
             : null;
 
   return (
     <>
-      <Group title="版本">
+      <Group title={t("settings.about.version")}>
         <Card>
           <CardBlock>
             <div className="about-brand">
@@ -62,15 +64,15 @@ export function AboutPane({
                   <span className="about-name">Riot</span>
                   {version ? <span className="about-ver">v{version}</span> : null}
                 </div>
-                <p className="about-tagline">一款轻量、强大的智能体工作台</p>
+                <p className="about-tagline">{t("settings.about.tagline")}</p>
               </div>
               <div className="about-actions">
                 <button disabled={checking} onClick={onCheck}>
-                  {checking ? "检查中…" : "检查更新"}
+                  {checking ? t("settings.about.checking") : t("settings.about.check")}
                 </button>
                 {update?.newer ? (
                   <button className="primary" onClick={() => void openInBrowser(update.url)}>
-                    去下载
+                    {t("settings.about.download")}
                   </button>
                 ) : null}
               </div>
@@ -84,7 +86,7 @@ export function AboutPane({
         </Card>
       </Group>
 
-      <Group title="配置文件">
+      <Group title={t("settings.about.config")}>
         <Card>
           <Row
             title="config.json"
@@ -92,11 +94,11 @@ export function AboutPane({
               <>
                 <code title={status.configPath}>{status.configPath}</code>
                 <br />
-                API key 不在这里，单独存在同目录的 <code>auth.json</code>。
+                {tx("settings.about.config.desc", { file: <code>auth.json</code> })}
               </>
             }
           >
-            <button onClick={() => void revealInFinder(configDir)}>在访达中显示</button>
+            <button onClick={() => void revealInFinder(configDir)}>{t("common.revealInFinder")}</button>
           </Row>
         </Card>
       </Group>

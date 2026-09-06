@@ -45,9 +45,9 @@ const MAX_STREAM_BYTES: usize = 128 * 1024 * 1024;
 /// 是错误而不是"截断后继续"：见模块文档。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SseError {
-    #[error("单个 SSE 事件超过 {limit} 字节还没结束，中止响应")]
+    #[error("a single SSE event exceeded {limit} bytes without ending; response aborted")]
     FrameTooLarge { limit: usize },
-    #[error("响应流累计超过 {limit} 字节还没结束，中止响应")]
+    #[error("response stream exceeded {limit} bytes in total without ending; response aborted")]
     StreamTooLarge { limit: usize },
 }
 

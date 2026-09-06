@@ -15,7 +15,9 @@ use serde::Serialize;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+use riot_protocol::text::UiError;
 use riot_protocol::tool::Tool;
+use riot_protocol::ui_error;
 
 use crate::client::{Client, Timeouts};
 use crate::stdio;
@@ -42,8 +44,10 @@ pub struct ServerStatus {
     pub id: String,
     /// `connecting` / `connected` / `failed`
     pub state: String,
-    /// connected 时是服务器自报的名字和版本；failed 时是错误原因。
+    /// connected 时是服务器自报的名字和版本（原样显示）；其余状态为空。
     pub detail: String,
+    /// failed 时的原因：词典键给界面翻译，`detail` 是进程/协议层的原话。
+    pub error: Option<UiError>,
     /// 对外的完整工具名（`mcp__…`）。
     pub tools: Vec<String>,
 }
@@ -58,7 +62,7 @@ enum ServerState {
         tools: Vec<ToolDef>,
     },
     Failed {
-        error: String,
+        error: UiError,
     },
 }
 
@@ -132,6 +136,7 @@ impl McpHub {
                     id: id.clone(),
                     state: "connecting".into(),
                     detail: String::new(),
+                    error: None,
                     tools: Vec::new(),
                 },
                 ServerState::Ready {
@@ -145,6 +150,7 @@ impl McpHub {
                             id: id.clone(),
                             state: "connected".into(),
                             detail: server_name.clone(),
+                            error: None,
                             tools: tools
                                 .iter()
                                 .map(|t| crate::tool::tool_name(id, &t.name))
@@ -154,7 +160,8 @@ impl McpHub {
                         ServerStatus {
                             id: id.clone(),
                             state: "failed".into(),
-                            detail: "进程退出或连接断开。点「重连」再试。".into(),
+                            detail: String::new(),
+                            error: Some(ui_error!("kernel.mcp.disconnected")),
                             tools: Vec::new(),
                         }
                     }
@@ -162,7 +169,8 @@ impl McpHub {
                 ServerState::Failed { error } => ServerStatus {
                     id: id.clone(),
                     state: "failed".into(),
-                    detail: error.clone(),
+                    detail: String::new(),
+                    error: Some(error.clone()),
                     tools: Vec::new(),
                 },
             });
@@ -312,7 +320,7 @@ async fn connect_task(spec: ServerSpec, state: Arc<Mutex<ServerState>>, cancel: 
             Err(e) => {
                 tracing::warn!(server = %spec.id, error = %e, "MCP 握手失败");
                 stdio::terminate(child).await;
-                *state.lock().await = ServerState::Failed { error: e.to_string() };
+                *state.lock().await = ServerState::Failed { error: e.ui_error() };
             }
         },
         _ = cancel.cancelled() => {
@@ -321,15 +329,13 @@ async fn connect_task(spec: ServerSpec, state: Arc<Mutex<ServerState>>, cancel: 
     }
 }
 
-fn spawn_error(command: &str, err: std::io::Error) -> String {
+/// 起不来的原因。找不到命令单独一键 —— 从访达 / Dock 打开时没有终端里的
+/// PATH，这是最常见的一种，文案要把"改成绝对路径"这条出路说出来。
+fn spawn_error(command: &str, err: std::io::Error) -> UiError {
     if err.kind() == std::io::ErrorKind::NotFound {
-        format!(
-            "启动失败：找不到命令「{command}」。\
-             从访达或 Dock 打开时没有终端里的 PATH，\
-             把命令改成 `which {command}` 给出的绝对路径，或确认 npx / uvx / node 已安装。"
-        )
+        ui_error!("kernel.mcp.commandNotFound", command = command; err)
     } else {
-        format!("启动失败：{err}。检查命令路径和参数。")
+        ui_error!("kernel.mcp.spawnFailed"; err)
     }
 }
 
@@ -340,7 +346,7 @@ async fn shutdown_handle(h: Handle) {
     if let ServerState::Ready { child, .. } = std::mem::replace(
         &mut *st,
         ServerState::Failed {
-            error: "已停止".into(),
+            error: ui_error!("kernel.mcp.stopped"),
         },
     ) {
         stdio::terminate(child).await;
@@ -521,15 +527,21 @@ mod tests {
     fn 找不到命令时把_path_问题说清楚() {
         let e = std::io::Error::new(std::io::ErrorKind::NotFound, "os error 2");
         let s = spawn_error("npx", e);
-        assert!(s.contains("找不到命令「npx」"), "{s}");
-        assert!(s.contains("PATH"), "{s}");
+        assert_eq!(s.key(), "kernel.mcp.commandNotFound");
+        assert_eq!(s.text.args["command"], "npx", "文案要点名是哪个命令");
     }
 
     #[test]
     fn 别的启动错误仍指向命令和参数() {
         let e = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied");
         let s = spawn_error("npx", e);
-        assert!(s.contains("检查命令路径和参数"), "{s}");
-        assert!(!s.contains("PATH"), "{s}");
+        assert_eq!(s.key(), "kernel.mcp.spawnFailed");
+        assert!(
+            s.detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("permission denied"),
+            "系统原话要留在细节里：{s}"
+        );
     }
 }

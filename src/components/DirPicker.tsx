@@ -1,6 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
-import { type DirBrowse, browseDirs, host, pickDirectory } from "../bridge";
+import { type DirBrowse, browseDirs, describeError, host, pickDirectory, renderUiError } from "../bridge";
+import { useT } from "../i18n";
 import { Modal } from "./Modal";
 
 /**
@@ -64,6 +65,7 @@ function DirPickerDialog({
   start: string | undefined;
   onDone: (path: string | null) => void;
 }) {
+  const { t, tx } = useT();
   const [view, setView] = useState<DirBrowse | null>(null);
   const [typed, setTyped] = useState("");
   const [loading, setLoading] = useState(false);
@@ -84,7 +86,7 @@ function DirPickerDialog({
           path: prev?.path ?? "",
           parent: prev?.parent ?? null,
           entries: [],
-          error: String(e),
+          error: { key: "host.legacy", detail: describeError(e) },
           missing: null,
         }));
       })
@@ -101,9 +103,9 @@ function DirPickerDialog({
   };
 
   return (
-    <Modal className="dir-picker" label="选择目录" portal onClose={() => onDone(null)}>
+    <Modal className="dir-picker" label={t("app.dirPicker.label")} portal onClose={() => onDone(null)}>
       <div className="modal-head">
-        <h3>选择服务器上的目录</h3>
+        <h3>{t("app.dirPicker.title")}</h3>
       </div>
       <div className="dir-picker-path">
         <button
@@ -111,8 +113,8 @@ function DirPickerDialog({
           className="btn-compact"
           disabled={!view?.parent || loading}
           onClick={() => go(view?.parent)}
-          title="上一级"
-          aria-label="上一级"
+          title={t("app.dirPicker.up")}
+          aria-label={t("app.dirPicker.up")}
         >
           ↑
         </button>
@@ -128,18 +130,21 @@ function DirPickerDialog({
           }}
           spellCheck={false}
           autoComplete="off"
-          placeholder="输入绝对路径后回车"
+          placeholder={t("app.dirPicker.placeholder")}
         />
       </div>
       <div className="dir-picker-list" role="listbox" aria-busy={loading}>
         {view?.missing ? (
           <p className="test-result err">
-            没有这个目录：<code className="path">{view.missing}</code>，已回到 {view.path}。
+            {tx("app.dirPicker.missing", {
+              missing: <code className="path">{view.missing}</code>,
+              path: view.path,
+            })}
           </p>
         ) : null}
-        {view?.error ? <p className="test-result err">{view.error}</p> : null}
+        {view?.error ? <p className="test-result err">{renderUiError(view.error)}</p> : null}
         {view && !view.error && view.entries.length === 0 ? (
-          <p className="hint">这里没有子目录。</p>
+          <p className="hint">{t("app.dirPicker.empty")}</p>
         ) : null}
         {view?.entries.map((e) => (
           <button
@@ -161,7 +166,7 @@ function DirPickerDialog({
       </div>
       <div className="modal-actions">
         <button type="button" onClick={() => onDone(null)}>
-          取消
+          {t("common.cancel")}
         </button>
         <button
           type="button"
@@ -169,7 +174,7 @@ function DirPickerDialog({
           disabled={!view || !!view.error || loading}
           onClick={() => view && onDone(view.path)}
         >
-          选择当前目录
+          {t("app.dirPicker.choose")}
         </button>
       </div>
     </Modal>

@@ -15,6 +15,7 @@ import {
   MAX_COMPACT_THRESHOLD as MAX_COMPACT_AT,
   MIN_COMPACT_THRESHOLD as MIN_COMPACT_AT,
 } from "../../lib/contextWindow";
+import { type MessageKey, numberFormat, useT } from "../../i18n";
 import { FieldNumber } from "../FieldNumber";
 import { ResizableTextarea } from "../ResizableTextarea";
 import { Card, CardBlock, Group, Row } from "./layout";
@@ -30,52 +31,60 @@ const DEFAULT_TURNS = 120;
 /** 见 Rust 侧 `default_permission_mode`。 */
 const DEFAULT_MODE: PermissionMode = "bypassPermissions";
 
-const SANDBOX_MODES: { id: SandboxMode; name: string; desc: string; danger?: boolean }[] = [
+const SANDBOX_MODES: { id: SandboxMode; labelKey: MessageKey; descKey: MessageKey; danger?: boolean }[] = [
   {
     id: "workspaceWrite",
-    name: "隔离（推荐）",
-    desc: "只能改工作区和构建缓存，读和联网不受限。",
+    labelKey: "settings.permission.sandbox.workspaceWrite",
+    descKey: "settings.permission.sandbox.workspaceWrite.desc",
   },
   {
     id: "workspaceWriteNoNet",
-    name: "隔离并断网",
-    desc: "另外掐掉命令的网络。npm、cargo 拉依赖会失败。",
+    labelKey: "settings.permission.sandbox.workspaceWriteNoNet",
+    descKey: "settings.permission.sandbox.workspaceWriteNoNet.desc",
   },
   {
     id: "off",
-    name: "不隔离",
-    desc: "命令能改任何文件，只剩规则判断拦着。",
+    labelKey: "settings.permission.sandbox.off",
+    descKey: "settings.permission.sandbox.off.desc",
     danger: true,
   },
 ];
 
-const MODES: { id: PermissionMode; name: string; desc: string; danger?: boolean }[] = [
-  { id: "default", name: "每次询问", desc: "写文件、执行命令前询问。" },
-  { id: "acceptEdits", name: "编辑放行", desc: "文件修改放行，命令仍询问。" },
+const MODES: { id: PermissionMode; labelKey: MessageKey; descKey: MessageKey; danger?: boolean }[] = [
+  {
+    id: "default",
+    labelKey: "settings.permission.mode.default",
+    descKey: "settings.permission.mode.default.desc",
+  },
+  {
+    id: "acceptEdits",
+    labelKey: "settings.permission.mode.acceptEdits",
+    descKey: "settings.permission.mode.acceptEdits.desc",
+  },
   {
     id: "plan",
-    name: "规划模式",
-    desc: "只读侦察并产出计划，批准后才动手。",
+    labelKey: "settings.permission.mode.plan",
+    descKey: "settings.permission.mode.plan.desc",
   },
   {
     id: "auto",
-    name: "自动判危",
+    labelKey: "settings.permission.mode.auto",
     // 不写"自动放行安全操作"就完了 —— 用户会以为它替他做了全部判断。
     // 要点出两件事：靠的是小模型（所以要配便宜档），以及它压不过安全检查。
-    desc: "小模型先判一遍，明确安全的不再问；安全检查与你写的规则仍然拦。需要配「子 agent 便宜档」。",
+    descKey: "settings.permission.mode.auto.desc",
   },
   {
     id: "bypassPermissions",
-    name: "全部放行",
+    labelKey: "settings.permission.mode.bypassPermissions",
     // 必须点出"仍会拦"。写成"所有操作不再询问"是假承诺：用户照着这句话
     // 挂机走人，回来发现任务停在一个弹窗上。
-    desc: "常规操作不再询问，危险操作仍会拦。",
+    descKey: "settings.permission.mode.bypassPermissions.desc",
     danger: true,
   },
   {
     id: "unattended",
-    name: "无人值守",
-    desc: "全部放行，包括危险操作。仅限一次性环境。",
+    labelKey: "settings.permission.mode.unattended",
+    descKey: "settings.permission.mode.unattended.desc",
     danger: true,
   },
 ];
@@ -114,6 +123,7 @@ function SandboxReality({
   uninstalling: boolean;
   onUninstall: () => void;
 }) {
+  const { t } = useT();
   const line = (cls: string, text: string) => (
     <p className={cls} style={{ margin: "8px 0 0" }}>
       {text}
@@ -122,7 +132,7 @@ function SandboxReality({
   // 探测失败先报，且不受「选了不隔离就不出声」的约束：这说明的是应用自己
   // 有问题，和用户选了哪一档无关。
   if (error) {
-    return line("form-error", `查不到隔离是否生效（${error}）—— 下面的选择可能不反映实际情况。`);
+    return line("form-error", t("settings.permission.sandbox.probeFailed", { error }));
   }
   if (!sbx) return null;
 
@@ -131,12 +141,12 @@ function SandboxReality({
       {line(
         "hint",
         wanted === "off"
-          ? "系统级隔离已安装但未启用（上面选了「不隔离」）。不打算再用可以卸载："
-          : "系统级隔离已安装。",
+          ? t("settings.permission.sandbox.installedOff")
+          : t("settings.permission.sandbox.installed"),
       )}
       <div className="pack-actions" style={{ marginTop: 6 }}>
         <button disabled={uninstalling} onClick={onUninstall}>
-          {uninstalling ? "等待权限确认…" : "卸载（需要管理员）"}
+          {uninstalling ? t("settings.permission.sandbox.waitingUac") : t("settings.permission.sandbox.uninstall")}
         </button>
       </div>
     </>
@@ -145,35 +155,29 @@ function SandboxReality({
   if (wanted === "off") return uninstallEntry || null;
 
   if (!sbx.implemented) {
-    return line("hint", "这个平台还没有系统级隔离，选了也不会生效 —— 实际仍然逐条询问。");
+    return line("hint", t("settings.permission.sandbox.unsupported"));
   }
   if (sbx.blocker?.kind === "needsElevatedInstall") {
     return (
       <>
-        {line(
-          "form-error",
-          "还没安装，所以当前并没有隔离：命令照常直接跑，只剩规则判断和逐条询问拦着。",
-        )}
+        {line("form-error", t("settings.permission.sandbox.notInstalled"))}
         <div className="pack-actions" style={{ marginTop: 6 }}>
           <button disabled={installing} onClick={onInstall}>
-            {installing ? "等待权限确认…" : "安装（需要管理员）"}
+            {installing ? t("settings.permission.sandbox.waitingUac") : t("settings.permission.sandbox.install")}
           </button>
         </div>
       </>
     );
   }
   if (sbx.blocker?.kind === "broken") {
-    return line("form-error", `装过但用不了，当前没有隔离：${sbx.blocker.error}`);
+    return line("form-error", t("settings.permission.sandbox.broken", { error: sbx.blocker.error }));
   }
   // 这一档在 Windows 上会整档降级成不隔离（断网要靠 WFP，而那一半没装）。
   // 不说的话，用户选了更严的档位反而什么都没得到。
   if (wanted === "workspaceWriteNoNet" && !sbx.networkIsolation) {
     return (
       <>
-        {line(
-          "form-error",
-          "这个平台还断不了网，所以整档退回不隔离 —— 想要隔离请改选「隔离（推荐）」。",
-        )}
+        {line("form-error", t("settings.permission.sandbox.noNetIsolation"))}
         {uninstallEntry}
       </>
     );
@@ -192,6 +196,7 @@ export function PermissionPane({
   askConfirm: AskConfirm;
   onSaved: () => void;
 }) {
+  const { t, tx } = useT();
   const [error, setError] = useState("");
   const current = status.config.defaultMode ?? DEFAULT_MODE;
   // 编辑期间存字符串：绑成 number 的话，用户删到空输入框会立刻变成 0，
@@ -209,11 +214,11 @@ export function PermissionPane({
   );
 
   // 夹紧发生时在字段旁说一声 —— 不说的话，99999 无声变 3600 像是输入被吞了。
-  const [clamp, setClamp] = useState<{ key: string; text: string } | null>(null);
+  const [clamp, setClamp] = useState<{ key: string; bound: "max" | "min"; value: number } | null>(null);
   const clampTimer = useRef(0);
   const noteClamp = (key: string, raw: number, v: number) => {
     if (raw === v) return;
-    setClamp({ key, text: raw > v ? `已调整为最大值 ${v}` : `已调整为最小值 ${v}` });
+    setClamp({ key, bound: raw > v ? "max" : "min", value: v });
     window.clearTimeout(clampTimer.current);
     clampTimer.current = window.setTimeout(() => setClamp(null), 2500);
   };
@@ -301,10 +306,10 @@ export function PermissionPane({
 
   const runInstall = () => {
     askConfirm({
-      title: "现在安装命令隔离？",
+      title: t("settings.permission.sandbox.installConfirm.title"),
       // 两次不是笔误，要提前说 —— 不说的话第二个弹窗看起来像出了问题。
-      body: "会弹出两次 Windows 权限确认（UAC）：第一次建一个专用的低权限账户，第二次摘掉它自带的联网限制（不摘的话沙箱内会彻底断网）。只需要装一次。",
-      confirmLabel: "开始安装",
+      body: t("settings.permission.sandbox.installConfirm.body"),
+      confirmLabel: t("settings.permission.sandbox.installConfirm.confirm"),
       action: () => {
         setInstalling(true);
         setError("");
@@ -320,9 +325,9 @@ export function PermissionPane({
 
   const runUninstall = () => {
     askConfirm({
-      title: "卸载命令隔离？",
-      body: "会弹出一次 Windows 权限确认（UAC），删除沙箱专用账户、它的凭证和残留授权。卸载后命令不再被系统级隔离，之后可以随时重新安装。",
-      confirmLabel: "开始卸载",
+      title: t("settings.permission.sandbox.uninstallConfirm.title"),
+      body: t("settings.permission.sandbox.uninstallConfirm.body"),
+      confirmLabel: t("settings.permission.sandbox.uninstallConfirm.confirm"),
       action: () => {
         setUninstalling(true);
         setError("");
@@ -363,9 +368,9 @@ export function PermissionPane({
     };
     if (mode === "off" && sandbox !== "off") {
       askConfirm({
-        title: "关掉命令隔离？",
-        body: "之后命令能改工作区以外的任何文件，只剩规则判断拦着。规则读不懂「python -c \"...\"」里的代码。",
-        confirmLabel: "确认关闭",
+        title: t("settings.permission.sandbox.offConfirm.title"),
+        body: t("settings.permission.sandbox.offConfirm.body"),
+        confirmLabel: t("settings.permission.sandbox.offConfirm.confirm"),
         action: commit,
       });
       return;
@@ -379,9 +384,9 @@ export function PermissionPane({
     // 会话都不设防，且没有任何弹窗会再提醒。
     if (mode === "unattended" && current !== "unattended") {
       askConfirm({
-        title: "把默认模式设为无人值守？",
-        body: "之后新建的会话都会跳过全部权限检查，包括危险操作。",
-        confirmLabel: "确认",
+        title: t("settings.permission.unattendedConfirm.title"),
+        body: t("settings.permission.unattendedConfirm.body"),
+        confirmLabel: t("common.confirm"),
         action: () => void apply(mode),
       });
       return;
@@ -389,13 +394,16 @@ export function PermissionPane({
     void apply(mode);
   };
 
+  const clampText = clamp
+    ? t(clamp.bound === "max" ? "settings.permission.clamp.max" : "settings.permission.clamp.min", {
+        value: clamp.value,
+      })
+    : null;
+
   return (
     <>
-      <Group
-        title="新会话的默认权限"
-        desc="只影响之后创建的会话。当前会话的权限在顶栏会话标题旁的下拉里切。"
-      >
-        <div className="mode-cards" role="radiogroup" aria-label="新会话的默认模式">
+      <Group title={t("settings.permission.defaultMode")} desc={t("settings.permission.defaultMode.desc")}>
+        <div className="mode-cards" role="radiogroup" aria-label={t("settings.permission.defaultMode.aria")}>
           {MODES.map((m) => (
             <button
               key={m.id}
@@ -405,20 +413,17 @@ export function PermissionPane({
               onClick={() => pick(m.id)}
             >
               <span className="mode-card-name">
-                {m.name}
-                {m.danger ? <span className="mode-card-flag">高风险</span> : null}
+                {t(m.labelKey)}
+                {m.danger ? <span className="mode-card-flag">{t("settings.permission.highRisk")}</span> : null}
               </span>
-              <span className="mode-card-desc">{m.desc}</span>
+              <span className="mode-card-desc">{t(m.descKey)}</span>
             </button>
           ))}
         </div>
       </Group>
 
-      <Group
-        title="命令隔离"
-        desc="由操作系统限制命令能改什么。开着时，没有规则命中、也不是只读的命令可以直接放行 —— 边界由内核守着。macOS 开箱可用，Windows 需要装一次。"
-      >
-        <div className="mode-cards" role="radiogroup" aria-label="命令隔离">
+      <Group title={t("settings.permission.sandbox")} desc={t("settings.permission.sandbox.desc")}>
+        <div className="mode-cards" role="radiogroup" aria-label={t("settings.permission.sandbox")}>
           {SANDBOX_MODES.map((m) => (
             <button
               key={m.id}
@@ -428,10 +433,10 @@ export function PermissionPane({
               onClick={() => pickSandbox(m.id)}
             >
               <span className="mode-card-name">
-                {m.name}
-                {m.danger ? <span className="mode-card-flag">高风险</span> : null}
+                {t(m.labelKey)}
+                {m.danger ? <span className="mode-card-flag">{t("settings.permission.highRisk")}</span> : null}
               </span>
-              <span className="mode-card-desc">{m.desc}</span>
+              <span className="mode-card-desc">{t(m.descKey)}</span>
             </button>
           ))}
         </div>
@@ -446,17 +451,13 @@ export function PermissionPane({
         />
         {IS_WINDOWS && sandbox !== "off" ? (
           <Card>
-            <Row
-              title="沙箱内额外可读的目录"
-              desc="一行一个绝对路径。装在你用户目录下的工具（nvm、conda、pip --user……）沙箱内默认打不开，需要哪个填哪个；目录越大，会话首次激活越慢。"
-              stack
-            >
+            <Row title={t("settings.permission.allowRead")} desc={t("settings.permission.allowRead.desc")} stack>
               <ResizableTextarea
                 className="paths-input"
                 value={allowRead}
                 onChange={(e) => setAllowRead(e.target.value)}
                 onBlur={commitAllowRead}
-                placeholder={"如：\nC:\\Users\\你\\.cargo\nC:\\Users\\你\\.rustup"}
+                placeholder={t("settings.permission.allowRead.placeholder")}
                 rows={3}
                 spellCheck={false}
               />
@@ -465,11 +466,11 @@ export function PermissionPane({
         ) : null}
       </Group>
 
-      <Group title="运行上限">
+      <Group title={t("settings.permission.limits")}>
         <Card>
           <Row
-            title="等待授权的时间"
-            desc={`弹窗多久没人回应就放弃，超时按拒绝处理。范围 ${MIN_TIMEOUT}–${MAX_TIMEOUT} 秒。`}
+            title={t("settings.permission.timeout")}
+            desc={t("settings.permission.timeout.desc", { min: MIN_TIMEOUT, max: MAX_TIMEOUT })}
           >
             <span className="field-inline">
               <FieldNumber
@@ -477,19 +478,19 @@ export function PermissionPane({
                 onChange={(e) => setTimeout_(e.target.value)}
                 onBlur={commitTimeout}
                 onKeyDown={blurOnEnter}
-                aria-label="等待授权的时间（秒）"
+                aria-label={t("settings.permission.timeout.aria")}
               />
-              <span className="field-unit">秒</span>
+              <span className="field-unit">{t("settings.permission.unit.seconds")}</span>
             </span>
             {clamp?.key === "timeout" ? (
               <span className="clamp-note" role="status">
-                {clamp.text}
+                {clampText}
               </span>
             ) : null}
           </Row>
           <Row
-            title="单轮最大步数"
-            desc={`一句话之内模型最多自主往返多少步。到顶就停下等你再说，不是报错。浏览器自动化、渗透这类多步任务容易吃满，可以调高。范围 ${MIN_TURNS}–${MAX_TURNS} 步。`}
+            title={t("settings.permission.turns")}
+            desc={t("settings.permission.turns.desc", { min: MIN_TURNS, max: MAX_TURNS })}
           >
             <span className="field-inline">
               <FieldNumber
@@ -497,25 +498,23 @@ export function PermissionPane({
                 onChange={(e) => setTurns(e.target.value)}
                 onBlur={commitTurns}
                 onKeyDown={blurOnEnter}
-                aria-label="单轮最大步数"
+                aria-label={t("settings.permission.turns")}
               />
-              <span className="field-unit">步</span>
+              <span className="field-unit">{t("settings.permission.unit.steps")}</span>
             </span>
             {clamp?.key === "turns" ? (
               <span className="clamp-note" role="status">
-                {clamp.text}
+                {clampText}
               </span>
             ) : null}
           </Row>
           <Row
-            title="默认压缩阈值"
-            desc={
-              <>
-                会话历史估算超过这个 token 数时自动摘要压缩。只对<b>没填上下文窗口</b>
-                的模型生效 —— 填了窗口的按窗口算。范围 {MIN_COMPACT_AT.toLocaleString()}–
-                {MAX_COMPACT_AT.toLocaleString()}。
-              </>
-            }
+            title={t("settings.permission.compactAt")}
+            desc={tx("settings.permission.compactAt.desc", {
+              noWindow: <b>{t("settings.permission.compactAt.noWindow")}</b>,
+              min: numberFormat().format(MIN_COMPACT_AT),
+              max: numberFormat().format(MAX_COMPACT_AT),
+            })}
           >
             <span className="field-inline">
               <FieldNumber
@@ -523,28 +522,25 @@ export function PermissionPane({
                 onChange={(e) => setCompactAt(e.target.value)}
                 onBlur={commitCompactAt}
                 onKeyDown={blurOnEnter}
-                aria-label="默认压缩阈值（token）"
+                aria-label={t("settings.permission.compactAt.aria")}
               />
               <span className="field-unit">token</span>
             </span>
             {clamp?.key === "compactAt" ? (
               <span className="clamp-note" role="status">
-                {clamp.text}
+                {clampText}
               </span>
             ) : null}
           </Row>
         </Card>
       </Group>
 
-      <Group title="记忆">
+      <Group title={t("settings.permission.memory")}>
         <Card>
-          <Row
-            title="历史会话回忆"
-            desc="让模型能翻本项目的其它会话：回答「上次那个问题最后怎么解决的」，并给出跳到那个会话的链接。摘录按项目分目录，存在 Riot 自己的数据目录里，不进项目。关掉后提示词里不再提它；每个会话自己的摘录仍会维护 —— 上下文压缩后模型靠它找回被总结掉的原文。摘录随会话一起删。"
-          >
+          <Row title={t("settings.permission.recall")} desc={t("settings.permission.recall.desc")}>
             <Switch
               on={status.config.sessionRecall ?? true}
-              label="历史会话回忆"
+              label={t("settings.permission.recall")}
               onChange={(v) => {
                 setError("");
                 setConfig({ ...status.config, sessionRecall: v })
@@ -556,12 +552,11 @@ export function PermissionPane({
         </Card>
       </Group>
 
-      <Group title="会话内规则">
+      <Group title={t("settings.permission.rules")}>
         <Card>
           <CardBlock>
             <p className="hint" style={{ margin: 0 }}>
-              点「总是允许」记住的规则（如 <code>Bash(npm run *)</code>
-              ）只在当前会话有效，关掉会话就没了。
+              {tx("settings.permission.rules.hint", { example: <code>Bash(npm run *)</code> })}
             </p>
           </CardBlock>
         </Card>

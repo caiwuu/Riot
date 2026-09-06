@@ -17,6 +17,7 @@ import {
   termWrite,
 } from "../bridge";
 import { type ConfirmRequest, ConfirmDialog } from "./ConfirmDialog";
+import { t as msg, useT } from "../i18n";
 import { basename } from "../pathDisplay";
 
 /** 会话删除的广播口。面板是单例、常驻挂载，模块级单听者足够。 */
@@ -64,6 +65,7 @@ export function TerminalPanel({
   /** 把选中的输出交给输入框。用户的终端模型读不到，要给就这么给。 */
   onSendSelection?: (text: string) => void;
 }) {
+  const { t } = useT();
   const [state, setState] = useState<{ tabs: Tab[]; active: string | null }>({
     tabs: [],
     active: null,
@@ -165,11 +167,11 @@ export function TerminalPanel({
         return;
       }
       setConfirm({
-        title: `关闭「${tab.title}」？`,
+        title: t("panels.terminal.closeConfirm.title", { title: tab.title }),
         body: tab.fromAgent
-          ? "这是模型起的服务，关闭会立即终止它 —— 模型可能正依赖这个服务。"
-          : "这个终端里有正在运行的进程，关闭会立即终止它。",
-        confirmLabel: "关闭并终止",
+          ? t("panels.terminal.closeConfirm.agentBody")
+          : t("panels.terminal.closeConfirm.body"),
+        confirmLabel: t("panels.terminal.closeConfirm.confirm"),
         action: doClose,
       });
     }, doClose);
@@ -215,7 +217,9 @@ export function TerminalPanel({
               .filter((t) => !claimed.has(t.id))
               // 服务归它的会话（宿主记的 owner）。owner 缺失时归当前
               // 会话 —— 至少让用户立刻看得见，好过丢进不可见的组。
-              .map((t) => adoptTab(t.id, t.title, t.owner ?? sessionRef.current));
+              .map((t) =>
+                adoptTab(t.id, t.title ?? msg("panels.terminal.title"), t.owner ?? sessionRef.current),
+              );
             if (add.length === 0) return prev;
             // 不抢 active —— 用户正看着/用着当前标签，服务在后台认领即可，
             // 面板底部会亮出"模型"标签作为线索。只有当前会话的组原本
@@ -320,11 +324,12 @@ export function TerminalPanel({
             .then(() => void termResize(id, inst.term.cols, inst.term.rows).catch(() => {}))
             .catch(() => {
               if (inst.disposed) return;
-              inst.term.write("\r\n\x1b[31m重连后接不上这个终端，它可能已经退出了。\x1b[0m\r\n");
+              inst.term.write(`\r\n\x1b[31m${t("panels.terminal.reattachFailed")}\x1b[0m\r\n`);
             });
         }
       }),
-    [],
+    // t 是模块级函数，身份稳定 —— 依赖里列它只为满足 lint，效果仍是挂载时订阅一次。
+    [t],
   );
 
   // 聚焦只跟"打开面板/切标签"走，不跟高度走 —— 用户在输入框打字时
@@ -430,7 +435,7 @@ export function TerminalPanel({
         // 只有 termClose 才移除。这里跟着关标签的话，本地没了、宿主还在，
         // 3 秒一次的认领轮询又把它捡回来 —— 表现为标签几秒闪现一次，
         // 面板关了也自己弹出来。留着标签展示最后输出，用户点 X 才真正关。
-        term.write("\r\n\x1b[2m[进程已退出。日志留在这里，点标签上的 × 关闭。]\x1b[0m\r\n");
+        term.write(`\r\n\x1b[2m${t("panels.terminal.processExited")}\x1b[0m\r\n`);
         setState((prev) => ({
           ...prev,
           tabs: prev.tabs.map((t) => (t.uid === tab.uid ? { ...t, exited: true } : t)),
@@ -452,9 +457,11 @@ export function TerminalPanel({
         .catch((e: unknown) => {
           // 等待期间标签可能已经关了，同 onEvent 的理由。
           if (inst.disposed) return;
-          term.write(
-            `\r\n\x1b[31m接不上这个终端。它对应的服务可能已经退出了，可以关掉这个标签。（${String(e)}）\x1b[0m\r\n`,
-          );
+          const text = t("errors.withDetail", {
+            text: t("panels.terminal.attachFailed"),
+            detail: String(e),
+          });
+          term.write(`\r\n\x1b[31m${text}\x1b[0m\r\n`);
         });
       return;
     }
@@ -480,9 +487,11 @@ export function TerminalPanel({
       })
       .catch((e: unknown) => {
         if (inst.disposed) return;
-        term.write(
-          `\r\n\x1b[31m终端没能启动，可以关掉这个标签再开一个试试。（${String(e)}）\x1b[0m\r\n`,
-        );
+        const text = t("errors.withDetail", {
+          text: t("panels.terminal.startFailed"),
+          detail: String(e),
+        });
+        term.write(`\r\n\x1b[31m${text}\x1b[0m\r\n`);
       });
   };
 
@@ -522,33 +531,37 @@ export function TerminalPanel({
           if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) e.currentTarget.scrollLeft += e.deltaY;
         }}
       >
-        {groupTabs.map((t) => (
+        {groupTabs.map((tab) => (
           <button
-            key={t.uid}
-            className={t.uid === state.active ? "term-tab active" : "term-tab"}
-            onClick={() => setState((prev) => ({ ...prev, active: t.uid }))}
+            key={tab.uid}
+            className={tab.uid === state.active ? "term-tab active" : "term-tab"}
+            onClick={() => setState((prev) => ({ ...prev, active: tab.uid }))}
             onAuxClick={(e) => {
               // 中键关标签（浏览器惯例）。照样走 requestClose ——
               // 中键点到正在跑东西的标签，确认一步不能省。
               if (e.button === 1) {
                 e.preventDefault();
-                requestClose(t);
+                requestClose(tab);
               }
             }}
-            title={t.fromAgent ? `${t.title}（模型起的服务）` : (t.root ?? "~")}
+            title={
+              tab.fromAgent
+                ? t("panels.terminal.agentTabTitle", { title: tab.title })
+                : (tab.root ?? "~")
+            }
           >
             {/* 标出哪些不是自己开的。用户看到一个没印象的标签在跑东西，
                 第一反应是"这哪来的" —— 这个点直接回答它。
                 判据是 fromAgent 而不是 hostId：用户自己的 shell 落地后
                 同样有 hostId，拿它区分会把每个终端都标成"模型"。 */}
-            {t.fromAgent ? (
-              <span className={t.exited ? "term-tab-badge exited" : "term-tab-badge"}>
-                {t.exited ? "已退出" : "模型"}
+            {tab.fromAgent ? (
+              <span className={tab.exited ? "term-tab-badge exited" : "term-tab-badge"}>
+                {tab.exited ? t("panels.terminal.badge.exited") : t("panels.terminal.badge.agent")}
               </span>
             ) : (
               <TermIcon />
             )}
-            <span className="term-tab-title">{t.title}</span>
+            <span className="term-tab-title">{tab.title}</span>
             {/* span 而不是嵌套 button —— button 套 button 是非法 HTML，
                 浏览器会把内层拆出去，点击行为不可预料。tabIndex + 键盘触发
                 自己补：role 只是声明，键盘可达要真做。 */}
@@ -556,16 +569,16 @@ export function TerminalPanel({
               className="term-tab-close"
               role="button"
               tabIndex={0}
-              aria-label="关闭终端"
+              aria-label={t("panels.terminal.closeTab")}
               onClick={(e) => {
                 e.stopPropagation();
-                requestClose(t);
+                requestClose(tab);
               }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
                   e.stopPropagation();
-                  requestClose(t);
+                  requestClose(tab);
                 }
               }}
             >
@@ -573,7 +586,7 @@ export function TerminalPanel({
             </span>
           </button>
         ))}
-        <button className="icon" onClick={() => addTab(defaultRoot)} title="新终端">
+        <button className="icon" onClick={() => addTab(defaultRoot)} title={t("panels.terminal.newTab")}>
           <PlusIcon />
         </button>
         <span className="term-tabs-spacer" />
@@ -581,21 +594,23 @@ export function TerminalPanel({
             密码和与本次任务无关的一切。开了之后模型能读这里的输出（但停不掉
             这个终端），省掉「我的 dev server 报错了」时手动复制几十行日志。
             模型起的服务不需要这个开关，它本来就读得到自己起的。 */}
-        {shareError ? <span className="term-share-error">共享失败</span> : null}
+        {shareError ? (
+          <span className="term-share-error">{t("panels.terminal.share.failed")}</span>
+        ) : null}
         {activeTab && !activeTab.fromAgent && activeTab.hostId != null ? (
           <button
             className={activeTab.shared ? "icon term-share on" : "icon term-share"}
             onClick={() => toggleShare(activeTab)}
             aria-pressed={!!activeTab.shared}
             title={
-              activeTab.shared
-                ? "正在共享给 agent：它能读这个终端的输出（点击收回）"
-                : "共享给 agent：让它能读这个终端的输出，但不能停它"
+              activeTab.shared ? t("panels.terminal.share.on") : t("panels.terminal.share.off")
             }
           >
             <ShareIcon />
             {/* 隐私开关不能只靠图标变色表达 —— 亮出文字，色弱也看得清 */}
-            {activeTab.shared ? <span className="term-share-mark">已共享</span> : null}
+            {activeTab.shared ? (
+              <span className="term-share-mark">{t("panels.terminal.share.mark")}</span>
+            ) : null}
           </button>
         ) : null}
         {/* 只想给一小段而不是整个终端时用这个 —— 给什么完全由用户决定。 */}
@@ -611,15 +626,15 @@ export function TerminalPanel({
             }}
             title={
               hasSelection
-                ? "把选中的内容发给模型"
-                : "先在终端里选中一段文本，再从这里发给模型"
+                ? t("panels.terminal.sendSelection")
+                : t("panels.terminal.sendSelection.hint")
             }
           >
             <SendUpIcon />
           </button>
         ) : null}
         {/* 收起 ≠ 关闭：shell 继续活着，再点开还是原样 */}
-        <button className="icon" onClick={onHide} title="收起终端面板">
+        <button className="icon" onClick={onHide} title={t("panels.terminal.hide")}>
           <ChevronDownIcon />
         </button>
       </div>
@@ -667,7 +682,7 @@ interface Tab {
 function mkTab(root: string | null, existing: Tab[], sessionId: string | null): Tab {
   // 同目录开出来的标签标题一模一样，撞了就加序号 —— 三个"Riot"
   // 并排时用户只能挨个点开猜哪个是哪个。
-  const base = (root ? basename(root) : "") || "终端";
+  const base = (root ? basename(root) : "") || msg("panels.terminal.title");
   let title = base;
   for (let n = 2; existing.some((t) => t.title === title); n++) title = `${base} ${n}`;
   return {

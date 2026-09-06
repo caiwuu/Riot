@@ -89,7 +89,9 @@ use riot_protocol::permission::{
     DecisionReason, PermissionContext, PermissionGate, PermissionResult,
 };
 use riot_protocol::task::{BackgroundTaskStatus, BackgroundTaskView};
+use riot_protocol::text::UiText;
 use riot_protocol::tool::{PromptContext, Tool, ToolContext, ToolOutcome, UiPayload};
+use riot_protocol::ui_text;
 use riot_runtime::{MemoryFileState, SystemFs, SystemProcessRunner};
 use riot_tools::registry::Registry;
 use riot_tools::scheduler::Scheduler;
@@ -475,12 +477,16 @@ const WORKER_IDENTITY: &str = "\
 You are an autonomous worker. The delegator hands you one task; you complete it on your own and \
 report back.";
 
-/// 给后台子 agent 的工具贴上归属：权限弹窗的那句话前面带"后台任务「x」"。
+/// 给后台子 agent 的工具贴上归属：权限弹窗上标出"后台任务「x」"。
 ///
 /// 后台任务的权限询问弹出来时，父轮次多半已经结束、用户正在聊别的 ——
-/// 一句光秃秃的"运行 rm -rf build"他不知道是谁要干。只改 `describe`
-/// （弹窗的 summary 取它）；name / schema / prompt 原样透传，请求形状
-/// 不变（分叉的缓存命中靠这个）。
+/// 一句光秃秃的"运行 rm -rf build"他不知道是谁要干。只加 `agent_label`
+/// （进 `PermissionAsk::agent_label`，前端拼前缀 —— `describe` 是词典键，
+/// 拼不进去）；name / schema / prompt 原样透传，请求形状不变（分叉的
+/// 缓存命中靠这个）。
+///
+/// `label` 是任务标题本身（"跑测试"），不是拼好的"后台任务「跑测试」"——
+/// 那层措辞属于界面文案，由前端按语言给。
 pub struct Attributed {
     inner: Arc<dyn Tool>,
     label: String,
@@ -511,8 +517,11 @@ impl Tool for Attributed {
     fn prompt(&self, ctx: &PromptContext) -> String {
         self.inner.prompt(ctx)
     }
-    fn describe(&self, input: &serde_json::Value) -> String {
-        format!("[{}] {}", self.label, self.inner.describe(input))
+    fn describe(&self, input: &serde_json::Value) -> UiText {
+        self.inner.describe(input)
+    }
+    fn agent_label(&self) -> Option<&str> {
+        Some(&self.label)
     }
     async fn call(&self, input: serde_json::Value, ctx: ToolContext) -> ToolOutcome {
         self.inner.call(input, ctx).await
@@ -608,13 +617,38 @@ pub enum JobEvent {
     /// 一个动静：调了个工具 / 说了句话。同步路转成父卡片的进度行，
     /// 两条路都更新登记表里的活动行。
     Activity {
-        line: String,
+        what: Activity,
         tool_uses: u32,
         tokens: u32,
     },
     /// 一条完整消息（assistant 回复、工具结果）。进登记表，界面打开着
     /// 它的会话时靠这个追上。
     Message(Message),
+}
+
+/// 子 agent 最近的一个动静。
+///
+/// 两种呈现：登记表里是词典键（面板翻译"调用 / 说"这类字），父卡片的
+/// 进度行是原样文本（`→ Grep`、模型的第一句）—— 那条通道不翻译。
+pub enum Activity {
+    Tool { name: String },
+    Said { text: String },
+}
+
+impl Activity {
+    fn ui_text(&self) -> riot_protocol::text::UiText {
+        match self {
+            Activity::Tool { name } => ui_text!("kernel.task.activity.tool", name = name),
+            Activity::Said { text } => ui_text!("kernel.task.activity.said", text = text),
+        }
+    }
+
+    fn progress_line(&self) -> String {
+        match self {
+            Activity::Tool { name } => format!("→ {name}"),
+            Activity::Said { text } => text.clone(),
+        }
+    }
 }
 
 /// 跑一个 [`Job`] 到底。
@@ -710,20 +744,22 @@ pub async fn run_job(
                         usage.merge(u);
                     }
                     for c in content {
-                        let line = match c {
+                        let what = match c {
                             AssistantContent::ToolUse { name, .. } => {
                                 tool_uses += 1;
-                                Some(format!("→ {name}"))
+                                Some(Activity::Tool { name: name.clone() })
                             }
                             AssistantContent::Text { text } => text
                                 .lines()
                                 .find(|l| !l.trim().is_empty())
-                                .map(|f| truncate_chars(f, 120)),
+                                .map(|f| Activity::Said {
+                                    text: truncate_chars(f, 120),
+                                }),
                             _ => None,
                         };
-                        if let Some(line) = line {
+                        if let Some(what) = what {
                             on_event(JobEvent::Activity {
-                                line,
+                                what,
                                 tool_uses,
                                 tokens: usage.input_tokens + usage.output_tokens,
                             });
@@ -891,7 +927,7 @@ impl TaskTool {
         // 得知道是谁想干这件事。同步的不贴 —— 弹窗就出现在转着圈的 Task
         // 卡片旁边，归属不言自明。
         let tools = if background {
-            Attributed::wrap_all(tools, &format!("后台任务「{title}」"))
+            Attributed::wrap_all(tools, &title)
         } else {
             tools
         };
@@ -1014,27 +1050,34 @@ impl Tool for TaskTool {
             .into()
     }
 
-    fn describe(&self, input: &serde_json::Value) -> String {
+    fn describe(&self, input: &serde_json::Value) -> UiText {
         let desc = input
             .get("description")
             .and_then(|v| v.as_str())
-            .unwrap_or("子任务");
+            .unwrap_or("?");
         let resume = input.get("resume").and_then(|v| v.as_str());
         let bg = input
             .get("run_in_background")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let what = match resume {
-            Some("self") => "分叉".to_owned(),
-            Some(id) => format!("续接 {id}"),
-            None => kind_of(input).as_str().to_owned(),
-        };
-        let mode = if bg || resume == Some("self") {
-            "后台"
-        } else {
-            "同步"
-        };
-        format!("子 agent（{what}·{mode}）：{desc}")
+        match (resume, bg) {
+            // 分叉总在后台跑。
+            (Some("self"), _) => ui_text!("tools.task.fork", description = desc),
+            (Some(id), true) => {
+                ui_text!("tools.task.resumeBackground", id = id, description = desc)
+            }
+            (Some(id), false) => ui_text!("tools.task.resume", id = id, description = desc),
+            (None, true) => ui_text!(
+                "tools.task.background",
+                kind = kind_of(input).as_str(),
+                description = desc
+            ),
+            (None, false) => ui_text!(
+                "tools.task.sync",
+                kind = kind_of(input).as_str(),
+                description = desc
+            ),
+        }
     }
 
     /// explore 是只读的（按输入判定）；general-purpose 会写。
@@ -1190,7 +1233,7 @@ impl Tool for TaskTool {
             tool_use_id: ctx.tool_use_id.clone(),
             parent: self.parent.clone(),
             status: BackgroundTaskStatus::Running,
-            activity: "启动".into(),
+            activity: ui_text!("kernel.task.activity.started"),
             tool_uses: 0,
             tokens: 0,
             started_at_ms: now,
@@ -1218,31 +1261,39 @@ impl Tool for TaskTool {
         let progress = (!background).then(|| ctx.progress.clone());
         let on_event = move |ev: JobEvent| match ev {
             JobEvent::Activity {
-                line,
+                what,
                 tool_uses,
                 tokens,
             } => {
                 if let Some(p) = &progress {
                     p.send(ProgressPayload::Line {
                         stream: OutputStream::Stdout,
-                        text: line.clone(),
+                        text: what.progress_line(),
                     });
                 }
-                tasks_for_events.activity(&id_for_events, line, tool_uses, tokens);
+                tasks_for_events.activity(&id_for_events, what.ui_text(), tool_uses, tokens);
             }
             JobEvent::Message(m) => tasks_for_events.push_message(&id_for_events, m),
         };
 
-        ctx.progress.send(ProgressPayload::Status {
-            // 模型名进进度里：不显示的话，"便宜档到底有没有生效"只能去翻日志，
-            // 而这正是用户配完之后第一个想确认的事。
-            text: format!(
-                "[{}·{}] {} {}",
-                kind.as_str(),
-                model,
-                title,
-                if background { "后台启动" } else { "启动" }
-            ),
+        // 模型名进进度里：不显示的话，"便宜档到底有没有生效"只能去翻日志，
+        // 而这正是用户配完之后第一个想确认的事。
+        ctx.progress.send(ProgressPayload::Message {
+            text: if background {
+                ui_text!(
+                    "kernel.task.startedBackground",
+                    kind = kind.as_str(),
+                    model = &model,
+                    title = &title
+                )
+            } else {
+                ui_text!(
+                    "kernel.task.started",
+                    kind = kind.as_str(),
+                    model = &model,
+                    title = &title
+                )
+            },
         });
 
         // ── 后台：spawn 走人 ───────────────────────────────
@@ -1307,8 +1358,12 @@ impl Tool for TaskTool {
                 text.push_str(n);
             }
             return ToolOutcome::Ok {
-                ui_payload: Some(UiPayload::Plain {
-                    text: format!("{title} 已在后台启动（{}）", agent_id.as_str()),
+                ui_payload: Some(UiPayload::Message {
+                    text: ui_text!(
+                        "kernel.task.launched",
+                        title = &title,
+                        id = agent_id.as_str()
+                    ),
                 }),
                 model_content: riot_protocol::message::ToolResultContent::text(text),
                 side_messages: Vec::new(),
@@ -1348,8 +1403,16 @@ impl Tool for TaskTool {
                     body.push_str(n);
                 }
                 ToolOutcome::Ok {
-                    ui_payload: Some(UiPayload::Plain {
-                        text: format!("{title} 完成{footer}"),
+                    // 界面那份是键 + 数字；footer 里那些给模型的续接说明不进界面。
+                    ui_payload: Some(UiPayload::Message {
+                        text: ui_text!(
+                            "kernel.task.completed",
+                            title = &title,
+                            id = agent_id.as_str(),
+                            model = &model,
+                            tokens = tokens,
+                            count = outcome.tool_uses
+                        ),
                     }),
                     model_content: riot_protocol::message::ToolResultContent::text(format!(
                         "{body}{footer}"
@@ -2032,12 +2095,12 @@ mod tests {
         assert!(error_for_model.contains("分叉"), "{error_for_model}");
     }
 
-    /// 归属包装只改 describe：弹窗那句话带上任务名，请求形状（name /
-    /// schema / prompt）一个字都不动 —— 分叉的缓存命中靠这个。
+    /// 归属包装只加 agent_label：弹窗靠它标出任务名，请求形状（name /
+    /// schema / prompt）和那句描述一个字都不动 —— 分叉的缓存命中靠这个。
     #[test]
     fn 归属包装只改弹窗文案不改请求形状() {
         let raw: Vec<Arc<dyn Tool>> = vec![Arc::new(riot_tools::tools::Bash)];
-        let wrapped = Attributed::wrap_all(raw.clone(), "后台任务「跑测试」");
+        let wrapped = Attributed::wrap_all(raw.clone(), "跑测试");
         let (a, b) = (&raw[0], &wrapped[0]);
         let ctx = PromptContext {
             cwd: "/tmp".into(),
@@ -2054,9 +2117,13 @@ mod tests {
             serde_json::to_string(&b.input_schema()).unwrap()
         );
         assert_eq!(a.is_read_only(&input), b.is_read_only(&input));
-        let d = b.describe(&input);
-        assert!(d.starts_with("[后台任务「跑测试」]"), "{d}");
-        assert!(d.contains(&a.describe(&input)), "{d}");
+        assert_eq!(
+            b.describe(&input),
+            a.describe(&input),
+            "描述是词典键，归属不能拼进去"
+        );
+        assert_eq!(a.agent_label(), None);
+        assert_eq!(b.agent_label(), Some("跑测试"));
     }
 
     /// 分叉的第一条消息要把父末尾悬空的 tool_use 全补上，否则严格校验的

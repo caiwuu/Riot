@@ -8,6 +8,8 @@
 
 import { useEffect, useState } from "react";
 
+import { useT } from "../i18n";
+
 /** 超过这个字节数截断渲染。整页 DOM 一次性挂几 MB 文本会卡渲染。 */
 const RENDER_MAX = 1024 * 1024;
 
@@ -20,7 +22,7 @@ const pending = new Map<number, (html: string) => void>();
 function markWorkerBroken(reason: unknown) {
   if (workerBroken) return;
   workerBroken = true;
-  console.warn("[markdown] Worker 不可用，回退主线程渲染", reason);
+  console.warn("[markdown] Worker unavailable, falling back to main-thread rendering", reason);
   worker?.terminate();
   worker = null;
   pending.clear();
@@ -86,6 +88,7 @@ async function renderMarkdown(text: string): Promise<string> {
 }
 
 export default function MarkdownView({ buf, path }: { buf: ArrayBuffer; path: string }) {
+  const { t } = useT();
   /** 渲染好的一份。截断提示和 HTML 一起换 —— 分成两个 state 的话，重读
    *  时提示先跟着新字节翻转、正文还是旧的。null = 还没渲染出来。 */
   const [doc, setDoc] = useState<{ html: string; truncated: boolean } | null>(null);
@@ -110,10 +113,10 @@ export default function MarkdownView({ buf, path }: { buf: ArrayBuffer; path: st
   return (
     <div className="markdown-doc">
       {doc?.truncated ? (
-        <div className="code-view-note">文件太大，只显示前 1 MB。完整内容请用"系统应用打开"。</div>
+        <div className="code-view-note">{t("transcript.preview.tooLarge", { size: "1 MB" })}</div>
       ) : null}
       {doc === null ? (
-        <div className="preview-panel-state">正在渲染…</div>
+        <div className="preview-panel-state">{t("transcript.preview.rendering")}</div>
       ) : (
         // micromark 默认转义原始 HTML（allowDangerousHtml 未开），
         // 输出里不会有文件自带的 <script> 之类，可直接贴。

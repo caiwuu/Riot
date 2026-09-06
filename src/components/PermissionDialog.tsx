@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 
-import type { PermissionAsk, PermissionMode, PermissionResponse } from "../bridge";
+import { type PermissionAsk, type PermissionMode, type PermissionResponse, renderUiText } from "../bridge";
 import { useImeGuard } from "../hooks/useImeGuard";
+import { type MessageKey, useT } from "../i18n";
 import { Markdown } from "./Markdown";
 import { useEscLayer } from "./Modal";
 
@@ -22,6 +23,7 @@ interface Props {
  * 跳过自己没看懂的东西，而没看懂正是最该拒绝的情况。
  */
 export function PermissionDialog({ ask, pendingCount, onAnswer }: Props) {
+  const { t, tn } = useT();
   const denyRef = useRef<HTMLButtonElement>(null);
   // 答过一次就锁死所有按钮 —— IPC 慢时连点会重复提交同一个决定。
   const [answered, setAnswered] = useState(false);
@@ -44,17 +46,31 @@ export function PermissionDialog({ ask, pendingCount, onAnswer }: Props) {
   // 内核给出了"可以记住"的规则建议时才显示"总是允许"。没有建议
   // 却显示这个按钮，等于许诺一个不会兑现的行为。
   const rememberable = ask.suggestions.filter((s) => s.type === "add_rule");
+  const rules = rememberable
+    .map((s) => `${s.tool}${s.pattern ? `(${s.pattern})` : ""}`)
+    .join(t("transcript.listSep"));
 
   return (
     <div className="modal-backdrop">
-      <div className="modal" role="dialog" aria-modal="true" aria-label="权限确认">
+      <div
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("transcript.permission.title")}
+      >
         <div className="modal-head">
           <span className="modal-tool">{ask.tool_name}</span>
-          <span className="modal-title">{ask.summary}</span>
+          <span className="modal-title">
+            {ask.agent_label
+              ? t("transcript.permission.fromTask", { label: ask.agent_label, summary: renderUiText(ask.summary) })
+              : renderUiText(ask.summary)}
+          </span>
           {/* 并发工具会一次问好几个。不说还剩几个的话，用户答完一个
               又冒出一个，会以为是自己点错了或者程序在重复询问。 */}
           {pendingCount > 1 ? (
-            <span className="modal-queue">还有 {pendingCount - 1} 个待确认</span>
+            <span className="modal-queue">
+              {tn("transcript.permission.pending", pendingCount - 1)}
+            </span>
           ) : null}
         </div>
 
@@ -67,7 +83,7 @@ export function PermissionDialog({ ask, pendingCount, onAnswer }: Props) {
             disabled={answered}
             onClick={() => answer({ decision: "deny" })}
           >
-            拒绝
+            {t("transcript.permission.deny")}
             {/* Esc=拒绝是纯键盘捷径，界面上不写出来没人发现得了 */}
             <span className="kbd-hint">esc</span>
           </button>
@@ -78,18 +94,13 @@ export function PermissionDialog({ ask, pendingCount, onAnswer }: Props) {
           {rememberable.length > 0 ? (
             <button
               className="btn-allow-always"
-              title={`写一条永久规则（可在 设置 → 权限 撤销）：${rememberable
-                .map((s) => `${s.tool}${s.pattern ? `(${s.pattern})` : ""}`)
-                .join("、")}`}
+              title={t("transcript.permission.alwaysTitle", { rules })}
               disabled={answered}
               onClick={() => answer({ decision: "allow", remember: rememberable })}
             >
-              总是允许（记规则）
+              {t("transcript.permission.always")}
               <span className="allow-always-sub">
-                以后不再询问 ·{" "}
-                {rememberable
-                  .map((s) => `${s.tool}${s.pattern ? `(${s.pattern})` : ""}`)
-                  .join("、")}
+                {t("transcript.permission.alwaysSub", { rules })}
               </span>
             </button>
           ) : null}
@@ -98,7 +109,7 @@ export function PermissionDialog({ ask, pendingCount, onAnswer }: Props) {
             disabled={answered}
             onClick={() => answer({ decision: "allow" })}
           >
-            允许一次
+            {t("transcript.permission.once")}
           </button>
         </div>
       </div>
@@ -128,6 +139,7 @@ export function AskChoiceCard({
   ask: PermissionAsk;
   onAnswer: (r: PermissionResponse) => void;
 }) {
+  const { t } = useT();
   const q = ask.preview.kind === "choice" ? ask.preview : null;
   const [picked, setPicked] = useState<string[]>([]);
   const [otherOn, setOtherOn] = useState(false);
@@ -141,8 +153,8 @@ export function AskChoiceCard({
     if (answered) return;
     const choice = [...ids];
     if (includeOther) {
-      const t = other.trim();
-      if (t) choice.push(`${OTHER_PREFIX}${t}`);
+      const custom = other.trim();
+      if (custom) choice.push(`${OTHER_PREFIX}${custom}`);
     }
     if (choice.length === 0) return;
     setAnswered(true);
@@ -164,9 +176,9 @@ export function AskChoiceCard({
   const needConfirm = q.allow_multiple || otherOn;
 
   return (
-    <div className="plan-card ask-card" role="region" aria-label="需要你决定">
+    <div className="plan-card ask-card" role="region" aria-label={t("transcript.ask.ariaLabel")}>
       <div className="plan-card-head">
-        <span className="plan-card-badge">决定</span>
+        <span className="plan-card-badge">{t("transcript.ask.badge")}</span>
         <span className="plan-card-title">{q.question}</span>
       </div>
 
@@ -188,7 +200,7 @@ export function AskChoiceCard({
           disabled={answered}
           onClick={() => setOtherOn((v) => !v)}
         >
-          其他
+          {t("transcript.ask.other")}
         </button>
       </div>
 
@@ -206,7 +218,7 @@ export function AskChoiceCard({
               if (canSubmit) submit(q.allow_multiple ? picked : [], true);
             }
           }}
-          placeholder="自己写…（Enter 提交）"
+          placeholder={t("transcript.ask.otherPlaceholder")}
           rows={2}
           spellCheck={false}
           autoFocus
@@ -215,7 +227,7 @@ export function AskChoiceCard({
 
       <div className="plan-card-actions">
         <button className="btn-deny" disabled={answered} onClick={deny}>
-          跳过
+          {t("transcript.ask.skip")}
         </button>
         <span className="plan-card-spacer" />
         {needConfirm ? (
@@ -224,7 +236,7 @@ export function AskChoiceCard({
             disabled={answered || !canSubmit}
             onClick={() => submit(q.allow_multiple ? picked : [], true)}
           >
-            确定
+            {t("common.ok")}
           </button>
         ) : null}
       </div>
@@ -233,9 +245,12 @@ export function AskChoiceCard({
 }
 
 /** 批准后切到哪个档，按钮上要写清楚 —— 这是批准动作的一部分，不是细节。 */
-const APPROVE_LABEL: Partial<Record<PermissionMode, { label: string; sub: string }>> = {
-  acceptEdits: { label: "批准，编辑放行", sub: "文件修改直接放行，命令仍询问" },
-  default: { label: "批准，逐步确认", sub: "每个写操作都再问一次" },
+const APPROVE_LABEL: Partial<Record<PermissionMode, { label: MessageKey; sub: MessageKey }>> = {
+  acceptEdits: {
+    label: "transcript.plan.approveAcceptEdits",
+    sub: "transcript.plan.approveAcceptEditsSub",
+  },
+  default: { label: "transcript.plan.approveDefault", sub: "transcript.plan.approveDefaultSub" },
 };
 
 /**
@@ -243,6 +258,7 @@ const APPROVE_LABEL: Partial<Record<PermissionMode, { label: string; sub: string
  * 没有按钮 —— 写完才轮到用户审。
  */
 export function PlanDraft({ text }: { text: string }) {
+  const { t } = useT();
   const bodyRef = useRef<HTMLDivElement>(null);
   // 只有本来就贴着底部才继续跟随 —— 用户上滚回读时，新 token 不能
   // 把他一次次拽回底部。
@@ -253,10 +269,10 @@ export function PlanDraft({ text }: { text: string }) {
   }, [text]);
 
   return (
-    <div className="plan-card plan-draft" role="status" aria-label="正在撰写计划">
+    <div className="plan-card plan-draft" role="status" aria-label={t("transcript.plan.drafting")}>
       <div className="plan-card-head">
-        <span className="plan-card-badge">计划</span>
-        <span className="plan-card-title">正在撰写…</span>
+        <span className="plan-card-badge">{t("transcript.plan.badge")}</span>
+        <span className="plan-card-title">{t("transcript.plan.draftingTitle")}</span>
       </div>
       <div
         className="plan-body"
@@ -298,10 +314,17 @@ export function PlanApprovalCard({
    */
   onParallel?: () => void;
 }) {
+  const { t } = useT();
   const [feedback, setFeedback] = useState("");
   const [answered, setAnswered] = useState(false);
   const modes = ask.suggestions.flatMap((s) => (s.type === "set_mode" ? [s.mode] : []));
-  const plan = ask.preview.kind === "plain" ? ask.preview.text : "";
+  // 计划正文是模型原文（raw）；plain 是词典键，只在计划为空时出现。
+  const plan =
+    ask.preview.kind === "raw"
+      ? ask.preview.text
+      : ask.preview.kind === "plain"
+        ? renderUiText(ask.preview.text)
+        : "";
 
   const answer = (r: PermissionResponse) => {
     if (answered) return;
@@ -324,21 +347,21 @@ export function PlanApprovalCard({
   };
 
   return (
-    <div className="plan-card" role="region" aria-label="计划批准">
+    <div className="plan-card" role="region" aria-label={t("transcript.plan.approvalLabel")}>
       <div className="plan-card-head">
-        <span className="plan-card-badge">计划</span>
-        <span className="plan-card-title">审阅后选择怎么执行</span>
+        <span className="plan-card-badge">{t("transcript.plan.badge")}</span>
+        <span className="plan-card-title">{t("transcript.plan.reviewTitle")}</span>
       </div>
 
       <div className="plan-body">
-        <Markdown text={plan || "（计划为空）"} />
+        <Markdown text={plan || t("transcript.plan.empty")} />
       </div>
 
       <textarea
         className="plan-feedback"
         value={feedback}
         onChange={(e) => setFeedback(e.target.value)}
-        placeholder="要打回的话，告诉它往哪改（可留空）"
+        placeholder={t("transcript.plan.feedbackPlaceholder")}
         rows={2}
         spellCheck={false}
       />
@@ -354,7 +377,7 @@ export function PlanApprovalCard({
             })
           }
         >
-          打回，继续规划
+          {t("transcript.plan.reject")}
         </button>
         <span className="plan-card-spacer" />
         {onParallel ? (
@@ -362,18 +385,21 @@ export function PlanApprovalCard({
             className="btn-allow-always"
             disabled={answered}
             onClick={approveParallel}
-            title="批准，并进入多任务模式：按依赖把步骤分层，每层一个后台子 agent 并行执行"
+            title={t("transcript.plan.parallelTitle")}
           >
             <span className="plan-parallel-icon" aria-hidden>
               ⑂
             </span>
-            并行构建
-            <span className="allow-always-sub">多任务模式，后台子 agent 分工</span>
+            {t("transcript.plan.parallel")}
+            <span className="allow-always-sub">{t("transcript.plan.parallelSub")}</span>
           </button>
         ) : null}
         {modes.length > 0 ? (
           modes.map((m, i) => {
-            const label = APPROVE_LABEL[m] ?? { label: `批准（${m}）`, sub: "" };
+            const known = APPROVE_LABEL[m];
+            const label = known
+              ? { label: t(known.label), sub: t(known.sub) }
+              : { label: t("transcript.plan.approveMode", { mode: m }), sub: "" };
             return (
               <button
                 key={m}
@@ -393,7 +419,7 @@ export function PlanApprovalCard({
             disabled={answered}
             onClick={() => answer({ decision: "allow", remember: [] })}
           >
-            批准
+            {t("transcript.plan.approve")}
           </button>
         )}
       </div>
@@ -402,11 +428,12 @@ export function PlanApprovalCard({
 }
 
 function Preview({ preview }: { preview: PermissionAsk["preview"] }) {
+  const { t, tn } = useT();
   switch (preview.kind) {
     case "command":
       return (
         <div className="preview">
-          <div className="preview-label">将在 {preview.cwd} 执行</div>
+          <div className="preview-label">{t("transcript.preview.runIn", { cwd: preview.cwd })}</div>
           <pre className="preview-cmd">{preview.command}</pre>
         </div>
       );
@@ -415,7 +442,7 @@ function Preview({ preview }: { preview: PermissionAsk["preview"] }) {
       return (
         <div className="preview">
           <div className="preview-label">
-            写入文件（{preview.lines} 行 · {preview.bytes} 字节）
+            {t("transcript.preview.writeFile", { lines: preview.lines, bytes: preview.bytes })}
           </div>
           <pre className="preview-cmd">{preview.path}</pre>
           {/* 内容前 N 行 —— 只给路径和字节数等于让用户盲签。 */}
@@ -427,7 +454,9 @@ function Preview({ preview }: { preview: PermissionAsk["preview"] }) {
                 </div>
               ))}
               {preview.truncated ? (
-                <div className="preview-more">… 共 {preview.lines} 行，仅显示前段</div>
+                <div className="preview-more">
+                  {tn("transcript.preview.truncated", preview.lines)}
+                </div>
               ) : null}
             </pre>
           ) : null}
@@ -437,7 +466,9 @@ function Preview({ preview }: { preview: PermissionAsk["preview"] }) {
     case "file_edit":
       return (
         <div className="preview">
-          <div className="preview-label">修改 {preview.path}</div>
+          <div className="preview-label">
+            {t("transcript.preview.editFile", { path: preview.path })}
+          </div>
           <pre className="preview-diff">
             {preview.diff.split("\n").map((line, i) => (
               <div key={i} className={line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : ""}>
@@ -451,7 +482,7 @@ function Preview({ preview }: { preview: PermissionAsk["preview"] }) {
     case "network_fetch":
       return (
         <div className="preview">
-          <div className="preview-label">访问网络</div>
+          <div className="preview-label">{t("transcript.preview.network")}</div>
           <pre className="preview-cmd">{preview.url}</pre>
         </div>
       );
@@ -459,6 +490,13 @@ function Preview({ preview }: { preview: PermissionAsk["preview"] }) {
     // choice 由 AskChoiceCard 渲染，权限弹窗走不到这里。
     case "choice":
       return null;
+
+    case "plain":
+      return (
+        <div className="preview">
+          <pre className="preview-cmd">{renderUiText(preview.text)}</pre>
+        </div>
+      );
 
     default:
       return (

@@ -292,8 +292,8 @@ async fn 工具_panic_不会让配对断掉() {
         fn prompt(&self, _: &riot_protocol::tool::PromptContext) -> String {
             "boom".into()
         }
-        fn describe(&self, _: &serde_json::Value) -> String {
-            "boom".into()
+        fn describe(&self, _: &serde_json::Value) -> riot_protocol::text::UiText {
+            riot_protocol::text::UiText::new("boom")
         }
         async fn call(
             &self,
