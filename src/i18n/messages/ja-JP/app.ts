@@ -23,7 +23,9 @@ export default {
   "app.error.delete": "削除に失敗しました",
   "app.error.clearDone": "クリアに失敗しました",
 
-  "app.notify.turnDone": "タスクが完了しました。戻って結果を確認してください。",
+  "app.notify.turnDone.title": "タスクが完了しました",
+
+  "app.notify.turnDone.body": "戻って結果を確認してください。",
 
   "app.notify.scheduleDone.title": "スケジュールタスクが完了しました",
 

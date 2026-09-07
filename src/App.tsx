@@ -2173,9 +2173,12 @@ export function App() {
 
 /* ── 对话 ───────────────────────────────────── */
 
-/** 长任务在后台跑完时发系统通知。权限与失败处理见 bridge 的 `notify`。 */
+/**
+ * 长任务在后台跑完时发系统通知。权限与失败处理见 bridge 的 `notify`。
+ * 标题不写「Riot」：横幅自己会标出发通知的应用，标题留给事情本身。
+ */
 function notifyTurnDone() {
-  void notify("Riot", t("app.notify.turnDone"));
+  void notify(t("app.notify.turnDone.title"), t("app.notify.turnDone.body"));
 }
 
 function Chat({

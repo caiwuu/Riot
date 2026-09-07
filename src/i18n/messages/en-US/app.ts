@@ -23,7 +23,9 @@ export default {
   "app.error.delete": "Couldn't delete",
   "app.error.clearDone": "Couldn't clear",
 
-  "app.notify.turnDone": "Task finished. Come back and take a look.",
+  "app.notify.turnDone.title": "Task finished",
+
+  "app.notify.turnDone.body": "Come back and take a look.",
 
   "app.notify.scheduleDone.title": "Scheduled task finished",
 

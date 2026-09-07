@@ -1556,28 +1556,29 @@ export async function openInBrowser(url: string): Promise<void> {
 }
 
 /**
- * 发一条系统通知。权限只在第一次要 —— 被拒绝就永远沉默，不反复骚扰。
+ * 发一条系统通知。
  *
- * 失败静默：通知是锦上添花，平台不支持、用户拒绝、插件没装都不值得
- * 打断调用方。文案由调用方给，这层只负责把能力接出来。
+ * 桌面上交给宿主发（`notify` 命令）：Windows 的横幅要挂在应用自己的
+ * AppUserModelID 下才会显示 Riot 的名字和图标，这件事只有 Rust 侧做得了
+ * —— 通知插件的 JS 接口在 dev 目录下跑时会把通知挂到 PowerShell 名下。
+ * 宿主那边失败只记日志，不回错。
+ *
+ * 失败静默：通知是锦上添花，平台不支持、用户拒绝都不值得打断调用方。
+ * 文案由调用方给，这层只负责把能力接出来。
  */
 export async function notify(title: string, body: string): Promise<void> {
   try {
     if (!host.nativeWindow) {
-      // 浏览器的通知 API。非安全上下文（http://192.168.…）下多半不可用，
-      // 静默跳过和桌面上被拒绝是同一种结局。
+      // 浏览器的通知 API。权限只在第一次要 —— 被拒绝就永远沉默，不反复
+      // 骚扰。非安全上下文（http://192.168.…）下多半不可用，静默跳过和
+      // 被拒绝是同一种结局。
       if (typeof Notification === "undefined") return;
       let perm = Notification.permission;
       if (perm === "default") perm = await Notification.requestPermission();
       if (perm === "granted") new Notification(title, { body });
       return;
     }
-    const { isPermissionGranted, requestPermission, sendNotification } = await import(
-      "@tauri-apps/plugin-notification"
-    );
-    let ok = await isPermissionGranted();
-    if (!ok) ok = (await requestPermission()) === "granted";
-    if (ok) sendNotification({ title, body });
+    await invoke<void>("notify", { title, body });
   } catch {
     // 平台不支持或用户拒绝 —— 无声跳过
   }

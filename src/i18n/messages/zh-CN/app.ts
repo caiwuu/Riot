@@ -24,7 +24,9 @@ export default {
   "app.error.delete": "删除失败",
   "app.error.clearDone": "清理失败",
 
-  "app.notify.turnDone": "任务完成了，回来看看结果吧。",
+  "app.notify.turnDone.title": "任务完成了",
+
+  "app.notify.turnDone.body": "回来看看结果吧。",
 
   "app.notify.scheduleDone.title": "定时任务完成",
 

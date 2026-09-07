@@ -25,6 +25,7 @@ pub use gui_env::print_process_env;
 pub mod dir_browse;
 pub mod env_probe;
 pub mod kernel;
+pub mod notification;
 pub mod packs;
 pub mod pasteboard;
 pub mod persist;
@@ -622,6 +623,20 @@ fn set_appearance(
 #[tauri::command]
 async fn check_update(app: tauri::AppHandle) -> HostResult<update::UpdateInfo> {
     crate::update::check(&app.package_info().version.to_string()).await
+}
+
+/// 发一条系统通知（后台跑完的任务、结束的定时任务）。文案由前端按界面语言给。
+///
+/// 不报错：通知发不出去只记日志，前端那边本来也没有可做的补救。走
+/// `spawn_blocking`：Windows 上第一次要写图标文件和注册表，之后每条也有一次
+/// 同步的 WinRT 调用。
+#[tauri::command]
+async fn notify(app: tauri::AppHandle, title: String, body: String) {
+    let done =
+        tokio::task::spawn_blocking(move || notification::send(&app, &title, &body)).await;
+    if let Err(e) = done {
+        tracing::warn!(error = %e, "notification task panicked");
+    }
 }
 
 #[tauri::command]
@@ -1537,6 +1552,7 @@ pub fn run() {
             app_version,
             set_appearance,
             check_update,
+            notify,
             set_config,
             set_api_key,
             mcp_status,

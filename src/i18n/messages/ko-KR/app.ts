@@ -23,7 +23,9 @@ export default {
   "app.error.delete": "삭제에 실패했습니다",
   "app.error.clearDone": "정리에 실패했습니다",
 
-  "app.notify.turnDone": "작업이 끝났습니다. 돌아와서 결과를 확인해 보세요.",
+  "app.notify.turnDone.title": "작업이 끝났습니다",
+
+  "app.notify.turnDone.body": "돌아와서 결과를 확인해 보세요.",
 
   "app.notify.scheduleDone.title": "예약 작업 완료",
 

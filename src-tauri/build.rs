@@ -20,6 +20,7 @@ const COMMANDS: &[&str] = &[
     "app_version",
     "set_appearance",
     "check_update",
+    "notify",
     "set_config",
     "set_api_key",
     "add_project",

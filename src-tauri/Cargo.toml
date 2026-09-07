@@ -80,6 +80,13 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 # 只用它一件事：main.rs 的 multicall 分发。阶段 A 内核嵌在宿主进程里，
 # riot-runtime 的 sandbox_win 拿 current_exe() 回头调的就是这个二进制。
 srt-win = { path = "../vendor/srt-win" }
+# 系统通知（见 src/notify.rs）。Windows 上不经 tauri-plugin-notification 而直接
+# 发 toast：插件在 dev 目录下跑时把通知挂到 PowerShell 名下。这个 crate 本来就在
+# 插件的依赖树里（notify-rust → tauri-winrt-notification），不多一份代码。
+# windows-registry 用来把应用的 AUMID（显示名 + 图标）注册进 HKCU，横幅才认得
+# 出这是 Riot。版本跟着 rust-version 走：0.100 要 1.95。
+tauri-winrt-notification = "0.7"
+windows-registry = "0.6.1"
 # DataExchange/Ole/Shell 三个是读剪贴板里的 CF_HDROP 用的（见 src/pasteboard.rs）。
 # Dwm/Gdi/Controls/WindowsAndMessaging 是侧栏的系统材质（见 src/vibrancy.rs）：
 # Gdi 只为了 DWM_BLURBEHIND 里的 HRGN，Controls 只为了 MARGINS，

@@ -10,7 +10,6 @@
     "core:window:allow-set-title",
     "core:window:allow-start-dragging",
     "dialog:default",
-    "notification:default",
     "opener:default",
     "opener:allow-reveal-item-in-dir",
     {
@@ -34,6 +33,7 @@
     "allow-app-version",
     "allow-set-appearance",
     "allow-check-update",
+    "allow-notify",
     "allow-set-config",
     "allow-set-api-key",
     "allow-add-project",

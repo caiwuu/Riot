@@ -16,6 +16,8 @@
 //! - `clipboard_paths`：读的是宿主机的剪贴板，和手机上按 ⌘V 的人无关，回空。
 //! - `set_appearance`：改的是桌面那扇窗的原生外观，手机上切个主题不该把它
 //!   一起换掉，空操作。
+//! - `notify`：系统通知要弹在远端用户手里的设备上（浏览器里前端自己走
+//!   Notification API），宿主机上弹一条没人看，空操作。
 //! - 带观看者的六条（订阅、终端、浏览器面板）：把连接号当观看者传进去。
 
 use serde::Serialize;
@@ -315,6 +317,8 @@ pub async fn dispatch(
         // 桌面窗口的外观和远端用户无关（见模块说明）。网页那头的 transport
         // 本来就不会发这条，这里兜住的是手写的调用。
         "set_appearance" => val(()),
+        // 通知该弹在远端用户的设备上，不是宿主机（见模块说明）。
+        "notify" => val(()),
         "check_update" => ok(crate::check_update(app.clone()).await),
         "mcp_status" => ok(crate::mcp_status(st).await),
         "mcp_restart" => ok(crate::mcp_restart(st, a.take("serverId")?).await),
