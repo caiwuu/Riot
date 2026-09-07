@@ -238,20 +238,15 @@ MUTANTS = [
         "",
         "bypass 模式下内容级 deny 规则完全失效",
     ),
+    # 锚点只取分支头这一行。拒绝文案跟着 plan 模式的产品措辞改过两回，
+    # 每回都让整段锚点失效；守卫成 false 之后 Plan 落进下面 `_` 的询问
+    # 分支，效果和"把 Deny 改成 Ask"一样，但文案再怎么改都碰不到它。
     (
         "规划模式改成询问",
         "permissions",
         "chain.rs",
-        """        PermissionMode::Plan => PermissionResult::Deny {
-            message: format!("规划模式下不能使用 `{}`。先退出规划模式。", tool.name()),
-            reason: DecisionReason::Mode { mode },
-        },""",
-        """        PermissionMode::Plan => finish_ask(
-            format!("是否允许 `{}`？", tool.name()),
-            vec![allow_tool_suggestion(tool.name())],
-            DecisionReason::Mode { mode },
-            ctx,
-        ),""",
+        "        PermissionMode::Plan => PermissionResult::Deny {",
+        "        PermissionMode::Plan if false => PermissionResult::Deny {",
         "规划模式下反复弹窗，用户点一次允许就动手改了代码",
     ),
     # ── Bash 分析 ─────────────────────────────────────
