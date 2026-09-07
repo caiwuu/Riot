@@ -15,7 +15,7 @@
 import type { PanelState } from "../bridge";
 import { type MessageKey, useT } from "../i18n";
 import { basename } from "../pathDisplay";
-import { BrowserIcon, DiffIcon, FileDocIcon, FolderIcon } from "./icons";
+import { BrowserIcon, DiffIcon, FileDocIcon, FolderIcon, PlanModeIcon } from "./icons";
 
 /** 工作台标签。browser / changes / files 每会话至多一个，preview 每文件一个。
  *  browser 在标签栏上展开成一组页面标签，但在状态里始终是一项 ——
@@ -30,7 +30,10 @@ export type WorkbenchTab =
   | { kind: "preview"; path: string }
   /** 一个子 agent 的只读会话（照 Cursor：点子 agent 开一个标签）。
    *  `title` 是标签上的字，面板拉到真名后会更新它。 */
-  | { kind: "subagent"; agentId: string; title: string };
+  | { kind: "subagent"; agentId: string; title: string }
+  /** 规划模式产出的计划（照 Cursor：计划在对话旁边的一页）。每会话至多
+   *  一个，内容是对话里最近那份计划 —— 标签自己不存正文。 */
+  | { kind: "plan" };
 
 /** 工作台的全部状态。收成一个对象是为了跟会话整存整取。 */
 export interface WorkbenchState {
@@ -64,6 +67,7 @@ export function WorkbenchTabs({
   tabs,
   active,
   pages,
+  planTitle,
   onSelect,
   onClose,
   onSelectPage,
@@ -75,6 +79,8 @@ export function WorkbenchTabs({
   active: string | null;
   /** 浏览器的页面状态。没有 browser 标签时内容为空，不参与渲染。 */
   pages: PanelState;
+  /** 计划标签上的字（计划的标题）。没有计划时用默认的「计划」。 */
+  planTitle?: string;
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
   /** 点了某个浏览器页面标签：激活浏览器并切到那一页。 */
@@ -130,7 +136,9 @@ export function WorkbenchTabs({
                 ? tr("app.workbench.files")
                 : t.kind === "subagent"
                   ? t.title
-                  : basename(t.path);
+                  : t.kind === "plan"
+                    ? planTitle?.trim() || tr("app.workbench.plan")
+                    : basename(t.path);
           return (
             <StripTab
               key={id}
@@ -142,6 +150,8 @@ export function WorkbenchTabs({
                   <FolderIcon />
                 ) : t.kind === "subagent" ? (
                   <ForkIcon />
+                ) : t.kind === "plan" ? (
+                  <PlanModeIcon />
                 ) : (
                   <FileDocIcon />
                 )
@@ -152,7 +162,9 @@ export function WorkbenchTabs({
                   ? t.path
                   : t.kind === "subagent"
                     ? tr("app.workbench.subagent", { id: t.agentId })
-                    : label
+                    : t.kind === "plan"
+                      ? tr("app.workbench.planTip")
+                      : label
               }
               onSelect={() => onSelect(id)}
               onClose={() => onClose(id)}

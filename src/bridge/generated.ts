@@ -874,11 +874,16 @@ export type ThinkingEffort = "low" | "medium" | "high";
  * 用户在界面上按的一个"推一把"按钮，变成一条塞给模型的带外提醒。
  *
  * 对应 Cursor 的 SimulatedMsgReason：按钮不产生用户的话，只产生一条
- * system_reminder，注入到当前轮的下一个安全点 —— 这一批工具结果就位、
- * 模型还没开口的那一刻。按钮说的是"你手上这件事"，等整轮跑完再给模型
- * 看，功能就等于不存在。
+ * system_reminder。两条投递路：
+ *
+ * - **轮中**（`turn.nudge`）：注入到当前轮的下一个安全点 —— 这一批工具
+ *   结果就位、模型还没开口的那一刻。按钮说的是"你手上这件事"，等整轮
+ *   跑完再给模型看，功能就等于不存在。「转到后台」走这条。
+ * - **开轮**（[`TurnInput::nudge`]）：随一条用户消息一起进历史，附在
+ *   正文之后。计划做完、回合已经结束，用户点「构建」时没有轮在跑，
+ *   提醒只能跟着新开的那一轮走。
  */
-export type Nudge = "start_multitasking" | "build_in_parallel";
+export type Nudge = "start_multitasking" | "build_plan" | "build_in_parallel";
 /**
  * 内核 → 宿主，对 [`RpcRequest`] 的应答。
  */
@@ -1489,6 +1494,12 @@ export interface WebSetup {
  */
 export interface TurnInput {
   images?: ImageInput[];
+  /**
+   * 这条消息是界面上哪个按钮发出来的（「构建」/「并行构建」）。
+   * 内核据此在正文之后附一条 system_reminder；正文本身只是给人看的
+   * 一句短话（"开始构建计划"），指示全在提醒里。见 [`Nudge`]。
+   */
+  nudge?: Nudge | null;
   refs?: string[];
   text: string;
 }

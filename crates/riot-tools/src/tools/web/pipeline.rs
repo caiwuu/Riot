@@ -42,15 +42,76 @@ fn user_agent() -> String {
     )
 }
 
+/// 抓回来的一张图。字节是原始响应体，没压缩、没编码。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedImage {
+    /// 规范化后的 MIME（小写、去掉参数），如 `image/png`。
+    ///
+    /// 这里只负责认出"这是一张图"；模型收不收这种类型由工具层判断 ——
+    /// 那份清单要和 Read 保持一致，不该在两处各写一遍。
+    pub media_type: String,
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fetched {
     Page(CachedPage),
+    /// 图片。不转 Markdown、不蒸馏，也不进缓存 —— 缓存按转成 Markdown
+    /// 的正文计量，装不下二进制；重抓一张图的代价也远小于重抓一页。
+    Image(FetchedImage),
     /// 跨站跳转。没有自动跟随，把目标交回模型。
     CrossHost {
         from: String,
         to: String,
         status: u16,
     },
+}
+
+/// 响应是不是一张图。返回规范化的 MIME。
+///
+/// 先看 content-type；服务端没给、或者给的是笼统的 `application/octet-stream`
+/// 时（CDN 上的静态文件常这样），再看文件头。四种格式的魔数都很稳。
+///
+/// `[约束]` content-type 明确是别的类型（`text/html`）时**不嗅探**：那是
+/// 服务端的表态，一个碰巧以 PNG 魔数开头的正文按图处理只会更糟。
+///
+/// svg 不算图：它是 XML 文本，视觉模型也不收，走正文那条路让模型读源码
+/// 反而更有用。
+pub(crate) fn image_media_type(content_type: &str, body: &[u8]) -> Option<String> {
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+
+    match mime.as_str() {
+        // 非标准写法很常见，归到标准名下，工具层的清单只认标准名。
+        "image/jpg" | "image/pjpeg" => Some("image/jpeg".to_owned()),
+        "image/svg+xml" => None,
+        "" | "application/octet-stream" | "binary/octet-stream" => {
+            sniff_image(body).map(ToOwned::to_owned)
+        }
+        m if m.starts_with("image/") => Some(m.to_owned()),
+        _ => None,
+    }
+}
+
+/// 按文件头认四种格式。认不出返回 None —— 这里不是"是不是二进制"的判断。
+fn sniff_image(body: &[u8]) -> Option<&'static str> {
+    if body.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("image/png");
+    }
+    if body.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("image/jpeg");
+    }
+    if body.starts_with(b"GIF87a") || body.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if body.len() >= 12 && &body[0..4] == b"RIFF" && &body[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
 }
 
 /// 抓一个页面并转成 Markdown。命中缓存就不发请求。
@@ -125,6 +186,15 @@ pub async fn fetch_page(
                 code: resp.status,
                 body: first_line(&String::from_utf8_lossy(&resp.body)),
             });
+        }
+
+        // 图片在解码文本之前拦下。落进下面那条路的话，二进制会被按
+        // UTF-8 解成一堆替换字符交给模型 —— 它拿着乱码也会言之凿凿。
+        if let Some(media_type) = image_media_type(&resp.content_type, &resp.body) {
+            return Ok(Fetched::Image(FetchedImage {
+                media_type,
+                bytes: resp.body,
+            }));
         }
 
         let raw_bytes = resp.body.len() as u64;
@@ -259,5 +329,72 @@ mod tests {
         let ua = user_agent();
         assert!(ua.starts_with("Riot/"), "{ua}");
         assert!(ua.contains(env!("CARGO_PKG_VERSION")), "{ua}");
+    }
+
+    const PNG_HEAD: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+
+    #[test]
+    fn 按_content_type_认图片并规范化() {
+        // 大小写、参数、非标准写法都是线上真会遇到的
+        assert_eq!(
+            image_media_type("image/png; charset=binary", b"x"),
+            Some("image/png".to_owned())
+        );
+        assert_eq!(
+            image_media_type("IMAGE/JPEG", b"x"),
+            Some("image/jpeg".to_owned())
+        );
+        assert_eq!(
+            image_media_type("image/jpg", b"x"),
+            Some("image/jpeg".to_owned()),
+            "非标准的 image/jpg 要归到标准名下，否则工具层的清单认不出"
+        );
+        // 不在模型清单里的图片类型也先认成图 —— 收不收由工具层说清楚，
+        // 落到文本那条路只会把二进制解成乱码。
+        assert_eq!(
+            image_media_type("image/bmp", b"x"),
+            Some("image/bmp".to_owned())
+        );
+    }
+
+    #[test]
+    fn svg_按文本处理() {
+        // XML 文本，视觉模型也不收；让模型读源码比报"不支持的图片"有用
+        assert_eq!(image_media_type("image/svg+xml", b"<svg/>"), None);
+    }
+
+    #[test]
+    fn 没有类型或_octet_stream_时按文件头认() {
+        assert_eq!(
+            image_media_type("", PNG_HEAD),
+            Some("image/png".to_owned())
+        );
+        assert_eq!(
+            image_media_type("application/octet-stream", PNG_HEAD),
+            Some("image/png".to_owned())
+        );
+        assert_eq!(
+            image_media_type("application/octet-stream", &[0xFF, 0xD8, 0xFF, 0xE0]),
+            Some("image/jpeg".to_owned())
+        );
+        assert_eq!(
+            image_media_type("application/octet-stream", b"GIF89a...."),
+            Some("image/gif".to_owned())
+        );
+        assert_eq!(
+            image_media_type("application/octet-stream", b"RIFF\0\0\0\0WEBPVP8 "),
+            Some("image/webp".to_owned())
+        );
+        assert_eq!(
+            image_media_type("application/octet-stream", b"just text"),
+            None,
+            "认不出文件头的 octet-stream 照旧走文本路"
+        );
+    }
+
+    #[test]
+    fn 明确的文本类型不嗅探() {
+        // 服务端说了是 HTML，就是 HTML —— 碰巧的魔数不能压过表态
+        assert_eq!(image_media_type("text/html", PNG_HEAD), None);
     }
 }

@@ -14,6 +14,7 @@
 //! 兜底逻辑够不到。
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use riot_protocol::message::ToolResultContent;
 use riot_protocol::permission::{PermissionContext, PermissionResult};
 use riot_protocol::text::UiText;
@@ -22,15 +23,19 @@ use riot_protocol::tool::{
     ValidationError,
 };
 use riot_protocol::ui_text;
+use riot_protocol::vision::DescribeRequest;
 use riot_protocol::web::WebError;
 use serde::Deserialize;
 use std::sync::Arc;
+use url::Url;
 
 use super::cache::PageCache;
 use super::markdown::{self, MAX_CONTENT_CHARS};
-use super::pipeline::{self, Fetched};
+use super::pipeline::{self, FetchedImage, Fetched};
 use super::preapproved;
 use super::url as weburl;
+use crate::tools::read::MAX_IMAGE_BYTES;
+use crate::tools::shrink;
 
 pub const WEB_FETCH: &str = "WebFetch";
 
@@ -81,7 +86,10 @@ impl Tool for WebFetch {
          - 需要登录才能看的页面（私有仓库、内部文档）抓不到，别反复重试。\n\
          - 同一个 URL 15 分钟内重复抓取会走缓存，不用担心重复请求。\n\
          - 跳转到别的站点时，工具会把新地址告诉你，你需要用新地址\
-         **再调一次**（这一次会重新征求用户同意）。"
+         **再调一次**（这一次会重新征求用户同意）。\n\
+         - 地址指向图片（png / jpg / gif / webp）时，图片会作为图返回给你看，\
+         同时显示在界面上给用户看；`prompt` 写你想从图里看什么。\
+         不要用 Bash 下载图片再想办法解码。"
             .to_owned()
     }
 
@@ -202,6 +210,7 @@ impl Tool for WebFetch {
                     side_messages: Vec::new(),
                 };
             }
+            Fetched::Image(img) => return image_outcome(img, &u, &parsed.prompt, &ctx).await,
             Fetched::Page(p) => p,
         };
 
@@ -235,6 +244,113 @@ impl Tool for WebFetch {
             ui_payload: Some(UiPayload::Plain { text }),
             side_messages: Vec::new(),
         }
+    }
+}
+
+/// 模型收得了的图片类型，以及落盘用的扩展名。
+///
+/// `[约束]` 和 Read、宿主 `read_image` 是同一份清单：界面按 `path` 读原图
+/// 时走的就是 `read_image`，这里认了它不认的类型，界面上就是一张裂图。
+fn supported_image(media_type: &str) -> Option<(&'static str, &'static str)> {
+    match media_type {
+        "image/png" => Some(("image/png", "png")),
+        "image/jpeg" => Some(("image/jpeg", "jpg")),
+        "image/gif" => Some(("image/gif", "gif")),
+        "image/webp" => Some(("image/webp", "webp")),
+        _ => None,
+    }
+}
+
+/// 抓回来的图交给模型。和 Read 读图、浏览器截图同一套分支。
+///
+/// 原图落到工件目录，界面按路径显示原图；进消息、发给模型的是压缩图
+/// （见 shrink 模块）。`prompt` 在模型自己能看图时用不上 —— 它看着图自己
+/// 找答案；走视觉兼容时它就是转述的侧重点。
+async fn image_outcome(
+    img: FetchedImage,
+    url: &Url,
+    prompt: &str,
+    ctx: &ToolContext,
+) -> ToolOutcome {
+    let Some((media_type, ext)) = supported_image(&img.media_type) else {
+        return ToolOutcome::failed(format!(
+            "{url} 是一张 {} 图片，模型只收 png / jpg / gif / webp。\
+             找这张图的其它格式版本，或者告诉用户这张图看不了。\
+             不要用 Bash 下载后转换 —— 转换出来的图仍然进不了对话。",
+            img.media_type
+        ));
+    };
+
+    if img.bytes.len() > MAX_IMAGE_BYTES {
+        return ToolOutcome::failed(format!(
+            "{url} 的图片有 {} KB，超过单张图片 {} KB 的上限。\
+             找这张图的缩略图或更小的版本；不要用 Bash 下载后缩小再读。",
+            img.bytes.len() / 1024,
+            MAX_IMAGE_BYTES / 1024,
+        ));
+    }
+
+    // 原图落盘给界面用。写不进就没有原图，界面退到压缩图 —— 图能看就行。
+    // tool_use_id 全局唯一，天然不撞名。
+    let path = ctx
+        .artifacts_dir
+        .join(format!("{}.{ext}", ctx.tool_use_id.as_str()));
+    let path = ctx.fs.write(&path, &img.bytes).await.ok().map(|()| path);
+
+    // 压不了（gif、损坏数据）就原样发，MAX_IMAGE_BYTES 已经兜过底。
+    let (data, media_type) = match shrink::for_model(&img.bytes) {
+        Some(s) => (s.data, s.media_type),
+        None => (
+            base64::engine::general_purpose::STANDARD.encode(&img.bytes),
+            media_type,
+        ),
+    };
+
+    let caption = ui_text!(
+        "tools.webFetch.image",
+        host = url.host_str().unwrap_or_default(),
+        media = media_type,
+        kb = img.bytes.len() / 1024
+    );
+
+    if ctx.vision.accepts_images() {
+        return ToolOutcome::Ok {
+            model_content: ToolResultContent::Image {
+                media_type: media_type.into(),
+                data,
+                path,
+            },
+            ui_payload: Some(UiPayload::Message { text: caption }),
+            side_messages: Vec::new(),
+        };
+    }
+
+    // 看不了图的模型走视觉兼容。转述自带"当作亲眼所见、不暴露管道"的
+    // 指示（宿主实现负责），这里只补上"描述的是哪个地址"。图片本体留给
+    // 界面（DescribedImage）。
+    match ctx
+        .vision
+        .describe(DescribeRequest {
+            media_type: media_type.into(),
+            data: data.clone(),
+            focus: format!("调用方抓取这张图片是想：{prompt}"),
+        })
+        .await
+    {
+        Ok(text) => ToolOutcome::Ok {
+            model_content: ToolResultContent::DescribedImage {
+                media_type: media_type.into(),
+                data,
+                path,
+                text: format!("{url}：\n{text}"),
+            },
+            ui_payload: Some(UiPayload::Message { text: caption }),
+            side_messages: Vec::new(),
+        },
+        Err(e) => ToolOutcome::failed(format!(
+            "{url} 是图片，但没能交给模型：{e}\n\
+             不要试图用 Bash 下载或转换它 —— 问题不在图片，在于没有能看图的模型。"
+        )),
     }
 }
 

@@ -374,13 +374,13 @@ impl HostGate {
         if updates.is_empty() {
             return;
         }
-        // 模式切换先落。批准计划的场景里，模型的**下一个**工具调用就要
-        // 按新模式判定 —— check() 每次都从 mode_live 现读，这里写完
-        // 立即可见。
+        // 模式切换先落。用户在 SwitchMode 的卡片上点「切换」之后，模型的
+        // **下一个**工具调用就要按新模式判定 —— check() 每次都从 mode_live
+        // 现读，这里写完立即可见。
         for u in &updates {
             if let riot_protocol::permission::PermissionUpdate::SetMode { mode, .. } = u {
                 *self.mode_live.lock().await = *mode;
-                tracing::info!(mode = ?mode, "权限模式已切换（用户批准计划时选择）");
+                tracing::info!(mode = ?mode, "权限模式已切换（用户在卡片上同意）");
                 // 告诉界面。不发的话 composer 还显示「规划模式」，而宿主
                 // 已经按新档放行 —— 显示得比实际更严是最坏的一种错。
                 let _ = self.sink.send(AgentEvent::ModeChanged { mode: *mode });
@@ -440,11 +440,12 @@ impl HostGate {
             };
         }
 
-        // 计划批准不吃普通询问的超时：计划是要读的文档，几页纸读一刻钟
-        // 很正常，而普通超时默认才 60 秒 —— 读到一半计划被"超时拒绝"，
-        // 模型退回规划模式重新提交，用户刚读的白读。上限一小时兜底
+        // 切模式的询问不吃普通询问的超时：它是"这活要不要先规划"这个决定
+        // 本身，用户可能正在读模型给的理由、或者刚离开一会儿 —— 普通超时
+        // 默认才 60 秒，到点按拒绝处理的话，模型会在没人点头的情况下直接
+        // 把一个大改动做下去，而这正是它建议先规划的原因。上限一小时兜底
         //（人真的走了不能让轮次永远挂着）。
-        let timeout = if tool.name() == "ExitPlanMode" {
+        let timeout = if tool.name() == riot_tools::tools::names::SWITCH_MODE {
             Duration::from_secs(3600)
         } else {
             self.ask_timeout
@@ -541,6 +542,15 @@ impl HostGate {
             PermissionResponse::Deny { message } => GateOutcome::Deny {
                 message: match message.as_deref().map(str::trim) {
                     Some(m) if !m.is_empty() => format!("用户拒绝了这次操作：{m}"),
+                    // 切模式被拒不是"换个做法再试"：用户就是不想换。措辞
+                    // 对照 Cursor（"Do not attempt to switch modes again"）——
+                    // 不说这句的话，模型下一步多半是再建议一次。
+                    _ if tool.name() == riot_tools::tools::names::SWITCH_MODE => {
+                        "The user declined the mode switch. Do not suggest switching again in \
+                         this conversation; stay in the current mode and carry out the request \
+                         as asked."
+                            .to_owned()
+                    }
                     _ => "用户拒绝了这次操作。换一种方式，或者问清楚再动手。".to_owned(),
                 },
             },
@@ -690,16 +700,17 @@ pub(crate) fn preview_of(
                 allow_multiple,
             },
         ),
-        // 计划批准卡显示计划**原文** —— 摘要等于让用户盲签一份实施方案。
-        // 原文是模型写的，走 Raw（不查词典）；空计划那句提示才是界面文案。
-        "ExitPlanMode" => match input.get("plan").and_then(|v| v.as_str()) {
-            Some(plan) => AskPreview::Raw {
-                text: plan.to_owned(),
-            },
-            None => AskPreview::Plain {
-                text: ui_text!("tools.plan.empty"),
-            },
-        },
+        // 切模式的卡片显示模型给的**理由原文**（"改动面大，先定方案"）——
+        // 用户按它决定切不切。原文是模型写的，走 Raw（不查词典）；没给理由
+        // 时退回工具描述那句（validate_input 本该把空理由拦在前面）。
+        name if name == riot_tools::tools::names::SWITCH_MODE => {
+            match riot_tools::tools::mode::explanation_of(input) {
+                Some(text) => AskPreview::Raw { text },
+                None => AskPreview::Plain {
+                    text: tool.describe(input),
+                },
+            }
+        }
         _ => AskPreview::Plain {
             text: tool.describe(input),
         },

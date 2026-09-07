@@ -111,6 +111,9 @@ export default {
   "app.workbench.files": "文件",
   "app.workbench.newTab": "新标签页",
   "app.workbench.subagent": "子 agent {id}",
+  "app.workbench.plan": "计划",
+  "app.workbench.planTip": "规划模式产出的计划",
+  "app.workbench.planNone": "这个会话还没有计划。切到 Plan 模式描述任务，模型会先写一份计划放在这里。",
   "app.workbench.addPanel": "添加面板",
   "app.workbench.closeTab": "关闭 {title}",
 

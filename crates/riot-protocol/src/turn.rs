@@ -171,15 +171,22 @@ pub struct TurnConfig {
 /// 用户在界面上按的一个"推一把"按钮，变成一条塞给模型的带外提醒。
 ///
 /// 对应 Cursor 的 SimulatedMsgReason：按钮不产生用户的话，只产生一条
-/// system_reminder，注入到当前轮的下一个安全点 —— 这一批工具结果就位、
-/// 模型还没开口的那一刻。按钮说的是"你手上这件事"，等整轮跑完再给模型
-/// 看，功能就等于不存在。
+/// system_reminder。两条投递路：
+///
+/// - **轮中**（`turn.nudge`）：注入到当前轮的下一个安全点 —— 这一批工具
+///   结果就位、模型还没开口的那一刻。按钮说的是"你手上这件事"，等整轮
+///   跑完再给模型看，功能就等于不存在。「转到后台」走这条。
+/// - **开轮**（[`TurnInput::nudge`]）：随一条用户消息一起进历史，附在
+///   正文之后。计划做完、回合已经结束，用户点「构建」时没有轮在跑，
+///   提醒只能跟着新开的那一轮走。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Nudge {
     /// 「转到后台」：把手头的活 `resume="self"` 分叉到后台子 agent，
     /// 主 agent 立刻停下 —— 对话腾出来给用户聊别的。
     StartMultitasking,
+    /// 「构建」：计划已批准，读回计划文件、落成待办、按序动手。
+    BuildPlan,
     /// 「并行构建」：按计划里 todo 的依赖分层，每层一个后台子 agent，
     /// 能并行的并行；末尾的测试留给最后一个测试 agent。
     BuildInParallel,
@@ -216,4 +223,9 @@ pub struct TurnInput {
     pub images: Vec<ImageInput>,
     #[serde(default)]
     pub refs: Vec<String>,
+    /// 这条消息是界面上哪个按钮发出来的（「构建」/「并行构建」）。
+    /// 内核据此在正文之后附一条 system_reminder；正文本身只是给人看的
+    /// 一句短话（"开始构建计划"），指示全在提醒里。见 [`Nudge`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nudge: Option<Nudge>,
 }

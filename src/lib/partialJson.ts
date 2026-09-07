@@ -1,7 +1,7 @@
 /**
  * 从尚未闭合的 JSON 对象里抽出顶层字符串字段。
  *
- * 给流式 tool_input 用：ExitPlanMode 的整份计划在 `{"plan":"..."}` 里，
+ * 给流式 tool_input 用：CreatePlan 的整份计划在 `{"plan":"..."}` 里，
  * 完整 JSON 到齐之前用户就该看见正文在长，而不是对着三个点干等。
  *
  * 只认**第一个**顶层键，避免 Bash/Write 的参数值里碰巧出现 `"plan"`。

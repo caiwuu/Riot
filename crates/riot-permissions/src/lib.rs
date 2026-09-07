@@ -23,4 +23,4 @@ pub mod testing;
 pub use chain::decide;
 pub use fence::FenceViolation;
 pub use rules::{MatchMode, RuleSet, matches_pattern};
-pub use safety::SafetyFinding;
+pub use safety::{PLAN_DIR, SafetyFinding, is_plan_document};

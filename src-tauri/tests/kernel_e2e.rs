@@ -152,7 +152,7 @@ async fn 完整链路_建会话_跑轮_done_事件回流() {
     // 这一步会:惰性水合(session.resume)→ 打包 TurnConfig → turn.submit
     // → 内核跑轮 → 401 → Done{Error} 经 event.agent 回流。
     let queued = state
-        .send_turn(&info.id, "你好", vec![], vec![])
+        .send_turn(&info.id, "你好", vec![], vec![], None)
         .await
         .expect("提交该被内核接受");
     assert!(queued.is_none(), "空闲会话该直接开轮,不是排队");

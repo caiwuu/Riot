@@ -170,6 +170,15 @@ export function StopIcon() {
   );
 }
 
+/** 「构建」键的三角：计划审完，开始跑。 */
+export function PlayIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 12 12" aria-hidden>
+      <path d="M3 1.8v8.4c0 .5.5.8.9.55l6.3-4.2a.65.65 0 0 0 0-1.1L3.9 1.25A.6.6 0 0 0 3 1.8z" fill="currentColor" />
+    </svg>
+  );
+}
+
 export function PencilIcon() {
   return (
     <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden>

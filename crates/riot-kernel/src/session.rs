@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 use riot_core::{AgentDeps, AgentState, run_agent};
 use riot_protocol::event::{AgentEvent, StreamDelta};
 use riot_protocol::id::{IdGenerator, MessageId, NanoIdGenerator, SessionId};
-use riot_protocol::message::{Attachment, Message, MessageMeta, UserContent};
+use riot_protocol::message::{AssistantContent, Attachment, Message, MessageMeta, UserContent};
 use riot_protocol::permission::{
     PermissionContext, PermissionGate, PermissionMode, PermissionModeState, PermissionRule,
 };
@@ -78,6 +78,9 @@ pub struct TurnInput {
     /// UserPromptSubmit hook 附加的上下文段落，包成 system-reminder
     /// 跟在这条消息里（模型可见，界面不当用户的话显示）。
     pub extra_context: Vec<String>,
+    /// 这条消息是界面上哪个按钮发的（「构建」/「并行构建」）。提醒文本
+    /// 由 [`crate::prompt::nudge_reminder`] 生成，附在正文之后。
+    pub nudge: Option<riot_protocol::Nudge>,
 }
 
 /// 会话的事件出口。
@@ -551,8 +554,8 @@ pub struct Session {
     /// 拿快照的话，用户点了"总是允许 npm run *"，十秒后模型跑
     /// `npm run build` 还会弹窗 —— 用户会认为按钮坏了。
     rules: Arc<Mutex<Vec<PermissionRule>>>,
-    /// 权限模式。`Arc` 的理由和 `rules` 完全一样：批准计划（ExitPlanMode）
-    /// 会在**轮次中间**把模式切到执行档，同一轮的下一个工具调用就要按
+    /// 权限模式。`Arc` 的理由和 `rules` 完全一样：用户在 SwitchMode 的卡片
+    /// 上点「切换」会在**轮次中间**改模式，同一轮的下一个工具调用就要按
     /// 新模式判定 —— 快照做不到这一点。
     mode: Arc<Mutex<PermissionMode>>,
     /// 已激活的 OS 沙箱，跨轮复用。见 [`Self::active_sandbox`]。
@@ -697,6 +700,25 @@ fn cut_at_user_prompt(history: &[Message], assistant_id: &str) -> Option<usize> 
         .iter()
         .position(|m| matches!(m, Message::Assistant { .. }) && m.id().as_str() == assistant_id)?;
     history[..ast].iter().rposition(is_user_prompt)
+}
+
+/// 这段历史里模型已经交过一份计划（调用过 CreatePlan）。
+///
+/// 规划模式的提醒据此换版：还没有计划时讲"怎么调研、怎么提交"，有了之后
+/// 讲"用户说的话是改计划还是要你动手"。按历史里的 tool_use 认，不另存
+/// 状态 —— 回退、压缩把那次调用抹掉之后，"没有计划"正是对模型而言的
+/// 真实状态（它手里已经没有那份文件的路径了，得重新提交）。
+fn history_has_plan(history: &[Message]) -> bool {
+    history.iter().any(|m| match m {
+        Message::Assistant { content, .. } => content.iter().any(|c| {
+            matches!(
+                c,
+                AssistantContent::ToolUse { name, .. }
+                    if name == riot_tools::tools::names::CREATE_PLAN
+            )
+        }),
+        _ => false,
+    })
 }
 
 impl Session {
@@ -1048,28 +1070,27 @@ impl Session {
     /// 「并行构建」顺手把会话切进多任务模式（Cursor 同款：点它就算进入
     /// Multitask）；宿主那边的开关由前端同步，下一轮 TurnConfig 传回来
     /// 是同一个值。
+    ///
+    /// 「构建」/「并行构建」如今在回合结束后才出现，正常走的是开轮那条路
+    /// （[`TurnInput::nudge`]）；这里仍然接住它们 —— 轮中收到就按轮中处理。
     pub async fn nudge(&self, nudge: riot_protocol::Nudge) -> bool {
         use riot_protocol::Nudge;
         let g = self.running.lock().await;
         if g.is_none() {
             return false;
         }
-        let content = match nudge {
-            Nudge::StartMultitasking => crate::prompt::nudge_start_multitasking(),
-            Nudge::BuildInParallel => {
-                self.set_multitask(true);
-                // 完整准则跟着这条一起进去（并行构建的提醒引用了它）。
-                self.multitask_announced.store(true, Ordering::Relaxed);
-                crate::prompt::nudge_build_in_parallel()
-            }
-        };
+        if matches!(nudge, Nudge::BuildInParallel) {
+            self.set_multitask(true);
+            // 完整准则跟着这条一起进去（并行构建的提醒引用了它）。
+            self.multitask_announced.store(true, Ordering::Relaxed);
+        }
         let mut msg_content = Vec::new();
         if matches!(nudge, Nudge::BuildInParallel) {
             msg_content.push(crate::prompt::multitask_reminder(
                 crate::prompt::MultitaskNote::Full,
             ));
         }
-        msg_content.push(content);
+        msg_content.push(crate::prompt::nudge_reminder(nudge));
         let id = self.ids.next_id("msg");
         self.queue.push(QueuedEntry {
             id: id.clone(),
@@ -1303,12 +1324,15 @@ impl Session {
                 }
             }
             let id = self.ids.next_id("msg");
-            let content = crate::content::user_content(
+            let mut content = crate::content::user_content(
                 input.clone(),
                 caps.vision.as_ref(),
                 self.mention_ctx(),
             )
             .await;
+            // 按钮消息极少排队（「构建」只在闲时出现），但排上了指示也不能丢：
+            // 少了它，模型收到的只是一句"开始构建计划"，不知道该读哪个文件。
+            content.extend(input.nudge.map(crate::prompt::nudge_reminder));
             let msg = Message::User {
                 id: MessageId::from_raw(id.clone()),
                 content,
@@ -3020,12 +3044,11 @@ impl Session {
             today: today.clone(),
         };
 
-        // 规划模式的出口工具只在规划模式注册：其它模式下它没有意义，
-        // 挂在清单里只会引诱模型误调。本轮批准后模式虽已切换，工具要到
-        // 下一轮才消失 —— 再调一次也只是无害地重复"已批准"。
-        if mode == PermissionMode::Plan && names.insert("ExitPlanMode".into()) {
-            tools.push(Arc::new(riot_tools::tools::plan::ExitPlanMode));
-        }
+        // CreatePlan / SwitchMode 在 builtin() 里常驻，不按模式增减：模型在
+        // 轮中经 SwitchMode 切进规划模式后，同一轮就要能调 CreatePlan ——
+        // 工具清单是开轮时定死的，按模式注册的话这条路走不通（而且清单
+        // 随模式变，前缀缓存跟着作废）。不在规划模式时 CreatePlan 由自己
+        // 的 check_permissions 拒掉并指路 SwitchMode。
 
         // 工具目录瘦身：延迟候选（MCP 工具）的定义总量超过阈值才启用 ——
         // 只有几个工具时，省下的上下文抵不过多一跳 ToolSearch 的往返。
@@ -3239,8 +3262,9 @@ impl Session {
                 let now = clock.now_ms();
                 let mut all: Vec<Message> = pending_notices.into_iter().chain(notices).collect();
                 // 规划模式的约束跟在最后一条通知末尾，和用户消息同一个位置逻辑。
+                let has_plan = history_has_plan(&history);
                 if let Some(Message::User { content, .. }) = all.last_mut() {
-                    content.extend(crate::prompt::plan_mode_reminder(mode));
+                    content.extend(crate::prompt::plan_mode_reminder(mode, has_plan));
                     // 唤醒轮也要记得自己是协调者：被通知叫醒后接着综合、
                     // 启动下一批，而不是顺手自己干起来。
                     content.extend(self.multitask_note());
@@ -3288,6 +3312,10 @@ impl Session {
                 for m in pending_notices {
                     push_notice(&mut history, m, sent_at_ms);
                 }
+                // 按钮指示排在所有提醒**之后**（见下）：它是这一轮最具体的
+                // 指令，离对话越近权重越高；「并行构建」还引用了多任务准则，
+                // 准则在前、指示在后读起来才顺。
+                let nudge = input.nudge;
                 let mut content =
                     crate::content::user_content(input, vision.as_ref(), self.mention_ctx()).await;
                 // 记忆注入：会话的**第一条**用户消息前置 AGENTS.md（全局 + 项目）。
@@ -3326,9 +3354,17 @@ impl Session {
                 // 规划模式的约束跟在消息**末尾**（用户正文之后）：它是对本轮
                 // 状态的注解，不是消息本身，和 extra_context 同一个位置逻辑。
                 // 为什么不进 system prompt，见 plan_mode_reminder 的取舍注释。
-                content.extend(crate::prompt::plan_mode_reminder(mode));
+                // 已有计划文件时换成"迭代还是执行"那一版 —— 第二轮起用户说的
+                // 话多半是改计划，不是要它动手。
+                content.extend(crate::prompt::plan_mode_reminder(
+                    mode,
+                    history_has_plan(&history),
+                ));
+                // agent 模式的对应物：这活要不要先规划（见 prompt::agent_mode_reminder）。
+                content.extend(crate::prompt::agent_mode_reminder(mode, nudge));
                 // 多任务模式的准则同位（见 prompt::multitask_reminder）。
                 content.extend(self.multitask_note());
+                content.extend(nudge.map(crate::prompt::nudge_reminder));
                 let user_msg = Message::User {
                     id: user_id.clone(),
                     content,

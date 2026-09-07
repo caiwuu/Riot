@@ -3,6 +3,13 @@ import type zh from "../zh-CN/composer";
 
 export default {
   "composer.placeholder": "タスクを説明するか、何でも質問してください",
+  "composer.placeholder.plan": "計画への修正を伝えるか、「ビルド」を押して実行を開始",
+  "composer.build": "ビルド",
+  "composer.build.title": "計画に沿って実行を開始（計画前の権限レベルに戻ります）",
+  "composer.build.more": "その他のビルド方法",
+  "composer.build.parallel": "並列でビルド",
+  "composer.build.parallelHint": "マルチタスクモード。バックグラウンドのサブエージェントで分担",
+  "composer.build.message": "計画のビルドを開始",
   "composer.placeholder.busy": "作業中です…今送信するとキューに入り、現在のタスク完了後に自動で送信されます",
   "composer.drop.hint": "離すと入力欄に追加",
   "composer.closeEsc": "閉じる (Esc)",

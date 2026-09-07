@@ -3,6 +3,13 @@ import type zh from "../zh-CN/composer";
 
 export default {
   "composer.placeholder": "Describe a task, or ask anything",
+  "composer.placeholder.plan": "Ask for changes to the plan, or press Build to start",
+  "composer.build": "Build",
+  "composer.build.title": "Carry out the plan (returns to the permission level used before planning)",
+  "composer.build.more": "More ways to build",
+  "composer.build.parallel": "Build in parallel",
+  "composer.build.parallelHint": "Multi-task mode; background subagents split the work",
+  "composer.build.message": "Build the plan",
   "composer.placeholder.busy":
     "It's working… sending now queues the message; it goes out once the current task finishes",
   "composer.drop.hint": "Release to add to the composer",

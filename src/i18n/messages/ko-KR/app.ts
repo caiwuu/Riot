@@ -110,6 +110,9 @@ export default {
   "app.workbench.files": "파일",
   "app.workbench.newTab": "새 탭",
   "app.workbench.subagent": "하위 agent {id}",
+  "app.workbench.plan": "계획",
+  "app.workbench.planTip": "계획 모드에서 작성한 계획",
+  "app.workbench.planNone": "이 대화에는 아직 계획이 없습니다. Plan 모드로 전환해 작업을 설명하면 모델이 먼저 여기에 계획을 씁니다.",
   "app.workbench.addPanel": "패널 추가",
   "app.workbench.closeTab": "{title} 닫기",
 

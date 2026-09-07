@@ -156,6 +156,15 @@ const IMAGE_MIME: Record<string, string> = {
   bmp: "image/bmp",
 };
 
+/**
+ * 按扩展名给出图片的 MIME；不是界面认得的图片类型就 undefined。
+ * 和 [`IMAGE_EXTS`] 同一份名单 —— 聊天正文里的 `![](路径)` 用它判断
+ * "这能不能当图贴出来"，判不出的退回成文件链接。
+ */
+export function imageMimeOf(path: string): string | undefined {
+  return IMAGE_MIME[extOf(path)];
+}
+
 function extOf(path: string): string {
   const name = basename(path);
   const dot = name.lastIndexOf(".");

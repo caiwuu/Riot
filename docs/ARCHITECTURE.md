@@ -973,13 +973,31 @@ Task 工具就是**再跑一遍主循环**(`riot_kernel::subagent`):独立 syste
 
 **多任务模式**(Cursor Multitask 的复现,`TurnConfig::multitask`)是上面这些原语之上的一层**纪律**,不是新能力:开着时主 agent 被要求把一切非琐碎的实质工作交给后台子 agent、委派完就结束回合、前台只做协调;零到一次工具调用能答完的直接答;不要为了并行而拆碎。准则文本在 `prompt::multitask_reminder`,走和规划模式提醒同一条**消息侧注入**的路(进出模式不能让前缀缓存作废):进入后第一轮完整版(~500 token),之后每轮一句短提醒,历史被动过(压缩 / 回退 / 撤回)重注完整版;关掉那一轮说一次"恢复正常"。唤醒轮也注 —— 被通知叫醒后要接着协调,不是顺手自己干起来。
 
-界面上三个入口,对应 Cursor 的三个 SimulatedMsgReason:开关放在 composer 的「工作方式」菜单里(Agent / Plan / 多任务三选一,pill 带 ⑂;权限档不在这个菜单里,在顶栏会话标题旁的下拉里切);「转到后台」只在跑轮时出现、挨着停止键(`Nudge::StartMultitasking`:让模型 `resume="self"` 分叉手头的活然后停下);「并行构建」是计划批准卡的第三个按钮(`Nudge::BuildInParallel`:批准 + 进入多任务 + 按 todo 依赖分层、每层一个后台子 agent、测试留给最后一个)。两个按钮都是 `turn.nudge`:一条 `QueuedKind::Nudge` 的队列条目(面板看不见),内核在下一个安全点注入 —— 按钮是对正在进行的工作说话,没有轮在跑就落空。
+界面上三个入口,对应 Cursor 的三个 SimulatedMsgReason:开关放在 composer 的「工作方式」菜单里(Agent / Plan / 多任务三选一,pill 带 ⑂;权限档不在这个菜单里,在顶栏会话标题旁的下拉里切);「转到后台」只在跑轮时出现、挨着停止键(`Nudge::StartMultitasking`:让模型 `resume="self"` 分叉手头的活然后停下);「构建」/「并行构建」在计划写好之后顶替发送键出现(`Nudge::BuildPlan` / `Nudge::BuildInParallel`,见下面的规划模式一节)。「转到后台」是 `turn.nudge`:一条 `QueuedKind::Nudge` 的队列条目(面板看不见),内核在下一个安全点注入 —— 按钮是对正在进行的工作说话,没有轮在跑就落空。两个构建键相反,它们出现时回合已经结束,提醒随新开那一轮的用户消息一起进历史(`TurnInput::nudge`,附在正文之后)。
 
-`[约束]` **两个按钮的注入时机是「下一批工具结果就位」,不是「整轮跑完」**,走 `InputQueue::drain_out_of_band`(和用户插话的收尾 `drain` 是两个取用点,见 §5)。这一点错了功能就等于没有:实测过的表现是用户点了「转到后台」毫无反应,模型把手头的活从头做到尾、写完总结,收尾 drain 才读到提醒,然后开一轮去分叉一个做已经做完的活的子 agent。同理「并行构建」会等到整批代码写完才谈并行。后台子 agent 的完成通知同路 —— 它也是对手头这件事说话。
+`[约束]` **轮中按钮的注入时机是「下一批工具结果就位」,不是「整轮跑完」**,走 `InputQueue::drain_out_of_band`(和用户插话的收尾 `drain` 是两个取用点,见 §5)。这一点错了功能就等于没有:实测过的表现是用户点了「转到后台」毫无反应,模型把手头的活从头做到尾、写完总结,收尾 drain 才读到提醒,然后开一轮去分叉一个做已经做完的活的子 agent。后台子 agent 的完成通知同路 —— 它也是对手头这件事说话。
 
 `[约束]` 轮次半路收场时(用户按停止、出错)队列残留三种处置,见 `run_locked` 的收尾:插话交前端面板、通知攒进 `pending_notices`、**按钮提醒作废**。提醒留到下一轮的话,用户下次随便问句什么都会被无端分叉到后台。
 
-`[约束]` 「并行构建」的指示要在**批准之前**排队:批准放行 ExitPlanMode 的结果后内核立刻 drain,指示紧跟在「已批准」后面;反过来它要等到下一批工具之后。宿主收到 BuildInParallel 时顺手把会话的 multitask 记成 true —— 内核那边虽然自己切了,下一轮 TurnConfig 传回 false 就又关上了。
+`[约束]` 「并行构建」= 进入多任务模式,宿主在 `send_turn` 收到 `BuildInParallel` 时顺手把会话的 multitask 记成 true —— 内核那边随 TurnConfig 现设,宿主不记的话下一轮又把 false 传回去。
+
+### 7.7 规划模式:计划文件、构建键、模式建议 ⭐
+
+规划模式(`PermissionMode::Plan`)是 Cursor Plan mode 的复现,三件东西拼成闭环:
+
+**计划是一份文件。** 模型在规划模式下只读侦察,想清楚之后调用 `CreatePlan`(`riot_tools::tools::plan`),把计划写成 `<项目>/.riot/plans/<标题 slug>-<调用 id 尾巴>.plan.md`。它**不阻塞、不弹窗**:文件写下就返回,模型收一句"计划已保存,用一两句话收尾",回合结束。前端认出这次调用(对话流里一张计划卡,`ProcessFold` 不折它),在右侧抽屉开一枚「计划」标签(`PlanPanel`)渲染这份文件:撰写中边流边渲染 `tool_input` 里的 `plan` 字段(`streamingPlan`),落定后读磁盘上的文件,模型每 Edit 一次(`editCount`)、每跑完一轮重读一次。旧版(对照 Claude Code 的 ExitPlanMode)把计划塞在工具参数里、用权限弹窗的批准当出口 —— 用户说"端口改成 8200",模型得把三页纸重交一遍;文件版改计划就是一次 Edit。
+
+`[约束]` `CreatePlan` 给模型的结果**第一行**固定是 `Plan file: <相对路径>`(`PLAN_FILE_LINE_PREFIX`),前端靠这一行知道文件在哪(`src/lib/plan.ts`)。工具的 `ui_payload` 到不了前端,路径又是内核现编的,两边只能约定一个可解析的行。
+
+`[约束]` `CreatePlan` 和 `SwitchMode` **常驻注册**(`builtin()` 末尾),不按模式增减:模型在轮中经 SwitchMode 切进规划模式后,同一轮就要能调 CreatePlan,而工具清单是开轮时定死的;清单随模式变也会让前缀缓存作废。不在规划模式时 CreatePlan 由自己的 `check_permissions` 拒掉并指路 SwitchMode。
+
+`[约束]` 规划模式唯一放行的写操作是改计划文件本身。决策链的 `mode_default` 对 Plan 模式下 `is_edit_tool` 且目标是 `safety::is_plan_document` 的调用放行;安全检查对同一判据豁免(`.riot/` 下其余一切仍是 AgentConfig);三处(决策链、安全检查、CreatePlan 的路径)共用 `riot_permissions::PLAN_DIR` 与 `is_plan_document`。判据要**窄**:只有 `plans/` 直接之下的 `.md`,`.riot/plans/run.sh` 照拦。
+
+**构建键在输入框。** 计划落定、还在规划模式、空闲、输入框没字时,发送键换成「构建 ▾」(Cursor 的 Build);打字就是在提意见,发送键回来。点「构建」:Composer 先把权限模式切回**进规划前那一档**(`execMode`,不是内核建议的兜底值)、**等宿主确认**,再发一条正文只有"开始构建计划"的用户消息,带 `TurnInput::nudge = BuildPlan`;内核把 `prompt::nudge_build_plan` 附在正文之后(读回计划文件 —— 用户可能改过 —— 落成待办、动手)。「并行构建」同路,多切一个多任务开关、提醒换成 `nudge_build_in_parallel`。顺序不能反:宿主在 submit 那一刻打包 TurnConfig,切模式的 IPC 还在路上的话这一轮仍按规划跑。
+
+**规划模式的提醒分两版**(`prompt::plan_mode_reminder`,消息侧注入,理由见 §7.6):历史里还没有 CreatePlan 调用时讲"怎么调研、提交前把关键决定定下来、计划里只给一条路线、提交后别问要不要开始(用户有构建键)";有了之后讲"用户的话是**改计划**还是**要执行**"—— 规划模式下绝大多数话是改计划("用 Redis"是让你写进计划),只有明确指着计划说"执行"才走 SwitchMode 请用户确认。文本住在 `riot_tools::tools::plan`(SwitchMode 切进规划模式时要在工具结果里给同一份,riot-tools 不能依赖内核)。
+
+**模式建议由模型发起。** `SwitchMode`(`riot_tools::tools::mode`,对照 Cursor 的同名工具)的 `check_permissions` 返回 `Ask`,理由 `UserChoice`,`suggestions` 带一条 `SetMode`;前端按 `tool_name` 认出它,渲染成对话流里的一张卡(`ModeSwitchCard`:模型给的理由原文 + 「切换」/「不用」)。用户点「切换」,宿主放行时把 SetMode 落到 `mode_live` 上 —— 同一轮内立即生效,模型的下一个工具调用已经按新模式判定;`ModeChanged` 事件让 composer 跟上。拒绝时模型收到"用户不想切,别再问"。system prompt 里有一节 `mode_selection` 讲**什么时候**建议规划(任务大、含糊、有取舍),判据和例子留在工具描述里。`[约束]` 理由必须是 `UserChoice`:它让「全部放行」和无人值守也把卡片弹出来,也让 Auto 模式的判危不去替用户答 —— 切模式是用户的决定,不是权限问题。切模式的询问吃一小时超时而不是普通的 60 秒:到点按拒绝处理的话,模型会在没人点头的情况下把一个大改动做下去,而这正是它建议先规划的原因。
 
 界面这头,「转到后台」点过之后进入 `pending` 态(虚线描边、文案变「正在转到后台…」、禁用)。这不是装饰:提醒最快也要等当前这批工具跑完才生效,而那可能是一次几十秒的搜索 —— 没有这个反馈,用户会以为没点上、再点一次,于是两条提醒排进去,模型分叉两个一样的子 agent。轮次一结束就复位。
 

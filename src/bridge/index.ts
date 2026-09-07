@@ -497,11 +497,18 @@ export function sendTurn(
   images: ImageInput[] = [],
   /** 输入框里选中的文件引用（那些块），项目内相对路径。 */
   refs: string[] = [],
+  /** 这条消息是哪个按钮发的（「构建」/「并行构建」）。普通发送不传。
+   *  内核据此在正文后附指示；正文只是给人看的一句短话。 */
+  nudge?: Nudge,
 ): Promise<string | null> {
   // 宽期限：这条要等宿主把会话历史水合起来（长会话是一次磁盘读 + 反
   // 序列化）。超时会被上层当成"没发出去"，而这条命令误判的代价最大 ——
   // 宁可多等，也不能让一条已经进了队列的消息在界面上显示成失败。
-  return invoke<string | null>("send_turn", { sessionId, text, images, refs }, T_SLOW);
+  return invoke<string | null>(
+    "send_turn",
+    { sessionId, text, images, refs, ...(nudge ? { nudge } : {}) },
+    T_SLOW,
+  );
 }
 
 /** 丢掉这条助手回复及其后的一切，从它前面那条用户消息再跑一轮。 */
@@ -823,13 +830,16 @@ export function setSessionMultitask(sessionId: string, on: boolean): Promise<voi
   return invoke("set_session_multitask", { sessionId, on });
 }
 
-/** 界面按钮：转到后台 / 并行构建。生成类型的别名。 */
+/** 界面按钮：转到后台 / 构建 / 并行构建。生成类型的别名。 */
 export type Nudge = GeneratedNudge;
 
 /**
- * 往当前轮塞一条带外提醒（转到后台 / 并行构建）。内核在下一个安全点注入 ——
+ * 往当前轮塞一条带外提醒（转到后台）。内核在下一个安全点注入 ——
  * 手头这批工具跑完、模型下次开口之前，不等整轮结束。
  * false = 此刻没有轮在跑，按钮落空。
+ *
+ * 「构建」/「并行构建」不走这条：计划做完回合已结束，它们随新一轮的
+ * 用户消息一起发（见 `sendTurn` 的 `nudge` 参数）。
  */
 export function turnNudge(sessionId: string, nudge: Nudge): Promise<boolean> {
   return invoke<boolean>("turn_nudge", { sessionId, nudge });

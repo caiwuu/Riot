@@ -32,7 +32,8 @@ pub const ASK_USER_QUESTION: &str = "AskUserQuestion";
 pub const DIAGNOSTICS: &str = "Diagnostics";
 pub const PREVIEW_FILE: &str = "PreviewFile";
 pub const SHOW_BROWSER: &str = "ShowBrowser";
-pub const EXIT_PLAN_MODE: &str = "ExitPlanMode";
+pub const CREATE_PLAN: &str = "CreatePlan";
+pub const SWITCH_MODE: &str = "SwitchMode";
 pub const TOOL_SEARCH: &str = "ToolSearch";
 
 // ── 浏览器 ────────────────────────────────────────────────
@@ -140,6 +141,8 @@ mod tests {
             DIAGNOSTICS,
             PREVIEW_FILE,
             SHOW_BROWSER,
+            CREATE_PLAN,
+            SWITCH_MODE,
             BROWSER_NAVIGATE,
             BROWSER_SNAPSHOT,
             BROWSER_SCREENSHOT,

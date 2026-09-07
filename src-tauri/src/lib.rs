@@ -190,9 +190,11 @@ async fn send_turn(
     // Option 是为了兼容不带这个字段的调用（缺参数会被 Tauri 拒成一条
     // 看不懂的反序列化错误）。
     refs: Option<Vec<String>>,
+    // 这条消息是界面上哪个按钮发的（「构建」/「并行构建」）。普通发送不带。
+    nudge: Option<riot_protocol::Nudge>,
 ) -> HostResult<Option<String>> {
     state
-        .send_turn(&session_id, &text, images, refs.unwrap_or_default())
+        .send_turn(&session_id, &text, images, refs.unwrap_or_default(), nudge)
         .await
 }
 

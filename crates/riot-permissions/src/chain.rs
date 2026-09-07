@@ -209,10 +209,30 @@ fn mode_default(
     }
 
     match mode {
-        // 只读规划模式：写操作一律拒绝，不问。
+        // 只读规划模式里唯一放行的写操作：改计划文件本身（`.riot/plans/*.md`）。
+        // 计划是规划模式的产物，用户说"第三步改成 X"，模型得能 Edit 它；
+        // 判据和安全检查、CreatePlan 共用一份（见 safety::is_plan_document）。
+        PermissionMode::Plan
+            if is_edit_tool(tool)
+                && tool
+                    .target_path(input)
+                    .is_some_and(|p| safety::is_plan_document(&p)) =>
+        {
+            PermissionResult::Allow {
+                updated_input: None,
+                reason: DecisionReason::Mode { mode },
+            }
+        }
+
+        // 只读规划模式：其余写操作一律拒绝，不问。
         // 问了也没用 —— 用户进 plan 模式就是不想让它动手。
         PermissionMode::Plan => PermissionResult::Deny {
-            message: format!("规划模式下不能使用 `{}`。先退出规划模式。", tool.name()),
+            message: format!(
+                "规划模式下不能使用 `{}`。规划模式只能改计划文件（`{}/*.md`）；\
+                 要动代码，先用 SwitchMode 请用户切到 agent 模式。",
+                tool.name(),
+                safety::PLAN_DIR
+            ),
             reason: DecisionReason::Mode { mode },
         },
 
@@ -954,6 +974,32 @@ mod tests {
             &RuleSet::default(),
         );
         assert_eq!(behavior(&r), "deny");
+    }
+
+    /// 规划模式唯一放行的写操作：改计划文件本身。用户说"第三步改成 X"，
+    /// 模型得能 Edit 它 —— 拦下的话规划模式里的计划只能整份重交。
+    #[test]
+    fn 规划模式放行计划文件的编辑_其余写仍拒() {
+        let ctx = ctx_with(PermissionMode::Plan);
+        for tool in ["Edit", "Write"] {
+            let r = decide(
+                &PermTool::writer(tool),
+                &input("/work/.riot/plans/teller-abc123.plan.md"),
+                &ctx,
+                &RuleSet::default(),
+            );
+            assert_eq!(behavior(&r), "allow", "{tool} 改计划文件该放行：{r:?}");
+        }
+        // 放行要窄：同目录的非 .md、别的目录的 .md、非编辑工具都不算。
+        for (tool, path) in [
+            ("Edit", "/work/.riot/plans/run.sh"),
+            ("Write", "/work/docs/plan.md"),
+            ("Write", "/work/.riot/hooks.json"),
+            ("Bash", "/work/.riot/plans/x.md"),
+        ] {
+            let r = decide(&PermTool::writer(tool), &input(path), &ctx, &RuleSet::default());
+            assert_ne!(behavior(&r), "allow", "{tool} {path} 不该放行：{r:?}");
+        }
     }
 
     #[test]

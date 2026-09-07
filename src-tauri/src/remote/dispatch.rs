@@ -108,6 +108,7 @@ pub async fn dispatch(
             a.take("text")?,
             a.take("images")?,
             a.take("refs")?,
+            a.take("nudge")?,
         )
         .await),
         "regenerate_turn" => {

@@ -22,6 +22,7 @@ import {
   isHostError,
   listSessions,
   notify,
+  type Nudge,
   renderUiError,
   type PermissionMode,
   openInBrowser,
@@ -45,7 +46,6 @@ import {
   subscribeScheduleChanges,
   subscribeScheduleRuns,
   subscribeSessionsChanges,
-  turnNudge,
 } from "./bridge";
 import { BrowserPanel } from "./components/BrowserPanel";
 import { GitChangesPanel } from "./components/GitChangesPanel";
@@ -66,6 +66,7 @@ import { ProjectRootContext } from "./components/Markdown";
 import {
   PermissionDialog,
 } from "./components/PermissionDialog";
+import { PlanPanel } from "./components/PlanPanel";
 import { Settings } from "./components/Settings";
 import { SubagentPanel } from "./components/SubagentPanel";
 import { closeSessionTerminals, TerminalPanel } from "./components/TerminalPanel";
@@ -79,6 +80,13 @@ import { useAppUpdate } from "./hooks/useAppUpdate";
 import { useBrowserPanel } from "./hooks/useBrowserPanel";
 import { isMobileNow, useIsMobile } from "./hooks/useIsMobile";
 import { t, useT } from "./i18n";
+import {
+  latestPlan,
+  type PlanState,
+  samePlan,
+  SWITCH_MODE_TOOL,
+  subscribePlanOpen,
+} from "./lib/plan";
 import { newPresetId } from "./lib/prompts";
 import { inheritedSampling } from "./lib/sampling";
 import { subscribeSessionOpen } from "./lib/sessionLink";
@@ -358,6 +366,32 @@ export function App() {
   const [permPick, setPermPick] = useState<{ id: string; pick: PermissionPick } | null>(null);
   /** 递增一次，改动面板重新比对一次。轮次结束时推一下。 */
   const [changesRev, setChangesRev] = useState(0);
+  /** 每个会话的计划（从对话条目派生，由 Chat 上报）。右侧抽屉的计划
+   *  面板、标签上的标题都从这里取。 */
+  const [plans, setPlans] = useState<Record<string, PlanState>>({});
+  const onPlanChange = useCallback((sessionId: string, state: PlanState) => {
+    setPlans((prev) => {
+      const cur = prev[sessionId];
+      // 按内容比：流式期间 Chat 每帧派生一份新对象，按引用比的话整个 App
+      // 会跟着每个 token 重渲染一次。
+      if (
+        cur &&
+        samePlan(cur.plan, state.plan) &&
+        cur.streaming === state.streaming &&
+        cur.canBuild === state.canBuild &&
+        cur.edits === state.edits
+      ) {
+        return prev;
+      }
+      // 内容没变就沿用旧对象，PlanPanel 的依赖不白翻。
+      return {
+        ...prev,
+        [sessionId]: samePlan(cur?.plan ?? null, state.plan) && cur
+          ? { ...state, plan: cur.plan }
+          : state,
+      };
+    });
+  }, []);
   /** 用户从终端选中、要交给模型的一段输出。塞进输入框而不是直接发送 ——
    *  他多半还要在前面补一句"这个报错怎么回事"。 */
   const [termSnippet, setTermSnippet] = useState<string | null>(null);
@@ -718,6 +752,8 @@ export function App() {
       ),
     [openTab],
   );
+  // 计划面板：对话里的计划卡点开它。
+  useEffect(() => subscribePlanOpen(() => openTab({ kind: "plan" })), [openTab]);
   // 历史会话：回答里的 `riot://session/<id>` 链接。会话已删就告诉链接
   // "没切成"，它自己提示 —— 点了没反应比一句"已删除"糟得多。
   useEffect(
@@ -1216,6 +1252,11 @@ export function App() {
     closeSessionTerminals(id);
     workbenchBySession.current.delete(id);
     setExecModes((prev) => {
+      if (!(id in prev)) return prev;
+      const { [id]: _gone, ...rest } = prev;
+      return rest;
+    });
+    setPlans((prev) => {
       if (!(id in prev)) return prev;
       const { [id]: _gone, ...rest } = prev;
       return rest;
@@ -1756,6 +1797,7 @@ export function App() {
                       onPermissionChange={(m) =>
                         setExecModes((prev) => (prev[s.id] === m ? prev : { ...prev, [s.id]: m }))
                       }
+                      execMode={execModes[s.id] ?? (s.mode === "plan" ? "default" : s.mode)}
                       onFirstMessage={onFirstMessage}
                       onSessionEmptied={onSessionEmptied}
                       onAgentBrowser={() => {
@@ -1775,6 +1817,8 @@ export function App() {
                       }}
                       onTurnEnd={() => setChangesRev((n) => n + 1)}
                       onBusy={(b) => patchSession(s.id, { busy: b })}
+                      onPlanChange={onPlanChange}
+                      onPlanOpen={() => openTab({ kind: "plan" })}
                       insertText={visible ? (termSnippet ?? pickSnippet ?? schedSnippet) : null}
                       onInserted={() => {
                         setTermSnippet(null);
@@ -1968,6 +2012,10 @@ export function App() {
               tabs={wb.tabs}
               active={wb.active}
               pages={browserPages}
+              {...(() => {
+                const name = plans[activeSession.id]?.plan?.name;
+                return name ? { planTitle: name } : {};
+              })()}
               onSelect={(id) => {
                 const t = wb.tabs.find((x) => tabId(x) === id);
                 if (t) openTab(t);
@@ -2012,6 +2060,26 @@ export function App() {
                 sessionId={activeSession.id}
                 refreshKey={changesRev}
               />
+            ) : null}
+            {/* 计划面板：画这个会话最近那份计划（Chat 上报）。只挂激活的那个，
+                切走就卸 —— 内容是从条目派生的，回来重算不花什么。 */}
+            {shownKind === "plan" ? (
+              (() => {
+                const ps = plans[activeSession.id];
+                return ps?.plan ? (
+                  <PlanPanel
+                    key={`plan:${activeSession.id}`}
+                    root={activeSession.root}
+                    plan={ps.plan}
+                    streaming={ps.streaming}
+                    // 模型每 Edit 一次文件、每跑完一轮，面板重读一次。
+                    refreshKey={`${changesRev}/${ps.edits}`}
+                    canBuild={ps.canBuild}
+                  />
+                ) : (
+                  <div className="plan-panel plan-panel-none">{t("app.workbench.planNone")}</div>
+                );
+              })()
             ) : null}
             {/* 子 agent 的只读会话。只挂激活的那个：切走就卸，回来重拉 ——
                 一个子 agent 的会话几十 KB，重拉比保活一排轮询便宜。 */}
@@ -2124,12 +2192,15 @@ function Chat({
   onOpenSettings,
   permissionPick,
   onPermissionChange,
+  execMode,
   onFirstMessage,
   onSessionEmptied,
   onAgentBrowser,
   onAgentPreview,
   onTurnEnd,
   onBusy,
+  onPlanChange,
+  onPlanOpen,
   insertText,
   onInserted,
 }: {
@@ -2152,6 +2223,8 @@ function Chat({
   permissionPick: PermissionPick | null;
   /** Composer 上报生效中的权限档。 */
   onPermissionChange: (m: PermissionMode) => void;
+  /** 这个会话生效中的权限档（App 汇总的那份）。切换卡切回 agent 时落成它。 */
+  execMode: PermissionMode;
   onFirstMessage: (sessionId: string, text: string) => void;
   /** 撤回把会话清空了。侧栏那句自动标题该跟着撤。 */
   onSessionEmptied?: (sessionId: string) => void;
@@ -2166,6 +2239,11 @@ function Chat({
   onTurnEnd?: () => void;
   /** 忙碌状态变化。侧栏的"正在跑"指示点靠它即时更新。 */
   onBusy?: (busy: boolean) => void;
+  /** 这个会话的计划变了（新计划、正在流的正文、能不能构建）。右侧抽屉
+   *  的计划面板画的就是这份 —— 计划是从对话条目派生的，只有 Chat 看得见。 */
+  onPlanChange?: (sessionId: string, state: PlanState) => void;
+  /** 模型开始写一份新计划：把右侧抽屉切到计划标签（只在前台时）。 */
+  onPlanOpen?: () => void;
   /** 要塞进输入框的一段文字（终端选中的输出）。null = 没有。 */
   insertText?: string | null;
   onInserted?: () => void;
@@ -2180,10 +2258,6 @@ function Chat({
         }
       : undefined,
   );
-
-  /** 宿主侧被「并行构建」顺手打开的多任务开关；Composer 的显示要跟上。
-   *  null = 没发生过（和 hostMode 同一个形状）。 */
-  const [hostMultitask, setHostMultitask] = useState<boolean | null>(null);
 
   const busy = session.busy;
   const turnEndRef = useRef(onTurnEnd);
@@ -2242,22 +2316,50 @@ function Chat({
   // 会话),任务自动让位 —— 它是进行时的进度,不是要留档的结果。
   const todoActive = busy && hasActiveTodos(session.items);
 
-  // 计划和选择题都走对话流里的内联卡：它们是对话的一部分，不是危险
-  // 操作。Bash / Write 这类权限询问仍弹窗 —— 必须看见原文才能签。
-  const isPlanAsk = (a: (typeof session.asks)[number]) =>
-    a.detail.suggestions.some((s) => s.type === "set_mode");
+  // 换模式的建议和选择题都走对话流里的内联卡：它们是对话的一部分，
+  // 不是危险操作。Bash / Write 这类权限询问仍弹窗 —— 必须看见原文才能签。
+  const isModeAsk = (a: (typeof session.asks)[number]) =>
+    a.detail.tool_name === SWITCH_MODE_TOOL;
   const isChoiceAsk = (a: (typeof session.asks)[number]) => a.detail.preview.kind === "choice";
-  const planAsk = session.asks.find(isPlanAsk);
+  const modeAsk = session.asks.find(isModeAsk);
   const choiceAsk = session.asks.find(isChoiceAsk);
-  const modalAsk = session.asks.find((a) => !isPlanAsk(a) && !isChoiceAsk(a));
+  const modalAsk = session.asks.find((a) => !isModeAsk(a) && !isChoiceAsk(a));
+
+  // 计划 = 对话里最近一次 CreatePlan 调用（见 lib/plan）。右侧抽屉的面板、
+  // 标签上的标题、输入框的「构建」键都从这一份派生。
+  const plan = useMemo(() => latestPlan(session.items), [session.items]);
+  const [buildAvailable, setBuildAvailable] = useState(false);
+  const planChangeRef = useRef(onPlanChange);
+  planChangeRef.current = onPlanChange;
+  const streamingPlan = session.streamingPlan;
+  useEffect(() => {
+    planChangeRef.current?.(sessionId, {
+      plan,
+      streaming: streamingPlan,
+      canBuild: buildAvailable && plan?.status === "ok",
+      edits: editCount,
+    });
+  }, [sessionId, plan, streamingPlan, buildAvailable, editCount]);
+  // 模型开始写一份**新**计划（卡片刚以运行态出现）→ 抽屉切到计划标签。
+  // 只认运行态：切回会话时水合出来的历史计划都是落定的，不该每次切回
+  // 都把抽屉弹开。后台会话不抢前台的抽屉（和浏览器、预览同一个取舍）。
+  const planOpenRef = useRef(onPlanOpen);
+  planOpenRef.current = onPlanOpen;
+  const openedPlan = useRef<string | null>(null);
+  useEffect(() => {
+    if (!plan || plan.status !== "running" || openedPlan.current === plan.id) return;
+    openedPlan.current = plan.id;
+    if (visible) planOpenRef.current?.();
+  }, [plan, visible]);
 
   const send = (
     text: string,
     images: ImageInput[] = [],
     refs: string[] = [],
+    nudge?: Nudge,
   ): Promise<boolean> => {
     onFirstMessage(sessionId, text);
-    return session.send(text, images, refs);
+    return session.send(text, images, refs, nudge);
   };
 
   const composer = (
@@ -2270,8 +2372,9 @@ function Chat({
       onConfig={onConfig}
       initialMode={initialMode}
       initialMultitask={initialMultitask}
-      hostMultitask={hostMultitask}
       hostMode={session.hostMode}
+      planReady={plan?.status === "ok"}
+      onBuildAvailable={setBuildAvailable}
       tokens={session.tokens}
       queued={session.queued}
       onQueueDelete={session.queueDelete}
@@ -2350,7 +2453,6 @@ function Chat({
             items={session.items}
             streaming={session.streaming}
             thinking={session.thinking}
-            streamingPlan={session.streamingPlan}
             busy={session.busy}
             compacting={session.compacting}
             waitSince={waitStartedAt(sessionId)}
@@ -2359,15 +2461,11 @@ function Chat({
             onEditEntry={session.editEntry}
             onResendEntry={session.resendEntry}
             onDeleteEntry={session.deleteEntry}
-            {...(planAsk ? { planAsk } : {})}
+            {...(modeAsk ? { modeAsk } : {})}
             {...(choiceAsk ? { choiceAsk } : {})}
-            onAnswerPlan={(r) => planAsk && void session.answer(r, planAsk.requestId)}
-            // 并行构建：先把并行指示排进当前轮（宿主顺手把会话切进多任务模式），
-            // 卡片随后批准。开关的显示由 Composer 自己的缓存管，这里同步一下。
-            onParallelPlan={() => {
-              void turnNudge(sessionId, "build_in_parallel").catch(() => {});
-              setHostMultitask(true);
-            }}
+            // 切回 agent 时落成这个会话进规划前那一档（Composer 上报的）。
+            execMode={execMode}
+            onAnswerMode={(r) => modeAsk && void session.answer(r, modeAsk.requestId)}
             onAnswerChoice={(r) => choiceAsk && void session.answer(r, choiceAsk.requestId)}
           />
         </SubagentsContext.Provider>

@@ -17,6 +17,7 @@ pub mod glob;
 pub mod grep;
 #[cfg(any(test, feature = "testing"))]
 pub mod memfs;
+pub mod mode;
 pub mod names;
 pub mod path;
 pub mod pentest;
@@ -86,6 +87,10 @@ pub fn builtin() -> Vec<Arc<dyn Tool>> {
     // 把东西摆到用户眼前（右侧面板）。追加在末尾，不动前缀。
     tools.push(Arc::new(preview::PreviewFile));
     tools.push(Arc::new(preview::ShowBrowser));
+    // 工作方式：模型建议换模式、规划模式交计划。两个都常驻（不按模式
+    // 增减，理由见 plan.rs 模块文档），追加在末尾，不动前缀。
+    tools.push(Arc::new(mode::SwitchMode));
+    tools.push(Arc::new(plan::CreatePlan));
     tools
 }
 

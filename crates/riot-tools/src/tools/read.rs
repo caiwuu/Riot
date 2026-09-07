@@ -37,8 +37,9 @@ const MAX_LINE_CHARS: usize = 2000;
 ///
 /// 和宿主侧用户附件的上限（`session::MAX_IMAGE_FILE`）取同一个数:
 /// "单张图能有多大"在产品里只该有一个答案，聊天框附得上的图 Read 也
-/// 读得了，反过来 Read 读不了的图附件也会被拦。
-const MAX_IMAGE_BYTES: usize = 3_500_000;
+/// 读得了，反过来 Read 读不了的图附件也会被拦。WebFetch 抓回来的图
+/// 也用这个数，同一条理由。
+pub(crate) const MAX_IMAGE_BYTES: usize = 3_500_000;
 
 /// 按扩展名认图片。
 ///
@@ -112,7 +113,10 @@ impl Tool for Read {
              - Lines longer than {MAX_LINE_CHARS} characters are truncated.\n\
              - Image files (png / jpg / gif / webp) are returned as images. `offset` \
              and `limit` do not apply to them, and you must not try to decode them \
-             through {BASH}.\n\
+             through {BASH}. Read an image only when YOU need to understand its \
+             content. When the user just wants to see it, do not read it — write \
+             `![](path)` in your reply and the UI renders the file inline at no \
+             token cost.\n\
              - Read several files in one message when you already know their paths; \
              they are fetched in parallel.\n\
              - Reading a file that does not exist is fine — you get an error, not a \

@@ -335,7 +335,7 @@ impl SessionManager {
         session: &Session,
         config: &TurnConfig,
     ) -> (TurnCapabilities, TurnLimits) {
-        // 会话设置:宿主是权威,每轮现设。ExitPlanMode 在内核改的 mode 会经
+        // 会话设置:宿主是权威,每轮现设。SwitchMode 在内核改的 mode 会经
         // ModeChanged 事件回流宿主,下一轮再传回来。
         session.set_mode(config.mode).await;
         session.set_python_venv(config.python_venv.clone()).await;
@@ -432,6 +432,7 @@ impl SessionManager {
                 .collect(),
             refs: input.refs,
             extra_context,
+            nudge: input.nudge,
         };
         let sink = session.sink();
         Ok(session
@@ -514,7 +515,8 @@ impl SessionManager {
     }
 
     /// 撤回一条排队插话,还原始输入。hook 附加的上下文不带回 —— 放回
-    /// 输入框编辑后重新提交时会重跑 hook。
+    /// 输入框编辑后重新提交时会重跑 hook。按钮标记也不带回：撤回到输入框
+    /// 的是一句普通的话，用户改完再发就是普通消息。
     pub async fn queue_take(&self, session_id: &str, entry_id: &str) -> Option<RpcTurnInput> {
         let s = self.get(session_id).await?;
         let input = s.queue_take(entry_id)?;
@@ -529,6 +531,7 @@ impl SessionManager {
                 })
                 .collect(),
             refs: input.refs,
+            nudge: None,
         })
     }
 

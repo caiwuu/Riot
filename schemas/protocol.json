@@ -300,7 +300,7 @@
           "type": "object"
         },
         {
-          "description": "会话的权限模式变了，而且**不是**用户在界面上切的。\n\n目前唯一来源：批准计划（ExitPlanMode）时用户选择的执行档位由\n宿主直接落到会话上。界面必须跟着更新 —— 否则 composer 还显示\n「规划模式」，而宿主已经在按「自动接受编辑」放行了。显示得比\n实际更严是最坏的一种错（和 SessionInfo.mode 的注释同一条教训）。",
+          "description": "会话的权限模式变了，而且**不是**用户在界面上的模式菜单里切的。\n\n目前唯一来源：模型调用 SwitchMode、用户在对话流里的卡片上点了\n「切换」，内核当场把模式落到会话上。界面必须跟着更新 —— 否则\ncomposer 还显示「Agent」，而内核已经按规划模式拦写操作了（或者\n反过来：还显示「规划」，宿主已经在放行编辑）。显示得比实际更严\n是最坏的一种错（和 SessionInfo.mode 的注释同一条教训）。",
           "properties": {
             "mode": {
               "$ref": "#/$defs/PermissionMode"
@@ -1625,11 +1625,16 @@
       "type": "object"
     },
     "Nudge": {
-      "description": "用户在界面上按的一个\"推一把\"按钮，变成一条塞给模型的带外提醒。\n\n对应 Cursor 的 SimulatedMsgReason：按钮不产生用户的话，只产生一条\nsystem_reminder，注入到当前轮的下一个安全点 —— 这一批工具结果就位、\n模型还没开口的那一刻。按钮说的是\"你手上这件事\"，等整轮跑完再给模型\n看，功能就等于不存在。",
+      "description": "用户在界面上按的一个\"推一把\"按钮，变成一条塞给模型的带外提醒。\n\n对应 Cursor 的 SimulatedMsgReason：按钮不产生用户的话，只产生一条\nsystem_reminder。两条投递路：\n\n- **轮中**（`turn.nudge`）：注入到当前轮的下一个安全点 —— 这一批工具\n  结果就位、模型还没开口的那一刻。按钮说的是\"你手上这件事\"，等整轮\n  跑完再给模型看，功能就等于不存在。「转到后台」走这条。\n- **开轮**（[`TurnInput::nudge`]）：随一条用户消息一起进历史，附在\n  正文之后。计划做完、回合已经结束，用户点「构建」时没有轮在跑，\n  提醒只能跟着新开的那一轮走。",
       "oneOf": [
         {
           "const": "start_multitasking",
           "description": "「转到后台」：把手头的活 `resume=\"self\"` 分叉到后台子 agent，\n主 agent 立刻停下 —— 对话腾出来给用户聊别的。",
+          "type": "string"
+        },
+        {
+          "const": "build_plan",
+          "description": "「构建」：计划已批准，读回计划文件、落成待办、按序动手。",
           "type": "string"
         },
         {
@@ -4850,6 +4855,17 @@
             "$ref": "#/$defs/ImageInput"
           },
           "type": "array"
+        },
+        "nudge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Nudge"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "这条消息是界面上哪个按钮发出来的（「构建」/「并行构建」）。\n内核据此在正文之后附一条 system_reminder；正文本身只是给人看的\n一句短话（\"开始构建计划\"），指示全在提醒里。见 [`Nudge`]。"
         },
         "refs": {
           "default": [],

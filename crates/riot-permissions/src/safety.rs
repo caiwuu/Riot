@@ -98,7 +98,15 @@ fn classify_path(path: &Path, read_only: bool) -> Option<SafetyKind> {
     if is_shell_rc(&normalized) || is_autostart_surface(&normalized) {
         return Some(SafetyKind::ShellRc);
     }
-    if contains_segment(&normalized, ".riot") || contains_segment(&normalized, ".claude") {
+    // `.riot/` 下几乎每样东西写下去都等于交出执行权（hooks 会跑脚本、
+    // skills 和 commands 是模型会照做的提示词）—— 唯一的例外是计划文件：
+    // `.riot/plans/*.md` 是规划模式写给用户读的方案，模型自己写、用户
+    // 审阅，不会被任何东西自动执行。不豁免的话，规划模式里改一下计划
+    // 就弹一次"这会修改 agent 配置"，而那个弹窗说的完全不是这回事。
+    // 判据和决策链、CreatePlan 共用一份（见 `is_plan_document`）。
+    if (contains_segment(&normalized, ".riot") && !is_plan_document(path))
+        || contains_segment(&normalized, ".claude")
+    {
         return Some(SafetyKind::AgentConfig);
     }
     if is_toolchain_exec_surface(&normalized) {
@@ -178,6 +186,37 @@ fn segment_after<'a>(path: &'a str, segment: &str) -> Option<&'a str> {
 /// 注意力 —— 弹窗多了他就不看内容直接点允许了，那时候真的危险操作也放行了。
 fn contains_segment(path: &str, segment: &str) -> bool {
     path.split('/').any(|s| s == segment)
+}
+
+/// 规划模式的计划文件所在目录（相对项目根）。
+///
+/// 定义在权限层而不是工具层，是因为它同时是两条权限判据的一部分：
+/// 规划模式放行这里的编辑（[`crate::chain`]）、安全检查不把它当 agent
+/// 配置（本模块）。工具层（CreatePlan）从这里取名字，三处不会漂移。
+pub const PLAN_DIR: &str = ".riot/plans";
+
+/// 是不是计划文件：`.riot/plans/` 之下、`.md` 结尾的**文件**。
+///
+/// 按路径分量匹配，不绑项目根：权限上下文里没有 cwd，而 `.riot/plans/`
+/// 在任何目录下都只会是计划目录（这个名字是本产品定的）。大小写折叠、
+/// 反斜杠归一，理由同 [`fold_for_match`]。
+///
+/// 只认 `.md`：`.riot/plans/run.sh` 不是计划，规划模式不该能写它，
+/// 安全检查也照常把它当 agent 配置。
+pub fn is_plan_document(path: &Path) -> bool {
+    let normalized = fold_for_match(&path.to_string_lossy());
+    if !normalized.ends_with(".md") {
+        return false;
+    }
+    let mut it = normalized.split('/');
+    while let Some(seg) = it.next() {
+        if seg == ".riot" {
+            return it.next() == Some("plans")
+                && matches!(it.next(), Some(file) if !file.is_empty())
+                && it.next().is_none();
+        }
+    }
+    false
 }
 
 fn is_shell_rc(path: &str) -> bool {
@@ -535,6 +574,47 @@ mod tests {
             Some(SafetyKind::AgentConfig),
             "改这个可能影响后续的权限判断"
         );
+    }
+
+    /// 计划文件是 `.riot/` 下唯一不算 agent 配置的东西。
+    ///
+    /// 不豁免的话，规划模式里改一下计划就弹一次"这会修改 agent 配置"——
+    /// 而那个弹窗说的完全不是这回事。豁免要**窄**：只有 `plans/` 直接
+    /// 之下的 `.md`；`.riot/plans/run.sh`、`.riot/hooks.json` 照拦。
+    #[test]
+    fn 计划文件不当_agent_配置_其余照拦() {
+        for plan in [
+            "/work/.riot/plans/teller-abc123.plan.md",
+            "/work/.riot/plans/x.md",
+            "C:\\work\\.riot\\plans\\X.PLAN.MD",
+        ] {
+            assert!(is_plan_document(Path::new(plan)), "{plan} 该算计划文件");
+            assert_eq!(on_write(plan), None, "{plan} 不该被当成 agent 配置");
+        }
+        for not_plan in [
+            "/work/.riot/plans/run.sh",
+            "/work/.riot/plans/sub/x.md",
+            "/work/.riot/hooks.json",
+            "/work/.riot/skills/x/SKILL.md",
+            "/work/.riot/commands/plans.md",
+            "/work/plans/x.md",
+        ] {
+            assert!(!is_plan_document(Path::new(not_plan)), "{not_plan} 不该算计划文件");
+        }
+        for still_config in [
+            "/work/.riot/plans/run.sh",
+            "/work/.riot/hooks.json",
+            "/work/.riot/skills/x/SKILL.md",
+        ] {
+            assert_eq!(
+                on_write(still_config),
+                Some(SafetyKind::AgentConfig),
+                "{still_config} 仍然是 agent 配置"
+            );
+        }
+        // 目录本身不是文件。
+        assert!(!is_plan_document(Path::new("/work/.riot/plans/")));
+        assert!(!is_plan_document(Path::new("/work/.riot/plans")));
     }
 
     #[test]

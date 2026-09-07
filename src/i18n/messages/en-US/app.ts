@@ -116,6 +116,9 @@ export default {
   "app.workbench.files": "Files",
   "app.workbench.newTab": "New tab",
   "app.workbench.subagent": "Subagent {id}",
+  "app.workbench.plan": "Plan",
+  "app.workbench.planTip": "The plan written in Plan mode",
+  "app.workbench.planNone": "No plan in this conversation yet. Switch to Plan mode and describe the task; the model writes a plan here first.",
   "app.workbench.addPanel": "Add panel",
   "app.workbench.closeTab": "Close {title}",
 

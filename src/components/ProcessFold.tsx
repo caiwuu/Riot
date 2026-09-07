@@ -2,6 +2,7 @@ import { memo, useEffect, useRef, useState } from "react";
 
 import type { Item } from "../hooks/useSession";
 import { t, tn, useT } from "../i18n";
+import { PLAN_TOOL } from "../lib/plan";
 import { Chevron } from "./Chevron";
 import { Markdown } from "./Markdown";
 import { SmoothFold } from "./SmoothFold";
@@ -23,8 +24,11 @@ export type Block =
  * Task 也不折：子 agent 的卡片是一条"标题 · 模型 · 正在做什么"的直播行，
  * 还是打开它会话的入口（照 Cursor，子 agent 列表始终可见）。折进
  * "N 步"里用户就找不到它了。
+ *
+ * CreatePlan 同理：计划卡是打开计划面板的入口，也是"这一轮产出了什么"
+ * 的答案 —— 规划轮里它前面往往是几十步只读侦察，折进去就没了。
  */
-const KEEP_VISIBLE = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit", "Task"]);
+const KEEP_VISIBLE = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit", "Task", PLAN_TOOL]);
 
 function foldable(it: Item): it is FoldItem {
   if (it.kind === "thinking") return true;

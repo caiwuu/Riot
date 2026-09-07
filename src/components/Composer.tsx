@@ -21,6 +21,7 @@ import {
   hasActiveKey,
   host,
   type ImageInput,
+  type Nudge,
   type PermissionMode,
   pickFiles,
   type ProviderConfig,
@@ -73,7 +74,15 @@ import { Chevron } from "./Chevron";
 import { FileIcon } from "./FileIcon";
 import { openFilePreview } from "./FilePreview";
 import { ContextRing } from "./ContextRing";
-import { ArrowUpIcon, PencilIcon, PlusIcon, StopIcon, TrashIcon } from "./icons";
+import {
+  ArrowUpIcon,
+  MultitaskIcon,
+  PencilIcon,
+  PlayIcon,
+  PlusIcon,
+  StopIcon,
+  TrashIcon,
+} from "./icons";
 import {
   ModeMenu,
   Picker,
@@ -81,6 +90,7 @@ import {
   type WorkMode,
   isExecPermissionMode,
   modelLabel,
+  useDropdown,
 } from "./pickers";
 import { BackgroundTasksPanel } from "./TaskPanel";
 import { ShotViewer } from "./ToolCard";
@@ -345,7 +355,6 @@ export function Composer({
   initialMode,
   hostMode,
   initialMultitask = false,
-  hostMultitask = null,
   tokens,
   queued,
   onQueueDelete,
@@ -363,6 +372,8 @@ export function Composer({
   insertText,
   onInserted,
   armed = true,
+  planReady = false,
+  onBuildAvailable,
 }: {
   sessionId: string;
   /** 会话的项目根。斜杠命令要按它找项目级 commands/。 */
@@ -378,8 +389,6 @@ export function Composer({
   hostMode: PermissionMode | null;
   /** 宿主侧这个会话的多任务开关。 */
   initialMultitask?: boolean;
-  /** 宿主顺手切的多任务开关（计划卡的「并行构建」）。null = 没发生过。 */
-  hostMultitask?: boolean | null;
   tokens: { input: number; output: number; context: number };
   /** 排队面板：跑轮中发的、还没注入对话的插话。 */
   queued: QueuedItem[];
@@ -391,8 +400,9 @@ export function Composer({
   /** 后台任务面板：这个会话里在跑 / 刚跑完的子 agent。 */
   tasks?: BackgroundTaskView[];
   onTaskCancel?: (agentId: string) => void;
-  /** 返回 false = 没发出去（hook 拦了、模型没配好），输入要放回输入框。 */
-  onSend: (t: string, images: ImageInput[], refs: string[]) => Promise<boolean>;
+  /** 返回 false = 没发出去（hook 拦了、模型没配好），输入要放回输入框。
+   *  `nudge` 只有「构建」/「并行构建」两个键传，普通发送不传。 */
+  onSend: (t: string, images: ImageInput[], refs: string[], nudge?: Nudge) => Promise<boolean>;
   onStop: () => void;
   /** 被撤回的提问（模型没开口就停了）。放回输入框，然后 `onWithdrawnRestored`。 */
   withdrawn: WithdrawnPrompt | null;
@@ -408,6 +418,13 @@ export function Composer({
   onInserted?: () => void;
   /** 前台才接全局拖放 / 粘贴。隐藏的保活实例不能跟前台抢。 */
   armed?: boolean;
+  /**
+   * 对话里已经有一份写好的计划（CreatePlan 落定了）。规划模式 + 空闲 +
+   * 输入框没字时，发送键换成「构建」（Cursor 同款）；占位提示也跟着改。
+   */
+  planReady?: boolean;
+  /** 「构建」键此刻在不在（计划面板底部的提示按它写）。 */
+  onBuildAvailable?: (on: boolean) => void;
 }) {
   const { t } = useT();
   // 编辑区是**非受控**的：内容住在 DOM 里，这些 state 只是它的投影。
@@ -440,12 +457,6 @@ export function Composer({
   const [multitask, setMultitask] = useState<boolean>(
     () => multitaskCache.get(sessionId) ?? initialMultitask,
   );
-  // 宿主顺手切的（并行构建）→ 显示跟上。宿主那边已经落盘，这里只改显示。
-  useEffect(() => {
-    if (hostMultitask === null) return;
-    setMultitask(hostMultitask);
-    multitaskCache.set(sessionId, hostMultitask);
-  }, [hostMultitask, sessionId]);
   /**
    * 点过「转到后台」、还没看到模型响应。
    *
@@ -877,7 +888,11 @@ export function Composer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [menuKind, menuPick, menuId]);
   /** 输入框的可及名。`data-placeholder` 只是 CSS 伪元素，读屏取不到。 */
-  const placeholder = busy ? t("composer.placeholder.busy") : t("composer.placeholder");
+  const placeholder = busy
+    ? t("composer.placeholder.busy")
+    : planReady && mode === "plan"
+      ? t("composer.placeholder.plan")
+      : t("composer.placeholder");
 
   /** 选中一个文件：把光标处的 `@查询` 换成一个块，就地插在句子里。 */
   const chooseFile = (p: string) => {
@@ -1350,6 +1365,71 @@ export function Composer({
     if (multitask) changeMultitask(false);
   };
 
+  /** 「构建」点过、这一轮还没开起来。防连点：连点两次就是两轮构建。 */
+  const [building, setBuilding] = useState(false);
+  useEffect(() => {
+    if (busy) setBuilding(false);
+  }, [busy]);
+  /** 发送键的位置上放「构建」的条件：有计划、在规划模式、空闲、输入框没字。
+   *  打了字就是在提意见，发送键回来。 */
+  const showBuild = planReady && mode === "plan" && !busy && !canSend;
+  const buildAvailRef = useRef(onBuildAvailable);
+  buildAvailRef.current = onBuildAvailable;
+  // 提示要说的是"点构建"这个动作有没有，打字期间键暂时让位不算没有。
+  const buildOffered = planReady && mode === "plan" && !busy;
+  useEffect(() => {
+    buildAvailRef.current?.(buildOffered);
+  }, [buildOffered]);
+
+  /**
+   * 「构建」/「并行构建」（Cursor 的 Build / Build in Parallel）。
+   *
+   * 顺序不能反：先把权限模式从规划切回进规划前那一档（并行还要开多任务），
+   * **等宿主确认**，再发那一轮 —— 宿主在 submit 那一刻打包 TurnConfig，
+   * 切模式的 IPC 若还在路上，这一轮就还按规划跑，模型收到「开始构建」
+   * 却一个文件都改不了。
+   *
+   * 消息正文是给人看的一句短话；真正的指示由内核按 `nudge` 附在后面
+   * （读回计划文件、落成待办、动手）。没发出去就把模式切回去 —— 界面上
+   * 不能留下一个"已经是 agent 了"的假象。
+   */
+  const buildPlan = async (parallel: boolean) => {
+    if (building || !showBuild) return;
+    setBuilding(true);
+    const target = execMode;
+    setMode(target);
+    modeCache.set(sessionId, target);
+    if (parallel) {
+      setMultitask(true);
+      multitaskCache.set(sessionId, true);
+    }
+    const rollback = () => {
+      setMode("plan");
+      modeCache.set(sessionId, "plan");
+      void setPermissionMode(sessionId, "plan").catch(() => {});
+      if (parallel) {
+        setMultitask(false);
+        multitaskCache.set(sessionId, false);
+        void setSessionMultitask(sessionId, false).catch(() => {});
+      }
+    };
+    try {
+      await setPermissionMode(sessionId, target);
+      if (parallel) await setSessionMultitask(sessionId, true);
+      const ok = await onSend(
+        t("composer.build.message"),
+        [],
+        [],
+        parallel ? "build_in_parallel" : "build_plan",
+      );
+      if (!ok) rollback();
+    } catch {
+      rollback();
+    } finally {
+      setBuilding(false);
+    }
+  };
+
   return (
     <div className="composer-wrap">
       {/* 落点提示铺满整个窗口 —— 因为落点确实是整个窗口，提示只圈住输入框
@@ -1776,7 +1856,15 @@ export function Composer({
                 <StopIcon />
               </button>
             ) : null}
-            {!busy || canSend ? (
+            {/* 计划写好、还在规划模式、输入框没字：发送键的位置换成「构建」
+                （Cursor 同款）。打字就是在提意见，发送键回来。 */}
+            {showBuild ? (
+              <BuildButton
+                disabled={building || !hasKey || !cfg.activeModel}
+                onBuild={() => void buildPlan(false)}
+                onBuildParallel={() => void buildPlan(true)}
+              />
+            ) : !busy || canSend ? (
               <button
                 type="submit"
                 className="send"
@@ -1802,6 +1890,77 @@ export function Composer({
           </div>
         </div>
       </form>
+    </div>
+  );
+}
+
+/**
+ * 「构建」：主键 + 右侧一枚小箭头拉出「并行构建」（Cursor 的 Build ▾）。
+ *
+ * 主键就是最常见的那条路（自己按计划做）；并行是进阶选项，藏进菜单 ——
+ * 两个等重的键并排，用户每次都要停下来想一下差别。
+ */
+function BuildButton({
+  disabled,
+  onBuild,
+  onBuildParallel,
+}: {
+  disabled: boolean;
+  onBuild: () => void;
+  onBuildParallel: () => void;
+}) {
+  const { t } = useT();
+  const [open, setOpen] = useState(false);
+  const { rootRef, onKeyDown } = useDropdown(open, setOpen);
+  return (
+    <div className="mode-menu build-menu" ref={rootRef} onKeyDown={onKeyDown}>
+      <div className="build-split">
+        <button
+          type="button"
+          className="build-btn"
+          disabled={disabled}
+          onClick={onBuild}
+          title={t("composer.build.title")}
+        >
+          <PlayIcon />
+          <span>{t("composer.build")}</span>
+        </button>
+        <button
+          type="button"
+          className="build-more"
+          disabled={disabled}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          aria-label={t("composer.build.more")}
+          title={t("composer.build.more")}
+          onClick={() => setOpen(!open)}
+        >
+          <Chevron down open={open} />
+        </button>
+      </div>
+      {open ? (
+        <div className="menu menu-right" role="menu">
+          <button
+            type="button"
+            role="menuitem"
+            className="menu-item menu-pick"
+            onClick={() => {
+              setOpen(false);
+              onBuildParallel();
+            }}
+          >
+            <span className="menu-pick-body">
+              <span className="menu-pick-label">
+                <span className="pill-mark pill-multitask" aria-hidden>
+                  <MultitaskIcon />
+                </span>
+                {t("composer.build.parallel")}
+              </span>
+              <span className="menu-hint">{t("composer.build.parallelHint")}</span>
+            </span>
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

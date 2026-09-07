@@ -4,6 +4,13 @@
  */
 export default {
   "composer.placeholder": "描述一个任务，或问点什么",
+  "composer.placeholder.plan": "对计划提修改意见，或点「构建」开始执行",
+  "composer.build": "构建",
+  "composer.build.title": "按计划开始执行（切回进入规划前的权限档）",
+  "composer.build.more": "更多构建方式",
+  "composer.build.parallel": "并行构建",
+  "composer.build.parallelHint": "多任务模式，后台子 agent 分工",
+  "composer.build.message": "开始构建计划",
   "composer.placeholder.busy": "它正在做事…此刻发送会排队，当前任务完成后自动发出",
   "composer.drop.hint": "松手，加进输入框",
   "composer.closeEsc": "关闭 (Esc)",

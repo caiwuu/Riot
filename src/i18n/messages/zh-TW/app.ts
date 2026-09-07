@@ -110,6 +110,9 @@ export default {
   "app.workbench.files": "檔案",
   "app.workbench.newTab": "新分頁",
   "app.workbench.subagent": "子 agent {id}",
+  "app.workbench.plan": "計畫",
+  "app.workbench.planTip": "規劃模式產出的計畫",
+  "app.workbench.planNone": "這個對話還沒有計畫。切到 Plan 模式描述任務，模型會先寫一份計畫放在這裡。",
   "app.workbench.addPanel": "新增面板",
   "app.workbench.closeTab": "關閉 {title}",
 

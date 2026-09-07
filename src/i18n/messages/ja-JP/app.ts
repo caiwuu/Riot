@@ -110,6 +110,9 @@ export default {
   "app.workbench.files": "ファイル",
   "app.workbench.newTab": "新しいタブ",
   "app.workbench.subagent": "サブエージェント {id}",
+  "app.workbench.plan": "計画",
+  "app.workbench.planTip": "プランモードで作成した計画",
+  "app.workbench.planNone": "この会話にはまだ計画がありません。Plan モードに切り替えてタスクを説明すると、モデルが先にここへ計画を書きます。",
   "app.workbench.addPanel": "パネルを追加",
   "app.workbench.closeTab": "{title} を閉じる",
 

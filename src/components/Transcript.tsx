@@ -25,7 +25,7 @@ import {
   useState,
 } from "react";
 
-import type { PermissionAsk, PermissionResponse } from "../bridge";
+import type { PermissionAsk, PermissionMode, PermissionResponse } from "../bridge";
 import { useImeGuard } from "../hooks/useImeGuard";
 import type { Item, TextItem } from "../hooks/useSession";
 import { useTimedFlag } from "../hooks/useTimedFlag";
@@ -51,7 +51,7 @@ import {
 import { Chip, FileChip } from "./Chip";
 import { ConfirmDialog, type ConfirmRequest } from "./ConfirmDialog";
 import { LazyMarkdown, Markdown } from "./Markdown";
-import { AskChoiceCard, PlanApprovalCard, PlanDraft } from "./PermissionDialog";
+import { AskChoiceCard, ModeSwitchCard } from "./PermissionDialog";
 import { type Block, groupBlocks, ProcessGroup, ThinkingBlock } from "./ProcessFold";
 import { TaskNoticeCard } from "./TaskPanel";
 import { ShotViewer, ToolCard } from "./ToolCard";
@@ -370,15 +370,14 @@ export function Transcript({
   items,
   streaming,
   thinking,
-  streamingPlan,
   busy,
   compacting,
   waitSince,
   armed = true,
-  planAsk,
+  modeAsk,
+  execMode = "default",
   choiceAsk,
-  onAnswerPlan,
-  onParallelPlan,
+  onAnswerMode,
   onAnswerChoice,
   onRegenerate,
   onEditEntry,
@@ -389,7 +388,6 @@ export function Transcript({
   items: Item[];
   streaming: string;
   thinking: string;
-  streamingPlan: string | null;
   busy: boolean;
   /** 前台才接 ⌘F。保活的隐藏实例不能跟前台抢查找。 */
   armed?: boolean;
@@ -400,13 +398,13 @@ export function Transcript({
    * 活得过切会话导致的重挂载 —— 状态行的秒数靠它接着数而不是清零。
    */
   waitSince: number | null;
-  /** 待批准的计划（ExitPlanMode 的询问）。内联在对话流末尾。 */
-  planAsk?: { requestId: string; detail: PermissionAsk };
+  /** 模型建议换工作方式（SwitchMode 的询问）。内联在对话流末尾。 */
+  modeAsk?: { requestId: string; detail: PermissionAsk };
+  /** 这个会话进规划前用的权限档，切回 agent 时落成它。 */
+  execMode?: PermissionMode;
   /** 模型主动提的选择题。同样内联，不弹窗。 */
   choiceAsk?: { requestId: string; detail: PermissionAsk };
-  onAnswerPlan?: (r: PermissionResponse) => void;
-  /** 计划卡的「并行构建」：在批准之前先把并行指示排进当前轮。 */
-  onParallelPlan?: () => void;
+  onAnswerMode?: (r: PermissionResponse) => void;
   onAnswerChoice?: (r: PermissionResponse) => void;
   onRegenerate?: (itemId: string) => void;
   /** 上下文编辑：把这条气泡的文本换掉。false = 没改成，编辑框保留草稿。 */
@@ -724,7 +722,7 @@ export function Transcript({
     // pinBottom 不进依赖：依赖列的是"什么变化该重新贴底"，那是内容本身。
     // 把每帧新建的函数混进去只会让这个列表失去表达力。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, streaming, thinking, streamingPlan, planAsk?.requestId, choiceAsk?.requestId, busy]);
+  }, [items, streaming, thinking, modeAsk?.requestId, choiceAsk?.requestId, busy]);
 
   // 还在转圈的工具。底部状态行靠它说清此刻在等谁 —— 一次 build 跑两
   // 分钟的时候，"生成中"是句废话。
@@ -809,16 +807,14 @@ export function Transcript({
             <Markdown text={streaming} animated />
           </div>
         ) : null}
-        {/* 计划边写边显示，批准卡到手后再换成带按钮的那张。 */}
-        {streamingPlan !== null && !planAsk ? <PlanDraft text={streamingPlan} /> : null}
-        {/* 计划批准卡长在对话流里，跟在 ExitPlanMode 的工具卡后面 ——
-            计划是要读的文档，弹窗会在等了很久之后突然糊脸。 */}
-        {planAsk && onAnswerPlan ? (
-          <PlanApprovalCard
-            key={planAsk.requestId}
-            ask={planAsk.detail}
-            onAnswer={onAnswerPlan}
-            {...(onParallelPlan ? { onParallel: onParallelPlan } : {})}
+        {/* 换模式的建议长在对话流里（Cursor 同款）：它是对话的一部分，
+            不是危险操作；用户看着模型给的理由点「切换」或者不切。 */}
+        {modeAsk && onAnswerMode ? (
+          <ModeSwitchCard
+            key={modeAsk.requestId}
+            ask={modeAsk.detail}
+            execMode={execMode}
+            onAnswer={onAnswerMode}
           />
         ) : null}
         {choiceAsk && onAnswerChoice ? (
@@ -840,7 +836,7 @@ export function Transcript({
          */}
         {compacting ? (
           <Dots label={t("transcript.wait.compacting")} timed since={waitSince} />
-        ) : busy && !planAsk && !choiceAsk ? (
+        ) : busy && !modeAsk && !choiceAsk ? (
           <Dots label={waitLabel} timed since={waitSince} />
         ) : null}
         </div>

@@ -4153,6 +4153,183 @@ html[data-host='web'] body {
   line-height: 1.6;
 }
 
+/* ── 计划面板（右侧抽屉标签，照 Cursor：计划在对话旁边的一页） ── */
+.plan-panel {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.plan-panel-none {
+  padding: 24px 16px;
+  color: var(--text-faint);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.plan-panel-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* 和对话里计划卡上的图标同一个：黄底方块。撰写中轻微呼吸，标出"在动"。 */
+.plan-panel-icon {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin-top: 1px;
+  border-radius: 8px;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+}
+
+.plan-panel-icon-live {
+  animation: plan-breathe 1.6s ease-in-out infinite;
+}
+
+@keyframes plan-breathe {
+  50% {
+    background: color-mix(in srgb, var(--warn) 28%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plan-panel-icon-live {
+    animation: none;
+  }
+}
+
+.plan-panel-head-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.plan-panel-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.plan-panel-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.plan-panel-live {
+  display: inline-flex;
+  align-items: center;
+  color: var(--warn);
+}
+
+.plan-panel-live .plan-caret {
+  height: 0.85em;
+  width: 5px;
+  margin-left: 3px;
+  background: var(--warn);
+}
+
+/* 文件路径可点（开成预览标签）。长得像路径不像按钮：等宽、淡色、悬停才带下划线。 */
+.plan-panel-path {
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.plan-panel-path:hover {
+  color: var(--text-dim);
+  text-decoration: underline;
+  background: transparent;
+}
+
+.plan-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 14px 18px 24px;
+}
+
+/* 概述：标题下一段引言，比正文淡。 */
+.plan-panel-overview {
+  margin: 0 0 14px;
+  padding: 0 0 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+/* 计划是要读的文档：正文按 Markdown 排版，字号和对话正文一致。标题层级
+   收敛 —— 模型爱用 ## 分节，1.3em 的大字会盖过面板自己的标题。 */
+.plan-panel-doc {
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.plan-panel-doc .md > :first-child {
+  margin-top: 0;
+}
+
+.plan-panel-doc .md h1,
+.plan-panel-doc .md h2,
+.plan-panel-doc .md h3,
+.plan-panel-doc .md h4 {
+  margin: 1.1em 0 0.4em;
+}
+
+.plan-panel-doc .md h1 {
+  font-size: 1.15em;
+}
+
+.plan-panel-doc .md h2 {
+  font-size: 1.08em;
+}
+
+.plan-panel-doc .md h3,
+.plan-panel-doc .md h4 {
+  font-size: 1em;
+}
+
+.plan-panel-empty {
+  color: var(--text-faint);
+  font-size: 13px;
+}
+
+/* 底部一行提示：意见和「构建」都在下方输入框。不放按钮 —— 一件事一个入口。 */
+.plan-panel-foot {
+  flex: none;
+  padding: 9px 14px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-faint);
+  background: var(--bg-card);
+}
+
 /* 条目排法和主对话的 .thread-col 一致，但不限宽、不居中 —— 抽屉本来就窄。 */
 .subagent-list {
   display: flex;
@@ -4821,12 +4998,78 @@ body.file-dragging.file-drop-hot * {
   cursor: default;
 }
 
-.handoff-icon,
-.plan-parallel-icon {
+.handoff-icon {
   color: var(--text-faint);
   font-size: 12px;
   line-height: 1;
   margin-right: 4px;
+}
+
+/* ── 「构建」（Cursor 的 Build ▾）：计划写好后顶替发送键 ──────────
+   主键 + 一枚拉出「并行构建」的小箭头，拼成一个胶囊。反色实底和发送键
+   同一套语言（它就是这一刻的"发送"），字比图标更说得清"按下去会发生什么"。 */
+.build-split {
+  display: inline-flex;
+  align-items: stretch;
+  height: 28px;
+  border-radius: 999px;
+  background: var(--text);
+  color: var(--bg);
+  overflow: hidden;
+}
+
+.build-btn,
+.build-more {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 0 12px 0 11px;
+  white-space: nowrap;
+}
+
+.build-btn svg {
+  display: block;
+}
+
+.build-more {
+  padding: 0 8px 0 6px;
+  /* 一道 1px 的分隔，用底色打透明 —— 深色白底上是一丝灰，浅色黑底上也是。 */
+  border-left: 1px solid color-mix(in srgb, var(--bg) 25%, transparent);
+}
+
+.build-more .chevron {
+  color: inherit;
+}
+
+.build-btn:hover:not(:disabled),
+.build-more:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--bg) 12%, transparent);
+  color: inherit;
+}
+
+.build-split:has(button:disabled) {
+  opacity: 0.45;
+}
+
+/* 构建菜单挂在工具栏右端，往左开 —— 往右开会顶出输入框。 */
+.menu.menu-right {
+  left: auto;
+  right: 0;
+}
+
+.build-menu .menu {
+  min-width: 220px;
+}
+
+.build-menu .menu-hint {
+  margin-top: 2px;
 }
 
 .menu-group-title {
@@ -6139,10 +6382,11 @@ button.ta-resize-grip:hover:not(:disabled),
   justify-content: center;
 }
 
-/* ── 计划批准卡（内联在对话流里） ─────────── */
+/* ── 对话流里的内联卡（选择题 / 换模式建议） ─────────── */
 
 /* 描边和底都是 --accent 打透明（原先手写的 rgba(90,141,214) 就是 --accent
-   的 RGB），随 accent 一起换主题。 */
+   的 RGB），随 accent 一起换主题。原是计划批准卡的壳，计划搬去侧栏之后
+   选择题卡和换模式卡沿用它 —— 它们是同一类东西：模型在对话里请用户拍板。 */
 .plan-card {
   margin: 10px 0 4px;
   padding: 12px 12px 10px;
@@ -6177,10 +6421,6 @@ button.ta-resize-grip:hover:not(:disabled),
   color: var(--text);
 }
 
-.plan-draft .plan-card-title {
-  color: var(--text-dim);
-}
-
 .plan-caret {
   display: inline-block;
   width: 7px;
@@ -6197,41 +6437,25 @@ button.ta-resize-grip:hover:not(:disabled),
   }
 }
 
-/* 计划是要读的文档：给足高度、可滚动、按 Markdown 排版。
-   基准字号比正文小半档 —— 它是嵌在卡片里的附件，不是对话本体。 */
-.plan-body {
-  max-height: min(44vh, 480px);
-  overflow-y: auto;
-  padding: 2px 12px;
-  margin: 0 0 10px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg);
+/* 换模式卡上模型给的理由：一两句话，比正文小半档、灰一档 —— 它是模型
+   在解释，不是对话本体。 */
+.mode-card-why {
+  margin: 0 2px 10px;
   font-size: 12px;
-  line-height: 1.65;
+  line-height: 1.6;
+  color: var(--text-dim);
 }
 
-/* 计划里的 markdown 标题收敛。模型爱用 # 一级标题开头，1.3em 的大字
-   会盖过界面自己的视觉层级 —— 在卡片语境里标题只需要比正文略突出。 */
-.plan-body .md h1,
-.plan-body .md h2,
-.plan-body .md h3,
-.plan-body .md h4 {
-  margin: 0.9em 0 0.35em;
+.mode-card-why .md > :first-child {
+  margin-top: 0;
 }
 
-.plan-body .md h1 {
-  font-size: 1.1em;
+.mode-card-why .md > :last-child {
+  margin-bottom: 0;
 }
 
-.plan-body .md h2 {
-  font-size: 1.05em;
-}
-
-.plan-body .md h3,
-.plan-body .md h4 {
-  font-size: 1em;
-}
+/* 换模式卡的两个键都是一行字 + 一行小字说明（切到哪、按哪档跑），
+   min-height 由 .plan-card-actions button 的 46px 统一。 */
 
 .plan-feedback {
   display: block;
@@ -6301,11 +6525,91 @@ button.ta-resize-grip:hover:not(:disabled),
   flex: 1;
 }
 
-/* 选择题的动作只有一行字，不必跟计划批准那套两行按钮同高。 */
+/* 选择题的动作只有一行字，不必跟换模式卡那套两行按钮同高。 */
 .ask-card .plan-card-actions button {
   min-height: 34px;
   flex-direction: row;
   align-items: center;
+}
+
+/* ── 计划卡（对话流里 CreatePlan 的卡，照 Cursor） ──────────
+   标题 + 一两句概述，整张卡是打开侧栏计划面板的入口。正文不在这里：
+   计划是要读的文档，铺进对话流会把对话本身冲走。 */
+.tool-plan .plan-tool-head {
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.tool-plan .plan-tool-head:hover {
+  background: var(--bg-hover);
+}
+
+/* 规划模式的黄（和 composer 上 Plan pill 同色），扫一眼就知道这张是计划。 */
+.plan-tool-icon {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-top: 1px;
+  border-radius: 8px;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+}
+
+.plan-tool-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.plan-tool-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  color: var(--text-faint);
+}
+
+.plan-tool-badge .plan-caret {
+  height: 0.85em;
+  width: 5px;
+  margin-left: 3px;
+  background: var(--warn);
+}
+
+.plan-tool-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.plan-tool-overview {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  /* 概述最多两行：卡是入口，不是正文。 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.tool-plan .task-card-go {
+  align-self: center;
+}
+
+.tool-plan:hover .task-card-go,
+.tool-plan:focus-within .task-card-go {
+  opacity: 1;
 }
 
 /* ── 任务清单 ───────────────────────────────
@@ -8029,6 +8333,53 @@ button.field-slider-state:hover {
 
 .md img {
   max-width: 100%;
+}
+
+/* 正文里的图（模型写 `![](路径)`，见 Markdown.tsx 的 MdImage）。按容器宽
+   显示、限高，点开全屏查看器 —— 和工具卡片里的截图同一套操作。用
+   button 包而不是 div：图在 <p> 里，块级容器会让 React 报嵌套错误。 */
+.md-img-wrap {
+  display: block;
+  max-width: 100%;
+  margin: 0.55em 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-side);
+  line-height: 0;
+  cursor: zoom-in;
+}
+
+.md-img-wrap:hover:not(:disabled) {
+  background: var(--bg-side);
+  border-color: var(--border-strong);
+}
+
+.md-img {
+  display: block;
+  max-width: 100%;
+  max-height: 480px;
+  height: auto;
+}
+
+/* 图还在读：先用文件名占位，读回来无缝换成图。 */
+.md-img-pending {
+  color: var(--text-dim);
+  font-size: 0.92em;
+}
+
+/* 读不到的图：文件链接 + 一句说明，点链接走预览 / 访达定位。 */
+.md-img-broken {
+  color: var(--text-dim);
+}
+
+/* 远程图片不加载（原因见 MdImage），画成带图标的链接，点了去浏览器看。 */
+.md-img-remote::before {
+  content: "▣";
+  margin-right: 4px;
+  font-size: 0.85em;
+  color: var(--text-dim);
 }
 
 .md-mermaid {

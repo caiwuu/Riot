@@ -3,6 +3,13 @@ import type zh from "../zh-CN/composer";
 
 export default {
   "composer.placeholder": "描述一個任務，或問點什麼",
+  "composer.placeholder.plan": "對計畫提修改意見，或點「建置」開始執行",
+  "composer.build": "建置",
+  "composer.build.title": "按計畫開始執行（切回進入規劃前的權限檔）",
+  "composer.build.more": "更多建置方式",
+  "composer.build.parallel": "平行建置",
+  "composer.build.parallelHint": "多任務模式，背景子 agent 分工",
+  "composer.build.message": "開始建置計畫",
   "composer.placeholder.busy": "它正在做事…此刻送出會排隊，目前任務完成後自動送出",
   "composer.drop.hint": "放開，加進輸入框",
   "composer.closeEsc": "關閉 (Esc)",

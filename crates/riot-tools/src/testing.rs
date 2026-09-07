@@ -377,6 +377,21 @@ impl FakeWeb {
         self
     }
 
+    /// 登记一个 200 的二进制响应（图片这类）。
+    pub fn bytes(self, url: &str, content_type: &str, body: Vec<u8>) -> Self {
+        self.put(
+            url,
+            riot_protocol::web::WebResponse {
+                status: 200,
+                status_text: "OK".into(),
+                content_type: content_type.into(),
+                body,
+                location: None,
+            },
+        );
+        self
+    }
+
     /// 登记一个重定向。`location` 要是绝对地址 —— 真实实现负责解析相对地址。
     pub fn redirect(self, url: &str, status: u16, location: &str) -> Self {
         self.put(

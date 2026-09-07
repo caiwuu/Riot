@@ -6,17 +6,21 @@
 
 use std::sync::Arc;
 
+use base64::Engine as _;
+use riot_protocol::message::ToolResultContent;
 use riot_protocol::permission::{
     DecisionReason, PermissionContext, PermissionMode, PermissionResult, PermissionRule,
     RuleDecision, RuleSource,
 };
-use riot_protocol::tool::{Tool, ToolContext, ToolOutcome};
+use riot_protocol::tool::{FileSystem, Tool, ToolContext, ToolOutcome, UiPayload};
+use riot_protocol::vision::VisionAccess;
 use riot_protocol::web::SearchHit;
 use tokio_util::sync::CancellationToken;
 
 use super::cache::PageCache;
 use super::{WebFetch, WebSearch};
-use crate::testing::{FakeWeb, FixedClock, NullFileState, NullFs, NullProc};
+use crate::testing::{FakeVision, FakeWeb, FixedClock, NullFileState, NullFs, NullProc};
+use crate::tools::memfs::MemFs;
 
 struct Harness {
     ctx: ToolContext,
@@ -25,6 +29,10 @@ struct Harness {
 }
 
 fn harness(web: FakeWeb) -> Harness {
+    harness_with(web, Arc::new(riot_protocol::vision::NoVision), Arc::new(NullFs))
+}
+
+fn harness_with(web: FakeWeb, vision: Arc<dyn VisionAccess>, fs: Arc<dyn FileSystem>) -> Harness {
     let web = Arc::new(web);
     let clock = Arc::new(FixedClock::new(1_767_225_600_000));
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -40,12 +48,12 @@ fn harness(web: FakeWeb) -> Harness {
             tx,
         ),
         file_state: Arc::new(NullFileState),
-        fs: Arc::new(NullFs),
+        fs,
         proc: Arc::new(NullProc),
         web: Arc::clone(&web) as Arc<_>,
         browser: Arc::new(riot_protocol::browser::NoBrowser),
         terminal: Arc::new(riot_protocol::terminal::NoTerminal),
-        vision: Arc::new(riot_protocol::vision::NoVision),
+        vision,
         clock: Arc::clone(&clock) as Arc<_>,
     };
 
@@ -528,6 +536,264 @@ async fn 没配联网能力时提示去设置() {
         )
         .await;
     assert!(out.is_error(), "{out:?}");
+}
+
+// ────────────────────────────────────────────────────────────
+// WebFetch：图片
+//
+// 图片地址以前会落进文本那条路：二进制按 UTF-8 解成一堆替换字符交给
+// 模型，模型拿着乱码也会言之凿凿。现在和 Read 读图、浏览器截图走同一
+// 套分支：能看图的模型直接拿图，看不了的走视觉兼容转述。
+// ────────────────────────────────────────────────────────────
+
+/// 造一张纯色 PNG。
+fn png(w: u32, h: u32) -> Vec<u8> {
+    let img = image::RgbaImage::from_pixel(w, h, image::Rgba([200, 40, 40, 255]));
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut out, image::ImageFormat::Png)
+        .expect("编码 PNG");
+    out.into_inner()
+}
+
+const IMG_URL: &str = "https://img.example/a.png";
+
+fn image_args() -> serde_json::Value {
+    serde_json::json!({ "url": IMG_URL, "prompt": "看看图上画的是什么" })
+}
+
+#[tokio::test]
+async fn 图片地址在能看图时直接给图片并落盘原图() {
+    let raw = png(8, 8);
+    let fs = Arc::new(MemFs::new().with_dir("/artifacts"));
+    let h = harness_with(
+        FakeWeb::new().bytes(IMG_URL, "image/png", raw.clone()),
+        Arc::new(FakeVision::Direct),
+        Arc::clone(&fs) as Arc<_>,
+    );
+
+    let out = fetch_tool().call(image_args(), h.ctx.clone()).await;
+
+    let ToolOutcome::Ok {
+        model_content,
+        ui_payload,
+        ..
+    } = out
+    else {
+        panic!("应当成功：{out:?}");
+    };
+    let ToolResultContent::Image {
+        media_type,
+        data,
+        path,
+    } = model_content
+    else {
+        panic!("应当是图片内容块：{model_content:?}");
+    };
+    // 小图不用压，原样进消息；类型跟着响应头走
+    assert_eq!(media_type, "image/png");
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(&data)
+            .expect("合法 base64"),
+        raw,
+        "小图该原样交给模型"
+    );
+    // 原图落在工件目录、扩展名跟类型 —— 界面按这个路径经 read_image 读原图，
+    // 那边按扩展名认类型，写错了就是一张裂图。
+    let path = path.expect("原图要落盘");
+    assert_eq!(path, std::path::PathBuf::from("/artifacts/t1.png"));
+    assert_eq!(
+        FileSystem::read(fs.as_ref(), &path).await.expect("读得回来"),
+        raw
+    );
+    // 卡片上要有一句说明，用户知道这张图从哪来
+    assert!(
+        matches!(ui_payload, Some(UiPayload::Message { .. })),
+        "{ui_payload:?}"
+    );
+}
+
+#[tokio::test]
+async fn 大图先压缩再交给模型() {
+    // 1600×1600 超过模型甜点区，进消息的必须是压过的 JPEG；原图照样落盘
+    let raw = png(1600, 1600);
+    let fs = Arc::new(MemFs::new().with_dir("/artifacts"));
+    let h = harness_with(
+        FakeWeb::new().bytes(IMG_URL, "image/png", raw.clone()),
+        Arc::new(FakeVision::Direct),
+        Arc::clone(&fs) as Arc<_>,
+    );
+
+    let out = fetch_tool().call(image_args(), h.ctx.clone()).await;
+
+    let ToolOutcome::Ok {
+        model_content: ToolResultContent::Image {
+            media_type, data, ..
+        },
+        ..
+    } = out
+    else {
+        panic!("应当是图片内容块：{out:?}");
+    };
+    assert_eq!(media_type, "image/jpeg", "压缩产物统一是 JPEG");
+    let small = image::load_from_memory(
+        &base64::engine::general_purpose::STANDARD
+            .decode(&data)
+            .expect("合法 base64"),
+    )
+    .expect("解得开压缩图");
+    assert!(
+        small.width() * small.height() <= crate::tools::shrink::MAX_MODEL_PIXELS,
+        "给模型的该是压缩图，实际还有 {}×{}",
+        small.width(),
+        small.height()
+    );
+    assert_eq!(
+        FileSystem::read(fs.as_ref(), std::path::Path::new("/artifacts/t1.png"))
+            .await
+            .expect("原图落盘"),
+        raw,
+        "落盘的必须是原图字节"
+    );
+}
+
+#[tokio::test]
+async fn 图片地址在看不了图时走视觉兼容转述() {
+    let h = harness_with(
+        FakeWeb::new().bytes(IMG_URL, "image/png", png(8, 8)),
+        Arc::new(FakeVision::Describe("一个红色的方块".into())),
+        Arc::new(NullFs),
+    );
+
+    let out = fetch_tool().call(image_args(), h.ctx.clone()).await;
+
+    let ToolOutcome::Ok {
+        model_content: ToolResultContent::DescribedImage { text, data, path, .. },
+        ..
+    } = out
+    else {
+        panic!("应当是转述内容块：{out:?}");
+    };
+    assert!(text.contains("一个红色的方块"), "{text}");
+    assert!(text.contains(IMG_URL), "要说明描述的是哪个地址：{text}");
+    assert!(!data.is_empty(), "图片本体要留给界面");
+    // NullFs 写不进去 → 没有原图路径，界面退到压缩图，工具不该因此失败
+    assert_eq!(path, None);
+}
+
+#[tokio::test]
+async fn 图片地址没配兼容模型时说清原因() {
+    let h = harness_with(
+        FakeWeb::new().bytes(IMG_URL, "image/png", png(8, 8)),
+        Arc::new(FakeVision::None),
+        Arc::new(NullFs),
+    );
+
+    let out = fetch_tool().call(image_args(), h.ctx.clone()).await;
+
+    assert!(out.is_error(), "{out:?}");
+    let t = text_of(&out);
+    // 问题不在图片；模型不能去 shell 里下载解码
+    assert!(t.contains("没有能看图的模型"), "{t}");
+    assert!(t.contains("不要试图用 Bash"), "{t}");
+}
+
+#[tokio::test]
+async fn 超过单张上限的图片直接拒绝() {
+    // 上限之内的字节数都不该去解码：一张巨图解开可能要几百 MB 内存
+    let huge = vec![0u8; crate::tools::read::MAX_IMAGE_BYTES + 1];
+    let h = harness_with(
+        FakeWeb::new().bytes(IMG_URL, "image/png", huge),
+        Arc::new(FakeVision::Direct),
+        Arc::new(NullFs),
+    );
+
+    let out = fetch_tool().call(image_args(), h.ctx.clone()).await;
+
+    assert!(out.is_error(), "{out:?}");
+    let t = text_of(&out);
+    assert!(t.contains("上限"), "{t}");
+    assert!(t.contains("缩略图"), "要给替代做法：{t}");
+}
+
+#[tokio::test]
+async fn 模型不收的图片类型要说清楚() {
+    let h = harness_with(
+        FakeWeb::new().bytes("https://img.example/a.bmp", "image/bmp", vec![0x42, 0x4D, 0, 0]),
+        Arc::new(FakeVision::Direct),
+        Arc::new(NullFs),
+    );
+
+    let out = fetch_tool()
+        .call(
+            serde_json::json!({ "url": "https://img.example/a.bmp", "prompt": "看" }),
+            h.ctx.clone(),
+        )
+        .await;
+
+    assert!(out.is_error(), "{out:?}");
+    let t = text_of(&out);
+    assert!(t.contains("image/bmp"), "{t}");
+    assert!(t.contains("png / jpg / gif / webp"), "要列出收哪几种：{t}");
+}
+
+#[tokio::test]
+async fn octet_stream_的图片按文件头认出来() {
+    // CDN 上的静态文件常常不带准确的 content-type
+    let h = harness_with(
+        FakeWeb::new().bytes(IMG_URL, "application/octet-stream", png(8, 8)),
+        Arc::new(FakeVision::Direct),
+        Arc::new(NullFs),
+    );
+
+    let out = fetch_tool().call(image_args(), h.ctx.clone()).await;
+
+    assert!(
+        matches!(
+            out,
+            ToolOutcome::Ok {
+                model_content: ToolResultContent::Image { .. },
+                ..
+            }
+        ),
+        "{out:?}"
+    );
+}
+
+#[tokio::test]
+async fn svg_仍按文本抓取() {
+    // XML 文本；视觉模型也不收 svg，读源码对模型更有用
+    let h = harness(FakeWeb::new().page(
+        "https://img.example/logo.svg",
+        "image/svg+xml",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\"><circle r=\"4\"/></svg>",
+    ));
+
+    let out = fetch_tool()
+        .call(
+            serde_json::json!({ "url": "https://img.example/logo.svg", "prompt": "读" }),
+            h.ctx.clone(),
+        )
+        .await;
+
+    assert!(!out.is_error(), "{out:?}");
+    assert!(text_of(&out).contains("<circle"), "{}", text_of(&out));
+}
+
+#[tokio::test]
+async fn 图片不进缓存() {
+    // 缓存按转成 Markdown 的正文计量，装不下二进制；重抓一张图很便宜
+    let tool = fetch_tool();
+    let h = harness_with(
+        FakeWeb::new().bytes(IMG_URL, "image/png", png(8, 8)),
+        Arc::new(FakeVision::Direct),
+        Arc::new(NullFs),
+    );
+
+    let _ = tool.call(image_args(), h.ctx.clone()).await;
+    let _ = tool.call(image_args(), h.ctx.clone()).await;
+    assert_eq!(h.web.requested().len(), 2);
 }
 
 // ────────────────────────────────────────────────────────────

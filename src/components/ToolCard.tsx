@@ -4,8 +4,10 @@ import { createPortal } from "react-dom";
 import { type BackgroundTaskView, readImage, renderUiText } from "../bridge";
 import type { Item } from "../hooks/useSession";
 import { t, tn, useT } from "../i18n";
+import { LEGACY_PLAN_TOOL, openPlanPanel, PLAN_TOOL, SWITCH_MODE_TOOL } from "../lib/plan";
 import { agentIdFromResult, openSubagent, SubagentsContext } from "../lib/subagentLink";
 import { Chevron } from "./Chevron";
+import { PlanModeIcon } from "./icons";
 import { useEscLayer } from "./Modal";
 import { SmoothFold } from "./SmoothFold";
 
@@ -56,7 +58,53 @@ export const ToolCard = memo(function ToolCard({
 }) {
   // 子 agent 有自己的卡：不折叠、不展开输出，点开是它的整个会话。
   if (tool.name === "Task") return <TaskCard tool={tool} />;
+  // 计划也有自己的卡：标题 + 概述，点开是右侧抽屉里的计划面板。
+  if (tool.name === PLAN_TOOL) return <PlanCard tool={tool} />;
   return <PlainToolCard tool={tool} eager={eager} />;
+});
+
+/**
+ * CreatePlan 的卡片（照 Cursor：对话里一张计划卡，正文在旁边的面板）。
+ *
+ * 卡上只放标题和一两句概述 —— 计划是要读的文档，几页纸铺进对话流会把
+ * 对话本身冲走；整张卡是打开计划面板的入口。撰写中显示"正在撰写"，
+ * 面板那边同步在流。
+ */
+const PlanCard = memo(function PlanCard({ tool }: { tool: Tool }) {
+  const { t } = useT();
+  const i = tool.input as Record<string, unknown>;
+  const str = (k: string) => (typeof i?.[k] === "string" ? (i[k] as string) : "");
+  const name = str("name").trim() || t("transcript.plan.untitled");
+  const overview = str("overview").trim();
+  const running = tool.status === "running";
+  return (
+    <div className={`tool tool-${tool.status} tool-plan`}>
+      <button
+        type="button"
+        className="tool-head plan-tool-head"
+        onClick={openPlanPanel}
+        title={t("transcript.plan.open")}
+      >
+        <span className="plan-tool-icon" aria-hidden>
+          <PlanModeIcon />
+        </span>
+        <span className="plan-tool-main">
+          <span className="plan-tool-badge">
+            {running ? t("transcript.plan.drafting") : t("transcript.plan.badge")}
+            {running ? <span className="plan-caret" aria-hidden /> : null}
+          </span>
+          <span className="plan-tool-title">{name}</span>
+          {overview ? <span className="plan-tool-overview">{overview}</span> : null}
+          {tool.status === "error" ? (
+            <span className="plan-tool-overview tool-fail">{tool.result ?? t("common.failed")}</span>
+          ) : null}
+        </span>
+        <span className="task-card-go" aria-hidden>
+          ›
+        </span>
+      </button>
+    </div>
+  );
 });
 
 /**
@@ -344,10 +392,13 @@ export function summarize(tool: Tool): string {
     }
     case "Bash":
       return str("command");
-    // 计划正文由下面的草稿卡/批准卡承担。不写这条的话会落到 default，
-    // 把整份计划 dump 进摘要行。
-    case "ExitPlanMode":
-      return t("transcript.tool.writingPlan");
+    // 计划有自己的卡（PlanCard）；这条只给过程组的直播头和旧 transcript
+    // 里的 ExitPlanMode 用。不写的话会落到 default，把整份计划 dump 进摘要行。
+    case PLAN_TOOL:
+    case LEGACY_PLAN_TOOL:
+      return str("name").trim() || t("transcript.tool.writingPlan");
+    case SWITCH_MODE_TOOL:
+      return t("transcript.tool.switchMode", { mode: str("target_mode_id") || "?" });
     case "AskUserQuestion":
       return str("question") || t("transcript.tool.question");
     case "Read":

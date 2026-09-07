@@ -3,6 +3,13 @@ import type zh from "../zh-CN/composer";
 
 export default {
   "composer.placeholder": "작업을 설명하거나 무엇이든 물어보세요",
+  "composer.placeholder.plan": "계획에 대한 수정 의견을 말하거나 「빌드」를 눌러 실행을 시작하세요",
+  "composer.build": "빌드",
+  "composer.build.title": "계획대로 실행 시작 (계획 전 권한 단계로 돌아감)",
+  "composer.build.more": "다른 빌드 방식",
+  "composer.build.parallel": "병렬 빌드",
+  "composer.build.parallelHint": "멀티태스크 모드, 백그라운드 하위 agent가 분담",
+  "composer.build.message": "계획 빌드 시작",
   "composer.placeholder.busy":
     "작업 중입니다… 지금 보내면 대기열에 들어가고, 현재 작업이 끝나면 자동으로 전송됩니다",
   "composer.drop.hint": "놓으면 입력창에 추가됩니다",

@@ -2,9 +2,10 @@ import { useEffect, useRef, useState } from "react";
 
 import { type PermissionAsk, type PermissionMode, type PermissionResponse, renderUiText } from "../bridge";
 import { useImeGuard } from "../hooks/useImeGuard";
-import { type MessageKey, useT } from "../i18n";
+import { useT } from "../i18n";
 import { Markdown } from "./Markdown";
 import { useEscLayer } from "./Modal";
+import { MODE_LABEL_KEY } from "./pickers";
 
 interface Props {
   ask: PermissionAsk;
@@ -244,87 +245,43 @@ export function AskChoiceCard({
   );
 }
 
-/** 批准后切到哪个档，按钮上要写清楚 —— 这是批准动作的一部分，不是细节。 */
-const APPROVE_LABEL: Partial<Record<PermissionMode, { label: MessageKey; sub: MessageKey }>> = {
-  acceptEdits: {
-    label: "transcript.plan.approveAcceptEdits",
-    sub: "transcript.plan.approveAcceptEditsSub",
-  },
-  default: { label: "transcript.plan.approveDefault", sub: "transcript.plan.approveDefaultSub" },
-};
-
 /**
- * 计划还在往 tool_input 里写的时候用。外观跟批准卡同一套，
- * 没有按钮 —— 写完才轮到用户审。
- */
-export function PlanDraft({ text }: { text: string }) {
-  const { t } = useT();
-  const bodyRef = useRef<HTMLDivElement>(null);
-  // 只有本来就贴着底部才继续跟随 —— 用户上滚回读时，新 token 不能
-  // 把他一次次拽回底部。
-  const stickRef = useRef(true);
-  useEffect(() => {
-    const el = bodyRef.current;
-    if (el && stickRef.current) el.scrollTop = el.scrollHeight;
-  }, [text]);
-
-  return (
-    <div className="plan-card plan-draft" role="status" aria-label={t("transcript.plan.drafting")}>
-      <div className="plan-card-head">
-        <span className="plan-card-badge">{t("transcript.plan.badge")}</span>
-        <span className="plan-card-title">{t("transcript.plan.draftingTitle")}</span>
-      </div>
-      <div
-        className="plan-body"
-        ref={bodyRef}
-        onScroll={(e) => {
-          const el = e.currentTarget;
-          stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-        }}
-      >
-        {text ? <Markdown text={text} /> : null}
-        <span className="plan-caret" aria-hidden />
-      </div>
-    </div>
-  );
-}
-
-/**
- * 计划批准卡（对照 Claude Code 的 "Ready to code?"，但**长在对话流里**）。
+ * 模型建议换工作方式（SwitchMode 工具）。长在对话流里，不弹窗（Cursor 同款）。
  *
- * 内联而不是弹窗：计划在模型侦察几分钟之后才到，弹窗会突然糊在脸上；
- * 而它本来就是对话的一部分 —— 跟在 ExitPlanMode 的工具卡后面，随流
- * 滚动，答完就地消失、工具卡随之落定结果。
+ * 两个方向：agent → plan（"这活改动面大，先定方案"）和 plan → agent
+ * （用户在聊天里说"开始做吧"，模型请他确认）。卡上放模型给的理由原文，
+ * 用户看着理由决定；「切换」把 set_mode 一并交回宿主 —— 同一轮内立即
+ * 生效，模型的下一个工具调用已经按新模式判定。
  *
- * 三个交互决策：计划按 Markdown 渲染（它是要读的文档）；批准按钮按
- * 执行档分两个（批准之后再逐个确认编辑，等于把刚做的决定再问一遍，
- * 所以"自动接受编辑"是主选项）；打回可以带反馈 —— 不带的话模型只
- * 知道"被拒了"，不知道往哪改。
+ * 切回 agent 用的是**进规划前那一档**（`execMode`），不是内核建议里的
+ * 兜底值：用户开着「编辑放行」进的规划，出来不该变成逐步确认。
+ *
+ * 不绑 Esc、不抢焦点 —— 那是权限弹窗的规矩。这张卡不是危险操作，用户
+ * 可能还想回头看上面的上下文。
  */
-export function PlanApprovalCard({
+export function ModeSwitchCard({
   ask,
+  execMode,
   onAnswer,
-  onParallel,
 }: {
   ask: PermissionAsk;
+  /** 这个会话进规划前用的权限档，切回 agent 时落成它。 */
+  execMode: PermissionMode;
   onAnswer: (r: PermissionResponse) => void;
-  /**
-   * 「并行构建」（Cursor 的 Build in Parallel）：批准 + 进入多任务模式 +
-   * 让模型把计划按依赖分层、每层一个后台子 agent。没传就不出这个按钮。
-   */
-  onParallel?: () => void;
 }) {
   const { t } = useT();
-  const [feedback, setFeedback] = useState("");
   const [answered, setAnswered] = useState(false);
-  const modes = ask.suggestions.flatMap((s) => (s.type === "set_mode" ? [s.mode] : []));
-  // 计划正文是模型原文（raw）；plain 是词典键，只在计划为空时出现。
-  const plan =
+  const target = ask.suggestions.find((s) => s.type === "set_mode")?.mode ?? "plan";
+  const toPlan = target === "plan";
+  // 理由是模型原文（raw）；plain 是词典键，只在模型没给理由时出现。
+  const why =
     ask.preview.kind === "raw"
       ? ask.preview.text
       : ask.preview.kind === "plain"
         ? renderUiText(ask.preview.text)
         : "";
+  const execLabelKey = MODE_LABEL_KEY[execMode];
+  const execLabel = execLabelKey ? t(execLabelKey) : execMode;
 
   const answer = (r: PermissionResponse) => {
     if (answered) return;
@@ -332,96 +289,43 @@ export function PlanApprovalCard({
     onAnswer(r);
   };
 
-  const approve = (mode: PermissionMode) => {
-    const chosen = ask.suggestions.find((s) => s.type === "set_mode" && s.mode === mode);
-    answer({ decision: "allow", remember: chosen ? [chosen] : [] });
-  };
-
-  /** 并行指示先排队、再批准：批准放行工具结果之后内核立刻 drain 队列，
-   *  指示紧跟在「已批准」后面进历史。反过来的话它要等到下一批工具之后。 */
-  const approveParallel = () => {
-    if (answered || !onParallel) return;
-    onParallel();
-    // 后台子 agent 每一步编辑都弹窗的话，并行就名存实亡 —— 默认自动接受编辑。
-    approve(modes.includes("acceptEdits") ? "acceptEdits" : (modes[0] ?? "default"));
-  };
-
   return (
-    <div className="plan-card" role="region" aria-label={t("transcript.plan.approvalLabel")}>
+    <div className="plan-card mode-card" role="region" aria-label={t("transcript.mode.ariaLabel")}>
       <div className="plan-card-head">
-        <span className="plan-card-badge">{t("transcript.plan.badge")}</span>
-        <span className="plan-card-title">{t("transcript.plan.reviewTitle")}</span>
+        <span className="plan-card-badge">{t("transcript.mode.badge")}</span>
+        <span className="plan-card-title">
+          {toPlan ? t("transcript.mode.toPlanTitle") : t("transcript.mode.toAgentTitle")}
+        </span>
       </div>
 
-      <div className="plan-body">
-        <Markdown text={plan || t("transcript.plan.empty")} />
-      </div>
-
-      <textarea
-        className="plan-feedback"
-        value={feedback}
-        onChange={(e) => setFeedback(e.target.value)}
-        placeholder={t("transcript.plan.feedbackPlaceholder")}
-        rows={2}
-        spellCheck={false}
-      />
+      {why ? (
+        <div className="mode-card-why">
+          <Markdown text={why} />
+        </div>
+      ) : null}
 
       <div className="plan-card-actions">
+        <button className="btn-deny" disabled={answered} onClick={() => answer({ decision: "deny" })}>
+          {toPlan ? t("transcript.mode.stayAgent") : t("transcript.mode.stayPlan")}
+        </button>
+        <span className="plan-card-spacer" />
         <button
-          className="btn-deny"
+          className="btn-allow"
           disabled={answered}
           onClick={() =>
             answer({
-              decision: "deny",
-              ...(feedback.trim() ? { message: feedback.trim() } : {}),
+              decision: "allow",
+              remember: [{ type: "set_mode", mode: toPlan ? "plan" : execMode, scope: "session" }],
             })
           }
         >
-          {t("transcript.plan.reject")}
+          {toPlan ? t("transcript.mode.switchPlan") : t("transcript.mode.switchAgent")}
+          <span className="allow-always-sub">
+            {toPlan
+              ? t("transcript.mode.switchPlanSub")
+              : t("transcript.mode.switchAgentSub", { mode: execLabel })}
+          </span>
         </button>
-        <span className="plan-card-spacer" />
-        {onParallel ? (
-          <button
-            className="btn-allow-always"
-            disabled={answered}
-            onClick={approveParallel}
-            title={t("transcript.plan.parallelTitle")}
-          >
-            <span className="plan-parallel-icon" aria-hidden>
-              ⑂
-            </span>
-            {t("transcript.plan.parallel")}
-            <span className="allow-always-sub">{t("transcript.plan.parallelSub")}</span>
-          </button>
-        ) : null}
-        {modes.length > 0 ? (
-          modes.map((m, i) => {
-            const known = APPROVE_LABEL[m];
-            const label = known
-              ? { label: t(known.label), sub: t(known.sub) }
-              : { label: t("transcript.plan.approveMode", { mode: m }), sub: "" };
-            return (
-              <button
-                key={m}
-                className={i === 0 ? "btn-allow" : "btn-allow-always"}
-                disabled={answered}
-                onClick={() => approve(m)}
-              >
-                {label.label}
-                {label.sub ? <span className="allow-always-sub">{label.sub}</span> : null}
-              </button>
-            );
-          })
-        ) : (
-          // 内核没给 set_mode 建议时也得有出口 —— 只剩"打回"的计划卡是死胡同
-          <button
-            className="btn-allow"
-            disabled={answered}
-            onClick={() => answer({ decision: "allow", remember: [] })}
-          >
-            {t("transcript.plan.approve")}
-          </button>
-        )}
       </div>
     </div>
   );

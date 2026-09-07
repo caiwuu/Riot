@@ -64,7 +64,7 @@ fn fan_out(viewers: &mut HashMap<String, Channel<AgentEvent>>, event: AgentEvent
 /// 事件流里宿主自己也要消费的那几件事。
 ///
 /// 事件的主要去向是前端 Channel,但 AppState 需要跟着更新自己的登记:
-/// busy 指示点、ExitPlanMode 在内核改掉的权限模式。全量事件都发给宿主
+/// busy 指示点、SwitchMode 在内核改掉的权限模式。全量事件都发给宿主
 /// 太重(token 流每秒上百条),只挑这几样。
 #[derive(Debug)]
 pub enum HostNotice {
@@ -74,7 +74,7 @@ pub enum HostNotice {
     Started { session_id: String },
     /// 一轮结束(会话空闲了)。
     Done { session_id: String },
-    /// 内核侧改了权限模式(ExitPlanMode)。宿主是设置权威,要记下来
+    /// 内核侧改了权限模式(用户在 SwitchMode 的卡片上同意)。宿主是设置权威,要记下来
     /// 并持久化 —— 否则下一轮 TurnConfig 又把旧模式传回去。
     ModeChanged {
         session_id: String,

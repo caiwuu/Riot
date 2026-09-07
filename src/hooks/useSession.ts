@@ -14,6 +14,7 @@ import {
   type HistorySnapshot,
   type ImageInput,
   type Message,
+  type Nudge,
   type PendingAsk,
   type PermissionAsk,
   type PermissionMode,
@@ -39,6 +40,7 @@ import {
 } from "../bridge";
 import { type MessageKey, t, tn } from "../i18n";
 import { extractTopLevelStringField, extractTopLevelStringFields } from "../lib/partialJson";
+import { PLAN_TOOL } from "../lib/plan";
 
 /**
  * 界面上的一条内容。
@@ -133,10 +135,11 @@ export interface SessionState {
   /** 正在流式输出的思考过程。 */
   thinking: string;
   /**
-   * 正在流式写出的计划正文（ExitPlanMode 的 `plan` 参数）。
+   * 正在流式写出的计划正文（CreatePlan 的 `plan` 参数）。
    * `null` = 没在写计划。空字符串 = 已经认出是计划、正文还没到。
    * 计划整段塞在工具参数里，等 tool_use 完整到达才显示的话，
-   * 用户会对着三个点干等几十秒，以为对话卡住了。
+   * 用户会对着侧栏空面板干等几十秒，以为对话卡住了。侧栏的计划面板
+   * 边流边渲染它；工具落定后改读磁盘上的文件。
    */
   streamingPlan: string | null;
   busy: boolean;
@@ -378,6 +381,9 @@ export function useSession(
   /** 等结果的 ShowBrowser 调用。同 pendingPreviews 的理由：浏览器里一页
    *  都没有时这个工具会失败，那时弹出来的是一个空面板。 */
   const pendingShowBrowser = useRef(new Set<string>());
+  /** 等结果的 CreatePlan 调用。结果一到，边流边显示的计划草稿就该撤 ——
+   *  之后侧栏面板读的是磁盘上那份文件。 */
+  const pendingPlans = useRef(new Set<string>());
 
   // 排队面板的权威镜像放 ref 而不是只放 state：事件回调（注入匹配、
   // Done 后接力）跑在 React 渲染周期之外，读 state 拿到的是一拍之前的
@@ -567,6 +573,8 @@ export function useSession(
               if (c.type !== "tool_use") continue;
               if (c.name === "ShowBrowser") {
                 pendingShowBrowser.current.add(c.id);
+              } else if (c.name === PLAN_TOOL) {
+                pendingPlans.current.add(c.id);
               } else if (c.name === "BrowserHandoff") {
                 // 唯一在**调用时**就弹的工具。它请用户在面板里亲自做一件事
                 // （登录、过验证码），而它的结果要等他做完才回来 —— 等结果
@@ -594,6 +602,13 @@ export function useSession(
                 onBrowserOpenRef.current?.();
               }
             }
+            // 计划工具落定了：草稿撤掉，侧栏面板改读磁盘上的文件。
+            const planDone = event.content.some(
+              (c) =>
+                c.type === "tool_result" &&
+                pendingPlans.current.delete(c.tool_use_id),
+            );
+            if (planDone) setState((s) => ({ ...s, streamingPlan: null }));
           }
           // 排队的插话被内核注入了 —— 面板条目转成对话气泡。先按 id 配
           //（宿主入队时定的、注入原样带回），配不上再按原文兜底（sendTurn
@@ -650,12 +665,9 @@ export function useSession(
             // 同一个 request_id 重复到达就不排两次 —— 事件重放（切回
             // 会话）不该让用户连答两遍同一个问题。
             if (s.asks.some((a) => a.requestId === event.request_id)) return s;
-            const isPlan = event.detail.suggestions.some((x) => x.type === "set_mode");
             return {
               ...s,
               asks: [...s.asks, { requestId: event.request_id, detail: event.detail }],
-              // 批准卡接手之后草稿可以撤 —— 两份同一份计划叠在一起。
-              ...(isPlan ? { streamingPlan: null } : {}),
             };
           });
           break;
@@ -966,6 +978,8 @@ export function useSession(
       text: string,
       images: ImageInput[] = [],
       refs: string[] = [],
+      /** 哪个按钮发的（「构建」/「并行构建」）。普通发送不传。 */
+      nudge?: Nudge,
     ): Promise<boolean> => {
       lastSendAt.current = Date.now();
       // 上午聊完、下午再发：Channel 往往已经死了。先换出口并对历史，
@@ -1015,7 +1029,7 @@ export function useSession(
         }));
       }
       try {
-        const queuedId = await sendTurn(sessionId, text, images, refs);
+        const queuedId = await sendTurn(sessionId, text, images, refs, nudge);
         const inPanel = queuedRef.current.some((q) => q.id === localId);
         // 宿主的裁决可能和乐观放置相反（提交瞬间轮子恰好结束/恰好开跑），
         // 以返回值为准挪位置。

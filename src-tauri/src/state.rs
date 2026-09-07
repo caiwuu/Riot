@@ -1328,9 +1328,16 @@ impl AppState {
         text: &str,
         images: Vec<riot_protocol::ImageInput>,
         refs: Vec<String>,
+        nudge: Option<riot_protocol::Nudge>,
     ) -> HostResult<Option<String>> {
         self.require_sink(session_id).await?;
-        self.submit_turn(session_id, text, images, refs).await
+        // 「并行构建」= 进入多任务模式。内核那边随 TurnConfig 现设，宿主
+        // 这边也要记下，否则下一轮 TurnConfig 又把 false 传回去（和轮中的
+        // `nudge` 同一条理由）。
+        if nudge == Some(riot_protocol::Nudge::BuildInParallel) {
+            self.set_multitask(session_id, true).await?;
+        }
+        self.submit_turn(session_id, text, images, refs, nudge).await
     }
 
     /// [`Self::send_turn`] 去掉"前端必须在听"的那道检查。
@@ -1345,6 +1352,7 @@ impl AppState {
         text: &str,
         images: Vec<riot_protocol::ImageInput>,
         refs: Vec<String>,
+        nudge: Option<riot_protocol::Nudge>,
     ) -> HostResult<Option<String>> {
         self.ensure_hydrated(session_id).await?;
         let sampling = {
@@ -1394,6 +1402,7 @@ impl AppState {
                     text: text.to_owned(),
                     images,
                     refs,
+                    nudge,
                 },
                 config: Box::new(turn_config),
             })
@@ -2423,7 +2432,7 @@ impl AppState {
         self.emit_schedule_changed();
 
         if let Err(e) = self
-            .submit_turn(&session_id, &task.prompt, Vec::new(), Vec::new())
+            .submit_turn(&session_id, &task.prompt, Vec::new(), Vec::new(), None)
             .await
         {
             let err = ui_error!("host.schedule.run.turnFailed"; e.to_ui());
