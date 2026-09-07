@@ -1366,15 +1366,41 @@ pub fn config_path() -> PathBuf {
         .join("config.json")
 }
 
-/// 所有会话的浏览器 profile 都放在这个目录下，一个会话一个子目录。
+/// 浏览器的 profile 目录。**全应用一份**，所有会话共用。
 ///
-/// `[约束]` 推导规则只能有这一份。会话装配浏览器时要按它建目录、删会话时
-/// 要按它删目录 —— 两处各写一遍的话，改了一处就会留下一地删不掉的孤儿，
-/// 而每个孤儿是一百多 MB。
+/// `[约束]` 同一时刻只能有一个浏览器进程握着它。CEF 120 起在
+/// `root_cache_path` 上建了进程单例锁 —— 第二个进程指同一个根时会在
+/// initialize 阶段**直接退出**，而宿主那边看到的只是"事件流断了"，
+/// 没有任何一条报错指向 profile。会话之间共用同一个浏览器进程
+/// （见宿主的 `browser::hub`）正是为了满足这一条。
+///
+/// `[取舍]` 早先是一个会话一份（`browser-profiles/<会话 id>`，见
+/// [`legacy_profiles_dir`]）。切那么细的代价是登录态跟着会话走：每开一个
+/// 新对话，要自动化的站点都得重登一遍 —— 而这正是内置浏览器最常用的场景
+/// 之一。隔离边界现在划在"agent 的浏览器 vs 用户真实的浏览器"这一刀上，
+/// 对话之间不设防。
+///
+/// `[约束]` 它仍然**绝不能**指向用户真实的浏览器 profile，理由见
+/// riot-browser 的 `paths::cache_dir`。放宽的只是"对话之间要不要互相隔离"。
 ///
 /// 参数化 `config_path` 的理由同 [`load_at`]：删除路径有单元测试，而它
 /// 绝不能落到用户真实的目录上。
-pub fn profiles_dir(config_path: &Path) -> PathBuf {
+pub fn browser_profile_dir(config_path: &Path) -> PathBuf {
+    config_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("browser-profile")
+}
+
+/// "一个会话一份 profile"那个时代的根目录（注意是复数）。
+///
+/// 只剩一个用途：启动时整个删掉。它下面每个子目录都以会话 id 命名，而
+/// 现在没有任何代码会再按会话 id 去建或找 profile —— 留着就是纯粹的存量
+/// 垃圾，一份几十到几百 MB，而用户从界面上完全看不到它。
+///
+/// `[约束]` 新的共享 profile 不能放在这个目录**下面**。放进去的话那次
+/// 清理会连它一起删掉，表现是"每次重启所有登录态都没了"。
+pub fn legacy_profiles_dir(config_path: &Path) -> PathBuf {
     config_path
         .parent()
         .unwrap_or(Path::new("."))
@@ -1385,7 +1411,7 @@ pub fn profiles_dir(config_path: &Path) -> PathBuf {
 /// 一个子目录。（压缩后给模型翻的对话原文不在这里 —— 那是 `sessions/digests/`
 /// 下的会话摘录，见内核的 `digest` 模块。）
 ///
-/// `[约束]` 推导规则只能有这一份，理由同 [`profiles_dir`]：内核按它建目录
+/// `[约束]` 推导规则只能有这一份：内核按它建目录
 /// 写文件，宿主删会话时按它删目录。以前这个推导只在内核的 Session 里，
 /// 宿主不知道它 —— 于是删会话从来不删工件，截图随着用过的会话数无上限
 /// 增长。
@@ -1402,7 +1428,7 @@ pub fn artifacts_root(config_path: &Path) -> PathBuf {
 /// 按它定位 —— 各写各的话，改一处就会出现"设置页说没装、模型却能用"这种
 /// 谁也说不清的状态，而每个包是几百 MB。
 ///
-/// 参数化 `config_path` 的理由同 [`profiles_dir`]。
+/// 参数化 `config_path` 的理由同 [`browser_profile_dir`]。
 pub fn packs_dir(config_path: &Path) -> PathBuf {
     config_path.parent().unwrap_or(Path::new(".")).join("packs")
 }

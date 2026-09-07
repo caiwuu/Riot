@@ -44,7 +44,9 @@ use riot_protocol::tool::{
 };
 use riot_protocol::ui_text;
 
-use super::names::{ASK_USER_QUESTION, CREATE_PLAN, EDIT, GLOB, GREP, READ, SWITCH_MODE};
+use super::names::{
+    ASK_USER_QUESTION, CREATE_PLAN, EDIT, GLOB, GREP, READ, SWITCH_MODE, TODO_WRITE,
+};
 
 /// 计划文件所在的目录（相对项目根）。和 `.riot/skills`、`.riot/commands`
 /// 同一个家。名字由权限层定（那里有两处特判：规划模式放行这里的编辑、
@@ -99,24 +101,30 @@ pub fn plan_mode_rules() -> String {
     )
 }
 
-/// 已经有计划文件之后每轮的提醒：用户说的话是改计划还是要执行。
+/// 还在迭代同一份计划时每轮的提醒：用户说的话是改计划还是要执行。
 ///
 /// 这是 Cursor 同款的"迭代 vs 执行"判据。规划模式下用户绝大多数话是在
 /// 改计划（"用 Redis 做缓存"是让你把它写进计划，不是让你去写代码）；
 /// 只有明确指着计划本身说"执行"才是执行 —— 而执行的入口是 SwitchMode
 /// 请用户确认，不是自己动手。
+///
+/// 内核只在**上一轮就在规划模式且计划文件在**时给这一版，并且把文件的
+/// 当前内容和路径一起附在同一条消息里（`<plan_file>`）—— 所以这里不再
+/// 让模型去翻"你之前的 CreatePlan 结果"（可能已被压缩掉）或先 Read 一遍。
 pub fn plan_iteration_rules() -> String {
     format!(
-        "Plan mode is still active and a plan file already exists (its path is in your earlier \
-         {CREATE_PLAN} result). Tell plan iteration apart from execution:\n\
+        "Plan mode is still active and a plan file already exists — its path and current \
+         content are attached to this message as `<plan_file>`. Tell plan iteration apart from \
+         execution:\n\
          - The user is ITERATING when they give feedback, request changes, or describe how \
          something should work. In plan mode, actionable phrasing (\"use Redis for the cache\", \
          \"make the poller loop over shards\", \"add error handling for the timeout case\") means \
          ADD THIS TO THE PLAN, not write the code. When in doubt, assume iteration.\n\
-         - Reflect every iteration in the plan file itself: {READ} it, then apply targeted \
-         {EDIT} calls (editing the `{PLAN_EXT}` file is the one write allowed in plan mode). Do \
-         not paste the revised plan into your reply — the user reads the file. Call \
-         {CREATE_PLAN} again only if they want a fundamentally different plan.\n\
+         - Reflect every iteration in the plan file itself: apply targeted {EDIT} calls to the \
+         attached file (editing the `{PLAN_EXT}` file is the one write allowed in plan mode; no \
+         {READ} needed first — the attached copy is current). Do not paste the revised plan into \
+         your reply — the user reads the file. Call {CREATE_PLAN} again only if they want a \
+         fundamentally different plan.\n\
          - The user wants EXECUTION only when the message refers to the plan itself and tells \
          you to carry it out, with nothing else attached: \"go ahead and implement the plan\", \
          \"execute it\", \"ok, do it\", \"ship it\". Then call {SWITCH_MODE} with \
@@ -128,6 +136,15 @@ pub fn plan_iteration_rules() -> String {
          You still MUST NOT edit code, run commands with side effects, or commit until the mode \
          switch is confirmed."
     )
+}
+
+/// 计划里的一条待办（对照 Cursor CreatePlanArgs 的 `todos[]`，去掉了 id ——
+/// Riot 的 TodoWrite 没有 id，靠措辞对上）。
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct PlanTodo {
+    /// One implementation task: imperative, specific, actionable (e.g. "add the
+    /// sessions table and its migration"). Use the same wording later in TodoWrite.
+    pub content: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -144,6 +161,31 @@ struct Input {
     /// the result will be verified. Do not repeat the title as a heading — the
     /// UI already shows `name`.
     plan: String,
+    /// The implementation task list derived from the plan, in execution order.
+    /// Provide it for any implementation plan unless the change is truly trivial
+    /// (a simple plan gets a few high-level todos); leave it empty for a purely
+    /// investigative plan. These become the todo list when the user presses Build.
+    #[serde(default)]
+    todos: Vec<PlanTodo>,
+}
+
+/// 一次 CreatePlan 调用参数里的待办措辞，按顺序。内核和前端从历史里的
+/// tool_use 取待办时走这一个入口 —— 形状只在这个文件里定义。
+/// 参数解析不出来（半截流、旧 transcript）就是空。
+pub fn todos_of(input: &serde_json::Value) -> Vec<String> {
+    input
+        .get("todos")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|t| t.get("content").and_then(|c| c.as_str()))
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub struct CreatePlan;
@@ -198,7 +240,9 @@ fn slug(name: &str) -> String {
 fn compose_document(name: &str, overview: Option<&str>, plan: &str) -> String {
     let body = plan.trim();
     let body = if body.starts_with("# ") {
-        body.split_once('\n').map_or("", |(_, rest)| rest).trim_start()
+        body.split_once('\n')
+            .map_or("", |(_, rest)| rest)
+            .trim_start()
     } else {
         body
     };
@@ -260,10 +304,20 @@ impl Tool for CreatePlan {
              - If the request is investigative and no code change is planned, say so explicitly \
              rather than inventing implementation steps.\n\
              \n\
+             TASK ORGANIZATION:\n\
+             - `todos` is the implementation task list derived from the plan, in execution \
+             order: each one a clear, specific, actionable task. Provide it for any \
+             implementation plan unless the change is truly trivial; a simple plan gets a few \
+             high-level todos. Leave it empty for a purely investigative plan.\n\
+             - The todos become the todo list when the user presses Build — you will then track \
+             them with {TODO_WRITE} using the same items and wording. Do not call {TODO_WRITE} \
+             for them while still planning.\n\
+             \n\
              UPDATING THE PLAN:\n\
              - Each call creates a NEW plan file. To revise an existing plan, {READ} the file and \
              apply targeted {EDIT} calls to it — editing that file is allowed in plan mode. Call \
-             this tool again only for a fundamentally different plan.\n\
+             this tool again only for a fundamentally different plan (that also replaces the \
+             todos; small revisions to the steps are reconciled when the plan is built).\n\
              \n\
              AFTER IT RETURNS:\n\
              - Finish your reply with one or two sentences: what the plan does and the key \
@@ -346,6 +400,18 @@ impl Tool for CreatePlan {
                 MAX_PLAN_BYTES / 1024
             )));
         }
+        // 只拦真正的坏数据：空文本进了清单，面板上就是一行空白。点名第几项，
+        // 模型能一次改对。
+        if let Some(i) = parsed
+            .todos
+            .iter()
+            .position(|t| t.content.trim().is_empty())
+        {
+            return Err(ValidationError::rejected(format!(
+                "todos 第 {} 项的 content 是空的。每一项是一条具体、可执行的任务措辞。",
+                i + 1
+            )));
+        }
         Ok(())
     }
 
@@ -366,12 +432,7 @@ impl Tool for CreatePlan {
 
         // 写完就是最新状态，直接进缓存：用户说"改一下第三步"，模型可以
         // 直接 Edit，不用先 Read 一遍。
-        let mtime_ms = ctx
-            .fs
-            .metadata(&abs)
-            .await
-            .map(|m| m.mtime_ms)
-            .unwrap_or(0);
+        let mtime_ms = ctx.fs.metadata(&abs).await.map(|m| m.mtime_ms).unwrap_or(0);
         ctx.file_state.put(
             abs,
             FileState {
@@ -381,10 +442,20 @@ impl Tool for CreatePlan {
             },
         );
 
+        // 待办数说一声：它们随计划一起落定了，模型不该在规划期间再用
+        // TodoWrite 建一遍（那会让输入框上方提前挂出一份全 pending 的清单）。
+        let todos_note = match parsed.todos.len() {
+            0 => String::new(),
+            n => format!(
+                " Its {n} todos are recorded with it and become the todo list when the user \
+                 presses Build — do not call {TODO_WRITE} for them now."
+            ),
+        };
         ToolOutcome::Ok {
             model_content: ToolResultContent::text(format!(
                 "{PLAN_FILE_LINE_PREFIX}{rel}\n\
-                 The plan is saved and open beside the conversation for the user to review.\n\
+                 The plan is saved and open beside the conversation for the user to \
+                 review.{todos_note}\n\
                  \n\
                  Now finish your reply with one or two sentences (what the plan does, the key \
                  decision). Do NOT paste the plan, and do NOT ask \"shall I start?\" — the user \
@@ -466,7 +537,10 @@ mod tests {
             let PermissionResult::Deny { message, .. } = r else {
                 panic!("{mode:?} 下该拒：{r:?}");
             };
-            assert!(message.contains(SWITCH_MODE), "拒绝要指路 SwitchMode：{message}");
+            assert!(
+                message.contains(SWITCH_MODE),
+                "拒绝要指路 SwitchMode：{message}"
+            );
         }
     }
 
@@ -508,7 +582,78 @@ mod tests {
         assert!(on_disk.contains("FastAPI 服务"), "概述要在：{on_disk}");
         assert!(on_disk.contains("1. 建表"), "正文要在：{on_disk}");
         // 写完进缓存，模型可以直接 Edit。
-        assert!(c.file_state.get(Path::new(&format!("/work/{rel}"))).is_some());
+        assert!(
+            c.file_state
+                .get(Path::new(&format!("/work/{rel}")))
+                .is_some()
+        );
+    }
+
+    /// 待办随计划落定：结果里报数并拦住"规划期间再 TodoWrite 一遍"；空措辞
+    /// 点名第几项；`todos_of` 是内核和前端取待办的唯一入口。
+    #[tokio::test]
+    async fn 待办随计划落定_空项被拦_解析走同一入口() {
+        let fs = Arc::new(MemFs::new().with_dir("/work/.riot/plans"));
+        let c = ctx(Arc::clone(&fs));
+        let mut with_todos = input();
+        with_todos["todos"] = serde_json::json!([
+            { "content": "建表" },
+            { "content": "  写路由 " },
+        ]);
+        CreatePlan
+            .validate_input(&with_todos, &c)
+            .await
+            .expect("两条正常待办该过");
+        let out = CreatePlan.call(with_todos.clone(), c.clone()).await;
+        let ToolOutcome::Ok { model_content, .. } = out else {
+            panic!("该成功：{out:?}");
+        };
+        let text = format!("{model_content:?}");
+        assert!(text.contains("2 todos"), "{text}");
+        assert!(
+            text.contains(&format!("do not call {TODO_WRITE} for them now")),
+            "规划期间别再建一遍：{text}"
+        );
+        assert_eq!(
+            todos_of(&with_todos),
+            vec!["建表", "写路由"],
+            "去空白、保顺序"
+        );
+
+        // 没给待办：结果不提，解析出来是空。
+        let out = CreatePlan.call(input(), c.clone()).await;
+        let ToolOutcome::Ok { model_content, .. } = out else {
+            panic!("该成功：{out:?}");
+        };
+        assert!(!format!("{model_content:?}").contains("todos"));
+        assert!(todos_of(&input()).is_empty());
+        assert!(todos_of(&serde_json::json!({ "todos": "not-an-array" })).is_empty());
+
+        let mut blank = input();
+        blank["todos"] = serde_json::json!([{ "content": "建表" }, { "content": "  " }]);
+        let err = CreatePlan
+            .validate_input(&blank, &c)
+            .await
+            .expect_err("空措辞该拦");
+        assert!(format!("{err:?}").contains("第 2 项"), "{err:?}");
+    }
+
+    /// 工具描述要教 todos 的用法，并且指路真实存在的 TodoWrite。
+    #[test]
+    fn 描述里讲待办怎么给() {
+        let p = CreatePlan.prompt(&PromptContext {
+            cwd: "/work".into(),
+            platform: "macos".into(),
+            sandboxed: false,
+            sibling_tools: Vec::new(),
+            today: "2026年9月".into(),
+        });
+        assert!(p.contains("TASK ORGANIZATION"), "{p}");
+        assert!(p.contains("`todos`"), "{p}");
+        assert!(
+            p.contains(TODO_WRITE),
+            "要说清构建时用哪个工具接着跟踪：{p}"
+        );
     }
 
     #[test]
@@ -556,5 +701,9 @@ mod tests {
         let iter = plan_iteration_rules();
         assert!(iter.contains(SWITCH_MODE) && iter.contains(EDIT));
         assert!(iter.contains("assume iteration"));
+        // 内核把文件内容附在同一条消息里，这里就不能再指着可能已被压缩掉的
+        // 旧结果说"路径在那儿"。
+        assert!(iter.contains("<plan_file>"), "{iter}");
+        assert!(!iter.contains("earlier CreatePlan result"), "{iter}");
     }
 }

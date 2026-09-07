@@ -263,6 +263,20 @@ export type Attachment =
       text: string;
     };
 /**
+ * 用户在界面上按的一个"推一把"按钮，变成一条塞给模型的带外提醒。
+ *
+ * 对应 Cursor 的 SimulatedMsgReason：按钮不产生用户的话，只产生一条
+ * system_reminder。两条投递路：
+ *
+ * - **轮中**（`turn.nudge`）：注入到当前轮的下一个安全点 —— 这一批工具
+ *   结果就位、模型还没开口的那一刻。按钮说的是"你手上这件事"，等整轮
+ *   跑完再给模型看，功能就等于不存在。「转到后台」走这条。
+ * - **开轮**（[`TurnInput::nudge`]）：随一条用户消息一起进历史，附在
+ *   正文之后。计划做完、回合已经结束，用户点「构建」时没有轮在跑，
+ *   提醒只能跟着新开的那一轮走。
+ */
+export type Nudge = "start_multitasking" | "build_plan" | "build_in_parallel";
+/**
  * 后台任务的生命周期。
  *
  * 没有"排队"态：后台子 agent 一登记就开跑 —— 并发数由模型自己克制
@@ -871,20 +885,6 @@ export type ThinkingPolicy =
  */
 export type ThinkingEffort = "low" | "medium" | "high";
 /**
- * 用户在界面上按的一个"推一把"按钮，变成一条塞给模型的带外提醒。
- *
- * 对应 Cursor 的 SimulatedMsgReason：按钮不产生用户的话，只产生一条
- * system_reminder。两条投递路：
- *
- * - **轮中**（`turn.nudge`）：注入到当前轮的下一个安全点 —— 这一批工具
- *   结果就位、模型还没开口的那一刻。按钮说的是"你手上这件事"，等整轮
- *   跑完再给模型看，功能就等于不存在。「转到后台」走这条。
- * - **开轮**（[`TurnInput::nudge`]）：随一条用户消息一起进历史，附在
- *   正文之后。计划做完、回合已经结束，用户点「构建」时没有轮在跑，
- *   提醒只能跟着新开的那一轮走。
- */
-export type Nudge = "start_multitasking" | "build_plan" | "build_in_parallel";
-/**
  * 内核 → 宿主，对 [`RpcRequest`] 的应答。
  */
 export type RpcResponse =
@@ -1157,6 +1157,16 @@ export interface MessageMeta {
    * 由 INV-9 断言保证。
    */
   model_origin?: string | null;
+  /**
+   * 这条 user 消息是界面上哪个按钮发的（「构建」/「并行构建」）。
+   *
+   * 对照 Cursor 的 `isPlanExecution` / `simulatedMsgReason`：按钮发的
+   * 消息在对话流里不画成用户气泡，画成一张「构建 · 计划标题」的卡。
+   * 正文（一句短话）和给模型的指示（`SystemReminder` 附件）都照常在
+   * 消息里 —— 这份标记只给界面，模型那边不需要。只有开轮那条路
+   * （`TurnInput::nudge`）打上；轮中注入的提醒是合成消息，本来就不显示。
+   */
+  nudge?: Nudge | null;
   /**
    * 是否为系统合成（而非模型产出或用户输入）。
    */

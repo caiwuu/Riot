@@ -82,8 +82,10 @@ import { isMobileNow, useIsMobile } from "./hooks/useIsMobile";
 import { t, useT } from "./i18n";
 import {
   latestPlan,
+  planTodos,
   type PlanState,
   samePlan,
+  sameTodos,
   SWITCH_MODE_TOOL,
   subscribePlanOpen,
 } from "./lib/plan";
@@ -377,19 +379,17 @@ export function App() {
       if (
         cur &&
         samePlan(cur.plan, state.plan) &&
+        sameTodos(cur.todos, state.todos) &&
         cur.streaming === state.streaming &&
         cur.canBuild === state.canBuild &&
         cur.edits === state.edits
       ) {
         return prev;
       }
-      // 内容没变就沿用旧对象，PlanPanel 的依赖不白翻。
-      return {
-        ...prev,
-        [sessionId]: samePlan(cur?.plan ?? null, state.plan) && cur
-          ? { ...state, plan: cur.plan }
-          : state,
-      };
+      // 内容没变的部分沿用旧对象，PlanPanel 的依赖不白翻。
+      const plan = cur && samePlan(cur.plan, state.plan) ? cur.plan : state.plan;
+      const todos = cur && sameTodos(cur.todos, state.todos) ? cur.todos : state.todos;
+      return { ...prev, [sessionId]: { ...state, plan, todos } };
     });
   }, []);
   /** 用户从终端选中、要交给模型的一段输出。塞进输入框而不是直接发送 ——
@@ -2075,6 +2075,7 @@ export function App() {
                     // 模型每 Edit 一次文件、每跑完一轮，面板重读一次。
                     refreshKey={`${changesRev}/${ps.edits}`}
                     canBuild={ps.canBuild}
+                    todos={ps.todos}
                   />
                 ) : (
                   <div className="plan-panel plan-panel-none">{t("app.workbench.planNone")}</div>
@@ -2331,6 +2332,9 @@ function Chat({
   // 计划 = 对话里最近一次 CreatePlan 调用（见 lib/plan）。右侧抽屉的面板、
   // 标签上的标题、输入框的「构建」键都从这一份派生。
   const plan = useMemo(() => latestPlan(session.items), [session.items]);
+  // 计划的待办进度：初稿在 CreatePlan 的参数里，构建后由模型的 TodoWrite
+  // 接管（见 lib/plan 的 planTodos）。
+  const todos = useMemo(() => planTodos(session.items, plan), [session.items, plan]);
   const [buildAvailable, setBuildAvailable] = useState(false);
   const planChangeRef = useRef(onPlanChange);
   planChangeRef.current = onPlanChange;
@@ -2341,8 +2345,9 @@ function Chat({
       streaming: streamingPlan,
       canBuild: buildAvailable && plan?.status === "ok",
       edits: editCount,
+      todos,
     });
-  }, [sessionId, plan, streamingPlan, buildAvailable, editCount]);
+  }, [sessionId, plan, streamingPlan, buildAvailable, editCount, todos]);
   // 模型开始写一份**新**计划（卡片刚以运行态出现）→ 抽屉切到计划标签。
   // 只认运行态：切回会话时水合出来的历史计划都是落定的，不该每次切回
   // 都把抽屉弹开。后台会话不抢前台的抽屉（和浏览器、预览同一个取舍）。

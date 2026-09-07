@@ -92,13 +92,19 @@ pub fn helper_exe() -> PathBuf {
 ///
 /// `[约束]` **绝不能**指向用户真实的浏览器 profile。
 ///
-/// agent 驱动的浏览器一旦带上用户的登录态，一次 prompt injection 就能读走
-/// 邮箱、代码仓库、银行页面里的内容。Codex 的内置浏览器同样明确不支持
-/// 认证和 cookie，要登录得另走扩展 —— 那是刻意的产品边界，不是缺功能。
+/// agent 驱动的浏览器一旦带上用户日常浏览器里的登录态，一次 prompt
+/// injection 就能读走邮箱、代码仓库、银行页面里的内容。隔离边界划在
+/// "agent 的浏览器 vs 用户真实的浏览器"这一刀上，而且只划在这一刀上 ——
+/// 这个目录**本身**是留登录态的（宿主全应用共用一份，见宿主的
+/// `config::browser_profile_dir`），否则每开一个对话都要把要自动化的站点
+/// 重登一遍。Codex 的内置浏览器也是这个粒度:独立于系统浏览器的一份
+/// profile，但登一次之后对后续任务一直有效。
 ///
 /// `[约束]` 一个目录同时只能有一个 Chromium 实例。第二个进程会因为拿不到
 /// profile 锁而**直接退出**，宿主那边看到的是"事件流断了"，完全指不出原因。
-/// 所以宿主可以用 `RIOT_BROWSER_PROFILE` 指定，让每个实例各用各的。
+/// 宿主因此只起一个浏览器进程、让所有会话共用（见宿主的 `browser::hub`），
+/// 并用 `RIOT_BROWSER_PROFILE` 把目录指进来。留着这个环境变量还有一个用途:
+/// 测试要各跑各的实例，各自指一个临时目录。
 pub fn cache_dir() -> PathBuf {
     if let Some(p) = std::env::var_os("RIOT_BROWSER_PROFILE").filter(|s| !s.is_empty()) {
         return PathBuf::from(p);

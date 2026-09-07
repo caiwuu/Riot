@@ -287,6 +287,43 @@ impl Transcripts {
             Err(e) => Err(e),
         }
     }
+
+    /// 所有会话的子 agent transcript 都在这个目录下，一个会话一个子目录
+    /// （以会话 id 命名），见 [`Self::subagents_of`]。
+    ///
+    /// 放在主目录**下面一层**而不是混在一起：[`Self::scan`] 只扫主目录里的
+    /// `.jsonl`，混进去的子 agent 记录会在索引重建时被当成会话捞回来。
+    ///
+    /// `[约束]` 推导规则只能有这一份。内核按它开子 agent 的日志、删会话时
+    /// 按它删目录、宿主启动时按它收孤儿 —— 各写各的话，改一处就会留下
+    /// 一地删不掉的目录，而每个是几百 KB 到几 MB 的工具输出。
+    pub fn subagents_dir(&self) -> PathBuf {
+        self.dir.join("subagents")
+    }
+
+    /// 一个会话的子 agent transcript 目录。里面每个 `.jsonl` 是一个子 agent。
+    pub fn subagents_of(&self, id: &SessionId) -> Transcripts {
+        Transcripts::new(self.subagents_dir().join(id.as_str()))
+    }
+
+    /// 删掉一个会话的全部子 agent transcript。不存在不是错误。
+    ///
+    /// 这一步以前是漏的：子 agent 的日志由 [`Self::subagents_of`] 单独落盘，
+    /// 而 [`Self::remove`] 只删主 transcript 那一个文件 —— 于是删掉的会话在
+    /// `subagents/` 下留一个永远没人认领的目录，一次侦察子 agent 的历史动辄
+    /// 几百 KB，多任务模式一个会话能开十几个。它刻意躲开了索引重建（见
+    /// [`Self::subagents_dir`]），所以用户从界面上完全看不到这笔泄漏。
+    ///
+    /// `[约束]` 要在子 agent 都停下之后调。正在跑的子 agent 还握着它的日志
+    /// 句柄，Windows 上删不掉打开着的文件 —— 删不掉只告警，残留的那份由
+    /// 宿主下次启动的孤儿清理收。
+    pub async fn remove_subagents(&self, id: &SessionId) -> std::io::Result<()> {
+        match tokio::fs::remove_dir_all(self.subagents_of(id).dir()).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 /// 加载时应用一条 rewind：先在活历史里找，找不到再看归档。
@@ -775,6 +812,76 @@ mod tests {
         let (m, msgs) = store.load(&SessionId::from_raw("ghost")).await;
         assert!(m.is_none());
         assert!(msgs.is_empty(), "没说过话不是错误");
+    }
+
+    /// 子 agent 的日志落在主目录**下面一层**，索引重建扫不到它们。
+    ///
+    /// 混进主目录的话，每个子 agent 都会在重建时被当成一个会话捞回来 ——
+    /// 用户看到的是侧栏里冒出一堆没见过的对话。
+    #[tokio::test]
+    async fn 子agent日志躲开索引重建() {
+        let d = dir();
+        let store = Transcripts::new(d.path());
+        let main = store.open(meta("s1"));
+        main.append(&user("m1", "主会话"));
+        main.flush().await;
+
+        let sub = store.subagents_of(&SessionId::from_raw("s1"));
+        let log = sub.open(meta("agent-a"));
+        log.append(&user("m1", "子 agent"));
+        log.flush().await;
+
+        assert!(
+            d.path().join("subagents/s1/agent-a.jsonl").is_file(),
+            "路径形状是 subagents/<会话>/<agent>.jsonl"
+        );
+        let ids: Vec<String> = store
+            .scan()
+            .into_iter()
+            .map(|s| s.meta.id.as_str().to_owned())
+            .collect();
+        assert_eq!(ids, vec!["s1"], "重建只该看到主会话");
+    }
+
+    /// 删会话要连子 agent 的日志一起删，而且只删它自己的。
+    ///
+    /// 这一步以前是漏的：`remove` 只删主 transcript 那一个文件，`subagents/`
+    /// 下的目录永远没人认领。它又刻意躲开了索引重建，所以用户在界面上
+    /// 看不到这笔泄漏 —— 一次侦察子 agent 的历史动辄几百 KB。
+    #[tokio::test]
+    async fn 删子agent日志只删自己那份且幂等() {
+        let d = dir();
+        let store = Transcripts::new(d.path());
+        for (session, agent) in [("s1", "a"), ("s1", "b"), ("s2", "c")] {
+            let log = store
+                .subagents_of(&SessionId::from_raw(session))
+                .open(meta(agent));
+            log.append(&user("m1", "x"));
+            log.flush().await;
+        }
+
+        store
+            .remove_subagents(&SessionId::from_raw("s1"))
+            .await
+            .expect("删 s1 的");
+
+        assert!(
+            !d.path().join("subagents/s1").exists(),
+            "s1 的整个目录该没了"
+        );
+        assert!(
+            d.path().join("subagents/s2/c.jsonl").is_file(),
+            "别的会话的日志不能被连累"
+        );
+        // 再删一次是成功，不是错误 —— 和 delete_session 的幂等语义对齐。
+        store
+            .remove_subagents(&SessionId::from_raw("s1"))
+            .await
+            .expect("目录不在了也不算错");
+        store
+            .remove_subagents(&SessionId::from_raw("从没有过"))
+            .await
+            .expect("从没开过子 agent 的会话同理");
     }
 
     #[tokio::test]

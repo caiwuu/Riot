@@ -94,11 +94,13 @@ const PlanCard = memo(function PlanCard({ tool }: { tool: Tool }) {
             {running ? <span className="plan-caret" aria-hidden /> : null}
           </span>
           <span className="plan-tool-title">{name}</span>
-          {overview ? <span className="plan-tool-overview">{overview}</span> : null}
-          {tool.status === "error" ? (
-            <span className="plan-tool-overview tool-fail">{tool.result ?? t("common.failed")}</span>
-          ) : null}
         </span>
+        {/* 概述另起一行、从图标那一列起排：它是整段话，不是标题的附注，
+            缩进到标题下面会在图标底下空出一列。 */}
+        {overview ? <span className="plan-tool-overview">{overview}</span> : null}
+        {tool.status === "error" ? (
+          <span className="plan-tool-overview tool-fail">{tool.result ?? t("common.failed")}</span>
+        ) : null}
         <span className="task-card-go" aria-hidden>
           ›
         </span>

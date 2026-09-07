@@ -25,6 +25,7 @@ pub use gui_env::print_process_env;
 pub mod dir_browse;
 pub mod env_probe;
 pub mod kernel;
+mod nav_guard;
 pub mod notification;
 pub mod packs;
 pub mod pasteboard;
@@ -1412,6 +1413,65 @@ fn install_panic_hook() {
     }));
 }
 
+/// 建主窗口。配置仍然在 `tauri.conf.json` 里（`app.windows[0]`），只是那边
+/// 标了 `"create": false`，改由这里按同一份配置建 —— 为的是能挂上两个钩子：
+///
+/// - `on_navigation`：webview 想把整个窗口导航到别处时先问这里。默认行为
+///   是照办，于是聊天里的链接上右键 "Open Link" 就能让 Riot 整个变成那个
+///   网页，而且回不来。策略见 [`nav_guard`]。
+/// - `on_new_window`：`window.open` 和右键 "Open Link in New Window"。
+///   应用自己从不开新窗口（对外链接一律走系统浏览器），所以全拒，外部
+///   网址照样转给系统浏览器。
+///
+/// `[约束]` 要在 setup 里**最先**跑。后面的外观设置靠 `get_webview_window("main")`
+/// 找窗口，那时窗口得已经在了。
+fn create_main_window(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri_plugin_opener::OpenerExt as _;
+
+    let config = app
+        .config()
+        .app
+        .windows
+        .first()
+        .cloned()
+        .ok_or("tauri.conf.json 里没有主窗口配置")?;
+    let dev_url = app.config().build.dev_url.clone();
+
+    // 转给系统浏览器。打不开只记日志：这是用户主动点的链接，静默吞掉
+    // 会让人以为链接坏了，但为此弹窗又太重。
+    let open_externally = {
+        let handle = app.handle().clone();
+        move |url: &tauri::Url| {
+            if let Err(e) = handle.opener().open_url(url.as_str(), None::<&str>) {
+                tracing::warn!(error = %e, url = %url, "转给系统浏览器失败");
+            }
+        }
+    };
+
+    let nav_open = open_externally.clone();
+    let new_window_open = open_externally;
+    tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
+        .on_navigation(move |url| match nav_guard::decide(url, dev_url.as_ref()) {
+            nav_guard::Verdict::Allow => true,
+            nav_guard::Verdict::OpenExternally => {
+                nav_open(url);
+                false
+            }
+            nav_guard::Verdict::Block => {
+                tracing::debug!(url = %url, "拦下一次不该发生的窗口导航");
+                false
+            }
+        })
+        .on_new_window(move |url, _features| {
+            if matches!(url.scheme(), "http" | "https" | "mailto") {
+                new_window_open(&url);
+            }
+            tauri::webview::NewWindowResponse::Deny
+        })
+        .build()?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let directives = log_filter(
@@ -1585,6 +1645,8 @@ pub fn run() {
         // 启动时把 MCP 连接对齐配置。放 setup 里而不是 restore：
         // spawn 连接任务要求 runtime 已经起来，restore 跑在那之前。
         .setup(|app| {
+            create_main_window(app)?;
+
             // 窗口外观钉成上次应用的那一档（界面有深浅两套配色，见 vibrancy
             // 模块）。配置里 theme: Dark 在建窗时先钉成深色；这里按记住的值
             // 重钉一次，选了浅色 / 跟随系统的用户才不会每次启动看到侧栏从深
@@ -1626,13 +1688,15 @@ pub fn run() {
                     .apply(&handle, &cfg.remote)
                     .await;
             });
-            // 顺手收掉没人认领的浏览器 profile 和工件目录。同样放 setup：
-            // 要在会话表恢复完之后才能判断谁是孤儿，而且删目录要 spawn_blocking。
-            // 不 await —— 启动路径上不该等着删几个 GB 的缓存。
+            // 顺手收掉按会话分的旧 profile（那套已经换成全应用一份了）、
+            // 没人认领的工件目录和子 agent transcript 目录。同样放 setup：
+            // 后两条要在会话表恢复完之后才能判断谁是孤儿，而且删目录要
+            // spawn_blocking。不 await —— 启动路径上不该等着删几个 GB 的缓存。
             let state = app.state::<AppState>().inner().clone();
             tauri::async_runtime::spawn(async move {
-                state.gc_browser_profiles().await;
+                state.gc_legacy_browser_profiles().await;
                 state.gc_artifacts().await;
+                state.gc_subagent_transcripts().await;
             });
             Ok(())
         })

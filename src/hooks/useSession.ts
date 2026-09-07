@@ -55,8 +55,19 @@ export type Item =
    * `files` 是消息里 `@` 引用过的文件路径（内容进了模型，界面只列路径）。
    * `at` 是消息产生的时刻（Unix 毫秒，见 MessageMeta.created_at_ms）；
    * undefined = 本字段之前的老记录，界面那里不显示时间。
+   * `nudge` = 这条是「构建」/「并行构建」按钮发的（MessageMeta.nudge），
+   * 画成构建卡而不是气泡；`planName` 是它构建的那份计划的标题。
    */
-  | { kind: "user"; id: string; text: string; images?: string[]; files?: string[]; at?: number }
+  | {
+      kind: "user";
+      id: string;
+      text: string;
+      images?: string[];
+      files?: string[];
+      at?: number;
+      nudge?: Nudge;
+      planName?: string;
+    }
   /** `stopped` = 用户按停止截断的半截回答（内核定稿的，见 finalize_partial）。 */
   | { kind: "assistant"; id: string; text: string; stopped?: boolean; at?: number }
   | { kind: "thinking"; id: string; text: string }
@@ -1007,6 +1018,17 @@ export function useSession(
       // `[约束]` queuedRef 的修改都在 setState 外面：StrictMode 会把
       // reducer 跑两遍，塞在里面的追加会翻倍。
       const wasBusy = busyRef.current;
+      // 乐观气泡。按钮发的那条从一开始就画成构建卡 —— 等宿主回声再换，
+      // 用户会看到一句占位话闪成卡片。
+      const optimistic = (items: Item[]): Item => ({
+        kind: "user",
+        id: localId,
+        text,
+        images: dataUrls,
+        ...(refs.length ? { files: refs } : {}),
+        at: sentAt,
+        ...buildOf(nudge, items),
+      });
       if (wasBusy) {
         mutateQueued((q) => [...q, { id: localId, text, images, refs }]);
       } else {
@@ -1015,17 +1037,7 @@ export function useSession(
         setState((s) => ({
           ...s,
           busy: true,
-          items: [
-            ...s.items,
-            {
-              kind: "user",
-              id: localId,
-              text,
-              images: dataUrls,
-              ...(refs.length ? { files: refs } : {}),
-              at: sentAt,
-            },
-          ],
+          items: [...s.items, optimistic(s.items)],
         }));
       }
       try {
@@ -1056,17 +1068,7 @@ export function useSession(
           setState((s) => ({
             ...s,
             busy: true,
-            items: [
-            ...s.items,
-            {
-              kind: "user",
-              id: localId,
-              text,
-              images: dataUrls,
-              ...(refs.length ? { files: refs } : {}),
-              at: sentAt,
-            },
-          ],
+            items: [...s.items, optimistic(s.items)],
           }));
         }
         return true;
@@ -1731,6 +1733,32 @@ function stampOf(meta: MessageMeta | null | undefined): { at?: number } {
 }
 
 /**
+ * 按钮发的消息（「构建」/「并行构建」）→ 构建卡要的两个字段，摊成一段可
+ * 展开的属性。计划标题取这条消息**之前**最近一份计划 —— 卡说的是"构建
+ * 哪份"，同一会话第二次规划再构建时不能指到旧的那份。「转到后台」不是
+ * 开轮消息，走不到这里；真走到了也按普通气泡画。
+ */
+function buildOf(
+  nudge: Nudge | null | undefined,
+  itemsBefore: Item[],
+): { nudge?: Nudge; planName?: string } {
+  if (nudge !== "build_plan" && nudge !== "build_in_parallel") return {};
+  const planName = latestPlanName(itemsBefore);
+  return { nudge, ...(planName ? { planName } : {}) };
+}
+
+/** 条目里最近一次 CreatePlan 的标题；没有就是 undefined。 */
+function latestPlanName(items: Item[]): string | undefined {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    if (it?.kind !== "tool" || it.name !== PLAN_TOOL) continue;
+    const name = (it.input as { name?: unknown } | null)?.name;
+    return typeof name === "string" && name.trim() ? name.trim() : undefined;
+  }
+  return undefined;
+}
+
+/**
  * 消息 → 界面条目。导出给子 agent 会话视图复用：那边拿到的是同一种
  * `Message[]`，画法也该和主对话一样（工具卡、思考块、回答）。
  */
@@ -1783,6 +1811,7 @@ export function messagesToItems(msgs: Message[], skipSynthetic = false): Item[] 
             ...(images.length && !imagesShown ? { images } : {}),
             ...(files.length && !imagesShown ? { files } : {}),
             ...stampOf(msg.meta),
+            ...buildOf(msg.meta?.nudge, items),
           });
           imagesShown = true;
         } else if (c.type === "tool_result") {
@@ -1964,6 +1993,10 @@ function applyMessage(s: SessionState, event: Extract<AgentEvent, { type: "messa
         const files = msg.content.flatMap((x) =>
           x.type === "attachment" && x.kind === "user_file" ? [x.path] : [],
         );
+        // 乐观气泡：正文相同的 `local-*` 换成正式 id，避免同一句话两张卡。
+        const localAt = items.findIndex(
+          (it) => it.kind === "user" && it.id.startsWith("local-") && it.text === c.text,
+        );
         const bubble: Extract<Item, { kind: "user" }> = {
           kind: "user",
           id: msg.id,
@@ -1971,11 +2004,10 @@ function applyMessage(s: SessionState, event: Extract<AgentEvent, { type: "messa
           ...(images.length ? { images } : {}),
           ...(files.length ? { files } : {}),
           ...stampOf(msg.meta),
+          // 构建卡的计划标题按这条消息之前的条目找：乐观气泡已经占了位的
+          // 话，它自己不能算"之前"。
+          ...buildOf(msg.meta?.nudge, localAt >= 0 ? items.slice(0, localAt) : items),
         };
-        // 乐观气泡：正文相同的 `local-*` 换成正式 id，避免同一句话两张卡。
-        const localAt = items.findIndex(
-          (it) => it.kind === "user" && it.id.startsWith("local-") && it.text === c.text,
-        );
         if (localAt >= 0) {
           items[localAt] = bubble;
         } else {

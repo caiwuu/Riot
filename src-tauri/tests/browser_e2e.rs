@@ -33,15 +33,68 @@ use tokio::sync::mpsc;
 /// 代价是这个二进制变慢（串行起进程），换"红了就是真坏了"。
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// 每个用例一个独立 profile。
+/// 每个用例一个独立 profile：`<tmp>/riot-browser-test-<pid>/<tag>`。
 ///
 /// `[约束]` 共用一个目录的话，并行跑的第二个实例会因为拿不到 Chromium 的
 /// profile 锁而直接退出，报出来是"事件流断了" —— 看起来像通信坏了，
-/// 实际是两个进程在抢同一份用户数据。
+/// 实际是两个进程在抢同一份用户数据。所以按进程号分根、按用例分子目录。
+///
+/// 顺手把**别的进程**留下的旧根收掉。这些目录以前从不清理，而一个 profile
+/// 有 16MB（Chromium 预分配 8MB 的 BrowserMetrics、5MB 多的 GPU 着色器缓存），
+/// 跑一遍全量就是 540MB —— 一台开发机上攒到过 4344 个、4.5GB，藏在临时目录里
+/// 没人会去看。只收 [`STALE_PROFILE_ROOT`] 以上没动过的：一次全量运行几十秒，
+/// 另一个正在跑的进程每开一个用例都往它的根里建子目录、刷新 mtime，不会那么旧。
 fn profile(tag: &str) -> PathBuf {
-    let p = std::env::temp_dir().join(format!("riot-browser-test-{}-{tag}", std::process::id()));
+    let tmp = std::env::temp_dir();
+    sweep_stale_profile_roots(&tmp);
+    let p = tmp
+        .join(format!("riot-browser-test-{}", std::process::id()))
+        .join(tag);
     let _ = std::fs::create_dir_all(&p);
     p
+}
+
+/// 多久没动过的测试 profile 根算作废。单个用例最长等 30 秒（CDP 超时），
+/// 这个数给了它二十倍的余量；再长只是让密集调试时的临时垃圾多躺一会儿。
+const STALE_PROFILE_ROOT: Duration = Duration::from_secs(10 * 60);
+
+/// 删掉临时目录里别的进程留下的、[`STALE_PROFILE_ROOT`] 没动过的
+/// `riot-browser-test-*`。旧命名（`riot-browser-test-<pid>-<tag>` 平铺）的
+/// 存量同样匹配这个前缀，一并收掉。删不掉就算了 —— 这只是省磁盘，不影响用例。
+fn sweep_stale_profile_roots(tmp: &std::path::Path) {
+    let Ok(rd) = std::fs::read_dir(tmp) else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now() - STALE_PROFILE_ROOT;
+    let mine = format!("riot-browser-test-{}", std::process::id());
+    for e in rd.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("riot-browser-test-") || name == mine {
+            continue;
+        }
+        let stale = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|m| m < cutoff);
+        if stale {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
+/// 一个会话的浏览器视图，连同它自己的那个进程。
+///
+/// 产品里进程是全应用共享的（一个 hub 带多个 `HostBrowser`，见
+/// `browser::hub`），但这些用例要各起各的 Chromium：它们串行跑、各用各的
+/// profile，共用一个 hub 只会让前一个用例的标签页漏进后一个。所以这里
+/// 一个用例一个 hub —— 共享本身另有用例专门验（`两个会话共用一个进程`）。
+fn host_browser(
+    app: PathBuf,
+    profile: PathBuf,
+) -> std::sync::Arc<riot_host_lib::browser::access::HostBrowser> {
+    let hub = riot_host_lib::browser::hub::BrowserHub::new(app, profile);
+    riot_host_lib::browser::access::HostBrowser::new(hub)
 }
 
 fn bundle() -> Option<PathBuf> {
@@ -228,7 +281,7 @@ async fn 崩掉之后下一次调用会自己重开() {
         eprintln!("跳过：还没打包");
         return;
     };
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("heal"));
+    let host = host_browser(app, profile("heal"));
 
     let before = host.open_tab().await.expect("开第一页");
     assert_eq!(before.tabs.len(), 1);
@@ -547,7 +600,7 @@ async fn 工具层能真的驱动浏览器() {
 
     let profile = profile("tools");
     let browser: std::sync::Arc<dyn riot_protocol::browser::BrowserAccess> =
-        riot_host_lib::browser::access::HostBrowser::new(app, profile);
+        host_browser(app, profile);
 
     // 惰性启动:这一刻进程还没起。第一次调用才起。
     let page = "data:text/html;charset=utf-8,\
@@ -587,7 +640,7 @@ async fn 点击和输入能驱动真实页面() {
     };
 
     use riot_protocol::browser::{BrowserAccess as _, InteractError, Target, WaitCondition};
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("interact"));
+    let host = host_browser(app, profile("interact"));
 
     // `[约束]` onsubmit 里不能用 `+` 拼串。data: URL 里加号是保留字符，
     // 某些解析路径会把它变成空格 —— 用 concat 绕开，别赌。
@@ -713,7 +766,7 @@ async fn 扩展交互在真实页面成立() {
     };
 
     use riot_protocol::browser::{Action, BrowserAccess as _, Nav, Target};
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("automation2"));
+    let host = host_browser(app, profile("automation2"));
 
     // confirm() 会阻塞页面直到应答 —— 事件循环必须自动放行，否则这一次
     // 点击和之后的一切都超时。这是这个用例最重要的一条。
@@ -787,7 +840,7 @@ async fn 抓包在真实页面成立() {
         return;
     };
     use riot_protocol::browser::{BrowserAccess as _, NetQuery};
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("netcap"));
+    let host = host_browser(app, profile("netcap"));
 
     // 页面自己再发一个子请求（fetch 一张 data: 图），好让列表里不止主文档。
     let page = "data:text/html;charset=utf-8,\
@@ -824,7 +877,7 @@ async fn 拦截与重放在真实页面成立() {
         return;
     };
     use riot_protocol::browser::{BrowserAccess as _, InterceptOp};
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("intercept"));
+    let host = host_browser(app, profile("intercept"));
 
     host.navigate("data:text/html;charset=utf-8,<body>拦截页</body>")
         .await
@@ -880,7 +933,7 @@ async fn 读cookie带安全属性() {
         return;
     };
     use riot_protocol::browser::BrowserAccess as _;
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("cookies"));
+    let host = host_browser(app, profile("cookies"));
 
     // data: URL 设不了 cookie（opaque origin）—— 用页面脚本往一个真实的
     // http 源写不现实，这里退而验证"没有 cookie 时给的是明确的空说明"，
@@ -907,7 +960,7 @@ async fn 被动探针在真实页面成立() {
         return;
     };
     use riot_protocol::browser::BrowserAccess as _;
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("probe"));
+    let host = host_browser(app, profile("probe"));
 
     // 页面里藏一个 AWS key、一个表单、一个链接。
     let page = "data:text/html;charset=utf-8,\
@@ -950,7 +1003,7 @@ async fn 文件上传在真实页面成立() {
         return;
     };
     use riot_protocol::browser::{BrowserAccess as _, Target};
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("upload"));
+    let host = host_browser(app, profile("upload"));
 
     // 用本进程的可执行文件当"要上传的文件"——一定存在的真实路径。
     let real_file = std::env::current_exe().expect("当前可执行文件路径");
@@ -990,7 +1043,7 @@ async fn 爬虫生成站点地图() {
 
     // 爬虫工具本身要 scope + 真实 host（data: 没有 host），这里直接验证
     // 驱动爬虫的纯逻辑在真实链接上成立:同 host 的链接会被挑出来续爬。
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("crawl"));
+    let host = host_browser(app, profile("crawl"));
     host.navigate(
         "data:text/html,<body><a href='https://x.test/a'>a</a>\
          <a href='https://x.test/b'>b</a><a href='https://y.test/c'>c</a></body>",
@@ -1103,7 +1156,7 @@ async fn 画面能持续推送而不是只出一帧() {
 
     // navigate 是 trait 方法，要 trait 在作用域里。
     use riot_protocol::browser::BrowserAccess as _;
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("cast2"));
+    let host = host_browser(app, profile("cast2"));
 
     // 页面自己动起来，保证有新帧可推 —— 静止页面 Chromium 不会重复发。
     let page = "data:text/html;charset=utf-8,\
@@ -1196,7 +1249,7 @@ async fn screencast_进行中放大面板画面要跟上() {
     };
 
     use riot_protocol::browser::BrowserAccess as _;
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("cast-grow"));
+    let host = host_browser(app, profile("cast-grow"));
 
     // `[约束]` 页面必须是静止的。带动画的页面每 100ms 就有新 damage，
     // capturer 错过一帧还有下一帧兜着 —— 而用户看的多数页面（文档、
@@ -1310,7 +1363,7 @@ async fn 画面尺寸跟着面板走() {
     };
 
     use riot_protocol::browser::BrowserAccess as _;
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("cast-size"));
+    let host = host_browser(app, profile("cast-size"));
 
     // 页面要一直在动，否则 Chromium 认为没有新内容，不会再发帧。
     let page = "data:text/html;charset=utf-8,\
@@ -1369,7 +1422,7 @@ async fn 帧按屏幕的像素密度出() {
     };
 
     use riot_protocol::browser::BrowserAccess as _;
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("dpi"));
+    let host = host_browser(app, profile("dpi"));
 
     // 页面要一直在动，否则 Chromium 认为没有新内容，不会再发帧。
     let page = "data:text/html;charset=utf-8,\
@@ -1461,7 +1514,7 @@ async fn 面板的滚轮能横竖两个方向滚动页面() {
     };
 
     use riot_protocol::browser::BrowserAccess as _;
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("wheel"));
+    let host = host_browser(app, profile("wheel"));
 
     // 页面把滚动位置打进 console，再从 console 工具读回来 —— 那是这一层
     // 唯一现成的"页面内部状态"窗口。
@@ -1530,7 +1583,7 @@ async fn 输入法的组字和确认都落进页面() {
 
     use riot_host_lib::browser::access::Input;
     use riot_protocol::browser::BrowserAccess as _;
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("ime"));
+    let host = host_browser(app, profile("ime"));
 
     // 输入框把自己的值打进 console —— 这一层唯一现成的"页面内部状态"窗口。
     //
@@ -1605,7 +1658,7 @@ async fn 整页截图不平铺视口() {
     };
 
     use riot_protocol::browser::BrowserAccess as _;
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("fullpage"));
+    let host = host_browser(app, profile("fullpage"));
 
     // 四段 1200px 的纯色，总高 4800 —— 远超视口，逼出"视口外"的渲染路径。
     let page = "data:text/html;charset=utf-8,\
@@ -1671,7 +1724,7 @@ async fn 截图体积不随屏幕密度变化() {
     };
 
     use riot_protocol::browser::BrowserAccess as _;
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("shot"));
+    let host = host_browser(app, profile("shot"));
 
     // 一个"几屏高、有配色"的页面，接近真实站点 —— 纯白页压得太狠，
     // 密度带来的差别会被压缩率吃掉，测不出问题。
@@ -1724,7 +1777,7 @@ async fn 多个标签页各自独立() {
     };
 
     use riot_protocol::browser::BrowserAccess as _;
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("tabs"));
+    let host = host_browser(app, profile("tabs"));
 
     let page = |tag: &str| format!("data:text/html;charset=utf-8,<h1>{tag}</h1>");
 
@@ -1901,7 +1954,7 @@ async fn 点外链开在新标签页里() {
     };
 
     use riot_protocol::browser::{BrowserAccess as _, Target};
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("popup-tab"));
+    let host = host_browser(app, profile("popup-tab"));
 
     // 走真的鼠标点击（`Input.dispatchMouseEvent`），因为用户就是这么点的 ——
     // 而且真实点击自带手势，不会撞上 Chromium 的弹窗拦截。
@@ -1981,7 +2034,7 @@ async fn 公网页面能访问本机服务而别的权限提示当场拒绝() {
         }
     });
 
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("lna"));
+    let host = host_browser(app, profile("lna"));
 
     // 必须是**真实的公网 https** 页面。data: 页面是不透明来源、非安全上下文，
     // 打向本机的请求被 CORS 直接拒掉（InsecureLocalNetwork），根本走不到
@@ -2053,7 +2106,7 @@ async fn 页面自己关掉一页之后还能继续用() {
     };
 
     use riot_protocol::browser::BrowserAccess as _;
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("selfclose"));
+    let host = host_browser(app, profile("selfclose"));
 
     host.navigate("data:text/html;charset=utf-8,<h1>AAA</h1>")
         .await
@@ -2143,7 +2196,7 @@ async fn 并发问活动页只会开出一页() {
     };
 
     use riot_protocol::browser::BrowserAccess as _;
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("once"));
+    let host = host_browser(app, profile("once"));
 
     // current_url 不开页，用它当"轻量的活动页查询"没意义 —— 这里要的是
     // 真的会开页的那条路。navigate 是最短的一条。
@@ -2154,6 +2207,151 @@ async fn 并发问活动页只会开出一页() {
 
     let s = host.state().await.expect("取状态");
     assert_eq!(s.tabs.len(), 1, "并发导航只该开出一页，实际：{:?}", s.tabs);
+}
+
+/// 两个会话共用一个进程，但各看各的标签页。
+///
+/// 这条是"全应用一份 profile"整件事的落地验证，跨了三件本可以各自出错、
+/// 而且都不会有编译错误的事：
+///
+/// 1. 两个会话真的共用一个 CEF 进程。共用不了的话第二个会因为抢不到
+///    profile 单例锁**静默退出**，这边只看到"事件流断了"。
+/// 2. 标签页号全局唯一。各发各的话两边的第一页在子进程那边是同一个
+///    browser —— 那时下面两个断言会看到对方的页。
+/// 3. 视图仍然隔离。共享到清单那一层的话，一个会话开页另一个会话的标签栏
+///    会跟着长出来。
+///
+/// 登录态共享（cookie 落在同一份 profile 里）是同一件事的另一面，这里不测：
+/// data: 页面是不透明来源，设不了 cookie，而为它起一个 http 服务器只是把
+/// 这条用例变成一个网络用例。
+#[tokio::test]
+async fn 两个会话共用一个进程但标签页各自隔离() {
+    let _serial = SERIAL.lock().await;
+    let Some(app) = bundle() else {
+        eprintln!("跳过：还没打包");
+        return;
+    };
+
+    use riot_protocol::browser::BrowserAccess as _;
+    // 一个 hub 两个会话 —— 正是产品里的形状。
+    let hub = riot_host_lib::browser::hub::BrowserHub::new(app, profile("shared"));
+    let 甲 = riot_host_lib::browser::access::HostBrowser::new(std::sync::Arc::clone(&hub));
+    let 乙 = riot_host_lib::browser::access::HostBrowser::new(hub);
+
+    甲.navigate("data:text/html;charset=utf-8,<h1>JIA</h1>")
+        .await
+        .expect("甲导航");
+    // 第二个会话起得来就说明进程是共用的:各起一个的话，这一步会卡在
+    // "起不来"或者拿到一个刚退出的进程。
+    乙.navigate("data:text/html;charset=utf-8,<h1>YI</h1>")
+        .await
+        .expect("乙导航 —— 失败多半是两个会话各起了一个进程，第二个抢不到 profile 锁");
+
+    let 甲的 = 甲.state().await.expect("甲的状态");
+    let 乙的 = 乙.state().await.expect("乙的状态");
+
+    assert_eq!(甲的.tabs.len(), 1, "甲多出了别人的页：{:?}", 甲的.tabs);
+    assert_eq!(乙的.tabs.len(), 1, "乙多出了别人的页：{:?}", 乙的.tabs);
+    assert_ne!(
+        甲的.active, 乙的.active,
+        "两个会话拿到同一个标签页号，它们其实在操作同一个页面"
+    );
+
+    // 各自看到的是自己那一页的内容，不是对方的。
+    assert!(甲.current_url().await.contains("JIA"));
+    assert!(乙.current_url().await.contains("YI"));
+
+    // 一个会话关掉自己的页，不该动到另一个。
+    甲.close_tab(甲的.active).await.expect("甲关页");
+    assert_eq!(甲.state().await.expect("甲的状态").tabs.len(), 0);
+    assert_eq!(
+        乙.state().await.expect("乙的状态").tabs.len(),
+        1,
+        "甲关自己的页把乙的页也关了"
+    );
+}
+
+/// 删会话之后，它的标签页要真的从共享进程里消失。
+///
+/// 这条是共享进程特有的泄漏：会话独占进程的时代，句柄一 drop 整棵进程树就被
+/// `kill_on_drop` 收掉，页自然跟着死；共享之后句柄 drop 了进程照跑，不主动
+/// 发 `CloseTab` 那些 CEF browser 就永远留在里面 —— 几十 MB 一个、脚本照跑、
+/// 面板开着的话 screencast 照推（hub 对帧的 ack 是无条件的）。
+///
+/// 观测点是从**另一个会话**的标签页发 `Target.getTargets`：它列的是整个进程里
+/// 所有页面，删掉的那一页的地址不该再出现在里面。只看被删会话自己的清单是
+/// 不够的 —— 清单清空和 CEF 那边关掉是两件事，这条盯的正是后者。
+#[tokio::test]
+async fn 删会话之后它的标签页不留在共享进程里() {
+    let _serial = SERIAL.lock().await;
+    let Some(app) = bundle() else {
+        eprintln!("跳过：还没打包");
+        return;
+    };
+
+    use riot_protocol::browser::BrowserAccess as _;
+    let hub = riot_host_lib::browser::hub::BrowserHub::new(app, profile("close-all"));
+    let 要删的 = riot_host_lib::browser::access::HostBrowser::new(std::sync::Arc::clone(&hub));
+    let 留下的 = riot_host_lib::browser::access::HostBrowser::new(std::sync::Arc::clone(&hub));
+
+    // 地址里带一个别处不会出现的标记，好在目标列表里认出它。
+    let doomed_page = "data:text/html;charset=utf-8,<h1>DOOMED-7f3a</h1>";
+    要删的.navigate(doomed_page).await.expect("要删的会话导航");
+    留下的
+        .navigate("data:text/html;charset=utf-8,<h1>KEEP</h1>")
+        .await
+        .expect("留下的会话导航");
+
+    // 从留下的那一页看整个进程：删之前那一页得在，否则下面"不在了"的断言
+    // 什么都没证明。
+    let browser = hub.live().await.expect("进程活着");
+    let keep_tab = 留下的.state().await.expect("状态").active;
+    let targets = |b: &std::sync::Arc<Browser>| {
+        let b = std::sync::Arc::clone(b);
+        async move {
+            let r = Tab {
+                browser: &b,
+                id: keep_tab,
+            }
+            .cdp("Target.getTargets", serde_json::json!({}))
+            .await
+            .expect("Target.getTargets");
+            serde_json::to_string(&r["targetInfos"]).expect("序列化")
+        }
+    };
+    assert!(
+        targets(&browser).await.contains("DOOMED-7f3a"),
+        "删之前那一页该在进程里"
+    );
+
+    // 模拟 delete_session 对浏览器做的事：摘句柄、关它的页。
+    要删的.close_all().await;
+
+    // CEF 的销毁要走一圈（渲染进程收尾、on_before_close），给它几秒。
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if !targets(&browser).await.contains("DOOMED-7f3a") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "删会话 10 秒后它的页还在共享进程里 —— 这就是孤儿标签页"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // 删掉的会话不能再开页：拿着旧句柄的迟到调用（前端最后一次轮询、还在飞
+    // 的工具调用）会走到这里，开出来的页同样没人管。
+    assert!(
+        要删的.navigate(doomed_page).await.is_err(),
+        "删掉的会话不该还能开页"
+    );
+    assert_eq!(要删的.state().await.expect("状态").tabs.len(), 0);
+
+    // 留下的会话毫发无损。
+    let kept = 留下的.state().await.expect("状态");
+    assert_eq!(kept.tabs.len(), 1, "别的会话的页被连累了：{:?}", kept.tabs);
+    assert!(留下的.current_url().await.contains("KEEP"));
 }
 
 /// 画面跟着活动标签页走。
@@ -2171,7 +2369,7 @@ async fn 画面跟着活动标签页走() {
     };
 
     use riot_protocol::browser::BrowserAccess as _;
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("tab-cast"));
+    let host = host_browser(app, profile("tab-cast"));
 
     // 两页都要一直在动:静止页面 Chromium 不会重复发帧，那样"没收到帧"
     // 就分不清是切换坏了还是页面本来就没变化。
@@ -2248,7 +2446,7 @@ async fn 空白页在地址栏里是空的() {
     };
 
     use riot_protocol::browser::BrowserAccess as _;
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("blank"));
+    let host = host_browser(app, profile("blank"));
 
     let page = |tag: &str| format!("data:text/html;charset=utf-8,<h1>{tag}</h1>");
 
@@ -2305,7 +2503,7 @@ async fn 工具栏能在历史里前进后退() {
     };
 
     use riot_protocol::browser::BrowserAccess as _;
-    let host = riot_host_lib::browser::access::HostBrowser::new(app, profile("history"));
+    let host = host_browser(app, profile("history"));
 
     let page = |tag: &str| format!("data:text/html;charset=utf-8,<body><h1>{tag}</h1></body>");
     host.navigate(&page("AAA")).await.expect("导航到 A");

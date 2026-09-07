@@ -295,6 +295,13 @@ impl SessionManager {
         if let Err(e) = self.transcripts.remove(&id).await {
             tracing::warn!(error = %e, "transcript 删除失败");
         }
+        // 子 agent 的日志在另一个目录，主 transcript 那一下删不到它。
+        // `abort_turn` 已经把后台子 agent 都取消了，但取消是异步的 —— 某个
+        // 正在收尾的子 agent 可能还握着句柄。Unix 上无所谓（unlink 之后
+        // 它写完就释放），Windows 上会删不掉；那份残留由宿主下次启动收。
+        if let Err(e) = self.transcripts.remove_subagents(&id).await {
+            tracing::warn!(error = %e, "子 agent transcript 目录没删干净，下次启动再收");
+        }
         if let Some(root) = root {
             self.digests.remove(&root, &id).await;
         }

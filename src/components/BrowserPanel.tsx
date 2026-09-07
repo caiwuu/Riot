@@ -421,6 +421,25 @@ export function BrowserPanel({
     [],
   );
 
+  // `[约束]` 画面区里不许发生外壳 webview 的文字选区。
+  //
+  // 画面是一整张 canvas。macOS 的 WebKit 在右键时会**先把光标下的元素选中**
+  // 当作菜单目标（源码里那一步的注释是 "context menu events are always
+  // allowed to perform a selection"，连 canvas 上的 user-select:none 都拦
+  // 不住），而被选中的替换元素会被画上一层半透明蓝色。菜单本身在
+  // onContextMenu 里拦掉了，选中态却留下 —— 现象是右键一下整个页面蒙上
+  // 一层蓝，怎么点都不消，看起来像页面坏了。
+  //
+  // 这条路上唯一可取消的事件是 selectstart（React 没有对应的合成事件，
+  // 只能挂原生监听）。掐掉它，选区根本不会建立。
+  useEffect(() => {
+    const el = viewRef.current;
+    if (!el) return;
+    const stop = (e: Event) => e.preventDefault();
+    el.addEventListener("selectstart", stop);
+    return () => el.removeEventListener("selectstart", stop);
+  }, []);
+
   // 拖出面板再松手：抬起落在别处，面板的 onMouseUp 收不到。这里在 window
   // 上兜一手，按最后一个页面坐标补一个 up。面板内的抬起先经 React 根节点
   // 处理、把 held 清掉，到这儿已经是 null，不会发两次。
@@ -707,6 +726,13 @@ export function BrowserPanel({
           // 右键已经作为 down/up 转发给页面了。这里拦掉外壳 webview 自己的
           // 上下文菜单，否则会弹出 Tauri 的菜单穿帮。
           e.preventDefault();
+          // WebKit 在派发这个事件**之前**就把菜单目标选中了（见上面
+          // selectstart 那段）。selectstart 拦住了就到不了这里；没拦住的话
+          // 选区已经在了，就地清掉 —— 只清落在画面区里的，别动别处的选区。
+          const sel = window.getSelection();
+          if (sel && sel.rangeCount > 0 && viewRef.current?.contains(sel.anchorNode)) {
+            sel.removeAllRanges();
+          }
         }}
         onMouseMove={(e) => {
           if (pickMode) {

@@ -1,5 +1,13 @@
 //! 把浏览器子进程接到工具层的 [`BrowserAccess`]。
 //!
+//! # 一个会话一份，但进程是共享的
+//!
+//! 这个结构是**会话级**的：标签页清单、活动页、快照编号、面板画面都属于
+//! 一个会话。底下那个 CEF 进程则是**全应用一个**，由 [`super::hub`] 管着。
+//!
+//! `[约束]` 标签页号不在这一层发。号由 hub 独占分配 —— 每个会话各发一套的话
+//! 两个会话的"第一页"在子进程那边是同一个 browser，理由见 hub 的模块注释。
+//!
 //! # 惰性启动
 //!
 //! `[取舍]` 第一次真的用到才起进程。
@@ -8,22 +16,30 @@
 //! 看个日志），为它们付这个代价不合理。代价是首次调用要多等一两秒 ——
 //! 而那一次本来就要等页面加载，用户感知不到差别。
 //!
+//! 共享之后这个代价还摊薄了：第二个用到浏览器的会话不必再等一次冷启动，
+//! 进程已经在跑了。
+//!
 //! # 谁负责关
 //!
-//! 进程活到会话结束。每次调用后关掉的话，下一次又要付启动成本，而且
-//! 页面状态（登录、滚动位置、SPA 的路由）全丢 —— 模型改完一次样式再截图
-//! 会发现自己回到了首页。
+//! 进程活到应用退出，不再跟着会话走 —— 别的会话可能正用着它。会话结束时
+//! 由 [`HostBrowser::close_all`] 把它名下的标签页在共享进程里关掉；光把
+//! 这个结构 drop 掉是不够的，理由见那个方法。
+//!
+//! 每次调用后关掉的话，下一次又要付启动成本，而且页面状态（登录、滚动
+//! 位置、SPA 的路由）全丢 —— 模型改完一次样式再截图会发现自己回到了首页。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use riot_protocol::browser::{
-    Action, BLANK_PAGE, BrowserAccess, BrowserUnavailable, Command, Event, InteractError,
-    InterceptOp, MarkedView, Nav, NetQuery, TabId, Target, WaitCondition,
+    Action, BLANK_PAGE, BrowserAccess, BrowserUnavailable, Command, InteractError, InterceptOp,
+    MarkedView, Nav, NetQuery, TabId, Target, WaitCondition,
 };
+use serde_json::Value;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use super::{Browser, Tab, ops};
@@ -192,23 +208,14 @@ impl PanelState {
 }
 
 /// 标签页清单。
+///
+/// 号不在这里发 —— 那是 [`super::hub::BrowserHub`] 的事，见模块注释。
+#[derive(Default)]
 struct Tabs {
-    /// 下一个要发的号。只增不减 —— 复用号会让"关掉的那页的延迟事件"
-    /// 落到新页上。
-    next: TabId,
     /// 标签栏上的顺序。
     order: Vec<TabId>,
+    /// 当前显示的那一页。0 = 一页都没有（0 不是合法的号）。
     active: TabId,
-}
-
-impl Default for Tabs {
-    fn default() -> Self {
-        Self {
-            next: 1,
-            order: Vec::new(),
-            active: 0,
-        }
-    }
 }
 
 /// 最近一次快照的编号表连同它的元数据:是在哪个标签页拍的、当时的文档
@@ -224,12 +231,15 @@ pub struct HostBrowser {
     /// 进去等于把这个结构拆散。用 `Weak` 而不是 `Arc`:任务持有强引用会让
     /// 会话结束后这个结构永远不释放，连着 CEF 那六个进程一起留下。
     me: Weak<Self>,
-    /// `.app` 的位置。
-    app: PathBuf,
-    /// 数据目录。每个会话一份 —— 同一个目录不能有两个 Chromium 实例。
-    profile: PathBuf,
-    /// 起好的进程。第一次用到时填上。
-    inner: Mutex<Option<Arc<Browser>>>,
+    /// 共享的浏览器进程。进程、profile、标签页号、事件路由都在它那边。
+    hub: Arc<super::hub::BrowserHub>,
+    /// 会话已经没了（[`Self::close_all`] 跑过）。
+    ///
+    /// `[约束]` 之后不能再开页。删会话和一次开页可能同时在飞：那次开页
+    /// 要么还没发命令（这里拦住），要么正在等 `TabOpened`（等到之后看见
+    /// 这个标志、把刚开出来的页关掉）。少了这一道，那一页就留在共享进程里
+    /// 没人管 —— 和 `close_all` 要解决的是同一种孤儿，只是晚到了几十毫秒。
+    closed: AtomicBool,
     /// 画面出口。面板打开时装上，关闭时摘掉。
     frames: Arc<Mutex<Option<mpsc::UnboundedSender<Frame>>>>,
     tabs: Mutex<Tabs>,
@@ -322,14 +332,13 @@ enum InterceptAction {
 }
 
 impl HostBrowser {
-    /// 直接回 `Arc`:事件循环要一个指回来的弱引用（见 [`Self::me`]），
+    /// 直接回 `Arc`:hub 的路由表按弱引用记着"这一页归谁"（见 [`Self::me`]），
     /// 而那个引用只能在 `Arc` 建好的同时拿到。
-    pub fn new(app: PathBuf, profile: PathBuf) -> Arc<Self> {
+    pub fn new(hub: Arc<super::hub::BrowserHub>) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
             me: me.clone(),
-            app,
-            profile,
-            inner: Mutex::new(None),
+            hub,
+            closed: AtomicBool::new(false),
             frames: Arc::default(),
             tabs: Mutex::default(),
             opening: Arc::default(),
@@ -424,12 +433,12 @@ impl HostBrowser {
     /// 一个号在子进程那边消失而这一层不知情 —— 而那个号很可能正是"当前页"。
     /// 之后每条命令都以"标签页不存在"被丢掉，每次 CDP 调用都要等满 30 秒:
     /// 面板卡死，地址栏空着，没有任何一条报错说得出"那一页已经没了"。
-    /// 事件循环收到 [`Event::TabClosed`] 就调这里。
+    /// hub 收到 [`riot_protocol::browser::Event::TabClosed`] 就调这里。
     ///
     /// 回"清单里本来有它没有"。不认识的号什么都不做 —— 同一页会被清两次
     /// （用户点关闭，然后子进程报 `TabClosed`），[`Self::close_tab`] 还靠
     /// 这个返回值判断该不该真的发关闭命令。
-    async fn forget_tab(&self, tab: TabId) -> bool {
+    pub(super) async fn forget_tab(&self, tab: TabId) -> bool {
         // 不走 `get()`:这条路是被事件驱动的，进程要是已经没了，为它再起一个
         // 完全说不通 —— 整份清单会由 [`Self::forget_crashed`] 一起清掉。
         let Some(b) = self.live().await else {
@@ -466,6 +475,10 @@ impl HostBrowser {
             }
         }
 
+        // 号从共享的路由表里摘掉。号不复用，所以之后不会再有人认领它 ——
+        // 留着只是让这一页的延迟事件继续找到一个已经不管它的会话。
+        self.hub.release_tab(tab).await;
+
         if left == 0 {
             // 没页了，画面也就没有出处。不摘掉的话，下次开页时 stream()
             // 会以为旧页还在推，先对一个已经关掉的页面发 stopScreencast。
@@ -479,7 +492,9 @@ impl HostBrowser {
 
     /// 进程崩了 —— 把这一层记着的、属于它的东西全丢掉。
     ///
-    /// [`Self::forget_tab`] 的整份版本。由 [`Self::get`] 在重开之前调用。
+    /// [`Self::forget_tab`] 的整份版本。由 hub 在重开之前对**每一个**挂着的
+    /// 会话调用一遍：崩的是共享进程，所有会话的标签页都跟着没了，而别的
+    /// 会话什么都没做、更不会自己发现这件事。
     ///
     /// `[约束]` 标签页清单必须清空。那些号在新进程里一个都不存在，留着的话
     /// 面板会显示一排幻影标签，而发给它们的每条命令都在子进程那边以
@@ -493,14 +508,11 @@ impl HostBrowser {
     ///
     /// 同理不碰 `frames`:面板还开着，画面出口照旧有效。新页开出来时
     /// [`Self::stream`] 会照它把 screencast 接上，画面自己就回来了。
-    async fn forget_crashed(&self) {
+    pub(super) async fn forget_crashed(&self) {
         {
             let mut tabs = self.tabs.lock().await;
             tabs.order.clear();
             tabs.active = 0;
-            // `next` 刻意不重置。号只增不减 —— 从 1 重新发的话，新进程的
-            // 1 号和刚消失的 1 号同号，而那些按号索引的表（等待者、抓包、
-            // 拦截规则）分不出两者。
         }
         // 等 `TabOpened` 的人永远等不到了 —— 那条事件本该由旧进程的事件流
         // 送来。drop 掉唤醒端让它们立刻拿到"浏览器进程退出了"，而不是各自
@@ -515,11 +527,59 @@ impl HostBrowser {
         self.ping_tabs().await;
     }
 
+    /// 会话没了 —— 关掉它名下所有标签页，把这一层记着的东西全清掉。
+    ///
+    /// `[约束]` 删会话必须调这个，不能只把句柄 drop 掉。进程是全应用共享的，
+    /// 句柄消失不会带走任何东西：那些 CEF browser 会留在进程里，每个几十 MB、
+    /// 页面脚本照跑；面板要是还开着，screencast 也不会停 —— hub 对帧的 ack
+    /// 是无条件的（在查归属之前就做了），于是一个没人看的页面会一直以几十帧
+    /// 每秒编 JPEG、被 ack、被丢掉，直到应用退出。
+    ///
+    /// 改成共享进程之前不需要这一步：会话独占进程，句柄一 drop 整棵进程树就
+    /// 被 `kill_on_drop` 收掉了。共享之后"进程死了页就没了"这条兜底不存在了，
+    /// 关页得自己做。
+    ///
+    /// 不等 `TabClosed`。CEF 的销毁要走一圈，而这个会话已经不存在了，没有人
+    /// 需要知道它什么时候关完 —— 路由在这里就摘掉，之后到达的 `TabClosed`
+    /// 找不到归属，被 hub 静默丢掉，正是想要的。
+    ///
+    /// 幂等。`closed` 标志同时挡住之后的开页，见它的说明。
+    pub async fn close_all(&self) {
+        self.closed.store(true, Ordering::Release);
+
+        let order = {
+            let mut tabs = self.tabs.lock().await;
+            tabs.active = 0;
+            std::mem::take(&mut tabs.order)
+        };
+        // 画面出口先摘：此后哪怕还漏进一帧也没人画。
+        *self.frames.lock().await = None;
+        *self.streaming.lock().await = None;
+        // `opening` 刻意不清。正在等 `TabOpened` 的那次开页要自己等到结果，
+        // 才知道那一页到底开出来没有 —— 开出来了它会看见 `closed` 然后自己
+        // 关掉（见 [`Self::spawn_tab`]）。这里把等待者丢掉的话它立刻拿到
+        // "进程退出了"，而页可能正好在下一毫秒开出来，没人收。
+        self.taps.lock().await.clear();
+        self.intercept.lock().await.clear();
+        *self.snap_refs.lock().await = None;
+
+        let live = self.live().await;
+        for tab in order {
+            self.hub.release_tab(tab).await;
+            // 进程已经不在就没有页要关。在的话发关闭命令 —— 发不出去（进程
+            // 正好在这一刻退出）也不算错，那些页跟着进程一起没了。
+            if let Some(b) = &live {
+                let _ = b.send(&Command::CloseTab { tab });
+            }
+        }
+    }
+
     /// 页面自己要求开一页（`target="_blank"`、`window.open()`）。
     ///
-    /// 浏览器进程只报告，开页在这里做 —— 标签页号由这一层分配，见
-    /// [`Event::PopupRequested`]。
-    async fn open_popup(&self, source: TabId, url: &str, background: bool) {
+    /// 浏览器进程只报告，开页在这里做 —— 标签页号由宿主分配，见
+    /// [`riot_protocol::browser::Event::PopupRequested`]。新页归发起它的那个会话（hub 按 `source`
+    /// 路由过来），和"在当前窗口里点开一个链接"是同一件事。
+    pub(super) async fn open_popup(&self, source: TabId, url: &str, background: bool) {
         let Some(b) = self.live().await else {
             return;
         };
@@ -627,31 +687,46 @@ impl HostBrowser {
         after: Option<TabId>,
         focus: bool,
     ) -> Result<TabId, BrowserUnavailable> {
-        let id = {
-            let mut tabs = self.tabs.lock().await;
-            let id = tabs.next;
-            tabs.next += 1;
-            id
-        };
+        // 会话已经删了就别开。拿着一个刚从表里摘掉的句柄进来的调用（前端的
+        // 最后一次轮询、还在飞的工具调用）会走到这里 —— 开出来的页没人管。
+        if self.closed.load(Ordering::Acquire) {
+            return Err(BrowserUnavailable("session is closed".into()));
+        }
 
-        // 登记等待者要在发命令**之前**。反过来的话，TabOpened 可能在登记
-        // 之前就到了，于是这里永远等不到 —— 表现是"新建标签页转半天然后失败"。
+        // 号和路由一起领。`[约束]` 这一步必须在发 `OpenTab` **之前** ——
+        // 号是全应用共享的（见 hub 的模块注释），而登记路由晚一步的话，
+        // `TabOpened` 可能先到、找不到归属被丢掉，于是下面永远等不到它。
+        let id = self.hub.claim_tab(self.me.clone()).await;
+
+        // 登记等待者同理要在发命令之前，理由一样：表现是"新建标签页转半天
+        // 然后失败"。
         let (tx, rx) = oneshot::channel();
         self.opening.lock().await.insert(id, tx);
         if let Err(e) = b.send(&Command::OpenTab { tab: id }) {
             self.opening.lock().await.remove(&id);
+            self.hub.release_tab(id).await;
             return Err(BrowserUnavailable(e.to_string()));
         }
         let opened = tokio::time::timeout(TAB_OPEN_TIMEOUT, rx).await;
         self.opening.lock().await.remove(&id);
-        match opened {
-            Ok(Ok(())) => {}
-            Ok(Err(_)) => return Err(BrowserUnavailable("browser process exited".into())),
-            Err(_) => {
-                return Err(BrowserUnavailable(format!(
-                    "标签页 {TAB_OPEN_TIMEOUT:?} 内没有就绪"
-                )));
-            }
+        let failed = match opened {
+            Ok(Ok(())) => None,
+            Ok(Err(_)) => Some("browser process exited".to_owned()),
+            Err(_) => Some(format!("标签页 {TAB_OPEN_TIMEOUT:?} 内没有就绪")),
+        };
+        if let Some(why) = failed {
+            // 这个号已经判定为"没开成"，路由要撤掉 —— 留着的话，之后万一
+            // 真的到达的事件会落在一个清单里根本没有这一页的会话上。
+            self.hub.release_tab(id).await;
+            return Err(BrowserUnavailable(why));
+        }
+
+        // 等的这段时间里会话被删了。页已经在 CEF 那边开出来了（`TabOpened`
+        // 刚到），而 `close_all` 那时清单里还没有它 —— 这里不收尸就没人收。
+        if self.closed.load(Ordering::Acquire) {
+            let _ = b.send(&Command::CloseTab { tab: id });
+            self.hub.release_tab(id).await;
+            return Err(BrowserUnavailable("session is closed".into()));
         }
 
         let tab = Tab { browser: b, id };
@@ -1098,132 +1173,116 @@ impl HostBrowser {
     /// 活着的浏览器，`None` = 没起来，或者起过但已经不在了。
     ///
     /// 那些"不为它起进程"的路径都走这里 —— 信息性查询（[`Self::state`]、
-    /// `current_url`）和事件驱动的清理（[`Self::forget_tab`]）。直接读
-    /// `inner` 的话，进程崩掉之后拿到的是个死句柄:面板会照旧显示一排
-    /// 幻影标签页，而点它们的每条命令都静默失败。
+    /// `current_url`）和事件驱动的清理（[`Self::forget_tab`]）。走 [`Self::get`]
+    /// 的话，一个已经崩掉的进程会被这些本该只是"看一眼"的调用拉起来。
     async fn live(&self) -> Option<Arc<Browser>> {
-        self.inner.lock().await.clone().filter(|b| b.alive())
+        self.hub.live().await
     }
 
-    /// 拿到浏览器，没起来就起，崩了就重开。
+    /// 拿到浏览器，没起来就起，崩了就重开。全应用共用那一个进程，所以
+    /// 这里只是转给 [`super::hub::BrowserHub::get`]。
     ///
-    /// `[约束]` 整个过程持锁。并发的两次工具调用都发现"还没起"的话，会
-    /// 各起一个进程 —— 而它们指向同一个 profile 目录，第二个拿不到锁直接
-    /// 退出，表现为"偶尔有个工具报浏览器不可用"。
-    ///
-    /// `[约束]` 崩掉的句柄必须换掉，不能只是照旧交出去。CEF 会崩（渲染
-    /// 一个恶意页面、显存耗尽、被系统的内存压力杀掉），而这个槽位一旦填上
-    /// 就没有别的地方会清它 —— 交出死句柄的结果是这个会话的浏览器永久
-    /// 不可用（面板、模型的每个 Browser* 工具全部报"浏览器进程未运行"），
-    /// 而用户唯一的出路是新建会话或者重启应用。
-    ///
-    /// `[取舍]` 重开是惰性的:等下一次真的用到才做，而不是收到"进程没了"
-    /// 就立刻拉起来。崩溃常常发生在没人看的时候（面板关着、模型早就转去
-    /// 改代码了），那时候拉起六个进程几百 MB 纯属白付 —— 和这一层
-    /// 「第一次用到才起」是同一条取舍。也因此这里不需要退避:重开由真实
-    /// 调用驱动，起来就崩的循环最多跟着调用频率转，不会自己打满 CPU。
+    /// 开页由 `active()` / `open_tab()` 负责，console 钩子也是每页一份、
+    /// 跟着开页一起装 —— 进程刚起来的那一刻是没有标签页的。
     async fn get(&self) -> Result<Arc<Browser>, BrowserUnavailable> {
-        let mut slot = self.inner.lock().await;
-        if let Some(b) = slot.as_ref() {
-            if b.alive() {
-                return Ok(Arc::clone(b));
-            }
-            // 丢掉死句柄，然后照常往下走 —— 下面那段起进程的代码不必知道
-            // 这是首次启动还是崩溃之后的重开。
-            tracing::warn!("浏览器进程已经不在了，重开一个");
-            *slot = None;
-            self.forget_crashed().await;
+        self.hub.get().await
+    }
+
+    // ── hub 派进来的事件 ──────────────────────────────
+    //
+    // 这几条都由共享进程的事件循环按标签页号找到本会话之后调用，见
+    // [`super::hub::BrowserHub::dispatch`]。
+
+    /// 某一页就绪了。唤醒正在等它的 `spawn_tab`。
+    pub(super) async fn on_tab_opened(&self, tab: TabId) {
+        // 没人等也正常:超时之后那个等待者已经撤了。
+        if let Some(w) = self.opening.lock().await.remove(&tab) {
+            let _ = w.send(());
+        }
+    }
+
+    /// 这一页的一条 CDP 事件。
+    ///
+    /// 走到这里的都是**事件**（不带 id）—— 带 id 的响应在 [`super`] 的
+    /// `route_cdp_response` 就被认领走了。对话框和 screencast 的 ack 也
+    /// 已经在 hub 那边无条件做完了（那两件事和归属无关，见 `dispatch_cdp`），
+    /// 所以这里只管本会话的状态。
+    pub(super) async fn on_cdp(&self, browser: &Arc<Browser>, tab: TabId, payload: &Value) {
+        let method = payload
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+
+        // `[约束]` Fetch 暂停的请求必须**逐一放行**，否则页面卡死。匹配到
+        // 规则就拦/伪造，否则一律 continue —— 绝不把一个 paused 请求漏在那里。
+        if method == "Fetch.requestPaused" {
+            handle_request_paused(browser, &self.intercept, tab, payload).await;
+            return;
         }
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let browser = Browser::spawn(self.app.clone(), Some(self.profile.clone()), tx)
-            .await
-            .map_err(|e| BrowserUnavailable(e.to_string()))?;
-
-        let browser = Arc::new(browser);
-
-        // 事件流必须一直有人排空 —— 通道是无界的，事件会持续来。
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-        let acker = Arc::clone(&browser);
-        let frames = Arc::clone(&self.frames);
-        let streaming = Arc::clone(&self.streaming);
-        let opening = Arc::clone(&self.opening);
-        let taps = Arc::clone(&self.taps);
-        let intercept = Arc::clone(&self.intercept);
-        let host = self.me.clone();
-        tokio::spawn(async move {
-            let mut ready = Some(ready_tx);
-            while let Some(ev) = rx.recv().await {
-                match ev {
-                    Event::Ready => {
-                        if let Some(t) = ready.take() {
-                            let _ = t.send(());
-                        }
-                    }
-                    Event::TabOpened { tab } => {
-                        // 没人等也正常:超时之后那个等待者已经撤了。
-                        if let Some(w) = opening.lock().await.remove(&tab) {
-                            let _ = w.send(());
-                        }
-                    }
-                    // 下面两条都另起一个任务做，不在这个循环里 await。
-                    //
-                    // `[约束]` 开一页要等 `TabOpened`，而那条事件正是这个循环
-                    // 派发的 —— 在循环里等它就是等自己，只能等到 10 秒超时，
-                    // 表现是"页面要求开的标签页永远开不出来"。清理那条不等
-                    // 事件，但它会发 CDP 命令，慢起来会挡住后面的帧。
-                    //
-                    // 弱引用升不上来 = 会话已经结束，这些事也就没意义了。
-
-                    // 用户点关闭时这一层已经清过一遍（[`Self::forget_tab`]
-                    // 是幂等的），这一条真正要接的是"我们没让它关、但它关了"。
-                    Event::TabClosed { tab } => {
-                        if let Some(h) = host.upgrade() {
-                            tokio::spawn(async move { h.forget_tab(tab).await });
-                        }
-                    }
-                    // 子进程已经把 CEF 的弹窗拦下来了，这里把它变成一个真的
-                    // 标签页 —— 见 [`Event::PopupRequested`]。
-                    Event::PopupRequested {
-                        source,
-                        url,
-                        background,
-                    } => {
-                        if let Some(h) = host.upgrade() {
-                            tokio::spawn(async move {
-                                h.open_popup(source, &url, background).await;
-                            });
-                        }
-                    }
-                    Event::Error { message } => {
-                        tracing::warn!(message, "浏览器报错");
-                    }
-                    Event::Cdp { tab, payload } => {
-                        handle_cdp_event(
-                            &acker, &frames, &streaming, &taps, &intercept, tab, &payload,
-                        )
-                        .await;
-                    }
-                    // OSR 的帧元数据现在没人用 —— 画面走 screencast。
-                    // 留着不删是因为它是"渲染还活着"的独立信号，
-                    // screencast 卡住时能用来分清是编码还是渲染的问题。
-                    Event::Frame { .. } | Event::LoadEnd { .. } | Event::LoadError { .. } => {}
-                }
+        // `[约束]` screencast 帧必须在累积之前拦掉。它的 domain 也是 `Page`，
+        // 订阅了 Page 的页面会把每秒几十帧的图塞进桶里 —— 内存瞬间爆掉，
+        // 而且把真正要看的事件淹了。帧有自己的专门通道，不进桶。
+        if method != "Page.screencastFrame" {
+            // 只有订阅过 domain 的标签页才有条目;没订阅的这里查不到，直接丢，
+            // 不为它建空条目（见 taps 模块"只累积订阅过的"）。
+            if let Some(t) = self.taps.lock().await.get_mut(&tab) {
+                t.ingest(payload);
             }
-        });
+            return;
+        }
 
-        // 等 CEF 就绪。没等到就发命令的话，命令会落在一个还没有消息循环的
-        // 进程上，全部静默丢掉。
-        //
-        // 这一刻还没有任何标签页 —— 开页由 active() / open_tab() 负责，
-        // console 钩子也是每页一份，跟着开页一起装。
-        tokio::time::timeout(std::time::Duration::from_secs(30), ready_rx)
-            .await
-            .map_err(|_| BrowserUnavailable("browser did not become ready within 30 s".into()))?
-            .map_err(|_| BrowserUnavailable("browser exited during startup".into()))?;
+        self.paint(browser, tab, &payload["params"]).await;
+    }
 
-        *slot = Some(Arc::clone(&browser));
-        Ok(browser)
+    /// 把一帧画到面板上。
+    ///
+    /// 帧的 ack 已经由 hub 发过了 —— 那一步和这里不同，是无条件的：这一帧
+    /// 可能属于已经切走的标签页，而那一页之后还会被切回来。
+    async fn paint(&self, browser: &Arc<Browser>, tab: TabId, params: &Value) {
+        // 不是正在显示的那一页就丢掉。切标签是"停旧的、开新的"两条命令，
+        // 中间旧页还会来几帧 —— 画上去的话，新标签会先闪一下旧页面的内容。
+        if *self.streaming.lock().await != Some(tab) {
+            return;
+        }
+
+        let Some(sink) = self.frames.lock().await.clone() else {
+            return; // 面板没开，帧丢掉
+        };
+        let Some(data) = params["data"].as_str() else {
+            return;
+        };
+        // base64 在这儿解成字节，见 [`Frame`] 的说明。解不开就丢这一帧 ——
+        // 坏一帧的代价是画面晚 30ms 更新，报错反而没人能处理。
+        use base64::Engine as _;
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
+            return;
+        };
+        let meta = &params["metadata"];
+        let frame = Frame {
+            data: bytes,
+            width: meta["deviceWidth"].as_f64().unwrap_or_default() as u32,
+            height: meta["deviceHeight"].as_f64().unwrap_or_default() as u32,
+        };
+        // 发失败说明面板那头没了，摘掉出口顺便停推送。
+        if sink.send(frame).is_err() {
+            *self.frames.lock().await = None;
+            let _ = browser.cdp_no_wait(tab, "Page.stopScreencast", serde_json::json!({}));
+        }
+    }
+
+    /// 假装这一页已经开好、进了清单。给 hub 那边的用例用 —— 它们验的是
+    /// 路由和崩溃连带，起一整棵 Chromium 只为把一个号塞进清单不划算。
+    #[cfg(test)]
+    pub(super) async fn 假装开了一页(&self, tab: TabId) {
+        let mut tabs = self.tabs.lock().await;
+        tabs.order.push(tab);
+        tabs.active = tab;
+    }
+
+    #[cfg(test)]
+    pub(super) async fn 标签页数(&self) -> usize {
+        self.tabs.lock().await.order.len()
     }
 }
 
@@ -2189,105 +2248,6 @@ pub fn panel_navigable(url: &str) -> bool {
         .any(|p| u.len() > p.len() && u[..p.len()].eq_ignore_ascii_case(p.as_bytes()))
 }
 
-/// 处理不带 id 的 CDP 事件:screencast 帧走画面出口，其余按订阅累积。
-///
-/// 走到这里的都是**事件**（不带 id）—— 带 id 的响应在 [`super::mod`] 的
-/// `route_cdp_response` 就被认领走了。所以这里不必再分辨响应和事件。
-#[allow(clippy::too_many_arguments)] // 事件循环要摸的共享状态就这么多，拆开更糊涂
-async fn handle_cdp_event(
-    browser: &Arc<Browser>,
-    frames: &Arc<Mutex<Option<mpsc::UnboundedSender<Frame>>>>,
-    streaming: &Arc<Mutex<Option<TabId>>>,
-    taps: &Arc<Mutex<HashMap<TabId, super::taps::EventTaps>>>,
-    intercept: &Arc<Mutex<HashMap<TabId, Vec<InterceptRule>>>>,
-    tab: TabId,
-    payload: &serde_json::Value,
-) {
-    let method = payload
-        .get("method")
-        .and_then(|m| m.as_str())
-        .unwrap_or_default();
-
-    // `[约束]` JS 对话框必须无条件、立即放行。alert/confirm/beforeunload 会
-    // **阻塞页面**直到有人应答 —— 没人应答的话，紧跟着的每一条 CDP 都超时，
-    // 表现是"点了个按钮之后浏览器整个僵住"。所以这里不问模型、不看订阅，
-    // 收到就 accept。prompt 给空文本（accept 但不填），beforeunload accept
-    // 等于允许离开，都是自动化里想要的默认。
-    if method == "Page.javascriptDialogOpening" {
-        let _ = browser.cdp_no_wait(
-            tab,
-            "Page.handleJavaScriptDialog",
-            serde_json::json!({ "accept": true }),
-        );
-        return;
-    }
-
-    // `[约束]` Fetch 暂停的请求必须**逐一放行**，否则页面卡死（和对话框
-    // 同一个道理）。匹配到规则就拦/伪造，否则一律 continue —— 绝不把一个
-    // paused 请求漏在那里。
-    if method == "Fetch.requestPaused" {
-        handle_request_paused(browser, intercept, tab, payload).await;
-        return;
-    }
-
-    // `[约束]` screencast 帧必须在累积之前拦掉。它的 domain 也是 `Page`，
-    // 订阅了 Page 的页面会把每秒几十帧的图塞进桶里 —— 内存瞬间爆掉，
-    // 而且把真正要看的事件淹了。帧有自己的专门通道，不进桶。
-    if method != "Page.screencastFrame" {
-        // 只有订阅过 domain 的标签页才有条目;没订阅的这里查不到，直接丢，
-        // 不为它建空条目（见 taps 模块"只累积订阅过的"）。
-        if let Some(t) = taps.lock().await.get_mut(&tab) {
-            t.ingest(payload);
-        }
-        return;
-    }
-    let params = &payload["params"];
-
-    // `[约束]` 必须 ack，而且要无条件 ack。
-    //
-    // Chromium 只在上一帧被确认后才发下一帧。漏一次 ack，那一页的画面就
-    // 永久停在那一帧 —— 而且不报错，看起来像页面卡住了。所以哪怕这一帧
-    // 属于已经切走的标签页，也要先把 ack 发出去:那一页之后可能被切回来，
-    // 而它那时候还欠着一次确认。
-    if let Some(sid) = params.get("sessionId") {
-        let _ = browser.cdp_no_wait(
-            tab,
-            "Page.screencastFrameAck",
-            serde_json::json!({ "sessionId": sid }),
-        );
-    }
-
-    // 不是正在显示的那一页就丢掉。切标签是"停旧的、开新的"两条命令，
-    // 中间旧页还会来几帧 —— 画上去的话，新标签会先闪一下旧页面的内容。
-    if *streaming.lock().await != Some(tab) {
-        return;
-    }
-
-    let Some(sink) = frames.lock().await.clone() else {
-        return; // 面板没开，帧丢掉
-    };
-    let Some(data) = params["data"].as_str() else {
-        return;
-    };
-    // base64 在这儿解成字节，见 [`Frame`] 的说明。解不开就丢这一帧 ——
-    // 坏一帧的代价是画面晚 30ms 更新，报错反而没人能处理。
-    use base64::Engine as _;
-    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
-        return;
-    };
-    let meta = &params["metadata"];
-    let frame = Frame {
-        data: bytes,
-        width: meta["deviceWidth"].as_f64().unwrap_or_default() as u32,
-        height: meta["deviceHeight"].as_f64().unwrap_or_default() as u32,
-    };
-    // 发失败说明面板那头没了，摘掉出口顺便停推送。
-    if sink.send(frame).is_err() {
-        *frames.lock().await = None;
-        let _ = browser.cdp_no_wait(tab, "Page.stopScreencast", serde_json::json!({}));
-    }
-}
-
 /// 处理一个被 Fetch 暂停的请求:匹配规则就拦/伪造，否则放行。
 ///
 /// `[约束]` 每条路径最后都要给 CDP 一个确定的答复（fail / fulfill /
@@ -2437,18 +2397,18 @@ mod tests {
 
     /// 摆一个"用过一阵子"的 `HostBrowser`，但不真的起进程。
     ///
-    /// `new` 是惰性的（第一次用到才 spawn），所以路径不存在无所谓 ——
+    /// 启动是惰性的（第一次用到才 spawn），所以路径不存在无所谓 ——
     /// 这几个用例测的是崩溃之后这一层怎么收拾自己记着的状态。
     fn 用过的() -> Arc<HostBrowser> {
-        let host = HostBrowser::new(
+        let hub = crate::browser::hub::BrowserHub::new(
             PathBuf::from("/nonexistent/riot-browser.app"),
             PathBuf::from("/nonexistent/profile"),
         );
+        let host = HostBrowser::new(hub);
         {
             let mut tabs = host.tabs.try_lock().expect("刚建好，没人抢");
             tabs.order = vec![1, 2, 3];
             tabs.active = 2;
-            tabs.next = 4;
         }
         host
     }
@@ -2483,17 +2443,6 @@ mod tests {
         assert!(host.taps.lock().await.is_empty());
         assert!(host.intercept.lock().await.is_empty());
         assert!(host.snap_refs.lock().await.is_none());
-    }
-
-    /// 标签页号不能从头再发。
-    ///
-    /// 重发的话，新进程的 1 号和刚刚消失的 1 号同号 —— 那些按号索引的表
-    /// （等待者、抓包、拦截规则）分不出两者，旧页的延迟事件会落到新页上。
-    #[tokio::test]
-    async fn 崩溃清理之后号接着往下发() {
-        let host = 用过的();
-        host.forget_crashed().await;
-        assert_eq!(host.tabs.lock().await.next, 4);
     }
 
     /// 面板尺寸要留着。

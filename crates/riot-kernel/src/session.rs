@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 use riot_core::{AgentDeps, AgentState, run_agent};
 use riot_protocol::event::{AgentEvent, StreamDelta};
 use riot_protocol::id::{IdGenerator, MessageId, NanoIdGenerator, SessionId};
-use riot_protocol::message::{AssistantContent, Attachment, Message, MessageMeta, UserContent};
+use riot_protocol::message::{Attachment, Message, MessageMeta, UserContent};
 use riot_protocol::permission::{
     PermissionContext, PermissionGate, PermissionMode, PermissionModeState, PermissionRule,
 };
@@ -558,6 +558,13 @@ pub struct Session {
     /// 上点「切换」会在**轮次中间**改模式，同一轮的下一个工具调用就要按
     /// 新模式判定 —— 快照做不到这一点。
     mode: Arc<Mutex<PermissionMode>>,
+    /// 上一轮**结束时**的模式（对照 Cursor 的 `prevTurnMode`）。规划模式的
+    /// 提醒据此换版：上一轮就在规划、计划也在，这一轮讲"改计划还是执行"；
+    /// 否则讲"怎么调研、怎么提交"。取轮末而不是轮首：模型在轮中经
+    /// SwitchMode 切进规划并交了计划，下一轮就该按迭代处理。None = 还没跑过
+    /// 一轮（含重启后 —— 不持久化，代价是重启后接着规划的第一轮拿到的是
+    /// 新规划那版提醒，附上的计划内容会把它拉回来）。
+    prev_turn_mode: Mutex<Option<PermissionMode>>,
     /// 已激活的 OS 沙箱，跨轮复用。见 [`Self::active_sandbox`]。
     sandbox: Mutex<Option<CachedSandbox>>,
     /// 用户手动改过的标题。None 时回退到自动标题。
@@ -702,26 +709,41 @@ fn cut_at_user_prompt(history: &[Message], assistant_id: &str) -> Option<usize> 
     history[..ast].iter().rposition(is_user_prompt)
 }
 
-/// 这段历史里模型已经交过一份计划（调用过 CreatePlan）。
-///
-/// 规划模式的提醒据此换版：还没有计划时讲"怎么调研、怎么提交"，有了之后
-/// 讲"用户说的话是改计划还是要你动手"。按历史里的 tool_use 认，不另存
-/// 状态 —— 回退、压缩把那次调用抹掉之后，"没有计划"正是对模型而言的
-/// 真实状态（它手里已经没有那份文件的路径了，得重新提交）。
-fn history_has_plan(history: &[Message]) -> bool {
-    history.iter().any(|m| match m {
-        Message::Assistant { content, .. } => content.iter().any(|c| {
-            matches!(
-                c,
-                AssistantContent::ToolUse { name, .. }
-                    if name == riot_tools::tools::names::CREATE_PLAN
-            )
-        }),
-        _ => false,
-    })
-}
-
 impl Session {
+    /// 这段对话当前的计划（见 [`crate::plan`]）：整份记录（界面归档 +
+    /// 活历史）里最近一次成功的 CreatePlan，内容从磁盘现读。
+    ///
+    /// `live` 由调用方传：开轮时历史已经克隆出来了（可能刚压缩过），再锁
+    /// 一次 `self.history` 读到的不一定是同一份。
+    async fn current_plan(&self, live: &[Message]) -> Option<crate::plan::CurrentPlan> {
+        let plan = {
+            let archived = self.ui_archive.lock().await;
+            crate::plan::latest_plan(&archived, live)?
+        };
+        crate::plan::load(&self.cwd, plan).await
+    }
+
+    /// 这一轮和计划有关的注入，按顺序：当前计划的内容（有的话）、规划模式
+    /// 的提醒（规划模式下）。跟在用户正文之后、其它提醒之前。
+    ///
+    /// 规划模式提醒的版本 = **上一轮就在规划模式 && 当前计划存在**（对照
+    /// Cursor 的 `prevTurnMode === PLAN`）。两个条件缺一不可：只看"历史里
+    /// 出现过 CreatePlan"，同一会话第二次进规划会被告知"去改上一份（早就
+    /// 构建完的）计划"，压缩后又退回"还没计划"；只看上一轮模式，上一轮问了
+    /// 个澄清问题还没交计划，这一轮就会被告知"计划已存在"。
+    async fn plan_turn(&self, mode: PermissionMode, live: &[Message]) -> Vec<UserContent> {
+        let plan = self.current_plan(live).await;
+        let iterating =
+            *self.prev_turn_mode.lock().await == Some(PermissionMode::Plan) && plan.is_some();
+        let mut out = Vec::new();
+        out.extend(
+            plan.as_ref()
+                .map(|p| crate::prompt::current_plan_context(p, mode)),
+        );
+        out.extend(crate::prompt::plan_mode_reminder(mode, iterating));
+        out
+    }
+
     /// 给工具用的浏览器能力。没打包时是 `NoBrowser`，工具会明说用不了。
     fn browser(&self) -> Arc<dyn riot_protocol::browser::BrowserAccess> {
         self.browser
@@ -755,6 +777,7 @@ impl Session {
             thinking_override: Mutex::new(riot_protocol::ThinkingPolicy::default()),
             rules: Arc::new(Mutex::new(Vec::new())),
             mode: Arc::new(Mutex::new(PermissionMode::Default)),
+            prev_turn_mode: Mutex::new(None),
             sandbox: Mutex::new(None),
             custom_title: Mutex::new(None),
             auto_title: Mutex::new(None),
@@ -815,6 +838,7 @@ impl Session {
             thinking_override: Mutex::new(settings.thinking),
             rules: Arc::new(Mutex::new(Vec::new())),
             mode: Arc::new(Mutex::new(settings.mode)),
+            prev_turn_mode: Mutex::new(None),
             sandbox: Mutex::new(None),
             custom_title: Mutex::new(settings.custom_title.clone()),
             auto_title: Mutex::new(settings.auto_title.clone()),
@@ -1336,7 +1360,10 @@ impl Session {
             let msg = Message::User {
                 id: MessageId::from_raw(id.clone()),
                 content,
-                meta: MessageMeta::default(),
+                meta: MessageMeta {
+                    nudge: input.nudge,
+                    ..Default::default()
+                },
             };
             {
                 let g = self.running.lock().await;
@@ -2037,6 +2064,9 @@ impl Session {
         if nudges > 0 {
             tracing::info!(count = nudges, "轮次已收场，界面提醒作废");
         }
+        // 这一轮收场时的模式，给下一轮的规划提醒换版用（见 `plan_turn`）。
+        // 取轮末：轮中经 SwitchMode 切进规划的那一轮，结束时已经是规划模式。
+        *self.prev_turn_mode.lock().await = Some(*self.mode.lock().await);
         // 一轮的历史定下来了，摘录跟上。放在 running 释放之后：写摘录要
         // 拿历史锁，不该让"这一轮结束了"的判定多等一次磁盘。
         self.refresh_digest().await;
@@ -2761,14 +2791,13 @@ impl Session {
         }
     }
 
-    /// 子 agent transcript 的落盘处：`sessions/subagents/<会话>/`。
-    /// 混进主目录会被索引重建当成会话捞回来。None = 本会话不持久化。
+    /// 子 agent transcript 的落盘处：`sessions/subagents/<会话>/`。路径规则
+    /// 在 store 那边只有一份（`Transcripts::subagents_of`），删会话时按同一
+    /// 份删。None = 本会话不持久化。
     fn subagent_transcripts(&self) -> Option<Arc<riot_store::Transcripts>> {
-        self.persist.as_ref().map(|p| {
-            Arc::new(riot_store::Transcripts::new(
-                p.store.dir().join("subagents").join(self.id.as_str()),
-            ))
-        })
+        self.persist
+            .as_ref()
+            .map(|p| Arc::new(p.store.subagents_of(&self.id)))
     }
 
     /// 自我分叉：用本轮的种子造一个和父同形的子 agent 任务。
@@ -3261,10 +3290,11 @@ impl Session {
                 .await;
                 let now = clock.now_ms();
                 let mut all: Vec<Message> = pending_notices.into_iter().chain(notices).collect();
-                // 规划模式的约束跟在最后一条通知末尾，和用户消息同一个位置逻辑。
-                let has_plan = history_has_plan(&history);
+                // 当前计划和规划模式的约束跟在最后一条通知末尾，和用户消息
+                // 同一个位置逻辑（并行构建的唤醒轮正要照着计划派下一批）。
+                let plan_notes = self.plan_turn(mode, &history).await;
                 if let Some(Message::User { content, .. }) = all.last_mut() {
-                    content.extend(crate::prompt::plan_mode_reminder(mode, has_plan));
+                    content.extend(plan_notes);
                     // 唤醒轮也要记得自己是协调者：被通知叫醒后接着综合、
                     // 启动下一批，而不是顺手自己干起来。
                     content.extend(self.multitask_note());
@@ -3280,15 +3310,19 @@ impl Session {
                 // 图片转述、`@` 展开跑完，慢的时候十几秒 —— 各取各的时钟，
                 // 界面上同一条消息会在定稿那一刻跳掉一分钟。
                 let sent_at_ms = clock.now_ms();
+                // 按钮发的消息带上标记（界面画成「构建」卡而不是气泡）。占位版
+                // 和定稿版都要带：前端认 id 换掉乐观气泡时用的是占位版。
+                let meta = MessageMeta {
+                    created_at_ms: Some(sent_at_ms),
+                    nudge: input.nudge,
+                    ..Default::default()
+                };
                 // 占位先立起来 —— 底下压缩和转述都是模型调用，这段时间里切走
                 // 再切回来必须还看得见自己刚发的话（见 `pending_user`）。
                 let pending = Message::User {
                     id: user_id.clone(),
                     content: crate::content::pending_user_content(&input),
-                    meta: MessageMeta {
-                        created_at_ms: Some(sent_at_ms),
-                        ..Default::default()
-                    },
+                    meta: meta.clone(),
                 };
                 *self.pending_user.lock().await = Some(pending.clone());
                 // `[约束]` 必须立刻推给前端。发送端自己靠乐观气泡，但其它
@@ -3321,7 +3355,8 @@ impl Session {
                 // 记忆注入：会话的**第一条**用户消息前置 AGENTS.md（全局 + 项目）。
                 // 只注入一次 —— 它随消息进历史和 transcript，往后每轮自然带着；
                 // 每轮都注的话，同一份内容会在上下文里堆出 N 份。
-                let mut prelude = if history.is_empty() {
+                let first_message = history.is_empty();
+                let mut prelude = if first_message {
                     self.first_message_prelude().await
                 } else {
                     Vec::new()
@@ -3351,27 +3386,24 @@ impl Session {
                     prelude.append(&mut content);
                     content = prelude;
                 }
-                // 规划模式的约束跟在消息**末尾**（用户正文之后）：它是对本轮
-                // 状态的注解，不是消息本身，和 extra_context 同一个位置逻辑。
-                // 为什么不进 system prompt，见 plan_mode_reminder 的取舍注释。
-                // 已有计划文件时换成"迭代还是执行"那一版 —— 第二轮起用户说的
-                // 话多半是改计划，不是要它动手。
-                content.extend(crate::prompt::plan_mode_reminder(
-                    mode,
-                    history_has_plan(&history),
-                ));
-                // agent 模式的对应物：这活要不要先规划（见 prompt::agent_mode_reminder）。
-                content.extend(crate::prompt::agent_mode_reminder(mode, nudge));
+                // 当前计划的内容和规划模式的约束跟在消息**末尾**（用户正文之后）：
+                // 它们是对本轮状态的注解，不是消息本身，和 extra_context 同一个
+                // 位置逻辑。为什么不进 system prompt，见 plan_mode_reminder 的
+                // 取舍注释；版本怎么选见 plan_turn。
+                content.extend(self.plan_turn(mode, &history).await);
+                // agent 模式的对应物：这活要不要先规划。只在会话首条消息上附
+                // （见 prompt::agent_mode_reminder 的取舍）—— 任务是在第一句话
+                // 里定下来的，之后每条都催一遍只会让中等任务也弹卡。
+                if first_message {
+                    content.extend(crate::prompt::agent_mode_reminder(mode, nudge));
+                }
                 // 多任务模式的准则同位（见 prompt::multitask_reminder）。
                 content.extend(self.multitask_note());
                 content.extend(nudge.map(crate::prompt::nudge_reminder));
                 let user_msg = Message::User {
                     id: user_id.clone(),
                     content,
-                    meta: MessageMeta {
-                        created_at_ms: Some(sent_at_ms),
-                        ..Default::default()
-                    },
+                    meta,
                 };
                 // 边产生边追加（两家共识）：轮次结束才写盘的话，中途崩溃丢的是
                 // 整轮对话；这里丢的最多是后台通道里还没落盘的几条。
@@ -5634,6 +5666,117 @@ mod tests {
         let exit = note_text(s.multitask_note()).expect("关掉说一声");
         assert!(exit.contains("has left multitask mode"), "{exit}");
         assert!(note_text(s.multitask_note()).is_none(), "退出只说一次");
+    }
+
+    /// 计划相关的注入：内容每轮从磁盘现读、随消息附上；规划模式提醒的
+    /// 版本看"上一轮是不是规划 && 计划在不在"，不看历史里出现过 CreatePlan。
+    ///
+    /// 两条各自对应一次真实的错法：只看历史，同一会话第二次进规划会被
+    /// 告知"去改上一份（早就构建完的）计划"，压缩后又退回"还没计划"；
+    /// 不附内容，轮次多了或压缩一次，模型手里就没有计划了。
+    #[tokio::test]
+    // 测试在临时目录里摆真实的计划文件，被测的正是"从磁盘读"。
+    #[allow(clippy::disallowed_methods)]
+    async fn 计划注入按上一轮模式换版并附上磁盘内容() {
+        use riot_protocol::id::ToolUseId;
+        use riot_protocol::message::{AssistantContent, ToolResultContent};
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let plans = dir.path().join(riot_tools::tools::plan::PLAN_DIR);
+        std::fs::create_dir_all(&plans).expect("建目录");
+        let rel = format!("{}/teller-t1.plan.md", riot_tools::tools::plan::PLAN_DIR);
+        std::fs::write(dir.path().join(&rel), "# Teller\n\n1. 用户改过的一步\n").expect("写文件");
+
+        let s = Session::new(SessionId::from_raw("s1"), dir.path().to_path_buf(), None);
+        let texts = |notes: Vec<UserContent>| -> Vec<String> {
+            notes
+                .into_iter()
+                .map(|c| note_text(Some(c)).expect("都是 system-reminder"))
+                .collect()
+        };
+
+        // 还没有计划：规划模式只有"新规划"那版提醒，agent 模式什么都不附。
+        let fresh = texts(s.plan_turn(PermissionMode::Plan, &[]).await);
+        assert_eq!(fresh.len(), 1, "{fresh:?}");
+        assert!(fresh[0].starts_with("Plan mode is active"), "{}", fresh[0]);
+        assert!(s.plan_turn(PermissionMode::Default, &[]).await.is_empty());
+
+        // 计划交过了（调用 + 结果在历史里），但上一轮不是规划模式（第一次
+        // 进规划 / 第二次进规划）：附内容，提醒仍是"新规划"版。
+        let history = vec![
+            Message::Assistant {
+                id: MessageId::from_raw("a1"),
+                content: vec![AssistantContent::ToolUse {
+                    id: ToolUseId::from_raw("t1"),
+                    name: riot_tools::tools::names::CREATE_PLAN.into(),
+                    input: serde_json::json!({ "name": "Teller", "plan": "1. 建表" }),
+                }],
+                usage: None,
+                meta: MessageMeta::default(),
+            },
+            Message::User {
+                id: MessageId::from_raw("u1"),
+                content: vec![UserContent::ToolResult {
+                    tool_use_id: ToolUseId::from_raw("t1"),
+                    content: ToolResultContent::text(format!(
+                        "{}{rel}\nsaved.",
+                        riot_tools::tools::plan::PLAN_FILE_LINE_PREFIX
+                    )),
+                    is_error: false,
+                }],
+                meta: MessageMeta::default(),
+            },
+        ];
+        *s.prev_turn_mode.lock().await = Some(PermissionMode::Default);
+        let entering = texts(s.plan_turn(PermissionMode::Plan, &history).await);
+        assert_eq!(entering.len(), 2, "{entering:?}");
+        assert!(
+            entering[0].contains("用户改过的一步"),
+            "内容从磁盘读：{}",
+            entering[0]
+        );
+        assert!(
+            entering[0].contains(&format!("<plan_file path=\"{rel}\">")),
+            "{}",
+            entering[0]
+        );
+        assert!(
+            entering[1].starts_with("Plan mode is active"),
+            "上一轮不在规划 → 不是迭代：{}",
+            entering[1]
+        );
+
+        // 上一轮就在规划、计划也在：换成"改计划还是执行"那版。
+        *s.prev_turn_mode.lock().await = Some(PermissionMode::Plan);
+        let iterating = texts(s.plan_turn(PermissionMode::Plan, &history).await);
+        assert_eq!(iterating.len(), 2, "{iterating:?}");
+        assert!(iterating[1].contains("still active"), "{}", iterating[1]);
+
+        // 上一轮在规划但还没交计划（问了个澄清问题）：仍是"新规划"版。
+        let asking = texts(s.plan_turn(PermissionMode::Plan, &[]).await);
+        assert!(
+            asking[0].starts_with("Plan mode is active"),
+            "{}",
+            asking[0]
+        );
+
+        // 计划被压缩进归档：内核和面板看的是同一份记录，照样认得。
+        *s.ui_archive.lock().await = history.clone();
+        let compacted = texts(s.plan_turn(PermissionMode::Plan, &[]).await);
+        assert_eq!(compacted.len(), 2, "{compacted:?}");
+        assert!(compacted[1].contains("still active"), "{}", compacted[1]);
+
+        // 构建后（不在规划模式）：只附内容，讲"照着做、别改它"，没有规划提醒。
+        let building = texts(s.plan_turn(PermissionMode::AcceptEdits, &history).await);
+        assert_eq!(building.len(), 1, "{building:?}");
+        assert!(building[0].contains("Plan mode is over"), "{}", building[0]);
+        assert!(building[0].contains("用户改过的一步"));
+
+        // 文件被删了 = 没有计划。
+        std::fs::remove_file(dir.path().join(&rel)).expect("删文件");
+        let gone = texts(s.plan_turn(PermissionMode::Plan, &history).await);
+        assert_eq!(gone.len(), 1, "{gone:?}");
+        assert!(gone[0].starts_with("Plan mode is active"), "{}", gone[0]);
     }
 
     /// 界面按钮：有轮在跑才排得上；「并行构建」顺手打开多任务、连完整准则一起送。

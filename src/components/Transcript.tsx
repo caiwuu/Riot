@@ -25,6 +25,7 @@ import {
   useState,
 } from "react";
 
+import { host } from "../bridge";
 import type { PermissionAsk, PermissionMode, PermissionResponse } from "../bridge";
 import { useImeGuard } from "../hooks/useImeGuard";
 import type { Item, TextItem } from "../hooks/useSession";
@@ -48,8 +49,10 @@ import {
   promptToSegs,
   segsToPrompt,
 } from "../lib/promptText";
+import { openPlanPanel } from "../lib/plan";
 import { Chip, FileChip } from "./Chip";
 import { ConfirmDialog, type ConfirmRequest } from "./ConfirmDialog";
+import { PlanModeIcon } from "./icons";
 import { LazyMarkdown, Markdown } from "./Markdown";
 import { AskChoiceCard, ModeSwitchCard } from "./PermissionDialog";
 import { type Block, groupBlocks, ProcessGroup, ThinkingBlock } from "./ProcessFold";
@@ -363,6 +366,27 @@ function FindBar({
       </div>
     </div>
   );
+}
+
+/**
+ * 桌面里拦掉外壳 webview 在会话区弹的原生右键菜单。
+ *
+ * 那是 WKWebView / WebView2 自带的菜单，样式和应用完全不搭（浏览器面板那边
+ * 同样拦了它，理由一样），而且里面的 "Open Link" 一类条目干的是**导航整个
+ * 窗口**——宿主现在会把那次导航拦下转给系统浏览器（`nav_guard`），但菜单里
+ * 摆着一个"看起来能用、点了却在别处生效"的入口，不如不摆。
+ *
+ * 两处例外：网页版里那是浏览器自己的菜单，用户在浏览器里就该有它；输入框
+ * （编辑消息的 textarea、查找条）里留着原生菜单 —— 右键粘贴是很多人的
+ * 肌肉记忆，拦了等于把粘贴藏起来。
+ */
+function suppressNativeMenu(e: React.MouseEvent) {
+  if (host.kind !== "tauri") return;
+  const el = e.target instanceof Element ? e.target : null;
+  if (el?.closest("input, textarea, [contenteditable]:not([contenteditable='false'])")) {
+    return;
+  }
+  e.preventDefault();
 }
 
 export function Transcript({
@@ -759,7 +783,7 @@ export function Transcript({
   const hydrateFrom = Math.max(0, blocks.length - 12);
 
   return (
-    <div className="transcript-shell">
+    <div className="transcript-shell" onContextMenu={suppressNativeMenu}>
       <main className="transcript" ref={boxRef}>
         <div className="thread-col">
         {turns.map((t, ti) => (
@@ -937,6 +961,22 @@ export const Row = memo(function Row({
           </div>
         );
       }
+      // 按钮发的那条（「构建」/「并行构建」）画成构建卡，不画成气泡：正文
+      // 只是一句占位话，用户按的是键、不是在说话（Cursor 同款：Build 的
+      // 气泡正文为空，界面按 isPlanExecution 画卡）。
+      if (item.nudge) {
+        return (
+          <div className="user-row">
+            <BuildCard item={item} />
+            <MsgActions
+              text={item.text}
+              mutateEnabled={!!mutateEnabled}
+              {...(item.at ? { at: item.at } : {})}
+              {...(onDeleteEntry ? { onDelete: () => onDeleteEntry(item) } : {})}
+            />
+          </div>
+        );
+      }
       // 用户输入按原文显示，不走 markdown —— 渲染会篡改他说的话。
       // 操作按钮排在气泡右下方的流内位置（不用绝对定位：thread-col 的
       // content-visibility 隐含 paint containment，定位出气泡边界会被裁掉）。
@@ -1035,6 +1075,34 @@ const FULL_STAMP_OPTS: Intl.DateTimeFormatOptions = {
 
 /** 悬停出现的消息操作：复制 / 重新生成 / 上下文编辑 / 删除，末尾是时刻。
  *  占位始终在，hover 才可见。 */
+/**
+ * 「构建」/「并行构建」按钮发出的那条消息（照 Cursor 的 Build 气泡）：
+ * 用户侧一张卡，标签写按了哪个键，下面是构建的那份计划的标题。整张卡
+ * 是打开计划面板的入口，和对话里的计划卡一致。
+ */
+function BuildCard({ item }: { item: Extract<Item, { kind: "user" }> }) {
+  const { t } = useT();
+  const parallel = item.nudge === "build_in_parallel";
+  return (
+    <button
+      type="button"
+      className="msg user build-card"
+      onClick={openPlanPanel}
+      title={t("transcript.plan.open")}
+    >
+      <span className="build-card-icon" aria-hidden>
+        <PlanModeIcon />
+      </span>
+      <span className="build-card-main">
+        <span className="build-card-badge">
+          {parallel ? t("composer.build.parallel") : t("composer.build")}
+        </span>
+        <span className="build-card-title">{item.planName ?? t("transcript.plan.untitled")}</span>
+      </span>
+    </button>
+  );
+}
+
 function MsgActions({
   text,
   at,

@@ -4283,6 +4283,55 @@ html[data-host='web'] body {
   color: var(--text-dim);
 }
 
+/* 计划的待办进度：正文末尾一块卡，样式对齐输入框上方的任务面板
+   （.todo-panel）—— 同是"清单 + 进度头"，条目复用 .todo-list。 */
+.plan-panel-todos {
+  margin: 18px 0 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+  padding: 4px 6px;
+}
+
+.plan-panel-todos-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 12px;
+  padding: 4px 6px;
+  cursor: pointer;
+  user-select: none;
+  text-align: left;
+}
+
+.plan-panel-todos-head:hover {
+  color: var(--text-dim);
+  background: transparent;
+}
+
+.plan-panel-todos-title {
+  flex-shrink: 0;
+  font-weight: 500;
+}
+
+.plan-panel-todos-doing {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+
+/* 勾选的那一下"啵"，和任务面板同一个动画：面板就地更新、条目按下标取
+   key，状态翻转时类一换动画就走一遍。 */
+.plan-panel-todos .todo-item.completed .todo-mark {
+  animation: todo-pop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
 /* 计划是要读的文档：正文按 Markdown 排版，字号和对话正文一致。标题层级
    收敛 —— 模型爱用 ## 分节，1.3em 的大字会盖过面板自己的标题。 */
 .plan-panel-doc {
@@ -6534,10 +6583,16 @@ button.ta-resize-grip:hover:not(:disabled),
 
 /* ── 计划卡（对话流里 CreatePlan 的卡，照 Cursor） ──────────
    标题 + 一两句概述，整张卡是打开侧栏计划面板的入口。正文不在这里：
-   计划是要读的文档，铺进对话流会把对话本身冲走。 */
+   计划是要读的文档，铺进对话流会把对话本身冲走。
+
+   网格三列：图标 | 标记+标题 | 箭头。概述独占第二行、跨前两列 —— 它是
+   整段话，缩进到标题下面的话图标底下就空出一列。 */
 .tool-plan .plan-tool-head {
-  align-items: flex-start;
-  gap: 10px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  column-gap: 10px;
+  row-gap: 6px;
+  align-items: start;
   padding: 10px 12px;
   cursor: pointer;
 }
@@ -6548,7 +6603,8 @@ button.ta-resize-grip:hover:not(:disabled),
 
 /* 规划模式的黄（和 composer 上 Plan pill 同色），扫一眼就知道这张是计划。 */
 .plan-tool-icon {
-  flex: none;
+  grid-column: 1;
+  grid-row: 1;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -6561,7 +6617,8 @@ button.ta-resize-grip:hover:not(:disabled),
 }
 
 .plan-tool-main {
-  flex: 1;
+  grid-column: 2;
+  grid-row: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -6593,6 +6650,8 @@ button.ta-resize-grip:hover:not(:disabled),
 }
 
 .plan-tool-overview {
+  grid-column: 1 / 3;
+  min-width: 0;
   font-size: 12px;
   line-height: 1.5;
   color: var(--text-dim);
@@ -6603,13 +6662,72 @@ button.ta-resize-grip:hover:not(:disabled),
   overflow: hidden;
 }
 
+/* 箭头只占第一行：跨两行的话，没有概述时会多出一条空行连带 row-gap，
+   卡凭空高 6px。对着标题行居中，视觉上也更像"点标题进去"。 */
 .tool-plan .task-card-go {
+  grid-column: 3;
+  grid-row: 1;
   align-self: center;
 }
 
 .tool-plan:hover .task-card-go,
 .tool-plan:focus-within .task-card-go {
   opacity: 1;
+}
+
+/* ── 构建卡（「构建」/「并行构建」按钮发出的那条，照 Cursor 的 Build 气泡）──
+   落在用户那一侧、沿用 .msg.user 的底色和圆角，但内容是"按了哪个键 +
+   构建哪份计划"，不是一句话。整张卡可点，开右侧的计划面板。 */
+.build-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px 8px 10px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: var(--text);
+  white-space: normal;
+}
+
+.build-card:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+
+/* 和计划卡同一个黄底方块，两张卡一眼看出是同一件事的两头。 */
+.build-card-icon {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+}
+
+.build-card-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.build-card-badge {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  color: var(--text-faint);
+}
+
+.build-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  word-break: break-word;
 }
 
 /* ── 任务清单 ───────────────────────────────

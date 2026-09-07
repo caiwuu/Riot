@@ -1528,6 +1528,17 @@
             "null"
           ]
         },
+        "nudge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Nudge"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "这条 user 消息是界面上哪个按钮发的（「构建」/「并行构建」）。\n\n对照 Cursor 的 `isPlanExecution` / `simulatedMsgReason`：按钮发的\n消息在对话流里不画成用户气泡，画成一张「构建 · 计划标题」的卡。\n正文（一句短话）和给模型的指示（`SystemReminder` 附件）都照常在\n消息里 —— 这份标记只给界面，模型那边不需要。只有开轮那条路\n（`TurnInput::nudge`）打上；轮中注入的提醒是合成消息，本来就不显示。"
+        },
         "synthetic": {
           "description": "是否为系统合成（而非模型产出或用户输入）。",
           "type": "boolean"

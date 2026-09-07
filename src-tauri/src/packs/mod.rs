@@ -114,7 +114,7 @@ pub struct CatalogEntry {
 
 // ── 目录 ──────────────────────────────────────────────
 
-/// 所有能力包的根目录。路径约定在内核的 config 里，和 `profiles_dir` 并列。
+/// 所有能力包的根目录。路径约定在内核的 config 里，和 `browser_profile_dir` 并列。
 pub fn packs_dir() -> PathBuf {
     crate::config::packs_dir(&crate::config::config_path())
 }
@@ -361,7 +361,7 @@ pub fn sync_mcp(config: &mut riot_kernel::config::AppConfig) -> bool {
     sync_mcp_in(config, &packs_dir())
 }
 
-/// 参数化版本，给测试用（同 `config::profiles_dir` 的理由）。
+/// 参数化版本，给测试用（同 `config::packs_dir` 的理由）。
 fn sync_mcp_in(config: &mut riot_kernel::config::AppConfig, root: &std::path::Path) -> bool {
     let before = config.mcp_servers.clone();
 

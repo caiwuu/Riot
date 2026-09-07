@@ -42,6 +42,7 @@ pub mod memory;
 pub mod mentions;
 pub mod models;
 pub mod packs;
+pub mod plan;
 pub mod prompt;
 pub mod session;
 pub mod skills;

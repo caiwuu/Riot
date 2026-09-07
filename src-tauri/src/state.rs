@@ -218,6 +218,12 @@ struct Inner {
     /// screencast / 输入转发是宿主能力,浏览器进程完全归宿主。
     /// M-B3 反向 RPC 后,内核的浏览器工具经宿主服务端用同一个实例。
     browsers: Mutex<HashMap<String, Arc<crate::browser::access::HostBrowser>>>,
+    /// 那一个共享的浏览器进程。`None` = 这个构建没打包浏览器。
+    ///
+    /// `[约束]` 全应用只能有一个。profile 目录只有一份,而 CEF 在它上面有
+    /// 进程单例锁 —— 建第二个 hub 就等于让第二个进程去抢那把锁,而抢输的
+    /// 那个是**静默退出**的(见 `browser::hub` 的模块注释)。
+    browser_hub: Option<Arc<crate::browser::hub::BrowserHub>>,
     /// 环境告警的去重表（env.snapshot 用）。见 `env_probe`。
     env_alerts: crate::env_probe::AlertSeen,
     /// 定时任务：任务表 + 运行认领 + 启动时发现的错过。
@@ -252,6 +258,8 @@ impl Inner {
             tracing::warn!("{e}");
             PathBuf::new()
         });
+        // 建 hub 不起进程（惰性启动），所以放在这里不花什么钱。
+        let browser_hub = make_browser_hub(&config_path);
         Self {
             transcripts: Arc::new(riot_store::Transcripts::new(&sessions_dir)),
             kernel: KernelClient::new(kernel_exe, sessions_dir.clone()),
@@ -265,6 +273,7 @@ impl Inner {
             index_lock: Mutex::default(),
             terminals: crate::term::Terminals::default(),
             browsers: Mutex::default(),
+            browser_hub,
             env_alerts: crate::env_probe::AlertSeen::default(),
             schedules: Mutex::default(),
             app: std::sync::OnceLock::new(),
@@ -299,7 +308,7 @@ impl AppState {
         let mut next_seq = 0u64;
         for p in index.sessions {
             next_seq = next_seq.max(p.seq + 1);
-            if let Some(b) = make_browser(&inner.config_path, &p.id) {
+            if let Some(b) = make_browser(inner.browser_hub.as_ref()) {
                 browsers_map.insert(p.id.clone(), b);
             }
             map.insert(
@@ -843,7 +852,7 @@ impl AppState {
             .await
             .default_mode
             .unwrap_or_else(crate::config::default_permission_mode);
-        if let Some(b) = make_browser(&self.0.config_path, id.as_str()) {
+        if let Some(b) = make_browser(self.0.browser_hub.as_ref()) {
             self.0
                 .browsers
                 .lock()
@@ -982,8 +991,9 @@ impl AppState {
         })
     }
 
-    /// 删除会话：中断正在跑的轮子，摘掉事件出口，**删掉磁盘上的 transcript、
-    /// 基线和浏览器 profile**。
+    /// 删除会话：中断正在跑的轮子，摘掉事件出口，关掉它在共享浏览器里开的
+    /// 标签页，**删掉磁盘上的 transcript、基线和工件**。浏览器 profile 不删，
+    /// 那是全应用共用的登录态。
     ///
     /// 幂等 —— 删一个不存在的会话是成功，不是错误。用户连点两次删除、
     /// 或者两个窗口先后删同一个，第二次都不该弹报错。
@@ -1016,16 +1026,29 @@ impl AppState {
                 if let Err(e) = self.0.transcripts.remove(&id).await {
                     tracing::warn!(error = %e, "transcript 删除失败，磁盘上可能留下孤儿文件");
                 }
+                // 子 agent 的日志另在一个目录，和内核那条路一样要单独删。
+                // 内核不在 = 没有子 agent 在跑，没有打开的句柄，直接删安全。
+                if let Err(e) = self.0.transcripts.remove_subagents(&id).await {
+                    tracing::warn!(error = %e, "子 agent transcript 目录删除失败");
+                }
             }
             crate::changes::remove_baselines(&crate::changes::baselines_path(
                 &self.0.sessions_dir,
                 session_id,
             ));
-            // 先摘掉内存里的浏览器句柄:Drop 会关掉 Chromium 进程,而
-            // remove_browser_profile 删的是它锁着的 profile 目录,必须在
-            // 进程退出之后(见 remove_browser_profile 的约束)。
-            self.0.browsers.lock().await.remove(session_id);
-            self.remove_browser_profile(session_id).await;
+            // 摘掉这个会话的浏览器视图,并把它在共享进程里开的标签页关掉。
+            //
+            // `[约束]` 光摘句柄不够。进程是全应用共享的,句柄 drop 了进程照跑,
+            // 它名下那些 CEF browser 会留在里面变成孤儿(几十 MB 一个、脚本
+            // 照跑、screencast 照推),见 `HostBrowser::close_all`。profile 目录
+            // 同样不跟着会话删 —— 那里面装的是所有会话共用的登录态。
+            //
+            // 先摘再关:摘掉之后新来的调用拿不到句柄,关的过程中不会有人再往
+            // 这个会话里开页。
+            let browser = self.0.browsers.lock().await.remove(session_id);
+            if let Some(b) = browser {
+                b.close_all().await;
+            }
             self.remove_artifacts(session_id).await;
             self.persist_index().await;
         }
@@ -1033,10 +1056,9 @@ impl AppState {
 
     /// 删掉一个会话的工件目录（截图原图、过大的工具结果）。
     ///
-    /// `[约束]` 必须跟着会话一起删，理由同 [`Self::remove_browser_profile`]：
-    /// 目录名就是会话 id，会话没了就没人会认领它。这一步以前是漏掉的 ——
-    /// 路径推导只在内核的 Session 里，宿主不知道它。现在两边都走
-    /// [`crate::config::artifacts_root`]。
+    /// `[约束]` 必须跟着会话一起删：目录名就是会话 id，会话没了就没人会
+    /// 认领它。这一步以前是漏掉的 —— 路径推导只在内核的 Session 里，宿主
+    /// 不知道它。现在两边都走 [`crate::config::artifacts_root`]。
     ///
     /// `[约束]` 必须在内核侧删除（中断轮子）**之后**：轮子跑着的时候工具
     /// 还在往里写截图，边写边删会留残骸。删不掉只告警。
@@ -1056,20 +1078,21 @@ impl AppState {
         }
     }
 
-    /// 删掉一个会话的浏览器 profile 目录。
+    /// 收掉"一个会话一份 profile"那个时代留下的整棵目录树。
     ///
-    /// `[约束]` 必须跟着会话一起删。profile 里除了 cookie 和 localStorage，
-    /// 还有 Chromium 自己塞的一堆缓存 —— 一个用过的 profile 是几十上百 MB，
-    /// 而目录名就是会话 id，会话没了就再也没有人会认领它。漏掉这一步的后果
-    /// 是缓存目录随着用过的会话数无上限增长，而用户从界面上完全看不到它。
+    /// `[约束]` 删的是 [`crate::config::legacy_profiles_dir`]（复数，
+    /// `browser-profiles/`），**不是**现在那个共享 profile
+    /// （[`crate::config::browser_profile_dir`]，单数）。两个名字只差一个
+    /// 字母，删错的表现是"每次重启所有网站的登录态都没了"，而现场没有任何
+    /// 东西指向这次清理。
     ///
-    /// `[约束]` 必须在 `interrupt()` 之后。浏览器进程握着 profile 里的
-    /// SingletonLock 和一批 leveldb 文件，边写边删会留下删不干净的残骸。
+    /// 里面每个子目录都以会话 id 命名，而现在没有任何代码会再按会话 id 去
+    /// 建或找 profile —— 整棵都是存量垃圾，一个用过的 profile 几十上百 MB，
+    /// 攒下来能有几个 GB，而用户从界面上完全看不到它。
     ///
-    /// 删不掉只告警。会话在逻辑上已经删除了，为一个缓存目录把整个操作报成
-    /// 失败说不通 —— 残留的那份下次启动由 [`Self::gc_browser_profiles`] 收。
-    async fn remove_browser_profile(&self, session_id: &str) {
-        let dir = crate::config::profiles_dir(&self.0.config_path).join(session_id);
+    /// 删不掉只告警：那只是没回收空间，不影响任何功能。
+    pub async fn gc_legacy_browser_profiles(&self) {
+        let dir = crate::config::legacy_profiles_dir(&self.0.config_path);
         if !dir.is_dir() {
             return;
         }
@@ -1078,37 +1101,39 @@ impl AppState {
         let path = dir.clone();
         let done = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&path)).await;
         match done {
-            Ok(Ok(())) => tracing::info!(dir = %dir.display(), "已删除会话的浏览器 profile"),
-            Ok(Err(e)) => {
-                tracing::warn!(error = %e, dir = %dir.display(), "浏览器 profile 没删掉");
+            Ok(Ok(())) => {
+                tracing::info!(dir = %dir.display(), "已清掉按会话分的旧浏览器 profile");
             }
-            Err(e) => tracing::warn!(error = %e, "删 profile 的任务没跑完"),
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, dir = %dir.display(), "旧浏览器 profile 没删掉");
+            }
+            Err(e) => tracing::warn!(error = %e, "清旧 profile 的任务没跑完"),
         }
-    }
-
-    /// 清掉没有会话认领的浏览器 profile 目录。
-    ///
-    /// [`Self::delete_session`] 已经会顺手删自己那份，所以这里收的是另外两类：
-    /// 旧版本留下的（那时删会话不删 profile），以及应用被强杀、删到一半的。
-    ///
-    /// `[约束]` 判定依据是**内存里的会话表**。它在 `restore_at` 之后就是索引
-    /// 的全部内容，所以这个方法只能在恢复完成之后调。拿磁盘上的 transcript
-    /// 文件当依据是不够的：一个刚建好、还没写过消息的会话在索引里但没有
-    /// transcript，照那个判会把它正在用的 profile 删掉。
-    pub async fn gc_browser_profiles(&self) {
-        let root = crate::config::profiles_dir(&self.0.config_path);
-        self.gc_orphan_dirs(root, "browser profile").await;
     }
 
     /// 清掉没有会话认领的工件目录（截图、过大工具结果）。
     ///
-    /// 和 [`Self::gc_browser_profiles`] 同一件事、同一个约束（恢复完成之后
-    /// 才能调）。删会话不删工件这个漏洞存在了很久，存量孤儿比 profile 多
-    /// 得多（一台机器上一百多个），单靠 `delete_session` 补上那一步收不回
-    /// 已经积下的。
+    /// `[约束]` 判定依据是**内存里的会话表**。它在 `restore_at` 之后就是索引
+    /// 的全部内容，所以这个方法只能在恢复完成之后调。拿磁盘上的 transcript
+    /// 文件当依据是不够的：一个刚建好、还没写过消息的会话在索引里但没有
+    /// transcript，照那个判会把它正在用的目录删掉。
+    ///
+    /// 删会话不删工件这个漏洞存在了很久，存量孤儿很多（一台机器上一百多
+    /// 个），单靠 `delete_session` 补上那一步收不回已经积下的。
     pub async fn gc_artifacts(&self) {
         let root = crate::config::artifacts_root(&self.0.config_path);
         self.gc_orphan_dirs(root, "artifact dir").await;
+    }
+
+    /// 清掉没有会话认领的子 agent transcript 目录。
+    ///
+    /// 和 [`Self::gc_artifacts`] 同一件事、同一个约束（恢复完成之后才能调）。
+    /// 收的是两类：删会话不删这个目录的旧版本留下的存量，以及删会话时某个
+    /// 子 agent 还握着句柄、Windows 上没删掉的残留（见
+    /// `riot_store::Transcripts::remove_subagents`）。
+    pub async fn gc_subagent_transcripts(&self) {
+        let root = self.0.transcripts.subagents_dir();
+        self.gc_orphan_dirs(root, "subagent transcript dir").await;
     }
 
     /// `root` 下每个子目录以会话 id 命名；不在内存会话表里的整个删掉。
@@ -1337,7 +1362,8 @@ impl AppState {
         if nudge == Some(riot_protocol::Nudge::BuildInParallel) {
             self.set_multitask(session_id, true).await?;
         }
-        self.submit_turn(session_id, text, images, refs, nudge).await
+        self.submit_turn(session_id, text, images, refs, nudge)
+            .await
     }
 
     /// [`Self::send_turn`] 去掉"前端必须在听"的那道检查。
@@ -2792,19 +2818,28 @@ fn normalize_projects(projects: &mut Vec<String>) {
     *projects = normalized;
 }
 
-/// 给一个会话装配面板浏览器。没打包浏览器时返回 None(工具装 NoBrowser、
-/// 面板报不可用)。profile 目录按会话 id 隔离:同一数据目录不能跑两个
-/// Chromium 实例,共用的话第二个会话一用就报不可用。
+/// 建那一个共享的浏览器进程管理器。没打包浏览器时返回 None(会话装
+/// NoBrowser、面板报不可用)。
+///
+/// 只建句柄,不起进程 —— 启动是惰性的,见 `browser::access` 的模块注释。
+fn make_browser_hub(config_path: &std::path::Path) -> Option<Arc<crate::browser::hub::BrowserHub>> {
+    let app = crate::browser::access::locate_app()?;
+    let profile = crate::config::browser_profile_dir(config_path);
+    Some(crate::browser::hub::BrowserHub::new(app, profile))
+}
+
+/// 给一个会话装配面板浏览器。没打包浏览器时返回 None。
+///
+/// 每个会话一个 `HostBrowser`(自己的标签页、活动页、快照编号),但它们都
+/// 挂在同一个进程上 —— profile 只有一份,登录态因此跨会话共享。为什么进程
+/// 必须共用见 `browser::hub` 的模块注释。
 ///
 /// 从 Session 移到宿主(阶段 B):浏览器进程和面板都是宿主能力,内核只经
 /// `dyn BrowserAccess` 用同一个实例。
 fn make_browser(
-    config_path: &std::path::Path,
-    id: &str,
+    hub: Option<&Arc<crate::browser::hub::BrowserHub>>,
 ) -> Option<Arc<crate::browser::access::HostBrowser>> {
-    let app = crate::browser::access::locate_app()?;
-    let profile = crate::config::profiles_dir(config_path).join(id);
-    Some(crate::browser::access::HostBrowser::new(app, profile))
+    Some(crate::browser::access::HostBrowser::new(Arc::clone(hub?)))
 }
 
 #[cfg(test)]
@@ -3049,34 +3084,48 @@ mod tests {
         state.delete_session("s_ghost").await;
     }
 
-    /// 摆一个"这个会话用过浏览器"的 profile 目录。
+    /// 摆一份共享 profile（全应用那一个，装着所有会话共用的登录态）。
     ///
     /// 测试环境里没有打包好的浏览器，会话装的是 `NoBrowser`，不会真的建
     /// 目录 —— 而这几个用例要验的正是"目录该不该被删"。
-    fn 摆个profile(state: &AppState, id: &str) -> PathBuf {
-        let dir = crate::config::profiles_dir(&state.0.config_path).join(id);
+    fn 摆个共享profile(state: &AppState) -> PathBuf {
+        摆份数据(crate::config::browser_profile_dir(&state.0.config_path))
+    }
+
+    /// 摆一份"一个会话一份"那个时代留下的 profile。
+    fn 摆个旧profile(state: &AppState, id: &str) -> PathBuf {
+        摆份数据(crate::config::legacy_profiles_dir(&state.0.config_path).join(id))
+    }
+
+    fn 摆份数据(dir: PathBuf) -> PathBuf {
         std::fs::create_dir_all(dir.join("Default")).expect("建 profile");
         std::fs::write(dir.join("Default").join("Cookies"), b"x").expect("写点东西进去");
         dir
     }
 
-    /// 删会话必须连浏览器 profile 一起删。
+    /// 删会话**不能**连浏览器 profile 一起删。
     ///
-    /// 盯着的是一个用户完全看不见的泄漏：一个用过的 profile 是几十上百 MB，
-    /// 目录名就是会话 id，会话删了就再没人会认领它。漏掉这一步的现象是
-    /// "应用数据目录不知不觉涨到好几个 G"，而界面上一个会话都没有。
+    /// profile 现在是全应用一份，里面装的是所有会话共用的登录态。跟着会话
+    /// 删的话，用户随手清掉一个临时会话，别的会话里所有网站的登录态一起
+    /// 消失 —— 而现场没有任何东西指向那次删除。
+    ///
+    /// （早先它确实是跟着会话删的，那时目录名就是会话 id。这条用例是那条
+    /// 规则的反面，改回去会被它拦住。）
     #[tokio::test]
-    async fn 删除会话连浏览器profile一起删() {
+    async fn 删除会话不碰共享的浏览器profile() {
         let state = state().await;
         let info = state
             .create_session(&temp_ws("prof-del"))
             .await
             .expect("会话");
-        let dir = 摆个profile(&state, &info.id);
+        let dir = 摆个共享profile(&state);
 
         state.delete_session(&info.id).await;
 
-        assert!(!dir.exists(), "会话删了 profile 还留着，缓存会无上限增长");
+        assert!(
+            dir.is_dir(),
+            "共享 profile 被会话删除连累了，用户会看到登录态莫名其妙消失"
+        );
     }
 
     /// 删会话必须连工件目录一起删（截图、过大工具结果）。
@@ -3098,6 +3147,58 @@ mod tests {
         state.delete_session(&info.id).await;
 
         assert!(!dir.exists(), "会话删了工件目录还留着：{}", dir.display());
+    }
+
+    /// 摆一个"这个会话开过子 agent"的日志目录。
+    fn 摆个子agent日志(state: &AppState, id: &str) -> PathBuf {
+        let dir = state.0.transcripts.subagents_dir().join(id);
+        std::fs::create_dir_all(&dir).expect("建子 agent 目录");
+        std::fs::write(dir.join("agent-x.jsonl"), "{}\n").expect("写一条");
+        dir
+    }
+
+    /// 删会话必须连子 agent 的日志目录一起删。
+    ///
+    /// 这一步以前是漏的：主 transcript 是一个文件，子 agent 的日志在另一个
+    /// 目录，删前者删不到后者。它又刻意躲开了索引重建（否则每个子 agent 都
+    /// 会被当成会话捞回来），所以用户从界面上完全看不到这笔泄漏。这里走的
+    /// 是内核不在时的兜底路径；内核在时由 `SessionManager::delete` 做同一件事。
+    #[tokio::test]
+    async fn 删除会话连子agent日志一起删() {
+        let state = state().await;
+        let info = state
+            .create_session(&temp_ws("sub-del"))
+            .await
+            .expect("会话");
+        let dir = 摆个子agent日志(&state, &info.id);
+
+        state.delete_session(&info.id).await;
+
+        assert!(
+            !dir.exists(),
+            "会话删了子 agent 日志还留着：{}",
+            dir.display()
+        );
+    }
+
+    /// 启动时收孤儿子 agent 日志目录，不碰活着的会话。
+    ///
+    /// 收的是旧版本（删会话不删这个目录）留下的存量，以及 Windows 上删会话
+    /// 时某个子 agent 还握着句柄、没删掉的残留。判定同样按会话表。
+    #[tokio::test]
+    async fn 清理孤儿子agent日志不碰活着的会话() {
+        let state = state().await;
+        let info = state
+            .create_session(&temp_ws("sub-gc"))
+            .await
+            .expect("会话");
+        let live = 摆个子agent日志(&state, &info.id);
+        let orphan = 摆个子agent日志(&state, "ses_早就没了");
+
+        state.gc_subagent_transcripts().await;
+
+        assert!(live.is_dir(), "活着的会话的子 agent 日志不能动");
+        assert!(!orphan.exists(), "没人认领的该收掉");
     }
 
     /// 启动时收孤儿工件目录，不碰活着的会话（约束同 profile 的 GC：按会话表判）。
@@ -3122,26 +3223,36 @@ mod tests {
         assert!(!orphan.exists(), "没人认领的工件目录该收掉");
     }
 
-    /// 启动时的清理只收孤儿，不碰活着的会话。
+    /// 启动清理要收掉按会话分的整棵旧 profile 树，但**绝不能**碰共享那一份。
     ///
-    /// `[约束]` 判定必须按会话表，不能按磁盘上的 transcript 文件。这个用例
-    /// 里的会话刚建好、一条消息都没写过，所以它**没有** transcript ——
-    /// 照 transcript 判的话，它正在用的 profile 会被当孤儿删掉，用户的现象
-    /// 是"新建会话里浏览器的登录态莫名其妙丢了"。
+    /// `[约束]` 两个目录名只差一个字母 —— 旧的是 `browser-profiles/`（复数，
+    /// 底下按会话 id 分），现在的是 `browser-profile/`（单数，就是 profile
+    /// 本身）。删错的表现是"每次重启，所有网站的登录态都没了"，而清理发生在
+    /// 启动路径的一个后台任务里，现场没有任何东西指向它。
     #[tokio::test]
-    async fn 清理孤儿profile不碰活着的会话() {
+    async fn 清理旧profile不碰共享的那份() {
         let state = state().await;
         let info = state
             .create_session(&temp_ws("prof-gc"))
             .await
             .expect("会话");
-        let live = 摆个profile(&state, &info.id);
-        let orphan = 摆个profile(&state, "ses_早就没了");
+        let shared = 摆个共享profile(&state);
+        // 旧树里连"还活着的会话"那份也要收：没有任何代码会再按会话 id 去
+        // 找 profile，留着它只是占几十上百 MB。
+        let old_live = 摆个旧profile(&state, &info.id);
+        let old_gone = 摆个旧profile(&state, "ses_早就没了");
 
-        state.gc_browser_profiles().await;
+        state.gc_legacy_browser_profiles().await;
 
-        assert!(live.is_dir(), "活着的会话的 profile 不能动");
-        assert!(!orphan.exists(), "没人认领的 profile 该收掉");
+        assert!(
+            shared.is_dir(),
+            "共享 profile 是登录态所在，这次清理绝不能碰它"
+        );
+        assert!(
+            !old_live.exists(),
+            "按会话分的旧 profile 已经没人会用，该收掉"
+        );
+        assert!(!old_gone.exists());
     }
 
     fn after_60min(name: &str, in_this_session: bool) -> ScheduleSpec {

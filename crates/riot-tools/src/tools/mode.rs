@@ -38,9 +38,7 @@ use riot_protocol::tool::{
 };
 use riot_protocol::ui_text;
 
-use super::names::{
-    ASK_USER_QUESTION, CREATE_PLAN, GLOB, GREP, READ, SWITCH_MODE, TODO_WRITE,
-};
+use super::names::{ASK_USER_QUESTION, CREATE_PLAN, GLOB, GREP, READ, SWITCH_MODE, TODO_WRITE};
 use super::plan::plan_mode_rules;
 
 /// 能切去的两种工作方式。多任务是独立开关不在这里；权限档（默认 /
@@ -250,11 +248,13 @@ impl Tool for SwitchMode {
                 plan_mode_rules()
             ),
             TargetMode::Agent => format!(
-                "The user agreed. Plan mode is over; you are in agent mode now. If a plan file \
-                 exists (see your earlier {CREATE_PLAN} result), {READ} it first — the user may \
-                 have edited it — then implement it: turn the steps into todos with \
-                 {TODO_WRITE}, work through them in order, and verify as the plan says. Do not \
-                 re-ask for approval."
+                "The user agreed. Plan mode is over; you are in agent mode now. If a plan exists \
+                 (you created it with {CREATE_PLAN}), its current content and path are attached \
+                 to the user's latest message as `<plan_file>`, with the plan's todos listed under \
+                 it — implement that: materialize those todos with {TODO_WRITE} (same items, same \
+                 wording, in order; derive them from the steps only if the plan defines none), \
+                 work through them, and verify as the plan says. If the attachment is missing, \
+                 {READ} the plan file first. Do not re-ask for approval."
             ),
         };
         ToolOutcome::Ok {
@@ -336,7 +336,10 @@ mod tests {
             matches!(reason, DecisionReason::UserChoice { .. }),
             "理由要是 UserChoice：{reason:?}"
         );
-        assert!(!reason.yields_to_bypass(), "切模式不能被「全部放行」替用户答");
+        assert!(
+            !reason.yields_to_bypass(),
+            "切模式不能被「全部放行」替用户答"
+        );
     }
 
     #[test]

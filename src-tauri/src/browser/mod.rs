@@ -13,12 +13,16 @@
 //! 会话都要用的东西，不在就什么都干不了。浏览器是可选能力，而且崩溃常常
 //! 发生在没人看的时候 —— 所以这一层只负责让句柄说得出自己废了
 //! （[`Browser::alive`]），真正的重开等到下一次用到才做，由
-//! [`access::HostBrowser::get`] 驱动。
+//! [`hub::BrowserHub::get`] 驱动。
+//!
+//! 进程只有一个，全应用共享（见 [`hub`]）。这一层不关心那件事:它管的是
+//! "一个进程怎么起、怎么说话、怎么收尸"，谁在用它是上面的事。
 
 // 宿主层不参与黄金回放，确定性约束（见 clippy.toml）只针对内核。
 #![allow(clippy::disallowed_methods)]
 
 pub mod access;
+pub mod hub;
 pub mod netlog;
 pub mod ops;
 pub mod taps;
@@ -101,11 +105,13 @@ impl Browser {
     /// `[约束]` 必须包进程组。CEF 自己会 spawn 五六个 helper，主进程被
     /// SIGKILL 时应用层的清理逻辑不会执行，只有 OS 层的进程组能保证
     /// 那些 helper 跟着一起死。这条和内核那边同理，见 ARCHITECTURE.md §2.3。
-    /// `profile` 是浏览器的数据目录。
+    /// `profile` 是浏览器的数据目录。全应用一份，所有会话共用里面的
+    /// cookie 和 localStorage。
     ///
     /// `[约束]` 一个目录同时只能有一个实例 —— Chromium 用锁文件独占 profile，
-    /// 第二个进程拿不到锁会**直接退出**，这边看到的只是"事件流断了"。
-    /// 要同时开多个浏览器（比如每个会话一个）就得给各自不同的目录。
+    /// 第二个进程拿不到锁会**直接退出**，这边看到的只是"事件流断了"，完全
+    /// 指不出原因。这正是浏览器进程做成全应用一个的原因，见 [`super::hub`]：
+    /// 别在别处再 spawn 一个。
     pub async fn spawn(
         app: PathBuf,
         profile: Option<PathBuf>,

@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from "react";
 
 import { readFileBytes } from "../bridge";
 import { useT } from "../i18n";
-import type { PlanView } from "../lib/plan";
+import type { PlanTodoView, PlanView } from "../lib/plan";
 import { joinRoot } from "../pathDisplay";
+import { Chevron } from "./Chevron";
 import { openFilePreview } from "./FilePreview";
 import { PlanModeIcon } from "./icons";
 import { Markdown } from "./Markdown";
@@ -18,6 +19,10 @@ import { Markdown } from "./Markdown";
  *   去 Edit 那个文件，面板要跟着刷（`refreshKey` 每有一次编辑落盘就变）；
  * - 读不到文件（被删了、目录换了）：退回工具输入里那份正文。
  *
+ * 正文末尾是计划的待办进度（`todos`，照 Cursor 计划里的 todos）：规划中是
+ * 一列 pending 的任务清单，读完计划怎么做，接着看它拆成了哪几步；构建后随
+ * 模型的 TodoWrite 就地翻状态，是这份计划自己的进度条。全部完成自动收起。
+ *
  * 没有输入框、没有「构建」键：意见在下方的输入框里说，构建键也在那里 ——
  * 一件事一个入口。底部一行提示把人指过去。
  */
@@ -27,6 +32,7 @@ export function PlanPanel({
   streaming,
   refreshKey,
   canBuild,
+  todos,
 }: {
   /** 会话的项目根，计划文件的相对路径按它拼。 */
   root: string;
@@ -37,6 +43,8 @@ export function PlanPanel({
   refreshKey: string;
   /** 输入框那边此刻有没有「构建」键（还在规划模式、回合已结束）。 */
   canBuild: boolean;
+  /** 计划的待办及进度（见 lib/plan 的 planTodos）。空就不画这一区。 */
+  todos: PlanTodoView[];
 }) {
   const { t } = useT();
   const running = plan.status === "running";
@@ -136,11 +144,62 @@ export function PlanPanel({
             <p className="plan-panel-empty">{t("transcript.plan.empty")}</p>
           )}
         </div>
+        {/* 待办跟在正文之后：先读计划怎么做，再看拆成了哪几步。
+            key 按计划 id：换了一份计划，开合状态回到默认。 */}
+        {!running && todos.length > 0 ? <PlanTodos key={plan.id} todos={todos} /> : null}
       </div>
       {!running ? (
         <div className="plan-panel-foot">
           {canBuild ? t("transcript.plan.footBuild") : t("transcript.plan.footDone")}
         </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * 计划的待办进度区。清单样式和输入框上方的任务面板共用（.todo-list），
+ * 这里多一层可折叠的头：默认展开，全部完成后自动收起。用户手动开合过就
+ * 听用户的；换了一份计划重新按默认走（父级按计划 id 换 key）。
+ */
+function PlanTodos({ todos }: { todos: PlanTodoView[] }) {
+  const { t } = useT();
+  const [userOpen, setUserOpen] = useState<boolean | null>(null);
+  const done = todos.filter((x) => x.status === "completed").length;
+  const doing = todos.find((x) => x.status === "in_progress");
+  const open = userOpen ?? done < todos.length;
+  return (
+    <div className="plan-panel-todos">
+      <button
+        type="button"
+        className="plan-panel-todos-head"
+        onClick={() => setUserOpen(!open)}
+        aria-expanded={open}
+      >
+        <Chevron open={open} />
+        <span className="plan-panel-todos-title">
+          {t("transcript.todo.title", { done, total: todos.length })}
+        </span>
+        {/* 收起时把"正在做什么"提到标题上，折叠不该让进度彻底消失。 */}
+        {!open && doing ? (
+          <span className="plan-panel-todos-doing">{doing.activeForm ?? doing.content}</span>
+        ) : null}
+      </button>
+      {open ? (
+        <ul className="todo-list">
+          {/* key 用下标：清单是整表替换、条目只会在尾部增删，下标键让已有
+              条目的 DOM 节点存续，状态翻转靠 class 变化过渡。 */}
+          {todos.map((x, n) => (
+            <li key={n} className={`todo-item ${x.status}`}>
+              <span className="todo-mark" aria-hidden>
+                {x.status === "completed" ? "✓" : x.status === "in_progress" ? "◐" : "○"}
+              </span>
+              <span className="todo-text">
+                {x.status === "in_progress" ? (x.activeForm ?? x.content) : x.content}
+              </span>
+            </li>
+          ))}
+        </ul>
       ) : null}
     </div>
   );

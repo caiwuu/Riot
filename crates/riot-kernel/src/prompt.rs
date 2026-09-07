@@ -393,16 +393,23 @@ batched update means the window shows a state that is no longer true.";
 /// 在静态段：模式本身每轮变，但"该不该建议换模式"这条准则不变，而且
 /// 它必须在 agent 模式下就位 —— 建议切规划正是在 agent 模式里发生的。
 /// 规划模式自己的约束走消息侧（见 [`plan_mode_reminder`]）。
+///
+/// 时机说的是"动手改之前"，不是"读文件之前"。旧版要求第一个工具调用就是
+/// SwitchMode，结果是模型没看代码就得给出理由 —— 卡片上的理由是编的，中等
+/// 任务也动不动弹一张「切到规划？」。Cursor 的同名分节只说 "before you
+/// proceed"，判断留给模型看过代码之后做。这里保留一句"别从调研滑进实现"：
+/// 那是实测过的另一种失败形态（读二十个文件然后直接开写，全程不提规划）。
 const MODE_SELECTION: &str = "\
 Pick the working mode before you proceed; reassess when the goal changes or you are stuck: \
 **agent** (implement directly) or **plan** (read-only research, then a plan the user reviews).
 
-Suggest **plan** — call SwitchMode (one-sentence explanation) as your FIRST action, before \
-reading files — when the user asks for a plan or the request is a planning task: a feature \
-spanning several files (authentication, payments, a new page plus its API), a large refactor or \
-migration, ambiguous requirements, or real trade-offs. One clarifying question then implementing \
-is NOT a substitute. Small, clear tasks: just do them. The user confirms on a card; that click is \
-cheap, a big change built without a plan is not.";
+Suggest **plan** — call SwitchMode with a one-sentence explanation — when the user asks for a \
+plan or the request is a planning task: a feature spanning several files (authentication, \
+payments, a new page plus its API), a large refactor or migration, ambiguous requirements, or \
+real trade-offs. Decide before you change anything: a quick look at the code to size the task \
+is fine, but do not drift from research into implementation without making the call. One \
+clarifying question then implementing is NOT a substitute. Small, clear tasks: just do them. \
+The user confirms on a card; that click is cheap, a big change built without a plan is not.";
 
 const TEST_YOUR_WORK: &str = "\
 Before you say you are done, verify: compile what compiles, run what runs. An unverified \
@@ -594,11 +601,18 @@ them rather than routing around the check.";
 ///   system prompt 的"尾部"和本轮对话之间还隔着全部工具定义和历史。
 ///
 /// 两个版本（Cursor 同款的两段注入）：
-/// - `has_plan == false`：还没交过计划 —— 讲怎么调研、提交前把关键决定
-///   定下来、计划里只给一条路线、提交后别问"要开始吗"（用户有构建键）；
-/// - `has_plan == true`：已经有计划文件 —— 讲用户的话是**改计划**还是
-///   **要执行**。规划模式下绝大多数话是改计划（"用 Redis"是让你写进
-///   计划），只有明确指着计划说"执行"才走 SwitchMode 请用户确认。
+/// - `iterating == false`：这是一段新的规划 —— 讲怎么调研、提交前把关键
+///   决定定下来、计划里只给一条路线、提交后别问"要开始吗"（用户有构建键）；
+/// - `iterating == true`：上一轮就在规划、而且计划文件已经在了 —— 讲用户
+///   的话是**改计划**还是**要执行**。规划模式下绝大多数话是改计划（"用
+///   Redis"是让你写进计划），只有明确指着计划说"执行"才走 SwitchMode 请
+///   用户确认。
+///
+/// `iterating` 的判定在会话侧（`Session::plan_turn`），对照 Cursor 的
+/// `prevTurnMode === PLAN`：看的是**上一轮是不是规划模式**，不是历史里有
+/// 没有出现过 CreatePlan。后者有两种错法：同一会话里第二次进规划（上一份
+/// 计划早就构建完了）会被告知"计划已存在，去改那个文件"；压缩把那次调用
+/// 吞掉之后又退回"还没计划"，模型重新调研再交一份，面板跳到新文件。
 ///
 /// 文本本身住在 `riot_tools::tools::plan`：SwitchMode 切进规划模式时要在
 /// 工具结果里给同一份（模型在那一轮里就要照着走），而 riot-tools 不能
@@ -610,10 +624,10 @@ them rather than routing around the check.";
 ///
 /// 退出规划模式后不再注入。历史里的旧提醒描述的是当时的状态；用户点
 /// 「构建」开的那一轮带的是 [`nudge_build_plan`]，盖过它。
-pub(crate) fn plan_mode_reminder(mode: PermissionMode, has_plan: bool) -> Option<UserContent> {
+pub(crate) fn plan_mode_reminder(mode: PermissionMode, iterating: bool) -> Option<UserContent> {
     (mode == PermissionMode::Plan).then(|| {
         UserContent::Attachment(Attachment::SystemReminder {
-            text: if has_plan {
+            text: if iterating {
                 riot_tools::tools::plan::plan_iteration_rules()
             } else {
                 riot_tools::tools::plan::plan_mode_rules()
@@ -622,32 +636,110 @@ pub(crate) fn plan_mode_reminder(mode: PermissionMode, has_plan: bool) -> Option
     })
 }
 
-/// agent 模式下每条用户消息末尾的一句：这活要不要先规划。
+/// 当前计划的内容，随用户消息一起给模型（对照 Cursor 每轮附上的
+/// `Current plan mode progress` + `<file_contents path="cursor-plan://…">`）。
+///
+/// 为什么每轮都注、而不是只在「构建」那一轮说一句"去读文件"：计划文本原本
+/// 只存在于模型自己的 CreatePlan 参数和它 Read 过的结果里，轮次一多、或者
+/// 压缩一次，那些就没了 —— 执行到一半偏离计划就是这么来的。文件才是计划：
+/// 用户可能在面板外直接改过，内容每轮从磁盘现读（见 `crate::plan`）。
+///
+/// 两种状态一句话说清该拿它做什么：规划中 → 改这份文件（内容就在这里，不用
+/// 先 Read；用户要的是另一件事就重新 CreatePlan）；构建后 → 照着做，别改它。
+///
+/// 计划带待办（CreatePlan 的 `todos`）时把它们列在文件后面 —— 对照 Cursor
+/// 的"Todos from the plan have already been created"。只在 TodoWrite 还没接管
+/// 时列（`crate::plan` 已经按这条规则把接管后的待办清空）：接管之后模型自己
+/// 最后那次 TodoWrite 才是权威，再摆一份初稿只会出现两份互相矛盾的清单。
+///
+/// 排在用户正文之后、各类提醒之前：它是参考材料，提醒才是本轮最具体的指令，
+/// 离对话越近权重越高。
+pub(crate) fn current_plan_context(
+    plan: &crate::plan::CurrentPlan,
+    mode: PermissionMode,
+) -> UserContent {
+    use riot_tools::tools::names::{CREATE_PLAN, EDIT, READ, TODO_WRITE};
+    let planning = mode == PermissionMode::Plan;
+    let guidance = if planning {
+        format!(
+            "You are in plan mode. If the user is iterating on this plan, apply their feedback to \
+             this file with targeted {EDIT} calls — its content is right here, no need to {READ} \
+             it first. If they are asking for a fundamentally different plan or a new task, call \
+             {CREATE_PLAN} for a new one instead."
+        )
+    } else {
+        "Plan mode is over. Where this plan still has relevant undone steps, keep implementing \
+         according to it. Do not edit the plan file."
+            .to_owned()
+    };
+    let todos = if plan.todos.is_empty() {
+        String::new()
+    } else {
+        let lead = if planning {
+            format!(
+                "Todos of this plan, in order (they become the todo list when the user presses \
+                 Build — do not call {TODO_WRITE} for them while planning):"
+            )
+        } else {
+            format!(
+                "Todos of this plan, in order — your todo list for this work. Materialize them \
+                 with {TODO_WRITE} (same items, same wording, same order) and keep their status \
+                 current as you go:"
+            )
+        };
+        let items = plan
+            .todos
+            .iter()
+            .enumerate()
+            .map(|(i, t)| format!("{}. {t}", i + 1))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("\n\n{lead}\n{items}")
+    };
+    UserContent::Attachment(Attachment::SystemReminder {
+        text: format!(
+            "Current plan of this conversation, created earlier with {CREATE_PLAN}. It was read \
+             from disk for this message, so it includes any edits the user made since — this copy \
+             is the plan, not your memory of it.\n\
+             {guidance}\n\
+             \n\
+             <plan_file path=\"{path}\">\n\
+             {content}\n\
+             </plan_file>{todos}",
+            path = plan.rel_path,
+            content = plan.content.trim_end(),
+        ),
+    })
+}
+
+/// agent 模式下，会话**首条**用户消息末尾的一句：这活要不要先规划。
 ///
 /// system prompt 里的 `mode_selection` 一节已经讲了同一件事，这里再说一遍
 /// 是实测逼出来的：deepseek-v4-pro 对着"加一套认证系统"、"迁移到 SQLite"
-/// 这种任务，静态段那一节写得再硬（"第一步就调 SwitchMode"）它也照旧
-/// 先读二十个文件再直接开写，全程不提规划；而它对消息末尾的
-/// `<system-reminder>` 每次都读、都照做（规划模式的提醒就是这么生效的）。
-/// 「离对话越近权重越高」这条经验在这里再次成立。
+/// 这种任务，静态段那一节写得再硬它也照旧先读二十个文件再直接开写，全程
+/// 不提规划；而它对消息末尾的 `<system-reminder>` 每次都读、都照做（规划
+/// 模式的提醒就是这么生效的）。「离对话越近权重越高」这条经验在这里再次成立。
 ///
-/// 只在**用户亲手发的**消息上附：按钮发的那一轮（`nudge` 非空）模式已经
-/// 是执行档、意图就是"开始做"；唤醒轮（通知）没有用户请求可判。规划模式
-/// 下不附 —— 那时附的是规划模式自己的提醒。约 60 token，比模型不规划就
-/// 把一个大改动做下去再推翻便宜得多。
+/// `[取舍]` 只附在会话的第一条消息上，不是每条。任务是在第一句话里定下来的，
+/// 之后的消息多半是追问和修正，每条都催一遍"要不要先规划"的结果是中等任务
+/// 也动不动弹一张「切到规划？」的卡 —— Cursor 一句都不催，只靠 system
+/// prompt；这里保留首条那一句是给弱一些的模型兜底。措辞也不再要求"第一个
+/// 工具就调 SwitchMode、别先读文件"：没看代码就得给理由，卡片上的理由只能
+/// 是编的。首条消息不可能是按钮发的（`nudge` 非空）或唤醒轮，规划模式下附
+/// 的是规划模式自己的提醒。
 pub(crate) fn agent_mode_reminder(
     mode: PermissionMode,
     nudge: Option<riot_protocol::Nudge>,
 ) -> Option<UserContent> {
     (mode != PermissionMode::Plan && nudge.is_none()).then(|| {
         UserContent::Attachment(Attachment::SystemReminder {
-            text: "Before touching any file, decide: is this a planning task — a feature \
-                   spanning several files, a large refactor or migration, ambiguous requirements, \
-                   or real trade-offs to settle first? If so, your FIRST tool call is SwitchMode \
-                   with target_mode_id=\"plan\" and a one-sentence explanation; the user confirms \
-                   on a card. Do not research first and decide later. Small, clear tasks: just do \
-                   them. If the user already declined a switch in this conversation, do not ask \
-                   again."
+            text: "Before you change anything, decide whether this is a planning task: a \
+                   feature spanning several files, a large refactor or migration, ambiguous \
+                   requirements, or real trade-offs to settle first. If it is, call SwitchMode \
+                   with target_mode_id=\"plan\" and a one-sentence explanation before you start \
+                   implementing; the user confirms on a card. A quick look at the relevant code \
+                   to size the task is fine — what you must not do is drift from research into \
+                   edits without making the call. Small, clear tasks: just do them."
                 .into(),
         })
     })
@@ -760,35 +852,55 @@ pub(crate) fn nudge_reminder(nudge: riot_protocol::Nudge) -> UserContent {
     }
 }
 
-/// 计划文件在哪、怎么找回。三条构建提醒共用这一段。
+/// 计划在哪。两条构建提醒共用这一段。
 ///
-/// 路径在模型自己的 CreatePlan 结果里；压缩过的历史可能只剩摘要，所以
-/// 给一条兜底：列目录取最新的。文件才是计划 —— 用户可能在按钮之前改过。
+/// 正常情况下计划内容就附在同一条消息里（[`current_plan_context`]，从磁盘
+/// 现读 —— 用户可能在按钮之前改过）。兜底给"列目录取最新"：按钮消息排队
+/// 或轮中注入的那两条路不带附件，文件被删了也不带。
 fn plan_file_hint() -> String {
     format!(
-        "Start by reading the plan file with Read: its path is in your earlier CreatePlan \
-         result (`Plan file: …`). If the conversation was compacted and the path is gone, list \
-         `{}/` and take the newest `.plan.md`. The user may have edited the file since you wrote \
-         it, so the file on disk is the plan — not your memory of it.",
+        "Work from the plan file, not from memory: its current content is attached to this \
+         message as `<plan_file>`, read from disk just now (the user may have edited it since you \
+         wrote it). If the attachment is missing, list `{}/`, take the newest `.plan.md`, and Read \
+         it.",
         riot_tools::tools::plan::PLAN_DIR
+    )
+}
+
+/// 待办怎么来。两条构建提醒共用这一段（对照 Cursor 的 "Todos from the plan
+/// have already been created. Do not create them again."）。
+///
+/// Riot 的清单没有独立状态，"已经建好"落地成"照着附件里的待办调一次
+/// TodoWrite"：同一批条目、同一措辞 —— 面板按措辞把进度对回计划。计划没给
+/// 待办（模型省了、或是旧计划）时才从步骤里拆。
+fn plan_todos_hint() -> String {
+    use riot_tools::tools::names::TODO_WRITE;
+    format!(
+        "The plan's todos are already defined — they are listed under the attached plan (or, if \
+         you already started tracking them, in your latest {TODO_WRITE} call). Do not invent a \
+         different list: begin by calling {TODO_WRITE} with exactly those items, in order and \
+         with the same wording (adjust only where the plan changed during review), the first one \
+         in_progress. If the plan defines no todos, derive them from its steps."
     )
 }
 
 /// 「构建」按钮注入的提醒（Cursor 的 Build）。
 ///
 /// 界面在发这条之前已经把权限模式从规划切回执行档；这条告诉模型计划
-/// 已批准、从文件读回来、落成待办、开始动手，别再问一遍。
+/// 已批准、以附上的文件为准、把计划的待办落成清单、开始动手，别再问一遍。
 pub(crate) fn nudge_build_plan() -> UserContent {
     UserContent::Attachment(Attachment::SystemReminder {
         text: format!(
             "The user pressed 「构建」 (Build): the plan is approved and plan mode is over — \
              implement it now.\n\
              - {}\n\
-             - Turn the plan into todos with TodoWrite, then work through them in order, \
-             verifying as the plan says.\n\
+             - {}\n\
+             - Work through the todos in order, marking each completed the moment it is done, \
+             verifying as the plan says. Do not stop until all of them are done.\n\
              - Do not re-ask for approval and do not re-plan. Where the plan is silent, use your \
              judgment and mention the decision in your report.",
-            plan_file_hint()
+            plan_file_hint(),
+            plan_todos_hint(),
         ),
     })
 }
@@ -804,12 +916,12 @@ pub(crate) fn nudge_build_in_parallel() -> UserContent {
              session is now in **multitask mode**, and they want the work run in parallel.\n\n\
              Rules for executing the plan in parallel:\n\
              - {}\n\
+             - {}\n\
              - Do NOT paste the whole plan into a subagent's prompt: give it the plan file's \
-             path, say which steps of the plan that subagent owns, and add only the context it \
+             path, say which todos of the plan that subagent owns, and add only the context it \
              needs that the plan does not show.\n\
-             - Start by turning the plan into todos with TodoWrite. For each item work out \
-             which other items must finish first, and flatten those dependencies into one or \
-             more **build phases**.\n\
+             - For each todo work out which other todos must finish first, and flatten those \
+             dependencies into one or more **build phases**.\n\
              - One background subagent per phase (Task, run_in_background=true). Launch \
              mutually independent phases together; a later phase waits until the completion \
              notifications for the phases it depends on have arrived. Run a blocking step as \
@@ -825,7 +937,8 @@ pub(crate) fn nudge_build_in_parallel() -> UserContent {
              Follow the multitask guidelines throughout the plan and the follow-up work. For \
              executing this plan specifically, these parallel instructions take precedence \
              over the rule against starting several sibling subagents.",
-            plan_file_hint()
+            plan_file_hint(),
+            plan_todos_hint(),
         ),
     })
 }
@@ -1054,13 +1167,13 @@ mod tests {
         );
     }
 
-    /// 已经有计划之后换成"改计划还是执行"那一版。
+    /// 还在迭代同一份计划时换成"改计划还是执行"那一版。
     ///
     /// 规划模式下用户第二句话多半是改计划（"端口改成 8200"），不是让它
     /// 动手。不换版的话模型收到的还是"去调研、去提交"，它会把三页纸重交
     /// 一遍 —— 而用户要的只是改一行。
     #[test]
-    fn 有计划之后的提醒讲迭代还是执行() {
+    fn 迭代中的提醒讲改计划还是执行() {
         let Some(UserContent::Attachment(Attachment::SystemReminder { text })) =
             plan_mode_reminder(PermissionMode::Plan, true)
         else {
@@ -1070,6 +1183,96 @@ mod tests {
         assert!(text.contains("assume iteration"), "拿不准时按改计划处理");
         assert!(text.contains("SwitchMode"), "执行的出口是请用户确认切模式");
         assert!(text.contains("Edit"), "改计划是改文件");
+        assert!(
+            !text.contains("in your earlier CreatePlan result"),
+            "路径和内容随消息附上，不能再让模型去翻可能已被压缩掉的旧结果：{text}"
+        );
+    }
+
+    /// 当前计划随消息附上：路径、磁盘上的内容、按模式给一句"拿它做什么"。
+    ///
+    /// 不附的话，计划文本只活在模型自己的 CreatePlan 参数和 Read 结果里，
+    /// 压缩一次就没了 —— 执行到一半偏离计划就是这么来的。
+    #[test]
+    fn 当前计划随消息附上并按模式给指引() {
+        let plan = crate::plan::CurrentPlan {
+            rel_path: ".riot/plans/teller-abc123.plan.md".into(),
+            content: "# Teller\n\n1. 建表\n2. 写路由\n".into(),
+            todos: Vec::new(),
+        };
+        let UserContent::Attachment(Attachment::SystemReminder { text }) =
+            current_plan_context(&plan, PermissionMode::Plan)
+        else {
+            panic!("该是 system-reminder");
+        };
+        assert!(
+            text.contains("<plan_file path=\".riot/plans/teller-abc123.plan.md\">"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("2. 写路由\n</plan_file>"),
+            "内容原样、去掉尾部空行；没给待办就不列：{text}"
+        );
+        assert!(text.contains("Edit"), "规划中：改这份文件");
+        assert!(
+            text.contains("no need to Read"),
+            "内容就在这里，别再 Read 一遍"
+        );
+        assert!(
+            text.contains("CreatePlan for a new one"),
+            "要的是另一件事就重新交"
+        );
+
+        let UserContent::Attachment(Attachment::SystemReminder { text }) =
+            current_plan_context(&plan, PermissionMode::AcceptEdits)
+        else {
+            panic!("该是 system-reminder");
+        };
+        assert!(text.contains("Plan mode is over"), "{text}");
+        assert!(text.contains("Do not edit the plan file"), "构建后不改计划");
+        assert!(!text.contains("no need to Read"), "执行态不讲迭代那套");
+    }
+
+    /// 计划带待办时列在文件后面，规划中和构建后各说一句拿它做什么。
+    ///
+    /// 不列的话，压缩之后模型只剩文件正文，"待办已经定义好了"就成了一句
+    /// 空话；列错状态（TodoWrite 接管后还列初稿）则是两份矛盾的清单 ——
+    /// 接管后的清空由 `crate::plan` 负责，这里只管有就列。
+    #[test]
+    fn 计划的待办随附件列出并按模式给指引() {
+        let plan = crate::plan::CurrentPlan {
+            rel_path: ".riot/plans/teller-abc123.plan.md".into(),
+            content: "# Teller\n\n步骤略。\n".into(),
+            todos: vec!["建表".into(), "写路由".into()],
+        };
+        let UserContent::Attachment(Attachment::SystemReminder { text }) =
+            current_plan_context(&plan, PermissionMode::Plan)
+        else {
+            panic!("该是 system-reminder");
+        };
+        assert!(
+            text.contains("</plan_file>\n\nTodos of this plan"),
+            "待办列在文件之后：{text}"
+        );
+        assert!(text.contains("\n1. 建表\n2. 写路由"), "{text}");
+        assert!(
+            text.contains("do not call TodoWrite for them while planning"),
+            "规划中别提前建清单：{text}"
+        );
+
+        let UserContent::Attachment(Attachment::SystemReminder { text }) =
+            current_plan_context(&plan, PermissionMode::Default)
+        else {
+            panic!("该是 system-reminder");
+        };
+        assert!(
+            text.contains("Materialize them with TodoWrite"),
+            "构建后落成清单：{text}"
+        );
+        assert!(
+            text.contains("same items, same wording, same order"),
+            "措辞要对得上，面板才能把进度对回计划：{text}"
+        );
     }
 
     /// agent 模式下模型要能判断"这活该先规划"并建议切换 —— 准则在静态段
@@ -1078,7 +1281,10 @@ mod tests {
     fn 系统提示里有工作方式选择的准则() {
         let p = system_prompt(&base());
         let (stable, _) = riot_providers::anthropic::split_request_system(&p);
-        assert!(stable.contains("SwitchMode"), "要指路切模式的工具：{stable}");
+        assert!(
+            stable.contains("SwitchMode"),
+            "要指路切模式的工具：{stable}"
+        );
         assert!(
             stable.contains("Suggest **plan**"),
             "要说清什么时候建议规划"
@@ -1089,38 +1295,66 @@ mod tests {
         );
         // 实测（deepseek-v4-pro）：措辞软的话，"加一套认证系统"这种活模型会
         // 直接开干 —— 先问一个问题、然后写代码，全程没提规划。要点名例子、
-        // 要说"第一步就调"。
+        // 要点名"别从调研滑进实现"。
         assert!(
-            stable.contains("as your FIRST action") && stable.contains("authentication"),
-            "要给具体触发例子并要求第一步就建议，软措辞模型不听"
+            stable.contains("authentication")
+                && stable.contains("do not drift from research into implementation"),
+            "要给具体触发例子并封住「读完就开写」那条路：{stable}"
+        );
+        // 但不能反过来要求没看代码就决定：卡片上的理由会是编的，中等任务也
+        // 动不动弹卡。判断时机是"动手改之前"。
+        assert!(
+            !stable.contains("before reading files") && !stable.contains("FIRST action"),
+            "不能要求模型在读文件之前就下判断：{stable}"
+        );
+        assert!(
+            stable.contains("Decide before you change anything"),
+            "{stable}"
         );
     }
 
-    /// agent 模式的"要不要先规划"走消息侧：只附在用户亲手发的消息上，
-    /// 规划模式和按钮发的那一轮都不附。
+    /// agent 模式的"要不要先规划"走消息侧（会话侧只在首条消息附，见
+    /// `Session::plan_turn`）：规划模式和按钮发的那一轮都不附，措辞允许先看
+    /// 一眼代码再决定。
     #[test]
-    fn agent_模式的规划提醒只附在用户消息上() {
+    fn agent_模式的规划提醒不要求盲判() {
         let Some(UserContent::Attachment(Attachment::SystemReminder { text })) =
             agent_mode_reminder(PermissionMode::Default, None)
         else {
-            panic!("agent 模式的用户消息要附提醒");
+            panic!("agent 模式的首条用户消息要附提醒");
         };
         assert!(text.contains("SwitchMode"), "{text}");
-        assert!(text.contains("Small, clear tasks"), "要说清小任务不必规划：{text}");
+        assert!(
+            text.contains("Small, clear tasks"),
+            "要说清小任务不必规划：{text}"
+        );
+        assert!(
+            text.contains("A quick look at the relevant code to size the task is fine"),
+            "允许先看代码：{text}"
+        );
+        assert!(
+            !text.contains("FIRST tool call") && !text.contains("Do not research first"),
+            "不能再要求第一个工具就是 SwitchMode：{text}"
+        );
         assert!(
             agent_mode_reminder(PermissionMode::Plan, None).is_none(),
             "规划模式下附的是规划模式自己的提醒"
         );
         assert!(
-            agent_mode_reminder(PermissionMode::Default, Some(riot_protocol::Nudge::BuildPlan))
-                .is_none(),
+            agent_mode_reminder(
+                PermissionMode::Default,
+                Some(riot_protocol::Nudge::BuildPlan)
+            )
+            .is_none(),
             "「构建」那一轮意图就是开始做，别再问要不要规划"
         );
     }
 
-    /// 「构建」提醒必须让模型先读文件再动手：用户可能在按钮之前改过计划。
+    /// 「构建」提醒必须让模型以附上的计划文件为准，而不是凭记忆动手：
+    /// 用户可能在按钮之前改过计划。附件缺席时给出找回文件的路。待办也一样：
+    /// 计划里已经定义好了，照着落成清单，不许另起一份。
     #[test]
-    fn 构建提醒要求读回计划文件() {
+    fn 构建提醒以附上的计划文件和待办为准() {
         for n in [
             riot_protocol::Nudge::BuildPlan,
             riot_protocol::Nudge::BuildInParallel,
@@ -1129,9 +1363,28 @@ mod tests {
             else {
                 panic!("按钮提醒该是 system-reminder");
             };
-            assert!(text.contains("reading the plan file"), "{n:?}: {text}");
-            assert!(text.contains("Plan file:"), "要指路 CreatePlan 结果里的那一行：{text}");
-            assert!(text.contains("TodoWrite"), "先落成待办再动手：{text}");
+            assert!(text.contains("<plan_file>"), "{n:?}: {text}");
+            assert!(text.contains("not from memory"), "{n:?}: {text}");
+            assert!(
+                text.contains(riot_tools::tools::plan::PLAN_DIR),
+                "附件缺席时要能找回文件：{text}"
+            );
+            assert!(
+                text.contains("The plan's todos are already defined"),
+                "待办随计划定好了，别再拆一遍：{n:?}: {text}"
+            );
+            assert!(
+                text.contains("Do not invent a different list"),
+                "{n:?}: {text}"
+            );
+            assert!(
+                text.contains("calling TodoWrite with exactly those items"),
+                "落成清单还是要调一次 TodoWrite（清单没有独立状态）：{n:?}: {text}"
+            );
+            assert!(
+                text.contains("If the plan defines no todos, derive them from its steps"),
+                "旧计划 / 没给待办的计划要有退路：{n:?}: {text}"
+            );
         }
     }
 
@@ -1483,13 +1736,16 @@ mod tests {
     /// 再之后 `showing_images` 一节加了约 0.6k（已从 0.9k 删到这个数）：
     /// 「打开这张图」不教写法的话模型只会 Read，一次就是上千 token 且留到
     /// 会话结束 —— 这一节每轮 150 token 的开销，一次读图就赔回来了。
-    /// 撞线时**先删再抬**，抬的时候把新的理由写在这里。
+    /// 上限随后抬到 15.2k：`mode_selection` 把建议规划的时机从"读文件之前"
+    /// 改成"动手改之前"，多出一句"看一眼代码可以，别从调研滑进实现"
+    /// （约 0.12k）—— 旧措辞让模型没看代码就编理由弹卡，那句是修这个的，
+    /// 而节里没有可删的赘句。撞线时**先删再抬**，抬的时候把新的理由写在这里。
     #[test]
     fn 静态前缀不超预算() {
         let p = system_prompt(&base());
         let n = p.chars().count();
         assert!(
-            n < 15_000,
+            n < 15_200,
             "system prompt 涨到 {n} 字符了，先确认每一节都还值这个价"
         );
     }

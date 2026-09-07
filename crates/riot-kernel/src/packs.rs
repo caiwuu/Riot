@@ -88,7 +88,7 @@ pub fn installed(id: &str) -> Option<InstalledPack> {
     installed_in(&crate::config::packs_dir(&crate::config::config_path()), id)
 }
 
-/// 参数化版本,给测试用(同 [`crate::config::profiles_dir`] 的理由)。
+/// 参数化版本,给测试用(同 [`crate::config::packs_dir`] 的理由)。
 pub fn installed_in(packs_root: &Path, id: &str) -> Option<InstalledPack> {
     let root = packs_root.join(id);
     let raw = std::fs::read_to_string(root.join("pack.json")).ok()?;

@@ -18,6 +18,9 @@ export const LEGACY_PLAN_TOOL = "ExitPlanMode";
 /** 内核里建议换模式的工具名（`riot_tools::tools::names::SWITCH_MODE`）。 */
 export const SWITCH_MODE_TOOL = "SwitchMode";
 
+/** 待办清单的工具名（`riot_tools::tools::names::TODO_WRITE`）。 */
+export const TODO_TOOL = "TodoWrite";
+
 /**
  * CreatePlan 结果首行的前缀，后面是计划文件相对项目根的路径。
  *
@@ -37,6 +40,17 @@ export interface PlanView {
   /** 计划文件相对项目根的路径。工具还没落定、或结果里解析不出时为 null。 */
   path: string | null;
   status: "running" | "ok" | "error";
+  /** 计划自带的待办措辞（CreatePlan 的 `todos[].content`），按顺序。
+   *  没给就是空 —— 旧计划、纯调研的计划都没有。 */
+  todos: string[];
+}
+
+/** 计划面板进度区里的一项。状态归并成清单的三态，认不出的算 pending。 */
+export interface PlanTodoView {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+  /** 进行式措辞（TodoWrite 的 activeForm）。计划初稿里没有。 */
+  activeForm?: string;
 }
 
 /** 一个会话的计划状态，由 Chat 上报给 App（右侧抽屉的面板画它）。 */
@@ -49,6 +63,8 @@ export interface PlanState {
   /** 本会话落盘的 Edit / Write 次数。面板据此重读计划文件 —— 用户提了
    *  意见，模型改的是文件，不刷新的话面板还停在旧版。 */
   edits: number;
+  /** 计划的待办及其进度（见 [`planTodos`]）。 */
+  todos: PlanTodoView[];
 }
 
 /**
@@ -64,8 +80,75 @@ export function samePlan(a: PlanView | null, b: PlanView | null): boolean {
     a.path === b.path &&
     a.name === b.name &&
     a.overview === b.overview &&
-    a.body === b.body
+    a.body === b.body &&
+    a.todos.length === b.todos.length &&
+    a.todos.every((t, i) => t === b.todos[i])
   );
+}
+
+/** 两份进度内容相同。理由同 `samePlan`。 */
+export function sameTodos(a: PlanTodoView[], b: PlanTodoView[]): boolean {
+  if (a === b) return true;
+  return (
+    a.length === b.length &&
+    a.every((t, i) => {
+      const o = b[i];
+      return (
+        o !== undefined &&
+        t.content === o.content &&
+        t.status === o.status &&
+        t.activeForm === o.activeForm
+      );
+    })
+  );
+}
+
+/** 计划自带的待办措辞。宽松解析：拿到什么算什么，空的跳过。 */
+function todosOf(input: Record<string, unknown> | null): string[] {
+  const raw = input?.todos;
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const t of raw) {
+    const c = (t as { content?: unknown } | null)?.content;
+    if (typeof c === "string" && c.trim()) out.push(c.trim());
+  }
+  return out;
+}
+
+/**
+ * 计划的待办及其进度。
+ *
+ * 和内核 `riot_kernel::plan` 同一条规则：计划的待办是清单的**初稿**，直到
+ * 模型开始用 TodoWrite 跟踪 —— 计划之后最近一次带清单的 TodoWrite 就是
+ * 进度（构建时模型照着计划的待办、同一措辞落成清单，之后逐项翻状态）；
+ * 还没有的话，初稿全部 pending。不按措辞逐条配对：模型改了措辞、加了一
+ * 项，面板照样显示它真正在跟踪的那份，而不是一列永远 pending 的初稿。
+ * 计划**之前**的 TodoWrite 是别的活的清单，不算。
+ */
+export function planTodos(items: Item[], plan: PlanView | null): PlanTodoView[] {
+  if (!plan) return [];
+  const at = items.findIndex((it) => it.kind === "tool" && it.id === plan.id);
+  for (let i = items.length - 1; i > at; i--) {
+    const it = items[i];
+    if (!it || it.kind !== "tool" || it.name !== TODO_TOOL) continue;
+    const raw = (it.input as { todos?: unknown } | null)?.todos;
+    // 正在流式写参数的那次调用，数组还解不出来 —— 跳过，别让面板闪一下空白。
+    if (!Array.isArray(raw) || raw.length === 0) continue;
+    return raw.flatMap((t) => {
+      const e = t as { content?: unknown; status?: unknown; activeForm?: unknown } | null;
+      if (typeof e?.content !== "string") return [];
+      const status =
+        e.status === "completed" || e.status === "in_progress" ? e.status : "pending";
+      return [
+        {
+          content: e.content,
+          status,
+          ...(typeof e.activeForm === "string" ? { activeForm: e.activeForm } : {}),
+        },
+      ];
+    });
+  }
+  return plan.todos.map((content) => ({ content, status: "pending" as const }));
 }
 
 /** 从 CreatePlan 的结果文本里取计划文件路径。 */
@@ -95,6 +178,7 @@ export function latestPlan(items: Item[]): PlanView | null {
       body: str("plan"),
       path: it.status === "ok" ? planPathFromResult(it.result) : null,
       status: it.status,
+      todos: todosOf(input),
     };
   }
   return null;

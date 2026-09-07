@@ -384,6 +384,15 @@ pub struct MessageMeta {
     /// 只有内核合成通知时打上。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_notice: Option<crate::task::TaskNotice>,
+    /// 这条 user 消息是界面上哪个按钮发的（「构建」/「并行构建」）。
+    ///
+    /// 对照 Cursor 的 `isPlanExecution` / `simulatedMsgReason`：按钮发的
+    /// 消息在对话流里不画成用户气泡，画成一张「构建 · 计划标题」的卡。
+    /// 正文（一句短话）和给模型的指示（`SystemReminder` 附件）都照常在
+    /// 消息里 —— 这份标记只给界面，模型那边不需要。只有开轮那条路
+    /// （`TurnInput::nudge`）打上；轮中注入的提醒是合成消息，本来就不显示。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nudge: Option<crate::turn::Nudge>,
 }
 
 impl MessageMeta {
