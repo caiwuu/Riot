@@ -173,6 +173,12 @@ export class WebTransport implements Transport {
     };
   }
 
+  setAppearance(): Promise<void> {
+    // 浏览器里没有原生窗口可钉；页面自己的配色由 `<html data-theme>` 管。
+    // 也不该发给宿主 —— 手机上切个主题不能把桌面那扇窗的外观一起换掉。
+    return Promise.resolve();
+  }
+
   /* ── 令牌管理（RemoteGate 用）───────────────── */
 
   /** 用一枚新令牌（重新）连接。 */

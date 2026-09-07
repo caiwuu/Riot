@@ -50,6 +50,11 @@ export default {
   "settings.general.language": "界面语言",
   "settings.general.language.desc": "切换立即生效。发给模型的提示词不受影响。",
   "settings.general.language.system": "跟随系统",
+  "settings.general.theme": "外观",
+  "settings.general.theme.desc": "切换立即生效。选「跟随系统」时随系统的外观设置自动切换。",
+  "settings.general.theme.system": "跟随系统",
+  "settings.general.theme.light": "浅色",
+  "settings.general.theme.dark": "深色",
 
   "settings.about.version": "版本",
   "settings.about.tagline": "一款轻量、强大的智能体工作台",

@@ -52,6 +52,11 @@ export default {
   "settings.general.language": "介面語言",
   "settings.general.language.desc": "切換立即生效。送給模型的提示詞不受影響。",
   "settings.general.language.system": "跟隨系統",
+  "settings.general.theme": "外觀",
+  "settings.general.theme.desc": "切換立即生效。選「跟隨系統」時隨系統的外觀設定自動切換。",
+  "settings.general.theme.system": "跟隨系統",
+  "settings.general.theme.light": "淺色",
+  "settings.general.theme.dark": "深色",
 
   "settings.about.version": "版本",
   "settings.about.tagline": "一款輕量、強大的智慧代理工作台",

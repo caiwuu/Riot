@@ -52,6 +52,12 @@ export default {
   "settings.general.language": "表示言語",
   "settings.general.language.desc": "切り替えは即座に反映されます。モデルに送るプロンプトには影響しません。",
   "settings.general.language.system": "システムに従う",
+  "settings.general.theme": "外観",
+  "settings.general.theme.desc":
+    "切り替えは即座に反映されます。「システムに従う」を選ぶと、システムの外観設定に合わせて自動で切り替わります。",
+  "settings.general.theme.system": "システムに従う",
+  "settings.general.theme.light": "ライト",
+  "settings.general.theme.dark": "ダーク",
 
   "settings.about.version": "バージョン",
   "settings.about.tagline": "軽量で強力なエージェントワークベンチ",

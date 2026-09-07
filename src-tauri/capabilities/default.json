@@ -32,6 +32,7 @@
     "allow-set-permission-mode",
     "allow-get-config",
     "allow-app-version",
+    "allow-set-appearance",
     "allow-check-update",
     "allow-set-config",
     "allow-set-api-key",

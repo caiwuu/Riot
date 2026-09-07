@@ -118,8 +118,6 @@ export function RemotePane({
     });
   };
 
-  const qrSrc = live?.qrSvg ? `data:image/svg+xml;utf8,${encodeURIComponent(live.qrSvg)}` : null;
-
   return (
     <>
       {host.kind === "web" ? (
@@ -191,13 +189,16 @@ export function RemotePane({
         <Group title={t("settings.remote.connect")} desc={t("settings.remote.connect.desc")}>
           <Card>
             <div className="remote-connect">
-              {qrSrc ? (
-                <img
+              {live.qrSvg ? (
+                // 内联而不是 <img src=data:>：宿主出的 SVG 只有形状，模块填
+                // currentColor、底透明，配色由 .remote-qr 按主题给。图片里的
+                // SVG 拿不到页面的 color，会变成黑模块透明底。
+                // 内容来自宿主的 qrcode 渲染器（只有 path 数据），没有用户输入。
+                <div
                   className="remote-qr"
-                  src={qrSrc}
-                  alt={t("settings.remote.qrAlt")}
-                  width={180}
-                  height={180}
+                  role="img"
+                  aria-label={t("settings.remote.qrAlt")}
+                  dangerouslySetInnerHTML={{ __html: live.qrSvg }}
                 />
               ) : null}
               <div className="remote-links">

@@ -52,6 +52,12 @@ export default {
   "settings.general.language": "Interface language",
   "settings.general.language.desc": "Takes effect immediately. Prompts sent to the model are not affected.",
   "settings.general.language.system": "Follow system",
+  "settings.general.theme": "Appearance",
+  "settings.general.theme.desc":
+    "Takes effect immediately. With “Follow system”, it switches along with the system appearance.",
+  "settings.general.theme.system": "Follow system",
+  "settings.general.theme.light": "Light",
+  "settings.general.theme.dark": "Dark",
 
   "settings.about.version": "Version",
   "settings.about.tagline": "A lightweight, powerful agent workbench",

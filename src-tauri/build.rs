@@ -18,6 +18,7 @@ const COMMANDS: &[&str] = &[
     "set_permission_mode",
     "get_config",
     "app_version",
+    "set_appearance",
     "check_update",
     "set_config",
     "set_api_key",

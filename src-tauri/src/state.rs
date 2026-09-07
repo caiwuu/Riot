@@ -2000,6 +2000,13 @@ impl AppState {
         self.0.terminals.clone()
     }
 
+    /// 宿主记的窗口外观（一个词的文件，见 `vibrancy::remember`）。和 config.json
+    /// 同目录，从 `config_path` 推导 —— 同一条"测试能指到临时目录"的线，
+    /// 别写成真实路径。
+    pub fn appearance_path(&self) -> PathBuf {
+        self.0.config_path.with_file_name("appearance")
+    }
+
     /// MCP 服务器的连接状态，给设置页看。
     pub async fn mcp_statuses(&self) -> Vec<riot_protocol::rpc::McpServerStatus> {
         match self.kernel_call(RpcRequest::McpStatus).await {

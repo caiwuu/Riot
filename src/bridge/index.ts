@@ -15,6 +15,7 @@
  */
 
 import {
+  type HostAppearance,
   type HostChannel,
   type LinkStatus,
   TransportDisconnected,
@@ -24,7 +25,7 @@ import {
 } from "./transport";
 
 export { host, TransportDisconnected };
-export type { LinkStatus };
+export type { HostAppearance, LinkStatus };
 export { HostError, describeError, isHostError, renderUiError, renderUiText } from "./errors";
 export type { UiErrorPayload, UiTextPayload } from "./errors";
 import { type UiErrorPayload, type UiTextPayload, toHostError } from "./errors";

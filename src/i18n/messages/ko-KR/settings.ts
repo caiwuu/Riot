@@ -52,6 +52,12 @@ export default {
   "settings.general.language": "인터페이스 언어",
   "settings.general.language.desc": "전환하면 즉시 적용됩니다. 모델에 보내는 프롬프트는 영향을 받지 않습니다.",
   "settings.general.language.system": "시스템 설정 따르기",
+  "settings.general.theme": "화면 모드",
+  "settings.general.theme.desc":
+    "전환하면 즉시 적용됩니다. 「시스템 설정 따르기」를 선택하면 시스템의 화면 모드에 맞춰 자동으로 전환됩니다.",
+  "settings.general.theme.system": "시스템 설정 따르기",
+  "settings.general.theme.light": "라이트 모드",
+  "settings.general.theme.dark": "다크 모드",
 
   "settings.about.version": "버전",
   "settings.about.tagline": "가볍고 강력한 에이전트 워크벤치",

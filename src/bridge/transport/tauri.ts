@@ -6,7 +6,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-import type { HostChannel, LinkStatus, Transport } from "./types";
+import type { HostAppearance, HostChannel, LinkStatus, Transport } from "./types";
 
 export class TauriTransport implements Transport {
   readonly kind = "tauri" as const;
@@ -37,5 +37,10 @@ export class TauriTransport implements Transport {
   onReconnect(): () => void {
     // IPC 不会断。
     return () => {};
+  }
+
+  setAppearance(appearance: HostAppearance): Promise<void> {
+    // 参数名 `theme` 对应宿主 `set_appearance(theme: Appearance)`。
+    return invoke("set_appearance", { theme: appearance });
   }
 }

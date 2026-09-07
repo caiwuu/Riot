@@ -9,10 +9,10 @@
  */
 
 import { TauriTransport } from "./tauri";
-import type { Transport } from "./types";
+import type { HostAppearance, Transport } from "./types";
 import { WebTransport } from "./web";
 
-export type { HostChannel, LinkStatus, Transport } from "./types";
+export type { HostAppearance, HostChannel, LinkStatus, Transport } from "./types";
 export { TransportDisconnected } from "./types";
 
 function detect(): Transport {
@@ -40,4 +40,11 @@ export const host = {
   openLocal: transport.kind === "tauri",
   /** 有没有原生窗口（红绿灯让位、窗口标题、全屏）。 */
   nativeWindow: transport.kind === "tauri",
+  /**
+   * 原生窗口的外观跟着界面主题走（`src/theme.ts` 每次启动和每次切换各调
+   * 一次）。`system` 让宿主解除钉死 —— 这一步必须先于前端读
+   * `prefers-color-scheme`，理由见 theme.ts。浏览器里空操作。
+   */
+  setAppearance: (appearance: HostAppearance): Promise<void> =>
+    transport.setAppearance(appearance),
 } as const;

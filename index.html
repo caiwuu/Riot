@@ -11,14 +11,48 @@
     />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <!-- 下面两个 meta 的初值是深色；首帧脚本和 src/theme.ts 会按生效主题改写 -->
     <meta name="theme-color" content="#181818" />
-    <!-- CSS 解析前就告诉引擎这是深色页面，省掉冷启动的白闪一帧 -->
+    <!-- CSS 解析前就告诉引擎页面的明暗，省掉冷启动错色的一帧 -->
     <meta name="color-scheme" content="dark" />
     <title>Riot</title>
+    <!-- 首帧防闪：样式表到位前先按用户偏好把 data-theme 挂到 <html> 上，
+         下面的兜底底色靠它选深浅。规则和 src/theme.ts 的解析一致（存了就用
+         存的，没存跟系统）—— 那边改了这里也要改。
+         桌面端 CSP 是 script-src 'self'，内联脚本能跑是因为 tauri-codegen 在打包时
+         会给 index.html 里每段内联脚本算 sha256 加进策略（配置里只关掉了
+         style-src 的自动改写）；dev 走 Vite 的页面没有 CSP。 -->
+    <script>
+      (function () {
+        var t = null;
+        try {
+          t = localStorage.getItem("riot.theme");
+        } catch (e) {
+          /* 隐私模式等拿不到存储：当没存过 */
+        }
+        if (t !== "light" && t !== "dark") {
+          // 没有 matchMedia 的环境按深色，和 theme.ts 的 systemTheme 一致
+          t =
+            typeof matchMedia !== "function" ||
+            matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light";
+        }
+        document.documentElement.setAttribute("data-theme", t);
+        var cs = document.querySelector('meta[name="color-scheme"]');
+        if (cs) cs.setAttribute("content", t);
+        var tc = document.querySelector('meta[name="theme-color"]');
+        if (tc) tc.setAttribute("content", t === "light" ? "#ffffff" : "#181818");
+      })();
+    </script>
     <style>
-      /* 兜底底色：样式表到位前 body 先有深色，别白屏一闪 */
+      /* 兜底底色：样式表到位前 html 先有正确明暗的底色，别错色一闪。
+         没有 data-theme（脚本没跑）按深色。 */
       html {
         background: #181818;
+      }
+      html[data-theme="light"] {
+        background: #ffffff;
       }
     </style>
   </head>

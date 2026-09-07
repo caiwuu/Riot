@@ -4,6 +4,9 @@ import ReactDOM from "react-dom/client";
 import { App } from "./App";
 import { host } from "./bridge";
 import { RemoteGate } from "./components/RemoteGate";
+// 主题模块加载即生效（挂 data-theme、对齐宿主外观），不等 React 渲染。
+// 组件各自也会 import 它，这里显式引一次是把"启动时一定执行"写明。
+import "./theme";
 import "./styles.css";
 
 /* 侧栏的磨砂底来自窗口那层系统材质：macOS 是 NSVisualEffectView 的
@@ -22,9 +25,14 @@ import "./styles.css";
    就没在计划里；哪天要上架，得连着这三处一起撤（配置、这里、CSS）。
    Windows 的 acrylic 不涉及私有 API。
 
-   材质明暗跟系统外观走。应用只有一套深色，所以宿主把窗口钉成 Dark
-   （tauri.conf.json 的 theme，以及 src-tauri/src/vibrancy.rs），浅色
-   系统上侧栏才不会翻成浅灰。
+   材质明暗跟窗口外观走，而窗口外观由宿主钉成页面正在用的那一档：界面
+   有深浅两套配色（src/theme.ts 解析用户选择，挂成 <html data-theme>），
+   页面深色而系统浅色时不钉住，侧栏会翻成系统浅色侧栏那种浅灰；反过来
+   页面浅色钉着深色，侧栏就是一块黑。用户选"跟随系统"时解除钉死，材质和
+   webview 里的 prefers-color-scheme 一起回到系统设置。tauri.conf.json 的
+   theme: Dark 只是建窗时的初值，宿主 setup 里按上次记住的外观重钉，之后
+   theme.ts 每次启动 / 切换都调 host.setAppearance 对齐（见
+   src-tauri/src/vibrancy.rs）。
 
    同样记在这里：additionalBrowserArgs 的 --enable-smooth-scrolling
    是 Windows 滚轮的平滑滚动。WebView2 嵌入场景默认不开这个 Chromium

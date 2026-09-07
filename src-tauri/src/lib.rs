@@ -36,7 +36,6 @@ pub mod term;
 pub mod term_access;
 pub mod tree;
 pub mod update;
-#[cfg(any(windows, target_os = "macos"))]
 mod vibrancy;
 
 use tauri::Manager;
@@ -596,6 +595,25 @@ async fn sandbox_uninstall() -> HostResult<()> {
 #[tauri::command]
 fn app_version(app: tauri::AppHandle) -> String {
     app.package_info().version.to_string()
+}
+
+/// 把原生窗口的外观（侧栏材质、标题栏、NSApp 外观）切到界面正在用的那一档。
+/// 前端 `src/theme.ts` 启动时和用户切换时各调一次；`system` 是解除钉死，
+/// 让 webview 的 `prefers-color-scheme` 回到真实系统设置（见 vibrancy 模块）。
+///
+/// 顺手记下来：下次启动建窗后 setup 直接按它钉，不用等前端起来再翻一次。
+///
+/// 不是 `async`：没有可等的东西。真正改外观的那段由 `vibrancy::apply` 自己
+/// 送到主线程执行（AppKit 只认主线程），不依赖命令本身跑在哪个线程。
+#[tauri::command]
+fn set_appearance(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+    theme: vibrancy::Appearance,
+) {
+    vibrancy::apply(&app, &window, theme);
+    vibrancy::remember(&state.appearance_path(), theme);
 }
 
 /// 对照 GitHub 上最新正式 Release。没网、还没发过版都不该让调用方当成崩溃。
@@ -1515,6 +1533,7 @@ pub fn run() {
             clipboard_paths,
             get_config,
             app_version,
+            set_appearance,
             check_update,
             set_config,
             set_api_key,
@@ -1548,15 +1567,16 @@ pub fn run() {
         // 启动时把 MCP 连接对齐配置。放 setup 里而不是 restore：
         // spawn 连接任务要求 runtime 已经起来，restore 跑在那之前。
         .setup(|app| {
-            // 只有一套深色配色。系统浅色时不钉住：macOS 的 sidebar 材质会变成
-            // 浅灰，Windows 的 mica 会垫一层白雾。配置里 theme: Dark 在建窗时
-            // 先钉上；这里再钉一次，覆盖菜单和以后新开的窗。
-            app.set_theme(Some(tauri::Theme::Dark));
-            // 侧栏材质的平台补钉，见 vibrancy 模块。放在最前面：越早越不容易
-            // 被用户看见中间态。
-            #[cfg(any(windows, target_os = "macos"))]
+            // 窗口外观钉成上次应用的那一档（界面有深浅两套配色，见 vibrancy
+            // 模块）。配置里 theme: Dark 在建窗时先钉成深色；这里按记住的值
+            // 重钉一次，选了浅色 / 跟随系统的用户才不会每次启动看到侧栏从深
+            // 翻到浅。没记录时就是深色，等于以前的行为。前端起来后还会再调
+            // 一次 set_appearance 对齐。放在最前面：越早越不容易被用户看见
+            // 中间态。
             if let Some(main) = app.get_webview_window("main") {
-                vibrancy::apply(&main);
+                let remembered =
+                    vibrancy::remembered(&app.state::<AppState>().inner().appearance_path());
+                vibrancy::apply(app.handle(), &main, remembered);
             }
 
             // 系统通知与全局 emit 要用应用句柄。要在 spawn_host_bridge

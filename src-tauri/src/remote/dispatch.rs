@@ -14,6 +14,8 @@
 //! 少数命令对远程观看者**语义不同**，在这里就地处理并注明理由 —— 那是
 //! "这个观看者不在这台机器前"这一事实的直接后果，不是业务逻辑：
 //! - `clipboard_paths`：读的是宿主机的剪贴板，和手机上按 ⌘V 的人无关，回空。
+//! - `set_appearance`：改的是桌面那扇窗的原生外观，手机上切个主题不该把它
+//!   一起换掉，空操作。
 //! - 带观看者的六条（订阅、终端、浏览器面板）：把连接号当观看者传进去。
 
 use serde::Serialize;
@@ -309,6 +311,9 @@ pub async fn dispatch(
         "set_config" => ok(crate::set_config(app.clone(), st, a.take("config")?).await),
         "set_api_key" => ok(crate::set_api_key(st, a.take("providerId")?, a.take("key")?).await),
         "app_version" => val(crate::app_version(app.clone())),
+        // 桌面窗口的外观和远端用户无关（见模块说明）。网页那头的 transport
+        // 本来就不会发这条，这里兜住的是手写的调用。
+        "set_appearance" => val(()),
         "check_update" => ok(crate::check_update(app.clone()).await),
         "mcp_status" => ok(crate::mcp_status(st).await),
         "mcp_restart" => ok(crate::mcp_restart(st, a.take("serverId")?).await),

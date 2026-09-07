@@ -28,6 +28,14 @@ export type LinkStatus =
   /** 没有令牌或令牌被拒。要用户给一个新的（见 RemoteGate）。 */
   | "auth-required";
 
+/**
+ * 原生窗口的外观。`system` = 解除钉死、跟系统走。
+ *
+ * 和宿主 `vibrancy::Appearance` 的 JSON 形态一致（小写）。界面主题的解析
+ * 在 `src/theme.ts`；这里只是它发给宿主的那一个词。
+ */
+export type HostAppearance = "light" | "dark" | "system";
+
 export interface Transport {
   readonly kind: "tauri" | "web";
 
@@ -56,6 +64,15 @@ export interface Transport {
    * 这个回调后要重新订阅、重新对账。桌面 IPC 永不触发。
    */
   onReconnect(cb: () => void): () => void;
+
+  /**
+   * 让宿主把原生窗口切到这个外观：macOS 的 NSApp / 窗口 / 视图树外观，
+   * Windows 的沉浸式深色标题栏与 mica 明暗。浏览器里没有原生窗口，是空操作。
+   *
+   * 不走 bridge 那层带期限的 `invoke`：结果没人等（调用方 `catch` 掉就完），
+   * 宿主不回话也卡不住任何 `finally`。
+   */
+  setAppearance(appearance: HostAppearance): Promise<void>;
 }
 
 /** 连接断开时未完成的调用会以这个类拒绝。调用方能据此分辨"宿主说不行"和"线断了"。 */

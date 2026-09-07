@@ -1,6 +1,18 @@
 /*
- * 布局与配色照 Codex 桌面端：中性深灰、低对比边框、正文不加气泡，
+ * 布局与配色照 Codex 桌面端：中性灰、低对比边框、正文不加气泡，
  * 视觉重量全部让给内容本身。
+ *
+ * 两套主题共用同一份规则。深色是默认（:root 里的值就是深色），浅色由
+ * <html data-theme="light"> 触发 —— 没有该属性、或值为 dark，都是深色。
+ * 浅色的全部差异收在紧跟 :root 的 html[data-theme='light'] 块里。
+ *
+ * `[约束]` 主题差异只允许落在 token 上。选择器、几何、透明度、层级关系
+ * 一律不按主题分叉；某处颜色需要随主题变，就抽成 token 放进那两个块，
+ * 规则本身只写 var()。全文不许出现绕开 token 的颜色字面量，仅有的例外
+ * 是与主题无关的东西：mask 渐变里的 #000、弹层背后的黑遮罩、查找高亮。
+ * "跟随系统"由 JS 侧解析成 data-theme 再挂上来，这里不写
+ * prefers-color-scheme；highlight.js 的 .hljs 配色也由 JS 换主题文件，
+ * 这里不写它的 token 配色。
  */
 
 /*
@@ -40,10 +52,16 @@
 
 :root {
   /* 灰阶照 Codex 桌面端取色，纯中性（R=G=B），不带蓝紫倾向。
-     两条关系必须记住，它和一般深色 App 是反的：
-     ① 菜单区（侧栏）比正文区**浅**——正文 --bg 是全屏最深的一层；
-     ② 浮起来的东西（卡片、hover、输入条）逐级变浅，沉进去的东西
-        （--bg-side：代码块、工具输出、终端）比正文更深。 */
+     这一块是深色的值，每个 token 的注释写的是深色的取值理由；浅色只在
+     下面 html[data-theme='light'] 块里覆盖 token，注释只写和这里不同的。
+
+     层级关系两套主题是**反着**的，要记的是"关系"不是"深浅"：
+     · 深色和一般深色 App 相反：① 菜单区（侧栏）比正文区**浅**——正文
+       --bg 是全屏最深的一层；② 浮起来的东西（卡片、hover、输入条）逐级
+       变浅，沉进去的东西（--bg-side：代码块、工具输出、终端）比正文更深。
+     · 浅色：正文 --bg 是全屏最亮的一层，侧栏、卡片、hover、输入条和沉
+       进去的东西全都比正文灰一点 —— 亮到顶了，"浮"和"沉"都只能往灰走，
+       前后关系改由阴影和描边说。 */
   --bg: #181818;
   --bg-side: #121212;
   --bg-card: #212121;
@@ -61,36 +79,109 @@
   --border: #303030;
   --border-strong: #3d3d3d;
   --text: #ececf1;
+  /* 正文和 --text-dim 之间的一档：文件块的文字、改动列表的文件名 ——
+     要比旁边的路径灰亮一档，又不能和正文抢。 */
+  --text-soft: #dcdce4;
   --text-dim: #a2a2ad;
   /* 最淡一级也要够得着 WCAG AA 的正文线 —— 它大量用在 11–13px 的
      必读小字上（标签标题、placeholder、说明），不是纯装饰。想再淡的
      装饰性符号请用透明度，别再加灰阶。
-     对比度按最浅的底算，不是 --bg：现在最浅的是输入条 --bg-input
-     （≈4.7:1，输入框的 placeholder 就压在上面），其次是菜单 --bg-nav。 */
+     对比度按离正文最近的那块底算，不是 --bg：深色里最浅的是输入条
+     --bg-input（≈4.7:1，输入框的 placeholder 就压在上面），其次是菜单
+     --bg-nav；浅色里同样按最灰的输入条和菜单算（数字见浅色块）。 */
   --text-faint: #94949f;
   /* 语义色：每个语义一个基色 + 深底配套（-soft 文字 / -bg 底 / -border 描边）。
      Tailwind 色和 Apple 系统色以前混着用，同屏三种绿 —— 已收敛到这一组，
      新代码不要再引进别的绿/黄/红。 */
   --ok: #4ade80;
   --ok-soft: #86efac;
+  /* 「允许」按钮的绿底（--ok 打进 --bg 约 18%），配 --ok-border 描边、
+     --ok-soft 文字。 */
+  --ok-bg: #1f3d2a;
   --ok-border: #2d5a3d;
+  /* 「批准并开工」按钮里那行 11px 说明字（.allow-always-sub）的颜色：
+     --ok-soft 打 60% 透明，压在 --ok-bg 上比主文案淡一档又不掉出同色系。
+     单独抽成 token 是因为"打透明变淡"这个手法只在深底上成立 —— 浅色的
+     绿底本身就浅，同一个 60% 会把字冲到 2.7:1（见浅色块），所以两套主题
+     要各给一个值，规则里只写 var()。 */
+  --ok-sub: color-mix(in srgb, var(--ok-soft) 60%, transparent);
   --warn: #fbbf24;
+  /* warn 的深底文字，和 --ok-soft / --danger-soft 同一角色：--warn 本身
+     是饱和黄，压在 --warn-bg 上当标题太刺，收成茶色。 */
+  --warn-soft: #d9b38a;
+  /* 列表行里"错过 N 次"那种 11px 小标：比 --warn 收一档、比 --warn-soft
+     更偏橙，才在一排灰字里认得出又不响。 */
+  --warn-dim: #d9a662;
   --warn-bg: #2a2214;
   --warn-border: #4a3a20;
+  /* 错过提示框（.sp-missed）的描边：比 --warn-border 亮一档 —— 那个框
+     里有按钮要点，边框得比横幅式提示更成形。 */
+  --warn-border-strong: #6b4a2a;
   --danger: #f87171;
   --danger-soft: #fca5a5;
   --danger-bg: #2a1a1c;
   --danger-border: #4a2529;
+  /* 侧栏一级菜单上的计数小红点：实底 + 近白字。它不是 danger 的语义
+     （不是出错，是"有东西没看"），所以不挂 --danger 系。 */
+  --badge-bg: #a33d3d;
+  --badge-text: #f2dede;
   /* accent 选中态的底色（边框配 --accent 用）。 */
   --bg-active: #20242c;
-  /* 主操作色：开关、选中态、primary 按钮共用。别再用近白底。 */
+  /* 主操作色：开关、选中态、primary 按钮共用。别再用近白底。
+     accent 系的角色：--accent 描边 / 开关 / 实底；--accent-dim 是 primary
+     按钮、选中日期这类"accent 调的底"；压在那种底上的描边和文字分别是
+     --accent-border / --accent-soft（对齐 -border / -soft 的惯例）；
+     --accent-text 是 accent 直接当正文里的文字用（链接、选中的单选点）
+     的那一档，比 --accent 亮 —— --accent 在 --bg 上当 13px 字不够读。 */
   --accent: #5a8dd6;
   --accent-dim: #2a3d5c;
-  /* 滚动条 thumb。用白透明而不是实心灰：叠在 --bg / --bg-side 上都是
+  --accent-border: #3d5f94;
+  --accent-soft: #c8d8f0;
+  --accent-text: #7cb3ff;
+  /* --accent 实底上的前景：开关滑块、实底按钮的字。两套主题都是白 ——
+     accent 两边都够深，白字都读得清。 */
+  --on-accent: #ffffff;
+  /* 三种输入块各有一档自己的文字色（种类靠颜色分，见 .chip-*）。
+     文件块走 --text-soft；命令块暖色、页面元素块绿色，都刻意比 --warn-soft
+     / --ok-soft 淡一点：块是嵌在正文里的，字色太饱和会跳出来。
+     底色和描边不另起 token，从字色 / --ok 系打透明派生。 */
+  --chip-cmd-text: #e6c9a4;
+  --chip-elem-text: #8fd6a0;
+  /* 文件类型图标（seti 字形，.file-icon 和引用块的 ::before）的整体滤镜。
+     lib/fileIcons.ts 里的颜色是 VS Code seti 主题的**深色**那组（.txt 的
+     默认灰 #d4d7d6、.js 的黄 #cbcb41），是给深底调的；VS Code 自己在浅色
+     主题下给每个图标另配了一组值，逐个对照下来正好是统一乘 0.9
+     （#d4d7d6→#bfc2c1、#519aba→#498ba7、#cc3e44→#b8383d……）。深色原样，
+     浅色见浅色块 —— 不改那份生成文件，也不用 JS 按主题换表。 */
+  --file-icon-filter: none;
+  /* 图片查看器的整屏底：近黑 + 高不透明，让图自己亮起来。 */
+  --viewer-bg: rgba(8, 9, 12, 0.85);
+  /* 滚动条 thumb。用透明色而不是实心灰：叠在 --bg / --bg-side 上都是
      一条淡痕，不会在侧栏里变成近白的硬条。hover 再抬一档。
-     别超过 ~10%：系统 overlay 默认就偏亮，我们要的是暗痕不是灰条。 */
+     别超过 ~10%：系统 overlay 默认就偏亮，我们要的是暗痕不是灰条。
+     浅色翻成黑透明（见浅色块），理由一样：叠在哪块灰上都是一条淡痕。 */
   --scrollbar-thumb: #ffffff12;
   --scrollbar-thumb-hover: #ffffff22;
+
+  /* 抬亮表：叠在任何底上都"抬一档"的透明色，深色是白透明、浅色是黑透明
+     （见浅色块）。用它而不用实心灰的地方，都是底色不固定的：磨砂侧栏、
+     输入框和气泡里都会出现的块、面板里一排分块的底。
+     `[约束]` 抬亮的方向随主题翻，所以不许在规则里直接写 #fff / #000 的
+     透明色，也不许 color-mix 里混 #fff —— 混 --lift-base。
+     三档按透明度分，拿不准用 --lift-1；原先散落的 4% / 5% 并到 4%，
+     9% / 10% 并到 10%，合成后差 1–2 级，看不出来。 */
+  --lift-base: #ffffff;
+  --lift-1: rgba(255, 255, 255, 0.04); /* 面板里的分块底、磨砂侧栏 hover */
+  --lift-2: rgba(255, 255, 255, 0.1); /* 拖缝 hover、文件块底、进度条轨道、磨砂侧栏选中 */
+  --lift-3: rgba(255, 255, 255, 0.16); /* 文件块 hover */
+
+  /* 阴影只抽颜色，几何各自保留 —— 浮层大小不同，投影的偏移和模糊本来就
+     不该一样，但"多黑"只该有两档：常规浮层（菜单、气泡、拖影）和压在
+     遮罩上的大块（弹窗、查看器里的图）。原先的 0.4 / 0.45 并到 0.45，
+     模糊过后差不出来。
+     浅色不能照抄：白底上 0.45 的黑像贴了黑边，见浅色块。 */
+  --shadow-color: rgba(0, 0, 0, 0.45);
+  --shadow-color-strong: rgba(0, 0, 0, 0.5);
 
   /* 动效表：全应用的时长和缓动只从这里取。
    *
@@ -156,6 +247,107 @@
   color-scheme: dark;
 }
 
+/* ── 浅色主题 ─────────────────────────────────
+ *
+ * 只覆盖颜色 token，一条规则都不改（原因见文件顶部）。取色照 Codex 桌面端
+ * 的浅色：灰阶照旧纯中性，层级关系和深色**相反** —— 正文 --bg 是全屏最亮
+ * 的一层（#ffffff 和 index.html 的首屏防闪底色是同一个值，别改），其他
+ * 每一块都比它灰一点：侧栏、卡片、hover、输入条、沉进去的代码块 / 终端。
+ * 深色里"浮起来变浅、沉进去变深"两个方向在这里都只能往灰走，几块灰彼此
+ * 只差几级，前后关系改由阴影和描边说 —— 所以阴影和描边在这里反而比
+ * 深色更要紧，别为了"干净"把它们压没。
+ *
+ * `[约束]` 这里必须覆盖 :root 里**每一个**颜色 token（包括 --lift-* /
+ * --shadow-color* 这些透明色）。漏一个，那个 token 就带着深色的值进浅色
+ * —— 白透明叠在白底上是不可见，黑阴影 0.45 叠在白底上是黑边。
+ * 就地覆盖 token 的地方（.sidebar / .composer / .menu、磨砂侧栏）全都
+ * 引用的是 token 或 --lift-*，会跟着这块一起翻，不用再写一遍浅色版。
+ */
+html[data-theme='light'] {
+  --bg: #ffffff;
+  --bg-side: #f6f6f6;
+  --bg-card: #f4f4f4;
+  --bg-hover: #ececec;
+  --bg-nav: #f3f3f3;
+  --bg-nav-hover: #e8e8e8;
+  --bg-nav-active: #e0e0e0;
+  /* 输入条不能和正文同白 —— 它没有描边，全靠底色差浮起来（见 .composer）。
+     比卡片再灰一点，pill 的 hover 再往下一档。 */
+  --bg-input: #f0f0f0;
+  --bg-input-hover: #e3e3e3;
+  --border: #e4e4e4;
+  --border-strong: #d0d0d0;
+  --text: #1a1a1a;
+  --text-soft: #3c3c44;
+  --text-dim: #5f5f68;
+  /* WCAG AA 按最灰的底算：输入条 --bg-input ≈4.7:1，菜单 --bg-nav ≈4.9:1，
+     正文 ≈5.3:1；连 hover 底 --bg-hover 也还有 ≈4.5:1。再淡就掉线，
+     想更淡请用透明度。 */
+  --text-faint: #6a6a74;
+  /* 语义色全部换成深一档：深色那组（#4ade80 / #fbbf24 / #f87171）是给深底
+     调的亮色，白底上对比只有 2:1 上下。-soft 在深色是"更亮的文字"，这里
+     翻成"更深的文字"；-bg 是很淡的同色调底；-border 是淡描边。
+     基色的线和 --text-faint 一样按**最灰的底**算，不是按 --bg：这三个色
+     当 12–13px 字时大多压在灰底上 —— diff 的 +/- 行在 --bg-side、右键菜单
+     的「删除会话」在 --bg-card、规划 / 多任务 pill 在 --bg-input。Tailwind
+     700 档（#15803d / #b45309 / #dc2626）只够白底（4.8–5.0:1），到 #f0f0f0
+     就掉到 4.2–4.4:1；各往下压半档之后，白底 5.4–5.8:1，#f0f0f0 上
+     4.7–5.1:1，连 hover 底 #ececec 也还有 ≥4.5:1。
+     --warn 压到 #a94d08 后和 --warn-dim（#9c4e0c）只差一档半，两者的角色
+     仍然分得开（--warn 是基色和 pill 字，--warn-dim 只给列表里的小标）。 */
+  --ok: #137537;
+  --ok-soft: #166534;
+  --ok-bg: #ddf3e4;
+  --ok-border: #a3d9b4;
+  /* 说明字不能再打透明：#166534 打 60% 压在 #ddf3e4 上只剩 2.7:1。改成往
+     按钮底色混 12%（比主文案淡一点、仍在绿色系），实测 ≈4.7:1。 */
+  --ok-sub: color-mix(in srgb, var(--ok-soft) 88%, var(--ok-bg));
+  --warn: #a94d08;
+  --warn-soft: #92400e;
+  --warn-dim: #9c4e0c;
+  --warn-bg: #fcf4e2;
+  --warn-border: #ead6a8;
+  --warn-border-strong: #dcbf7e;
+  --danger: #cf2222;
+  --danger-soft: #991b1b;
+  --danger-bg: #fdecec;
+  --danger-border: #f1c0c0;
+  --badge-bg: #cf3f3f;
+  --badge-text: #ffffff;
+  --bg-active: #eaf0fa;
+  /* accent 保持 #5a8dd6 的色相往深走（白字压上去 ≈4.9:1）；-dim 翻成
+     很淡的蓝底，-soft / -text 翻成深蓝字（在各自的底上 ≥6:1）。 */
+  --accent: #3b6fc4;
+  --accent-dim: #dfe9f7;
+  --accent-border: #9dbae4;
+  --accent-soft: #274d8a;
+  --accent-text: #2d5fb3;
+  --on-accent: #ffffff;
+  --chip-cmd-text: #7d5019;
+  --chip-elem-text: #166534;
+  /* seti 图标压暗一成 = VS Code 浅色主题给这套图标配的那组值（见 :root）。
+     不压的话 .txt / .spec / .har 这类走默认灰 #d4d7d6 的图标在白底上只有
+     1.4:1，基本看不见。 */
+  --file-icon-filter: brightness(0.9);
+  /* 查看器翻成磨砂白。深色查看器在浅色界面上不是不行（不少 App 的看图
+     就是黑底），但那样关闭键、阴影都得再配一套深色值 —— 先按整套浅色走。 */
+  --viewer-bg: rgba(250, 250, 250, 0.88);
+  --scrollbar-thumb: #00000022;
+  --scrollbar-thumb-hover: #00000033;
+
+  /* 抬亮翻成黑透明，透明度大致对应：白底上黑 4% 就已经是卡片那档灰。 */
+  --lift-base: #000000;
+  --lift-1: rgba(0, 0, 0, 0.05);
+  --lift-2: rgba(0, 0, 0, 0.1);
+  --lift-3: rgba(0, 0, 0, 0.16);
+
+  /* 白底上的阴影只能到 0.12–0.2，再重就像贴了黑边。 */
+  --shadow-color: rgba(0, 0, 0, 0.14);
+  --shadow-color-strong: rgba(0, 0, 0, 0.2);
+
+  color-scheme: light;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -171,7 +363,9 @@ body,
   overscroll-behavior: none;
 }
 
-/* 全局细滚动条。系统默认那条在深色面板上又宽又亮。
+/* 全局细滚动条。系统默认那条在深色面板上又宽又亮（浅色下没那么刺，
+   但宽度和常驻槽的问题一样在，两套主题同一份规则，只有 thumb 的颜色
+   走 token）。
    `[约束]` 两套写法必须互斥。只要 scrollbar-width 取了非初始值，同一个元素上
    的 ::-webkit-scrollbar 规则就会被整体忽略（CSSWG 给旧伪元素定的迁移路径，
    WebKit 18.2 起实装）。macOS WKWebView 还会给 scrollbar-color 叠一层
@@ -297,9 +491,10 @@ html[data-vibrancy] .main {
 html[data-vibrancy] .sidebar {
   background: color-mix(in srgb, var(--bg-nav) 50%, transparent);
   /* hover / 选中也得让材质透过去：实心灰会在磨砂上抠出一块不透明的
-     补丁，材质的色相进不来。白透明叠在任何底上都是「抬一档」。 */
-  --bg-nav-hover: #ffffff0d;
-  --bg-nav-active: #ffffff17;
+     补丁，材质的色相进不来。--lift-* 叠在任何底上都是「抬一档」，
+     并且随主题翻方向（深色白透明、浅色黑透明），这里不用再写浅色版。 */
+  --bg-nav-hover: var(--lift-1);
+  --bg-nav-active: var(--lift-2);
 }
 
 /* Windows 的 mica 采样的是壁纸而不是背后的窗口，本身近乎不透明，罩层
@@ -394,15 +589,17 @@ button:disabled {
 
 button.primary {
   background: var(--accent-dim);
-  border-color: #3d5f94;
-  color: #c8d8f0;
+  border-color: var(--accent-border);
+  color: var(--accent-soft);
   font-weight: 600;
 }
 
+/* hover：底往 --accent 走 24%（和原先手写的 #35507a 只差 1 级），字往
+   抬亮的极色推 60% —— 深色是更白、浅色是更黑，方向随主题翻。 */
 button.primary:hover:not(:disabled) {
-  background: #35507a;
+  background: color-mix(in srgb, var(--accent) 24%, var(--accent-dim));
   border-color: var(--accent);
-  color: #e8f0fc;
+  color: color-mix(in srgb, var(--accent-soft) 40%, var(--lift-base));
 }
 
 button.primary:disabled {
@@ -880,12 +1077,12 @@ html[data-resizing] .slide-panel {
   width: 100%;
 }
 
-/* 中性白透明，不用 --accent。那个色的语义是"选中 / 主操作"，而这条线只是
-   "这里能拖"的提示 —— 一条饱和蓝横贯整个窗口高度，比它要提示的那件事响得多。
-   白透明还顺带压住了两侧的底色差：侧栏在 macOS 上是半透的（底下是系统材质），
-   实心灰会在那半边糊成一条突兀的硬边。 */
+/* 中性透明（--lift-2），不用 --accent。那个色的语义是"选中 / 主操作"，而这
+   条线只是"这里能拖"的提示 —— 一条饱和蓝横贯整个窗口高度，比它要提示的
+   那件事响得多。透明色还顺带压住了两侧的底色差：侧栏在 macOS 上是半透的
+   （底下是系统材质），实心灰会在那半边糊成一条突兀的硬边。 */
 .rz:hover::after {
-  background: #ffffff1a;
+  background: var(--lift-2);
 }
 
 .booting {
@@ -982,7 +1179,7 @@ html[data-resizing] .slide-panel {
   background: var(--warn-bg);
   color: var(--warn);
   font-size: 12.5px;
-  box-shadow: 0 4px 18px #00000066;
+  box-shadow: 0 4px 18px var(--shadow-color);
 }
 
 .link-banner .booting-spinner {
@@ -1007,6 +1204,10 @@ html[data-host='web'] body {
   padding: 14px 16px;
 }
 
+/* 二维码的配色在这里定：宿主出的 SVG 模块填 currentColor、底透明（见
+   remote/mod.rs 的 qr_svg），所以 color 就是模块色、background 就是底色。
+   两套主题都取"正文墨色压正文底"——深色是浅模块深底，浅色是常规的
+   深模块白底，扫码器两种都认。 */
 .remote-qr {
   flex: none;
   width: 180px;
@@ -1014,6 +1215,15 @@ html[data-host='web'] body {
   border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--bg);
+  color: var(--text);
+  /* 圆角要裁到 SVG 上，它自己是方的。 */
+  overflow: hidden;
+}
+
+.remote-qr svg {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .remote-links {
@@ -1940,7 +2150,7 @@ html[data-host='web'] body {
   min-width: 16px;
   padding: 0 5px;
   border-radius: 8px;
-  background: var(--bg-hover, rgba(127, 127, 127, 0.2));
+  background: var(--bg-hover);
   text-align: center;
 }
 
@@ -2573,7 +2783,7 @@ html[data-host='web'] body {
   background: var(--bg-card);
   border: 1px solid var(--border-strong);
   color: var(--text-dim);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 4px 16px var(--shadow-color);
   z-index: var(--z-panel);
 }
 
@@ -2601,7 +2811,7 @@ html[data-host='web'] body {
   background: var(--bg-card);
   border: 1px solid var(--border-strong);
   border-radius: 8px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 4px 16px var(--shadow-color);
 }
 
 .find-bar input {
@@ -2640,7 +2850,8 @@ html[data-host='web'] body {
   opacity: 0.4;
 }
 
-/* Custom Highlight API 的命中上色。 */
+/* Custom Highlight API 的命中上色。黄底 + 深字两套主题都读得清，是全文
+   少数刻意不走 token 的颜色（查找高亮就该是"黄色荧光笔"）。 */
 ::highlight(riot-find) {
   background: rgba(250, 204, 21, 0.35);
   color: inherit;
@@ -2755,8 +2966,8 @@ html[data-host='web'] body {
    是"该歇口气了"，用柔和的信息色 + 虚线边，一眼看出是提示不是故障。 */
 .msg.notice {
   align-self: stretch;
-  color: var(--text-dim, #9aa4b2);
-  background: var(--bg-card, rgba(127, 127, 127, 0.08));
+  color: var(--text-dim);
+  background: var(--bg-card);
   border: 1px dashed var(--border);
   border-radius: 10px;
   padding: 10px 14px;
@@ -3040,7 +3251,7 @@ html[data-host='web'] body {
   overflow: auto;
   padding: 56px 24px 24px;
   box-sizing: border-box;
-  background: rgba(8, 9, 12, 0.85);
+  background: var(--viewer-bg);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   cursor: zoom-out;
@@ -3054,10 +3265,14 @@ html[data-host='web'] body {
   height: auto;
   object-fit: contain;
   border-radius: 6px;
-  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 8px 40px var(--shadow-color-strong);
   cursor: default;
 }
 
+/* 关闭键的底 / 描边 / hover 走最深一层的灰阶 token：原先手写的
+   #14161c 系带一点蓝，和查看器底几乎同色，看上去就是一圈描边 ——
+   --bg-side + --border-strong 在深色里和它差不到 5 级，浅色下自动
+   变成磨砂白上的浅灰圈。 */
 .shot-viewer-close {
   position: fixed;
   top: 16px;
@@ -3069,17 +3284,17 @@ html[data-host='web'] body {
   width: 34px;
   height: 34px;
   padding: 0;
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  border: 1px solid var(--border-strong);
   border-radius: 50%;
-  background: #14161c;
-  color: var(--text, #e6e6e6);
+  background: var(--bg-side);
+  color: var(--text);
   cursor: pointer;
   appearance: none;
   -webkit-appearance: none;
 }
 
 .shot-viewer-close:hover {
-  background: rgba(50, 54, 64, 0.9);
+  background: var(--bg-hover);
 }
 
 /* ── 输入框 ─────────────────────────────────── */
@@ -3175,6 +3390,8 @@ html[data-host='web'] body {
   line-height: 1;
   text-align: center;
   color: var(--chip-glyph-color, currentColor);
+  /* 和 .file-icon 同一层滤镜：块上带进来的也是深色那组颜色。 */
+  filter: var(--file-icon-filter);
   /* 光学对齐。seti 的字形坐在基线上、墨迹中心在基线上方 6.5px；文字的
      视觉中心（x 高和大写的折中）在上方 3.5px 左右，压 3px 对齐。 */
   translate: 0 3px;
@@ -3193,18 +3410,18 @@ html[data-host='web'] body {
 }
 
 /* 三种块都是无边框的 pill（Cursor 同款），靠底色分种类：文件中性灰、
-   文字近白，类型色只落在图标上；命令暖色、页面元素绿 —— 它们没有图标，
-   底色是唯一的种类标记，文件和命令并排时一眼分得开。
-   边框留 1px 透明，三种块高度一致。底色用半透色，输入框和气泡底色不同
-   也能各自浮起一档。 */
+   文字走 --text-soft，类型色只落在图标上；命令暖色、页面元素绿 —— 它们
+   没有图标，底色是唯一的种类标记，文件和命令并排时一眼分得开。
+   边框留 1px 透明，三种块高度一致。底色用半透色（--lift-* / 字色打透明），
+   输入框和气泡底色不同也能各自浮起一档，换主题也不用另配底色。 */
 .chip-ref,
 .chip-cmd {
   border: 1px solid transparent;
 }
 
 .chip-ref {
-  color: #dcdce4;
-  background: rgba(255, 255, 255, 0.09);
+  color: var(--text-soft);
+  background: var(--lift-2);
   --chip-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.3' stroke-linejoin='round'%3E%3Cpath d='M9 1.8H4.5a1 1 0 0 0-1 1v10.4a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1V5.3L9 1.8z'/%3E%3Cpath d='M8.9 2v3.4h3.4'/%3E%3C/svg%3E");
 }
 
@@ -3214,8 +3431,8 @@ html[data-host='web'] body {
 }
 
 .chip-cmd {
-  color: #e6c9a4;
-  background: rgba(230, 190, 140, 0.14);
+  color: var(--chip-cmd-text);
+  background: color-mix(in srgb, var(--chip-cmd-text) 14%, transparent);
 }
 
 /* 命令块只有 `/名字`，没有图标 —— content: none 连带把 gap 也去掉。 */
@@ -3223,11 +3440,14 @@ html[data-host='web'] body {
   content: none;
 }
 
-/* 取件光标图标，和浏览器面板工具栏那个十字呼应。 */
+/* 取件光标图标，和浏览器面板工具栏那个十字呼应。
+   底和描边从 --ok 系派生：原先手写的 rgba(70,170,100) 打 12% / 40%，
+   合成后和 --ok 打 12% / --ok-border 只差 2–4 级；字色单独一档
+   （--ok-soft 更亮更饱和，嵌在正文里会跳）。 */
 .chip-elem {
-  color: #8fd6a0;
-  background: rgba(70, 170, 100, 0.12);
-  border: 1px solid rgba(70, 170, 100, 0.4);
+  color: var(--chip-elem-text);
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+  border: 1px solid var(--ok-border);
   /* 元素描述可以很长，截断在这儿兜底（chipLabel 已经截过一次）。 */
   max-width: 260px;
   overflow: hidden;
@@ -3570,7 +3790,7 @@ html[data-host='web'] body {
   align-self: stretch;
   border: 1px dashed var(--border);
   border-radius: 10px;
-  background: var(--bg-card, rgba(127, 127, 127, 0.08));
+  background: var(--bg-card);
   font-size: 13px;
 }
 
@@ -3945,8 +4165,9 @@ html[data-host='web'] body {
    把它和正文区分开了，再套一圈线只是重复一遍同一件事。
 
    代价是两样东西会溶进这块新底色，就地各抬一档：hover 反馈（图标键、
-   pill、停止键都走 --bg-hover），以及 pill 的轮廓（--border 对 #2b2b2b
-   只差 5 级，等于没有）。--border 的覆盖因此要留着，虽然框自己不用它 ——
+   pill、停止键都走 --bg-hover），以及 pill 的轮廓（深色 --border 对
+   #2b2b2b 只差 5 级，等于没有；浅色 #e4e4e4 对 #f0f0f0 也只差 12 级，
+   同样得用 strong）。--border 的覆盖因此要留着，虽然框自己不用它 ——
    吃这个变量的是里面那排 pill。pill 的 hover 于是和常态描边同色，
    反馈由抬亮的底色承担。 */
 .composer {
@@ -3971,7 +4192,9 @@ html[data-host='web'] body {
 
 /* 整窗的落点提示。落点确实是整个窗口，所以提示也铺满整个窗口。
    `pointer-events: none` 是必须的：它盖在所有东西上面，吃了鼠标就等于
-   把界面冻住半秒。 */
+   把界面冻住半秒。
+   遮罩的黑不走 token：压暗底下的界面是两套主题共用的惯例，白底上一层
+   黑透明同样读作"界面暂时让开了"。 */
 .drop-veil {
   position: fixed;
   inset: 0;
@@ -3990,7 +4213,7 @@ html[data-host='web'] body {
   border-radius: 12px;
   background: var(--bg-card);
   border: 1px solid var(--accent);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 8px 32px var(--shadow-color);
   font-size: 13px;
   color: var(--text);
 }
@@ -4009,7 +4232,7 @@ html[data-host='web'] body {
   border-radius: 8px;
   background: var(--bg-card);
   border: 1px solid var(--border-strong);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 8px 24px var(--shadow-color);
 }
 
 /* 拖起来之后输入框先亮一层浅的"往这儿放"。没有这一下，用户不知道整个
@@ -4075,7 +4298,9 @@ body.file-dragging.file-drop-hot * {
   display: block;
 }
 
-/* 移除键压在右上角。平时半透明，免得一排缩略图上全是实心叉。 */
+/* 移除键压在右上角。平时半透明，免得一排缩略图上全是实心叉。
+   黑底白叉不走 token：它压在图片内容上、不压在界面底色上，图片是什么
+   色都得认得出，两套主题下都是这一套。 */
 .attachment-remove {
   position: absolute;
   top: 2px;
@@ -4340,6 +4565,9 @@ body.file-dragging.file-drop-hot * {
   flex: 1;
 }
 
+/* 发送键是整页唯一的反色键：正文色当底、底色当图标（深色是白底黑箭头，
+   浅色自动翻成黑底白箭头）。图标走 --bg 而不是手写近黑 —— 深色下 #181818
+   和原先的 #111 差不出来，浅色下它就是白。 */
 .send {
   flex: none;
   width: 28px;
@@ -4350,7 +4578,7 @@ body.file-dragging.file-drop-hot * {
   place-items: center;
   background: var(--text);
   border-color: var(--text);
-  color: #111;
+  color: var(--bg);
 }
 
 /* 按钮收窄了，图标跟着收 —— 只收这里的，`ArrowUpIcon` 在排队面板里
@@ -4360,25 +4588,26 @@ body.file-dragging.file-drop-hot * {
   height: 13px;
 }
 
-/* hover 变白只属于"发送"态：busy 时这个按钮是停止键（.send.stop），
-   有自己的底色语义，不能跟着一起变白。 */
+/* hover 推到极色（--lift-base：深色纯白、浅色纯黑）只属于"发送"态：
+   busy 时这个按钮是停止键（.send.stop），有自己的底色语义，不能跟着变。 */
 .send:hover:not(:disabled):not(.stop) {
-  background: #fff;
+  background: var(--lift-base);
 }
 
-/* 停止键：浅灰底 + 深色方块，和发送键的"浅底深图标"同一套语言 ——
-   图标不用白色，白方块在浅灰底上对比低，也跟发送键的深箭头不一致。 */
+/* 停止键：极色底 + 底色方块，和发送键的"反色底、底色图标"同一套语言 ——
+   图标不用别的颜色，方块和箭头必须是同一种黑（或白），否则两态像两个键。 */
 .send.stop {
-  background: #fff;
+  background: var(--lift-base);
   border-color: var(--border-strong);
-  color: #111;
+  color: var(--bg);
 }
 
-/* 停止键常态已是抬亮过的底色（别人的 hover 态），自己悬停再抬一档、
-   边框跟着亮一点 —— 否则它像个没反应的死按钮。 */
+/* 停止键常态已是抬亮过的底色（别人的 hover 态），自己悬停再往回压一档、
+   边框跟着显出来 —— 否则它像个没反应的死按钮。两档都从极色往 --bg 混
+   （60% / 25%），深色下就是原先手写的 #a0a0a0 / #555，差不到 2 级。 */
 .send.stop:hover:not(:disabled) {
-  background: #a0a0a0;
-  border-color: #555;
+  background: color-mix(in srgb, var(--lift-base) 60%, var(--bg));
+  border-color: color-mix(in srgb, var(--lift-base) 25%, var(--bg));
 }
 
 /* pill 下拉菜单（工作方式 / 服务方 / 模型 / 顶栏权限） */
@@ -4397,11 +4626,12 @@ body.file-dragging.file-drop-hot * {
   border: 1px solid var(--border-strong);
   border-radius: 12px;
   padding: 4px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 8px 32px var(--shadow-color);
   z-index: var(--z-menu);
   /* composer 把 --bg-hover 抬到 --bg-input-hover，给 pill 用。菜单底是
-     --bg-card，再吃那一档会比会话右键菜单（同样叠在卡片上）重一截。 */
-  --bg-hover: color-mix(in srgb, #fff 5%, var(--bg-card));
+     --bg-card，再吃那一档会比会话右键菜单（同样叠在卡片上）重一截。
+     混的是 --lift-base 不是 #fff：浅色下要往黑压才是"抬一档"。 */
+  --bg-hover: color-mix(in srgb, var(--lift-base) 5%, var(--bg-card));
 }
 
 /* 顶栏里的菜单往下开：上面就是窗口边，没地方。 */
@@ -4619,6 +4849,8 @@ body.file-dragging.file-drop-hot * {
 
 /* ── 弹层（权限 / 设置） ────────────────────── */
 
+/* 遮罩的黑不走 token：弹窗背后压暗界面是两套主题共用的惯例（系统 sheet
+   在浅色下也是黑透明），换成白透明反而像页面没加载完。 */
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -4638,7 +4870,7 @@ body.file-dragging.file-drop-hot * {
   border: 1px solid var(--border-strong);
   border-radius: 16px;
   overflow: hidden;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 20px 60px var(--shadow-color-strong);
 }
 
 .modal-head {
@@ -4724,7 +4956,7 @@ body.file-dragging.file-drop-hot * {
 }
 
 .btn-allow {
-  background: #1f3d2a;
+  background: var(--ok-bg);
   border-color: var(--ok-border);
   color: var(--ok-soft);
 }
@@ -5267,7 +5499,7 @@ button.chip.clickable {
    输入框里的目录块不可点（没有单文件可预览），保持文本光标。 */
 button.chip-ref.clickable:hover,
 .composer-input .chip-ref:not([data-extra='dir']):hover {
-  background: rgba(255, 255, 255, 0.16);
+  background: var(--lift-3);
   color: var(--text);
 }
 
@@ -5755,7 +5987,7 @@ button.chip-ref.clickable:hover,
   background: var(--bg-card);
   border: 1px solid var(--border-strong);
   border-radius: 12px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 8px 32px var(--shadow-color);
 }
 
 /* 带说明的选项：主标签和灰字之间留一口气，不然两行贴死看着像一行断了。
@@ -5909,12 +6141,14 @@ button.ta-resize-grip:hover:not(:disabled),
 
 /* ── 计划批准卡（内联在对话流里） ─────────── */
 
+/* 描边和底都是 --accent 打透明（原先手写的 rgba(90,141,214) 就是 --accent
+   的 RGB），随 accent 一起换主题。 */
 .plan-card {
   margin: 10px 0 4px;
   padding: 12px 12px 10px;
-  border: 1px solid rgba(90, 141, 214, 0.4);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
   border-radius: 12px;
-  background: rgba(90, 141, 214, 0.05);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
 }
 
 .plan-card-head {
@@ -5924,12 +6158,15 @@ button.ta-resize-grip:hover:not(:disabled),
   margin: 0 2px 10px;
 }
 
+/* 徽标字色落在链接蓝和 accent 深底文字的中间（原先手写的 #9cc0f0，
+   和这个混法只差 2 级）：比 --accent-soft 饱和、比 --accent-text 收敛，
+   在 5% 的淡蓝底上当 11px 小标刚好。 */
 .plan-card-badge {
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.5px;
-  color: #9cc0f0;
-  border: 1px solid rgba(90, 141, 214, 0.5);
+  color: color-mix(in srgb, var(--accent-text) 50%, var(--accent-soft));
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
   border-radius: 999px;
   padding: 1.5px 8px;
 }
@@ -6055,8 +6292,9 @@ button.ta-resize-grip:hover:not(:disabled),
 }
 
 .plan-card-actions .btn-allow .allow-always-sub {
-  /* 绿底按钮里的淡灰会糊掉，用同色系的暗绿 */
-  color: rgba(134, 239, 172, 0.6);
+  /* 绿底按钮里的淡灰会糊掉，用同色系。深色是 --ok-soft 打 60% 透明，
+     浅色另配（打透明在浅绿底上会掉到 2.7:1），值都在 token 里。 */
+  color: var(--ok-sub);
 }
 
 .plan-card-spacer {
@@ -6383,7 +6621,7 @@ button.ta-resize-grip:hover:not(:disabled),
   padding: 8px 10px;
   margin-bottom: 10px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--lift-1);
   font-size: 12px;
 }
 
@@ -6419,7 +6657,7 @@ button.ta-resize-grip:hover:not(:disabled),
   font-size: 11px;
   line-height: 1.4;
   color: var(--text-dim);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--lift-1);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 3px 7px;
@@ -6439,7 +6677,7 @@ button.ta-resize-grip:hover:not(:disabled),
 .pack-item {
   padding: 10px 12px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--lift-1);
 }
 
 .pack-head {
@@ -6456,14 +6694,16 @@ button.ta-resize-grip:hover:not(:disabled),
 .pack-badge {
   font-size: 11px;
   color: var(--text-dim);
-  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  border: 1px solid var(--border);
   border-radius: 999px;
   padding: 0 6px;
 }
 
+/* 描边是 --ok 打 35% 透明。原先写死的是 Apple 系统绿 #30d158 的 RGB ——
+   :root 收敛语义色之前的残留，跟着字色一起换成 --ok。 */
 .pack-badge.on {
-  color: var(--ok, #30d158);
-  border-color: rgba(48, 209, 88, 0.35);
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 35%, transparent);
 }
 
 .pack-progress {
@@ -6476,13 +6716,13 @@ button.ta-resize-grip:hover:not(:disabled),
 .pack-bar {
   height: 4px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--lift-2);
   overflow: hidden;
 }
 
 .pack-bar-fill {
   height: 100%;
-  background: var(--accent, #0a84ff);
+  background: var(--accent);
   transition: width var(--dur-3) var(--ease-out);
 }
 
@@ -6512,11 +6752,13 @@ button.ta-resize-grip:hover:not(:disabled),
 .skill-item {
   padding: 8px 10px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--lift-1);
 }
 
+/* 原先写死的是 Apple 系统红 #ff453a 的 RGB，同 .pack-badge.on 的理由换成
+   --danger 打透明。 */
 .skill-item.bad {
-  outline: 1px solid rgba(255, 69, 58, 0.35);
+  outline: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
 }
 
 .skill-item-head {
@@ -6533,7 +6775,7 @@ button.ta-resize-grip:hover:not(:disabled),
 .skill-source {
   font-size: 11px;
   color: var(--text-dim);
-  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  border: 1px solid var(--border);
   border-radius: 999px;
   padding: 0 6px;
 }
@@ -6542,7 +6784,7 @@ button.ta-resize-grip:hover:not(:disabled),
   margin: 6px 0 0;
   padding: 10px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--lift-1);
   font-size: 12px;
   line-height: 1.6;
   overflow-x: auto;
@@ -6588,8 +6830,8 @@ button.ta-resize-grip:hover:not(:disabled),
 
 .input-with-btn .btn-compact:hover:not(:disabled) {
   background: var(--accent-dim);
-  border-color: #3d5f94;
-  color: #c8d8f0;
+  border-color: var(--accent-border);
+  color: var(--accent-soft);
 }
 
 .toggle-row {
@@ -6655,7 +6897,7 @@ button.ta-resize-grip:hover:not(:disabled),
 
 .toggle-track.on .toggle-knob {
   transform: translateX(14px);
-  background: #fff;
+  background: var(--on-accent);
 }
 
 .toggle-label {
@@ -7118,7 +7360,7 @@ button.ta-resize-grip:hover:not(:disabled),
 }
 
 .model-row.active .model-radio {
-  color: #7cb3ff;
+  color: var(--accent-text);
 }
 
 .fetched-list {
@@ -7146,10 +7388,12 @@ button.ta-resize-grip:hover:not(:disabled),
   color: var(--text);
 }
 
+/* 底比「允许」按钮的 --ok-bg 淡得多（--ok 只打 7% 进 --bg，和原先手写的
+   #17251c 差不到 3 级）：这是一排 pill 里的状态标记，不是要点的键。 */
 .fetched-item.added {
   border-color: var(--ok-border);
   color: var(--ok-soft);
-  background: #17251c;
+  background: color-mix(in srgb, var(--ok) 7%, var(--bg));
 }
 
 .field-hint {
@@ -7442,7 +7686,7 @@ button.field-slider-state:hover {
   background: var(--bg-card);
   border: 1px solid var(--border-strong);
   border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 8px 24px var(--shadow-color);
   color: var(--text-dim);
   font-size: 12px;
   font-weight: 400;
@@ -7547,7 +7791,7 @@ button.field-slider-state:hover {
   border: 1px solid var(--border-strong);
   border-radius: 10px;
   padding: 4px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 8px 32px var(--shadow-color);
 }
 
 .ctx-item {
@@ -7767,7 +8011,7 @@ button.field-slider-state:hover {
 }
 
 .md a {
-  color: #7cb3ff;
+  color: var(--accent-text);
   text-decoration: none;
 }
 
@@ -8105,7 +8349,7 @@ button.field-slider-state:hover {
 .msg-editor-save {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .msg-editor-save:hover:not(:disabled) {
@@ -8150,7 +8394,8 @@ button.field-slider-state:hover {
 }
 
 /* 直播预览：一行框，右端贴着最新的字，左端渐隐 —— 视觉上文字向左滚过。
-   fold-peek 是过程组组头的同款（见 ProcessGroup 的 live 形态）。 */
+   fold-peek 是过程组组头的同款（见 ProcessGroup 的 live 形态）。
+   mask 渐变里的 #000 只是"不透明"的意思，不是颜色，两套主题一样。 */
 .think-peek,
 .fold-peek {
   flex: 1;
@@ -8365,7 +8610,7 @@ button.field-slider-state:hover {
   border: 1px solid var(--border-strong);
   border-radius: 12px;
   background: var(--bg-card);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 8px 32px var(--shadow-color);
 }
 
 .ctx-panel-head {
@@ -8697,6 +8942,8 @@ button.field-slider-state:hover {
   line-height: 1;
   font-weight: 400;
   user-select: none;
+  /* 内联的是深色那组颜色，浅色靠这一层滤镜压暗（见 token 注释）。 */
+  filter: var(--file-icon-filter);
 }
 
 .change-path {
@@ -8726,8 +8973,8 @@ button.field-slider-state:hover {
 }
 
 .change-name {
-  /* 介于正文白和目录灰之间：要比路径亮一档，又不能抢中间对话。 */
-  color: #dcdce4;
+  /* 介于正文和目录灰之间：要比路径亮一档，又不能抢中间对话。 */
+  color: var(--text-soft);
 }
 
 /* 把复制/展开顶到行尾，+- 贴在文件名后面。 */
@@ -9124,7 +9371,8 @@ button.field-slider-state:hover {
 /* ── 面板类 P2 批量修复 ───── */
 
 /* 标签一多溢出后，被挤出去的标签看起来像不存在。两端渐隐提示"还有、
-   可以滚"。渐隐带刻意窄：右端的功能按钮也在这条栏里，宽了会吃掉一角。 */
+   可以滚"。渐隐带刻意窄：右端的功能按钮也在这条栏里，宽了会吃掉一角。
+   mask 里的 #000 是"不透明"，不是颜色，两套主题一样。 */
 .term-panel .term-tabs {
   mask-image: linear-gradient(
     to right,
@@ -9171,7 +9419,7 @@ button.field-slider-state:hover {
   flex: none;
   padding: 0 6px;
   font-size: 11px;
-  color: var(--danger, #f87171);
+  color: var(--danger);
   white-space: nowrap;
 }
 
@@ -9192,7 +9440,7 @@ button.field-slider-state:hover {
 .scope-panel .scope-error {
   margin-bottom: 4px;
   font-size: 11px;
-  color: var(--danger, #f87171);
+  color: var(--danger);
 }
 
 /* 已有数据时点刷新，按钮变灰太隐蔽 —— 图标转起来才像"在干活"。 */
@@ -9325,8 +9573,8 @@ button.field-slider-state:hover {
   min-width: 16px;
   padding: 1px 5px;
   border-radius: 8px;
-  background: #a33d3d;
-  color: #f2dede;
+  background: var(--badge-bg);
+  color: var(--badge-text);
   font-size: 10px;
   line-height: 14px;
   text-align: center;
@@ -9477,9 +9725,11 @@ button.field-slider-state:hover {
   background: var(--bg);
 }
 
+/* 错过提示框：warn 系的底 + 亮一档的描边。底原先是 rgba(160,110,50) 打 12%，
+   压在 --bg 上和 --warn-bg 差不到 5 级，直接用 token。 */
 .sp-missed {
-  border: 1px solid #6b4a2a;
-  background: rgba(160, 110, 50, 0.12);
+  border: 1px solid var(--warn-border-strong);
+  background: var(--warn-bg);
   border-radius: 10px;
   padding: 10px 12px;
   display: flex;
@@ -9490,7 +9740,7 @@ button.field-slider-state:hover {
 .sp-missed-title {
   font-size: 12px;
   font-weight: 600;
-  color: #d9b38a;
+  color: var(--warn-soft);
 }
 
 .sp-missed-row {
@@ -9521,7 +9771,7 @@ button.field-slider-state:hover {
 
 .sp-missed-btn:hover:not(:disabled) {
   color: var(--text);
-  border-color: #3d5f94;
+  border-color: var(--accent-border);
 }
 
 .sp-missed-foot {
@@ -9617,7 +9867,7 @@ button.field-slider-state:hover {
 .sp-row-missed {
   margin-left: 8px;
   font-size: 11px;
-  color: #d9a662;
+  color: var(--warn-dim);
 }
 
 .sp-row-meta {
@@ -9889,7 +10139,7 @@ button.field-slider-state:hover {
 
 .tp-item.picked {
   background: var(--accent-dim);
-  color: #c8d8f0;
+  color: var(--accent-soft);
 }
 
 /* 日期时间：左日历 + 右时/分两列。 */
@@ -9964,7 +10214,7 @@ button.field-slider-state:hover {
 
 .dtp-day.picked {
   background: var(--accent-dim);
-  color: #c8d8f0;
+  color: var(--accent-soft);
 }
 
 .dtp-day:disabled {
@@ -10119,7 +10369,7 @@ button.field-slider-state:hover {
   background: var(--bg-card);
   border: 1px solid var(--border-strong);
   border-radius: 12px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 12px 40px var(--shadow-color);
   overflow: hidden;
 }
 
@@ -10216,7 +10466,7 @@ button.field-slider-state:hover {
 
   .slide-panel.side[data-open] {
     transform: none;
-    box-shadow: 12px 0 40px rgba(0, 0, 0, 0.45);
+    box-shadow: 12px 0 40px var(--shadow-color);
   }
 
   .slide-panel.side .slide-panel-inner,
@@ -10229,6 +10479,7 @@ button.field-slider-state:hover {
     padding-bottom: calc(10px + env(safe-area-inset-bottom));
   }
 
+  /* 遮罩的黑不走 token，理由同 .modal-backdrop。 */
   .mobile-backdrop {
     position: fixed;
     inset: 0;

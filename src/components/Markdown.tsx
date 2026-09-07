@@ -17,10 +17,42 @@ import { t, useT } from "../i18n";
 import { openSession, sessionIdFromHref } from "../lib/sessionLink";
 import { AGENT_LINK_SCHEME, openSubagent } from "../lib/subagentLink";
 import { joinRoot, looksAbsPath } from "../pathDisplay";
+import { type Theme, getTheme, subscribeTheme } from "../theme";
 import { openFilePreview } from "./FilePreview";
 import { MermaidBlock } from "./Mermaid";
 
-import "highlight.js/styles/github-dark-dimmed.css";
+import hljsDarkCss from "highlight.js/styles/github-dark-dimmed.css?inline";
+import hljsLightCss from "highlight.js/styles/github.css?inline";
+
+/**
+ * highlight.js 的配色随主题切。
+ *
+ * 两套主题以字符串打进包里（`?inline`：Vite 只给文本，不注入），由这一个
+ * `<style>` 按解析后的主题换内容。不能像以前那样静态 `import` 主题 CSS ——
+ * 那会被打进全局样式表，两套一起进就是后进的盖住先进的，切不动。
+ *
+ * 插在 `<head>` 最前面而不是末尾：原来的静态 import 在打包产物里排在
+ * styles.css 之前，styles.css 里对 `.hljs` 的覆盖（去底色、去内边距）都是
+ * 在这个次序下写的。换了注入方式，次序不该跟着反过来。
+ *
+ * 这份样式全局生效：CodeView（文件预览的代码高亮）也用 `.hljs` 类。
+ */
+const HLJS_STYLE_ID = "riot-hljs-theme";
+const HLJS_CSS: Record<Theme, string> = { dark: hljsDarkCss, light: hljsLightCss };
+
+function applyHljsTheme(theme: Theme) {
+  let el = document.getElementById(HLJS_STYLE_ID);
+  if (!el) {
+    el = document.createElement("style");
+    el.id = HLJS_STYLE_ID;
+    document.head.prepend(el);
+  }
+  const css = HLJS_CSS[theme];
+  if (el.textContent !== css) el.textContent = css;
+}
+
+applyHljsTheme(getTheme());
+subscribeTheme(applyHljsTheme);
 
 /**
  * 当前会话的项目根。代码引用要靠它把模型写的相对路径拼成能打开的绝对路径。

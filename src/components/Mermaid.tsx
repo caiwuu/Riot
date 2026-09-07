@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 
 import { useTimedFlag } from "../hooks/useTimedFlag";
 import { type MessageKey, useT } from "../i18n";
+import { type Theme, useTheme } from "../theme";
 import { useEscLayer } from "./Modal";
 
 /**
@@ -14,6 +15,10 @@ import { useEscLayer } from "./Modal";
  *
  * mermaid 很大，动态加载，没图的对话不付这份体积。
  * `securityLevel: "strict"`：图里的 HTML / 点击事件一律不执行。
+ *
+ * 配色随界面主题走。SVG 是静态的，颜色在渲染时就写死在里面，切主题不会
+ * 自己变 —— 所以主题进了渲染 effect 的依赖：切换后每张已经画出来的图按新
+ * 配色重画一遍（旧图挂着直到新图落地，不闪源码）。
  */
 
 type MermaidApi = {
@@ -21,32 +26,72 @@ type MermaidApi = {
   render: (id: string, src: string) => Promise<{ svg: string }>;
 };
 
+const FONT_FAMILY = "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif";
+
+/**
+ * 两套配色，值抄 styles.css 里对应主题的 token（mermaid 读不了 CSS 变量）：
+ * background 是图所在的容器底（--bg-side），primary 是节点底 / 边框
+ * （--accent-dim / --accent），文字和连线是 --text / --text-dim，
+ * secondary / tertiary 是子图、备注这类次级面（--bg-card / --bg）。
+ * 深色用 mermaid 的 dark 主题打底。
+ *
+ * 浅色用 base 而不是 default：default 的流程图节点底 / 描边是写死的
+ * #ECECFF / #9370DB（mainBkg / border1，不从 primaryColor 推），传进去的
+ * --accent-dim / --accent 根本落不到节点上，画出来是一片和灰阶界面对不上的
+ * 淡紫。base 是 mermaid 专门留给自定义的那套：nodeBkg = primaryColor、
+ * nodeBorder = primaryBorderColor、clusterBkg = tertiaryColor、边标签底
+ * = secondaryColor，这里给的每个值都会用上。neutral 是纯灰阶，和界面上
+ * 蓝色的强调色对不上，所以也不用。
+ */
+const THEME_CONFIG: Record<Theme, Record<string, unknown>> = {
+  dark: {
+    theme: "dark",
+    themeVariables: {
+      darkMode: true,
+      background: "#121212",
+      primaryColor: "#2a3d5c",
+      primaryTextColor: "#ececf1",
+      primaryBorderColor: "#5a8dd6",
+      lineColor: "#a2a2ad",
+      secondaryColor: "#212121",
+      tertiaryColor: "#181818",
+      fontFamily: FONT_FAMILY,
+    },
+  },
+  light: {
+    theme: "base",
+    themeVariables: {
+      darkMode: false,
+      background: "#f6f6f6",
+      primaryColor: "#dfe9f7",
+      primaryTextColor: "#1a1a1a",
+      primaryBorderColor: "#3b6fc4",
+      lineColor: "#5f5f68",
+      secondaryColor: "#f4f4f4",
+      tertiaryColor: "#ffffff",
+      fontFamily: FONT_FAMILY,
+    },
+  },
+};
+
 let loaded: Promise<MermaidApi> | null = null;
+/** 上次 `initialize` 用的主题。切主题后第一张要画的图负责重新 initialize。 */
+let configured: Theme | null = null;
 let seq = 0;
 
 function load(): Promise<MermaidApi> {
-  loaded ??= import("mermaid").then((m) => {
-    const api = m.default as MermaidApi;
-    api.initialize({
-      startOnLoad: false,
-      securityLevel: "strict",
-      theme: "dark",
-      themeVariables: {
-        darkMode: true,
-        background: "#121212",
-        primaryColor: "#2a3d5c",
-        primaryTextColor: "#ececf1",
-        primaryBorderColor: "#5a8dd6",
-        lineColor: "#a2a2ad",
-        secondaryColor: "#212121",
-        tertiaryColor: "#181818",
-        fontFamily:
-          "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif",
-      },
-    });
-    return api;
-  });
+  loaded ??= import("mermaid").then((m) => m.default as MermaidApi);
   return loaded;
+}
+
+/**
+ * 让 mermaid 的全局配置对上要画的主题。`initialize` 是整体替换，所以每次都
+ * 给全套（安全等级也在里面），而不是只补主题那几项。
+ */
+function configure(api: MermaidApi, theme: Theme) {
+  if (configured === theme) return;
+  configured = theme;
+  api.initialize({ startOnLoad: false, securityLevel: "strict", ...THEME_CONFIG[theme] });
 }
 
 /** 读屏和放大按钮要报图的名字。从源码首个关键词猜，猜不出统一叫流程图。 */
@@ -70,6 +115,7 @@ function kindOf(src: string): MessageKey {
 
 export function MermaidBlock({ source }: { source: string }) {
   const { t } = useT();
+  const theme = useTheme();
   const uid = useId().replace(/[^a-zA-Z0-9]/g, "");
   const [svg, setSvg] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
@@ -88,10 +134,14 @@ export function MermaidBlock({ source }: { source: string }) {
     }
     let alive = true;
     // 流式时每个 token 都重跑。短延迟等一小截写完再画，别每个字符都渲染。
+    // 切主题也走这条路：整屏的图一起排队，180ms 后各画各的。
     const timer = window.setTimeout(() => {
       const id = `mmd-${uid}-${++seq}`;
       void load()
-        .then((api) => api.render(id, src))
+        .then((api) => {
+          configure(api, theme);
+          return api.render(id, src);
+        })
         .then((out) => {
           if (!alive) return;
           setSvg(out.svg);
@@ -109,7 +159,7 @@ export function MermaidBlock({ source }: { source: string }) {
       alive = false;
       window.clearTimeout(timer);
     };
-  }, [source, uid]);
+  }, [source, uid, theme]);
 
   const label = t(kindOf(source));
 

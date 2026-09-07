@@ -310,17 +310,25 @@ fn primary_lan_ip() -> Option<Ipv4Addr> {
 
 /// 把登录链接画成二维码 SVG。链接太长编不进去（不会发生：URL + 43 位令牌
 /// 远在容量之内）就没有二维码，界面上显示链接本身。
+///
+/// 只出形状不出颜色：模块填 `currentColor`、底不填。配色归页面管（深色是
+/// 浅模块深底，浅色反过来），这里写死任何一种都会在另一套主题里变成一块
+/// 反色的方块。`[约束]` 所以前端必须把它**内联**进 DOM，不能当 `<img src>`
+/// 用 —— 图片里的 SVG 拿不到页面的 `color`，`currentColor` 会落回黑色。
+/// 同一个理由，去掉开头的 XML 声明：它是独立文件才需要的东西，塞进 HTML
+/// 会被解析成一段无意义的注释。
 fn qr_svg(text: &str) -> Option<String> {
     use qrcode::render::svg;
     let code = qrcode::QrCode::new(text.as_bytes()).ok()?;
-    Some(
-        code.render::<svg::Color<'_>>()
-            .min_dimensions(180, 180)
-            .quiet_zone(true)
-            .dark_color(svg::Color("#e8e8e8"))
-            .light_color(svg::Color("#181818"))
-            .build(),
-    )
+    let doc = code
+        .render::<svg::Color<'_>>()
+        .min_dimensions(180, 180)
+        .quiet_zone(true)
+        .dark_color(svg::Color("currentColor"))
+        .light_color(svg::Color("none"))
+        .build();
+    let start = doc.find("<svg")?;
+    Some(doc[start..].to_owned())
 }
 
 #[cfg(test)]
@@ -344,6 +352,11 @@ mod tests {
             auth::generate_token()
         );
         let svg = qr_svg(&url).expect("能编");
-        assert!(svg.contains("<svg"), "输出是 SVG 文档：{}", &svg[..60]);
+        assert!(svg.starts_with("<svg"), "内联用，不带 XML 声明：{}", &svg[..60]);
+        assert!(
+            svg.contains(r#"fill="currentColor""#) && svg.contains(r#"fill="none""#),
+            "颜色留给页面定"
+        );
+        assert!(!svg.contains('#'), "不该写死任何颜色");
     }
 }

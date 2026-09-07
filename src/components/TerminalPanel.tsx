@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { FitAddon } from "@xterm/addon-fit";
-import { Terminal } from "@xterm/xterm";
+import { type ITheme, Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 
 import {
@@ -19,6 +19,7 @@ import {
 import { type ConfirmRequest, ConfirmDialog } from "./ConfirmDialog";
 import { t as msg, useT } from "../i18n";
 import { basename } from "../pathDisplay";
+import { type Theme, getTheme, useTheme } from "../theme";
 
 /** 会话删除的广播口。面板是单例、常驻挂载，模块级单听者足够。 */
 let sessionGoneListener: ((sessionId: string) => void) | null = null;
@@ -66,6 +67,7 @@ export function TerminalPanel({
   onSendSelection?: (text: string) => void;
 }) {
   const { t } = useT();
+  const theme = useTheme();
   const [state, setState] = useState<{ tabs: Tab[]; active: string | null }>({
     tabs: [],
     active: null,
@@ -332,6 +334,15 @@ export function TerminalPanel({
     [t],
   );
 
+  // 主题切换：每个活着的 xterm 换一套配色。xterm 读不了 CSS 变量，页面的
+  // token 翻过去了它不会跟 —— 不改的话浅色页面里嵌着一块深色终端。
+  // 新建的实例在 mount 里按 getTheme() 取当前主题，这里只管已经存在的。
+  useEffect(() => {
+    for (const inst of instances.current.values()) {
+      if (!inst.disposed) inst.term.options.theme = THEMES[theme];
+    }
+  }, [theme]);
+
   // 聚焦只跟"打开面板/切标签"走，不跟高度走 —— 用户在输入框打字时
   // 拖终端分隔线，焦点不该被抢过来。
   //
@@ -364,7 +375,9 @@ export function TerminalPanel({
       fontFamily: '"Riot Mono", Menlo, ui-monospace, monospace',
       fontSize: 12,
       scrollback: 5000,
-      theme: THEME,
+      // 读模块级的当前值而不是闭包里的 theme：mount 是 ref 回调，用户切了
+      // 主题之后新开的标签要按新主题建，已有实例由上面的 effect 改。
+      theme: THEMES[getTheme()],
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -771,41 +784,78 @@ function b64ToBytes(b64: string): Uint8Array {
 }
 
 /**
- * 配色对齐 styles.css 的 :root。xterm 读不了 CSS 变量，只能抄一份。
+ * 两套配色，对齐 styles.css 里 `:root` 和 `html[data-theme='light']` 的 token。
+ * xterm 读不了 CSS 变量，只能抄一份；主题切换时由上面的 effect 对每个实例
+ * 改 `options.theme`。
  *
  * `scrollbarSlider*` 必须在这里给：xterm 6 的滚动条是自绘的 div，颜色由它
  * 自己注入一段 `<style>`，样式表里写什么都抢不过。默认值是前景色 20%
- * 透明度 —— 深底上是一条很亮的灰。
+ * 透明度 —— 深底上是一条很亮的灰，白底上是一条很黑的灰。
  */
-const THEME = {
-  // 和聊天区同底（--bg）。曾经用侧栏的 #121212，深一档的结果是终端、
-  // 抽屉、主区三种灰凑在一屏上。
-  background: "#181818",
-  foreground: "#ececf1",
-  cursor: "#ececf1",
-  cursorAccent: "#181818",
-  selectionBackground: "#3d3d3d",
-  // ANSI black 不能和背景同色：TUI 拿它画分隔和填充。
-  black: "#121212",
-  red: "#f87171",
-  green: "#4ade80",
-  yellow: "#fbbf24",
-  blue: "#7cb3ff",
-  magenta: "#c792ea",
-  cyan: "#7fdbca",
-  white: "#ececf1",
-  brightBlack: "#6e6e78",
-  brightRed: "#fca5a5",
-  brightGreen: "#86efac",
-  brightYellow: "#fde68a",
-  brightBlue: "#a5c8ff",
-  brightMagenta: "#ddb6f2",
-  brightCyan: "#a2e8dd",
-  brightWhite: "#ffffff",
-  // 半透明而不是实色：滑块压在输出上，底下的字还得看得见
-  scrollbarSliderBackground: "#ffffff10",
-  scrollbarSliderHoverBackground: "#ffffff1c",
-  scrollbarSliderActiveBackground: "#ffffff28",
+const THEMES: Record<Theme, ITheme> = {
+  dark: {
+    // 和聊天区同底（--bg）。曾经用侧栏的 #121212，深一档的结果是终端、
+    // 抽屉、主区三种灰凑在一屏上。
+    background: "#181818",
+    foreground: "#ececf1",
+    cursor: "#ececf1",
+    cursorAccent: "#181818",
+    selectionBackground: "#3d3d3d",
+    // ANSI black 不能和背景同色：TUI 拿它画分隔和填充。
+    black: "#121212",
+    red: "#f87171",
+    green: "#4ade80",
+    yellow: "#fbbf24",
+    blue: "#7cb3ff",
+    magenta: "#c792ea",
+    cyan: "#7fdbca",
+    white: "#ececf1",
+    brightBlack: "#6e6e78",
+    brightRed: "#fca5a5",
+    brightGreen: "#86efac",
+    brightYellow: "#fde68a",
+    brightBlue: "#a5c8ff",
+    brightMagenta: "#ddb6f2",
+    brightCyan: "#a2e8dd",
+    brightWhite: "#ffffff",
+    // 半透明而不是实色：滑块压在输出上，底下的字还得看得见
+    scrollbarSliderBackground: "#ffffff10",
+    scrollbarSliderHoverBackground: "#ffffff1c",
+    scrollbarSliderActiveBackground: "#ffffff28",
+  },
+  light: {
+    // 同样和聊天区同底（浅色的 --bg 是纯白），前景是浅色的 --text。
+    background: "#ffffff",
+    foreground: "#1a1a1a",
+    cursor: "#1a1a1a",
+    cursorAccent: "#ffffff",
+    // 淡蓝灰。纯灰的选区在白底上和"禁用"一个观感。
+    selectionBackground: "#d3e0f2",
+    // ANSI 色按 GitHub Light 的终端调色板：那套是照着白底可读性挑的。
+    // 尤其黄色 —— 深色那套的 #fbbf24 在白底上对比度不到 2:1，读不出来；
+    // 这里用偏棕的琥珀色，牺牲一点"黄"换可读。亮色系同理，在白底上要
+    // 更深而不是更亮，否则 bold 文字反而更淡。
+    black: "#24292f",
+    red: "#cf222e",
+    green: "#1a7f37",
+    yellow: "#9a6700",
+    blue: "#0969da",
+    magenta: "#8250df",
+    cyan: "#1b7c83",
+    // ANSI white 不能和背景同色：ls 的某些配色、TUI 的次要文字用它。
+    white: "#6e7781",
+    brightBlack: "#57606a",
+    brightRed: "#a40e26",
+    brightGreen: "#116329",
+    brightYellow: "#7d4e00",
+    brightBlue: "#218bff",
+    brightMagenta: "#a475f9",
+    brightCyan: "#3192aa",
+    brightWhite: "#8c959f",
+    scrollbarSliderBackground: "#00000014",
+    scrollbarSliderHoverBackground: "#00000022",
+    scrollbarSliderActiveBackground: "#00000030",
+  },
 };
 
 /* ── 图标 ───────────────────────────────────── */

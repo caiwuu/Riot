@@ -1,9 +1,10 @@
 //! 代码 / 纯文本预览。
 //!
-//! 不走 @file-viewer 的 text 管线：它是一套浅色皮，摆在 Riot 的深色壳里
-//! 突兀，代码高亮的配色也和聊天里的代码块不一致。聊天代码块用的是
-//! highlight.js + github-dark-dimmed（Markdown.tsx 全局引入了主题 css），
-//! 这里用同一套 —— 颜色、字体和对话里看到的代码完全一致。
+//! 不走 @file-viewer 的 text 管线：它是一套浅色皮，不跟 Riot 的主题走，
+//! 代码高亮的配色也和聊天里的代码块不一致。聊天代码块用的是 highlight.js +
+//! github 系主题（深色 github-dark-dimmed、浅色 github，Markdown.tsx 按当前
+//! 主题维护那个全局 `<style>`），这里用同一套 —— 颜色、字体和对话里看到的
+//! 代码完全一致。
 //!
 //! highlight.js 全量包不小，动态 import：只有真的打开代码文件才加载。
 
