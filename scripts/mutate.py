@@ -102,8 +102,13 @@ MUTANTS = [
         "permissions",
         "chain.rs",
         """    if mode == PermissionMode::DontAsk || !ctx.can_prompt_user {
+        // 给模型的话。原本要问用户的那句是词典键,这里没有词典,只能给
+        // 键和参数（`UiError` 的 Display）—— 足够让模型知道拦的是什么。
         return PermissionResult::Deny {
-            message: format!("{message}（无法询问，已拒绝）"),
+            message: format!(
+                "这次调用需要用户确认（{}），但当前没有人能回答，已拒绝。",
+                UiError::from(message)
+            ),
             reason,
         };
     }""",
