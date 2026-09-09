@@ -88,6 +88,20 @@ export function ProviderEditor({
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [sampDraft, setSampDraft] = useState<SamplingDraft>(() => samplingDraft(p.sampling));
+  /**
+   * 「测试连接」拿哪个模型发请求。只是这个编辑器里的一次挑选：不落配置、
+   * 不碰对话在用的模型 —— 换对话用的模型在输入框上换。早先这里的圆点
+   * 直接改全局 activeModel，结果在设置里点一下，输入框上的模型跟着跳，
+   * 用户以为只是在挑要测的那个。
+   *
+   * 初值取对话正在用的那个（如果属于这家），否则列表第一个 —— 那多半
+   * 就是用户最想验证的。之后只跟用户在这里的点击走。
+   */
+  const [testPick, setTestPick] = useState(
+    () => (cfg.activeProvider === p.id && cfg.activeModel) || p.models[0]?.id || "",
+  );
+  // 挑中的那个被删了就退回列表第一个，别让圆点指着一个不存在的名字。
+  const testModel = p.models.some((m) => m.id === testPick) ? testPick : (p.models[0]?.id ?? "");
 
   const blurCommit = () => {
     const patch: Partial<ProviderConfig> = {};
@@ -128,10 +142,6 @@ export function ProviderEditor({
     } catch (e) {
       onError(String(e));
     }
-  };
-
-  const activate = (model: string) => {
-    void onCommit({ ...cfg, activeProvider: p.id, activeModel: model });
   };
 
   const addModel = (m: string) => {
@@ -185,19 +195,16 @@ export function ProviderEditor({
   };
 
   const doTest = async () => {
-    // 测激活模型（如果属于这个 provider 且非空），否则测列表第一个。
-    // 都没有就别发请求 —— 空模型名会换来一句各家措辞不一的 400，
+    // 一个模型都没有就别发请求 —— 空模型名会换来一句各家措辞不一的 400，
     // 用户从那种报错里看不出"其实是没选模型"。
-    const model =
-      (cfg.activeProvider === p.id && cfg.activeModel) || p.models[0]?.id || "";
-    if (!model) {
+    if (!testModel) {
       setTestResult({ ok: false, text: t("settings.provider.editor.test.noModel") });
       return;
     }
     setTesting(true);
     setTestResult(null);
     try {
-      const detail = await testConnection(p.id, model);
+      const detail = await testConnection(p.id, testModel);
       setTestResult({ ok: true, text: t("settings.provider.editor.test.ok", { detail }) });
     } catch (e) {
       setTestResult({ ok: false, text: String(e) });
@@ -206,7 +213,7 @@ export function ProviderEditor({
     }
   };
 
-  const isActive = cfg.activeProvider === p.id;
+  const testModelCfg = p.models.find((m) => m.id === testModel);
 
   return (
     <>
@@ -349,19 +356,21 @@ export function ProviderEditor({
             </p>
           </CardBlock>
         ) : null}
-        <div className="model-list" role="radiogroup" aria-label={t("settings.provider.editor.currentModel")}>
+        {/* 圆点选的是「测试连接」要测的模型，仅此而已。对话用哪个模型在
+            输入框上选，这里不替它做决定。 */}
+        <div className="model-list" role="radiogroup" aria-label={t("settings.provider.editor.testModel")}>
           {p.models.map((m) => {
-            const active = isActive && cfg.activeModel === m.id;
+            const picked = m.id === testModel;
             return (
-              <div key={m.id} className={active ? "model-row active" : "model-row"}>
+              <div key={m.id} className={picked ? "model-row active" : "model-row"}>
                 <button
                   className="model-name"
                   role="radio"
-                  aria-checked={active}
-                  onClick={() => activate(m.id)}
-                  title={active ? t("settings.provider.inUse") : t("settings.provider.editor.setCurrent")}
+                  aria-checked={picked}
+                  onClick={() => setTestPick(m.id)}
+                  title={picked ? t("settings.provider.editor.testModel") : t("settings.provider.editor.testWith")}
                 >
-                  <span className="model-radio">{active ? "●" : "○"}</span>
+                  <span className="model-radio">{picked ? "●" : "○"}</span>
                   <span className="model-label">
                     {m.name?.trim() || m.id}
                     {m.vision ? (
@@ -460,7 +469,13 @@ export function ProviderEditor({
           <span className={testResult.ok ? "test-result ok" : "test-result err"}>{testResult.text}</span>
         ) : (
           <span className="hint" style={{ margin: 0 }}>
-            {t("settings.provider.editor.test.hint")}
+            {/* 把要测的模型名写进提示里：列表里那个圆点和这个按钮隔着好几
+                屏，不点名的话看不出两者是一回事。 */}
+            {testModelCfg
+              ? tx("settings.provider.editor.test.hintModel", {
+                  model: <code>{testModelCfg.name?.trim() || testModelCfg.id}</code>,
+                })
+              : t("settings.provider.editor.test.hint")}
           </span>
         )}
         <div className="editor-foot-actions">

@@ -103,7 +103,7 @@ export default {
   "app.scopeBadge.label": "渗透授权 {count} 个站点",
   "app.resizer.title": "拖动调整大小，双击恢复默认",
 
-  "app.welcome.tagline": "每个会话绑定一个项目目录。",
+  "app.welcome.tagline": "打开一个项目目录，开始对话。",
   "app.welcome.recent": "最近",
   "app.welcome.dirMissing": "找不到这个目录",
 

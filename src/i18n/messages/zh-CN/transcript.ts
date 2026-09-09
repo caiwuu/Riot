@@ -26,6 +26,8 @@ export default {
 
   // 消息行与悬停操作
   "transcript.msg.stopped": "已停止生成",
+  /** 错误卡上展开技术细节（服务方原话、HTTP 状态）的开关。 */
+  "transcript.error.detail": "详情",
   "transcript.msg.copy": "复制原文",
   "transcript.msg.regenerate": "重新生成",
   "transcript.msg.regenerateBusy": "生成中，结束后才能重新生成",
@@ -92,7 +94,7 @@ export default {
   "transcript.taskPanel.dismiss": "收起",
   "transcript.taskPanel.dismissTitle": "收起已结束的任务",
   "transcript.taskPanel.stopTitle": "停止这个后台任务",
-  "transcript.subagent.gone": "这个子 agent 的记录已经不在内核里（内核重启后旧 id 会失效）。",
+  "transcript.subagent.gone": "找不到这个子 agent 的记录（它的记录文件可能已被删除，或者它当时没来得及写下任何内容）。",
   "transcript.subagent.prompt": "任务",
   "transcript.subagent.starting": "正在启动…",
   "transcript.subagent.stopTitle": "停止这个子 agent",

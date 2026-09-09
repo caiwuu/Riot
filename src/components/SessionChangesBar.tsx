@@ -17,13 +17,13 @@ import { FileChangeList } from "./FileChangeList";
  */
 export function SessionChangesBar({
   sessionId,
-  /** 变一次就重新拉一次。外层在每次编辑工具落盘时递增 ——
-   *  跑轮中的改动要实时长出来,不能等到轮子结束。 */
+  /** 变一次就重新拉一次。外层把主 agent 的编辑落盘、子 agent 的收尾和
+   *  编辑活动都编进去 —— 跑轮中的改动要实时长出来,不能等到轮子结束。 */
   refreshKey,
   paused = false,
 }: {
   sessionId: string;
-  refreshKey: number;
+  refreshKey: string | number;
   /** 保活但不可见时别轮询。切回来 refreshKey 会再推一次。 */
   paused?: boolean;
 }) {

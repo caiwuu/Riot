@@ -352,7 +352,11 @@ mod tests {
             auth::generate_token()
         );
         let svg = qr_svg(&url).expect("能编");
-        assert!(svg.starts_with("<svg"), "内联用，不带 XML 声明：{}", &svg[..60]);
+        assert!(
+            svg.starts_with("<svg"),
+            "内联用，不带 XML 声明：{}",
+            &svg[..60]
+        );
         assert!(
             svg.contains(r#"fill="currentColor""#) && svg.contains(r#"fill="none""#),
             "颜色留给页面定"

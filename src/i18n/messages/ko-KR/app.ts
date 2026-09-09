@@ -102,7 +102,7 @@ export default {
   "app.scopeBadge.label": "침투 테스트 범위: {count}개 사이트",
   "app.resizer.title": "드래그하여 크기 조절, 더블 클릭으로 기본값 복원",
 
-  "app.welcome.tagline": "각 세션은 하나의 프로젝트 폴더에 연결됩니다.",
+  "app.welcome.tagline": "프로젝트 폴더를 열고 대화를 시작하세요.",
   "app.welcome.recent": "최근",
   "app.welcome.dirMissing": "폴더를 찾을 수 없습니다",
 

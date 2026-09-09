@@ -37,6 +37,8 @@ export default {
   "kernel.provider.quota": "服务方账户额度不足。",
   "kernel.provider.modelNotFound": "服务方不认识这个模型，检查设置里的模型名。",
   "kernel.provider.refused": "服务方拒绝了请求（HTTP {status}）。",
+  "kernel.provider.htmlResponse":
+    "服务方返回的是网页而不是接口响应（HTTP {status}）。多半是被网关或防火墙拦下了，也可能是 API 地址填错了。",
   "kernel.provider.refusedInStream": "服务方在响应中途报了错。",
   "kernel.provider.transport": "连不上服务方 —— 检查网络、代理或 base URL。",
   "kernel.provider.unreachable": "多次尝试后仍然连不上服务方 —— 检查网络、代理或 base URL。",
@@ -78,6 +80,7 @@ export default {
   "kernel.task.activity.completed": "完成",
   "kernel.task.activity.failed": "失败",
   "kernel.task.activity.cancelled": "已停止",
+  "kernel.task.activity.interrupted": "Riot 重启，已中断",
   "kernel.task.started": "[{kind}·{model}] {title} 启动",
   "kernel.task.startedBackground": "[{kind}·{model}] {title} 后台启动",
   "kernel.task.launched": "{title} 已在后台启动（{id}）",

@@ -315,6 +315,8 @@ pub enum UserContent {
 
 `[约束]` **控制面消息(System)不进 API 请求。**序列化到 provider 时必须过滤掉。这类消息只是给用户看的。
 
+`[约束]` **失败不进 transcript。**provider 报错、上下文耗尽这类失败只通过 `Done { reason: Error }` 报出,不写成 `System` 消息:它描述的是某一次尝试,不是对话内容,用户改好配置再发一句之后它就过时了。宿主把最近一轮的失败当**会话状态**记在内存里(`Meta::last_error`),切回会话时随快照(`HistoryOut::last_error`)给前端画在末尾,下一轮一开始就清。`System` 只留给轮内真实发生、事后仍成立的干预(Stop hook 拦住收尾之类的 Info 级记录)。
+
 ### 4.4 类型安全的 ID
 
 ```rust
@@ -953,7 +955,7 @@ Task 工具就是**再跑一遍主循环**(`riot_kernel::subagent`):独立 syste
 
 `[约束]` 唤醒轮沿用**上一轮**的模型端点、能力、上限(`LastTurn`),不问宿主。这是"宿主每轮现给配置"的唯一例外:那一轮不是宿主发起的,没人现装。会话自己的活设置(模式、venv、追加提示词、思考策略)照常从会话上现读 —— 用户在界面上把模式切成规划,唤醒轮也按规划跑。
 
-`[约束]` 没赶上安全点的通知(轮被中断)攒进 `pending_notices`,**下一轮开工时注入**,不在收尾处立刻唤起新的一轮 —— 用户刚按了停止,多半是要改说法,这时候冒出一轮"收到通知"是在和他抢话。重新生成不夹带通知:那一轮的历史已经截到提问,塞进去会改变被重来的问题。
+`[约束]` 没赶上安全点的通知(轮被中断 / 出错 / 跑满步数)攒进 `pending_notices`,**下一轮开工时注入**,不在收尾处立刻唤起新的一轮 —— 用户刚按了停止,多半是要改说法,这时候冒出一轮"收到通知"是在和他抢话;出错的再唤一轮多半原样再错。**模型正常说完的轮次是例外**(`Session::settle_turn`,判据 `leftover_notices_wake`):通知只是到得早了几毫秒(主循环最后一次 drain 之后、`running` 释放之前),排进了一个再没人取的队列,收尾处就地接管 `running` 唤起新的一轮 —— 和 `deliver_task_notice` 撞上空闲会话做的是同一件事。攒到下一轮的话,多任务模式下主 agent 本来就闲着等通知,"下一轮"要等用户开口,用户看到的是子 agent 早已跑完、主 agent 却一直不接手。重新生成不夹带通知:那一轮的历史已经截到提问,塞进去会改变被重来的问题。
 
 `[约束]` 用户按停止只停前台;后台子 agent 有自己的令牌和面板上的停止键。关会话 / 退应用(`abort_turn`)才连后台一起停,此后到达的通知丢弃(`closing`)。
 
@@ -965,7 +967,11 @@ Task 工具就是**再跑一遍主循环**(`riot_kernel::subagent`):独立 syste
 
 `[取舍]` 分叉和父共享浏览器、终端面板。它们是会话级独占资源,同时操作会打架;但分叉的本意是接管实质工作、父退到协调,给分叉 `NoBrowser` 会让它面对一段"刚才浏览器里看到……"的历史却没有浏览器,更糟。真正并发驾驭的情形靠 Task 的提示词约束。
 
-**登记表**(`riot_kernel::tasks::BackgroundTasks`)记会话里跑过的每个子 agent —— 同步的也记,续接要它的历史。历史留在内存(transcript 那份是给人看的),**边跑边追加**;只保留最近 24 个已结束的,更早的续接会得到"太久了"。每个子 agent 的状态变化都推 `AgentEvent::BackgroundTask`(全量视图,不进 transcript;切回会话靠 `session.resume` 快照):后台任务面板只画 `background == true` 的,Task 工具卡片按 `tool_use_id` 认领自己的那个,直播"标题 · 模型 · 正在做什么"(照 Cursor 的子 agent 行)。
+**登记表**(`riot_kernel::tasks::BackgroundTasks`)记会话里跑过的每个子 agent —— 同步的也记,续接要它的历史。历史留在内存,**边跑边追加**;只保留最近 24 个已结束的在内存里,更早的要看、要续接时从它的 transcript 读回来。每个子 agent 的状态变化都推 `AgentEvent::BackgroundTask`(全量视图,不进 transcript;切回会话靠 `session.resume` 快照):后台任务面板只画 `background == true` 的,Task 工具卡片按 `tool_use_id` 认领自己的那个,直播"标题 · 模型 · 正在做什么"(照 Cursor 的子 agent 行)。
+
+**登记表跨越重启**(照 Cursor:重启之后子 agent 的会话照样能点开)。视图(标题、类型、模型、哪次 Task 开的、父子关系、状态、用量)在每次登记 / 收场时整份写进 `sessions/subagents/<会话>/tasks.json`(`riot_store::TaskIndex`,先写临时文件再改名,写盘在后台任务里),会话水合时读回来(`Session::restore_tasks` → `BackgroundTasks::restore`),随 `session.resume` 快照回给界面;上个进程里还在跑的标成已取消 + "已中断"。消息不进快照:每个子 agent 的 transcript 本来就在同目录的 `<agent>.jsonl`,恢复回来的登记项内存里没有历史,`task.history` / 续接发现历史不在内存就读盘。老会话(早于快照)没有 `tasks.json`:水合时扫子 agent 目录,从对话历史里的 Task 调用(tool_use 给标题 / 类型 / 是否后台,tool_result 正文里带 agent id,完成通知给状态)把视图推回来(`tasks::reconstruct_views`),推完当场落盘 —— 和改动基线的 sidecar 同一个路子。
+
+`[约束]` 分叉出来的子 agent 重启后**能看不能续**:它继承的父历史没写进自己的 transcript(那是父会话的对话),盘上那截接不回一份完整的请求历史,`resume` 会得到一句"重新发起一个新任务"。
 
 **子 agent 的会话可看**(照 Cursor:点子 agent 开一个只读标签)。`task.history` 回它到此刻为止的消息,右侧抽屉的 `subagent` 标签轮询它(1.2s,跑完即停)—— 子 agent 的消息**不走主事件流**:几个并行的侦察每秒几十条工具结果,全推给前端只为一个可能没开的面板不值。分叉只回它自己产生的那段(`view_from`),继承的父历史是父会话的对话,用户正对着它。入口三处:Task 卡片、后台任务面板、回答里的 `[标题](agent:<id>)` 链接(Task 的提示词和结果脚注都教模型这么写)。没有输入框:子 agent 的对话对象是主 agent,追加指令是主 agent 的事(`resume`)。
 

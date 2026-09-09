@@ -21,6 +21,7 @@ export default {
   "transcript.compactRule": "Messages above have been compacted",
 
   "transcript.msg.stopped": "Generation stopped",
+  "transcript.error.detail": "Details",
   "transcript.msg.copy": "Copy text",
   "transcript.msg.regenerate": "Regenerate",
   "transcript.msg.regenerateBusy": "Generating — you can regenerate once it finishes",
@@ -95,7 +96,7 @@ export default {
   "transcript.taskPanel.dismissTitle": "Dismiss finished tasks",
   "transcript.taskPanel.stopTitle": "Stop this background task",
   "transcript.subagent.gone":
-    "This subagent's record is no longer in the kernel (old ids expire when the kernel restarts).",
+    "No record of this subagent could be found (its transcript may have been deleted, or it never got to write anything).",
   "transcript.subagent.prompt": "Task",
   "transcript.subagent.starting": "Starting…",
   "transcript.subagent.stopTitle": "Stop this subagent",

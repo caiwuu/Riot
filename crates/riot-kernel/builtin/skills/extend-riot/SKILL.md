@@ -33,7 +33,9 @@ disable-model-invocation: false
   它是模型决定要不要加载的唯一依据。
 - **`description` 硬顶 250 字符**。超了会被截断，模型就是在残句上做判断。
   写不下就说清「什么时候用」，别写做法——做法在正文里。
-- frontmatter 只认 `key: value` **单行标量**。多行、列表、嵌套都不认。
+- frontmatter 认 `key: value` 单行标量，和 `>-` / `|` **块标量**（description
+  写成多行用这个，Cursor / Claude Code 的技能文件就是这种写法，直接拷进来
+  能用）。列表、嵌套映射不认，未知的键忽略。
 - 正文 64 KB 封顶。数据文件放技能目录里让模型按需 Read，不要整个贴进来。
 - `allowed-tools` / `model` / `context: inline|fork` **还不支持**，写了会被
   忽略而不是报错。

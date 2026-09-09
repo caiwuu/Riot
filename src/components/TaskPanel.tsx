@@ -119,6 +119,12 @@ export const TaskNoticeCard = memo(function TaskNoticeCard({ item }: { item: Not
  *
  * 全部结束且用户收起 → 什么都不画。有任务在跑时面板不能被收起来隐藏 ——
  * 那是用户唯一能停掉它们的地方。
+ *
+ * 挂载那一刻已经结束的任务视同收起过：登记表跟着会话落盘，重启 / 切回
+ * 会话拿到的快照里带着以前所有跑完的后台任务，每打开一个老会话就弹一次
+ * "N 个后台任务已完成"是噪音 —— 它们的汇报早就以通知卡片躺在对话里，
+ * 子 agent 的会话也从 Task 卡片和通知卡片点得开。挂载时有任务在跑就不
+ * 这么做：用户回来是想看全貌，结束的和跑着的一起列。
  */
 export function BackgroundTasksPanel({
   tasks,
@@ -129,7 +135,9 @@ export function BackgroundTasksPanel({
 }) {
   const { t, tn } = useT();
   const [open, setOpen] = useState(true);
-  const [dismissedAt, setDismissedAt] = useState<number | null>(null);
+  const [dismissedAt, setDismissedAt] = useState<number | null>(() =>
+    tasks.some((x) => x.background && x.status === "running") ? null : Date.now(),
+  );
   // 只画后台的：同步子 agent 在对话流里有自己的 Task 卡片直播，再进面板是重复。
   const background = tasks.filter((x) => x.background);
   const running = background.filter((x) => x.status === "running");

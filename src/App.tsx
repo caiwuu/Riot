@@ -2314,6 +2314,25 @@ function Chat({
       ).length,
     [session.items],
   );
+  // 改动条的刷新键。主 agent 的编辑之外还要盯子 agent：它们改的文件也算
+  // 这个会话的（内核把基线记到父会话头上），但它们的 Edit / Write 不进主
+  // 会话的 items —— 主会话只看得到 Task 卡片收尾、后台完成通知，以及任务
+  // 面板里"正在调哪个工具"那一行。只在那一行是 Edit / Write 时把调用计数
+  // 掺进来：子 agent 翻代码时的几十次 Read 不值得每次都去重算 diff。
+  const changesKey = useMemo(() => {
+    let n = editCount;
+    for (const it of session.items) {
+      if (it.kind === "task_notice" || (it.kind === "tool" && it.name === "Task" && it.status === "ok")) n++;
+    }
+    let sub = "";
+    for (const t of session.tasks) {
+      const a = t.activity;
+      const editing =
+        a.key === "kernel.task.activity.tool" && (a.args?.name === "Edit" || a.args?.name === "Write");
+      sub += `${t.id}:${t.status}:${editing ? t.tool_uses : 0};`;
+    }
+    return `${n}|${sub}`;
+  }, [editCount, session.items, session.tasks]);
 
   // 输入框上方那一格的占位规则:跑轮期间有没做完的任务清单,就让
   // 任务临时顶掉改动条;清单全部完成、或轮子停了(含切回已结束的
@@ -2421,7 +2440,7 @@ function Chat({
       ) : (
         <SessionChangesBar
           sessionId={sessionId}
-          refreshKey={editCount}
+          refreshKey={changesKey}
           paused={!visible}
         />
       )}

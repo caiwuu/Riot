@@ -29,30 +29,42 @@ pub trait HostCallHandler: Send + Sync {
     async fn handle(&self, req: HostRequest) -> HostResponse;
 }
 
-/// 前端事件出口表:session_id → 观看者 → Channel。
+/// 一个观看者的出口。
+struct Viewer {
+    ch: Channel<AgentEvent>,
+    /// 自这条出口挂上以来往里发过多少条事件。诊断用:前端因为"静默太久"
+    /// 重新订阅时,这个数告诉我们上一条出口是**真的没东西可发**,还是
+    /// 事件发出去了而 JS 那头没收到(通道死了 —— `Channel::send` 在 JS
+    /// 不听时照样成功,宿主没有别的办法知道)。
+    sent: u64,
+}
+
+/// 前端事件出口表:session_id → 观看者 → 出口。
 ///
 /// 一个会话可以同时有多个观看者(桌面窗口 + 手机上的网页版),每个观看者
 /// 各自一条出口;同一观看者重新订阅会替换自己那条(窗口刷新)。发送失败的
 /// 出口(网页连接断了)在分发时顺手摘掉。
-type Sinks = Arc<Mutex<HashMap<String, HashMap<String, Channel<AgentEvent>>>>>;
+type Sinks = Arc<Mutex<HashMap<String, HashMap<String, Viewer>>>>;
 
 /// 把一条事件发给会话的每个观看者,发不出去的出口当场摘掉。
 ///
 /// 摘掉是必要的:远程连接断开后那条 Channel 的 send 会一直失败,留着只是
 /// 每条事件白克隆一份;而桌面 webview 的 Channel 永不报错,不受影响。
-fn fan_out(viewers: &mut HashMap<String, Channel<AgentEvent>>, event: AgentEvent) {
+fn fan_out(viewers: &mut HashMap<String, Viewer>, event: AgentEvent) {
     if viewers.len() == 1 {
         // 单观看者是常态,省掉一次 clone。
-        let (viewer, ch) = viewers.iter().next().expect("非空");
-        if ch.send(event).is_err() {
-            let dead = viewer.clone();
+        let (viewer, v) = viewers.iter_mut().next().expect("非空");
+        v.sent += 1;
+        let dead = v.ch.send(event).is_err().then(|| viewer.clone());
+        if let Some(dead) = dead {
             viewers.remove(&dead);
         }
         return;
     }
     let mut dead = Vec::new();
-    for (viewer, ch) in viewers.iter() {
-        if ch.send(event.clone()).is_err() {
+    for (viewer, v) in viewers.iter_mut() {
+        v.sent += 1;
+        if v.ch.send(event.clone()).is_err() {
             dead.push(viewer.clone());
         }
     }
@@ -72,8 +84,14 @@ pub enum HostNotice {
     /// 自己发起的轮**:后台子 agent 跑完唤醒父会话那一轮没有经过宿主,
     /// 不接这条的话侧栏的运行指示点直到轮子结束都不亮。
     Started { session_id: String },
-    /// 一轮结束(会话空闲了)。
-    Done { session_id: String },
+    /// 一轮结束(会话空闲了)。`error` = 这一轮是以失败收场的,原因是什么。
+    ///
+    /// 失败不进历史(见 riot-core agent_loop「错误不进历史」),宿主把它当
+    /// 会话状态记着,切回会话时随快照给前端;下一轮开始就清掉。
+    Done {
+        session_id: String,
+        error: Option<riot_protocol::event::AgentError>,
+    },
     /// 内核侧改了权限模式(用户在 SwitchMode 的卡片上同意)。宿主是设置权威,要记下来
     /// 并持久化 —— 否则下一轮 TurnConfig 又把旧模式传回去。
     ModeChanged {
@@ -234,12 +252,24 @@ impl KernelClient {
 
     /// 挂上一个会话的前端事件出口。同一观看者再挂就是替换。
     pub async fn attach_sink(&self, session_id: &str, viewer: &str, ch: Channel<AgentEvent>) {
-        self.sinks
+        let replaced = self
+            .sinks
             .lock()
             .await
             .entry(session_id.to_owned())
             .or_default()
-            .insert(viewer.to_owned(), ch);
+            .insert(viewer.to_owned(), Viewer { ch, sent: 0 });
+        if let Some(old) = replaced {
+            // 前端重新订阅了(切回会话、看门狗判定静默太久、睡眠唤醒)。
+            // `sent_since_attach` 大于 0 而前端是因为收不到事件才来重订阅的话,
+            // 说明上一条通道已经死了 —— 事件发出去了,JS 那头没收到。
+            tracing::info!(
+                session_id,
+                viewer,
+                sent_since_attach = old.sent,
+                "事件出口被替换"
+            );
+        }
     }
 
     /// 摘掉一个会话的全部事件出口(删会话时)。
@@ -313,11 +343,20 @@ fn spawn_dispatch(
                             let sid = session_id.as_str().to_owned();
                             // 宿主关心的那几件先拷贝一份出去(见 HostNotice)。
                             match &event {
-                                AgentEvent::RequestStart { turn: 1, .. } => {
+                                // 主循环的第一次请求是 turn 0(见 AgentState::new),
+                                // 一轮里之后的每次模型调用 turn 递增 —— 只认第一次。
+                                AgentEvent::RequestStart { turn: 0, .. } => {
                                     let _ = host_tx.send(HostNotice::Started { session_id: sid.clone() });
                                 }
-                                AgentEvent::Done { .. } => {
-                                    let _ = host_tx.send(HostNotice::Done { session_id: sid.clone() });
+                                AgentEvent::Done { reason } => {
+                                    let error = match reason {
+                                        TerminalReason::Error { error } => Some(error.clone()),
+                                        _ => None,
+                                    };
+                                    let _ = host_tx.send(HostNotice::Done {
+                                        session_id: sid.clone(),
+                                        error,
+                                    });
                                 }
                                 AgentEvent::ModeChanged { mode } => {
                                     let _ = host_tx.send(HostNotice::ModeChanged {
@@ -383,18 +422,20 @@ fn spawn_dispatch(
             {
                 fan_out(viewers, e);
             }
+            let gone = AgentError::Internal {
+                error: riot_protocol::ui_error!("host.kernel.gone"),
+            };
             fan_out(
                 viewers,
                 AgentEvent::Done {
                     reason: TerminalReason::Error {
-                        error: AgentError::Internal {
-                            error: riot_protocol::ui_error!("host.kernel.gone"),
-                        },
+                        error: gone.clone(),
                     },
                 },
             );
             let _ = host_tx.send(HostNotice::Done {
                 session_id: sid.clone(),
+                error: Some(gone),
             });
         }
         let _ = host_tx.send(HostNotice::KernelGone);

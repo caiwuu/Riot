@@ -14,7 +14,6 @@ import {
   browserReload,
   browserResize,
   browserSelection,
-  closeBrowser,
   encodePickForComposer,
   openBrowser,
 } from "../bridge";
@@ -197,7 +196,9 @@ export function BrowserPanel({
       // 只停宿主的 JPEG 编码 —— 没人看的时候继续推是白烧 CPU。
       // 浏览器进程和标签页都留着：收起面板 ≠ 关浏览器，切去看一眼
       // 改动再切回来，页面还是原样。
-      void closeBrowser(sessionId).catch(() => {});
+      // 关的是**这一次**订阅（带序号）：StrictMode 下这个 cleanup 和紧跟的
+      // 下一次 openBrowser 在宿主侧是并发的，不带序号会把新的一并关掉。
+      void sub.close().catch(() => {});
     };
   }, [sessionId, onPanel, onFrame, reconnectTick]);
 

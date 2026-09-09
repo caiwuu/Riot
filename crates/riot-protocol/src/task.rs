@@ -42,7 +42,8 @@ impl BackgroundTaskStatus {
 /// 切回会话时随 `session.resume` 快照整批回来。不进 transcript ——
 /// 它描述的是一个活状态，落盘重放会长出永远"运行中"的幽灵；"跑过、
 /// 结果是什么"由通知消息（[`TaskNotice`]）和 Task 的 tool_result 记在
-/// 历史里。
+/// 历史里。跨越重启靠内核另存的登记表快照（`subagents/<会话>/tasks.json`），
+/// 装回来时"运行中"的一律改成已取消。
 ///
 /// 名字里的 Background 是历史包袱：最初只给后台任务用，后来同步子 agent
 /// 也要在 Task 卡片上直播"标题 · 模型 · 正在做什么"，于是全都登记，

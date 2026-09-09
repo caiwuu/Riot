@@ -807,7 +807,7 @@
       ]
     },
     "BackgroundTaskView": {
-      "description": "一个子 agent 在界面上的样子（同步的、后台的都有一份）。\n\n随 [`crate::event::AgentEvent::BackgroundTask`] 每次变化推一份全量；\n切回会话时随 `session.resume` 快照整批回来。不进 transcript ——\n它描述的是一个活状态，落盘重放会长出永远\"运行中\"的幽灵；\"跑过、\n结果是什么\"由通知消息（[`TaskNotice`]）和 Task 的 tool_result 记在\n历史里。\n\n名字里的 Background 是历史包袱：最初只给后台任务用，后来同步子 agent\n也要在 Task 卡片上直播\"标题 · 模型 · 正在做什么\"，于是全都登记，\n靠 `background` 区分该不该进后台任务面板。",
+      "description": "一个子 agent 在界面上的样子（同步的、后台的都有一份）。\n\n随 [`crate::event::AgentEvent::BackgroundTask`] 每次变化推一份全量；\n切回会话时随 `session.resume` 快照整批回来。不进 transcript ——\n它描述的是一个活状态，落盘重放会长出永远\"运行中\"的幽灵；\"跑过、\n结果是什么\"由通知消息（[`TaskNotice`]）和 Task 的 tool_result 记在\n历史里。跨越重启靠内核另存的登记表快照（`subagents/<会话>/tasks.json`），\n装回来时\"运行中\"的一律改成已取消。\n\n名字里的 Background 是历史包袱：最初只给后台任务用，后来同步子 agent\n也要在 Task 卡片上直播\"标题 · 模型 · 正在做什么\"，于是全都登记，\n靠 `background` 区分该不该进后台任务面板。",
       "properties": {
         "activity": {
           "allOf": [
@@ -3604,7 +3604,7 @@
           "type": "object"
         },
         {
-          "description": "task.history 的应答。`task` 为 None = 没有这个子 agent（内核重启后\n旧 id 都会失效）。分叉出的子 agent 只回它自己产生的那段，不回继承\n的父历史。",
+          "description": "task.history 的应答。`task` 为 None = 没有这个子 agent（登记表里\n没有，盘上也没有它的记录 —— 登记表跟着会话落盘，重启后旧 id 照样\n认得）。分叉出的子 agent 只回它自己产生的那段，不回继承的父历史。",
           "properties": {
             "data": {
               "properties": {
@@ -4238,6 +4238,26 @@
         "root",
         "enabled",
         "createdAtMs"
+      ],
+      "type": "object"
+    },
+    "ScheduledWake": {
+      "description": "叫醒这一轮的定时任务。\n\n没有它的话，到点那一轮收到的是一句和用户手敲的一模一样的话：模型不知道\n自己是被定时任务叫醒的，也不知道任务 id —— 「盯到 CI 过就停」这种有限的\n盯梢，条件达成后它想把自己删掉都得先 list 再按名字对。带上 id 和重复\n规则，它才有办法在目标达成时收尾、在跑不下去时暂停。",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "repeat": {
+          "$ref": "#/$defs/Repeat"
+        },
+        "taskId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "taskId",
+        "name",
+        "repeat"
       ],
       "type": "object"
     },
@@ -4884,6 +4904,17 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "scheduled": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScheduledWake"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "这条消息是定时任务到点发的，不是用户手敲的。内核据此在正文之后附\n一条 system_reminder，告诉模型是谁叫醒了它。见 [`ScheduledWake`]。"
         },
         "text": {
           "type": "string"

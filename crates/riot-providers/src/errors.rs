@@ -110,6 +110,31 @@ fn exhausted(e: &HttpError) -> ProviderError {
     }
 }
 
+/// 回的是一整张网页而不是接口响应。
+///
+/// 说话的不是 API，是挡在它前面的东西：Cloudflare 之类的网关拦截、公司
+/// 防火墙、或者 base URL 填到了某个网站首页。这时状态码的含义不可信 ——
+/// Cloudflare 拦截也回 403，按状态码说"API key 不对"会把用户支去改一个
+/// 本来没问题的 key（截图里的真实事故）。
+///
+/// 只认 4xx：5xx 的网页（网关回的 502 / 503 页）语义上仍是"上游挂了"，
+/// 走过载 / 连不上那套说法更准。429 和 402 也不在此列 —— 限流页、付费页
+/// 上写的状态码就是它们的真意。
+fn html_page(status: u16, e: &HttpError) -> ProviderError {
+    ProviderError::Refused {
+        error: ui_error!("kernel.provider.htmlResponse", status = status; e),
+    }
+}
+
+fn is_html_4xx(e: &HttpError) -> Option<u16> {
+    match e.status {
+        Some(s @ 400..=499) if s != 429 && s != 402 && crate::transport::is_html(&e.body) => {
+            Some(s)
+        }
+        _ => None,
+    }
+}
+
 /// 放弃重试之后的统一映射。`context_overflow` 是各协议自己认 400 正文的
 /// 那一手 —— 两家的措辞不同，这里不猜。
 pub(crate) fn map_giveup(
@@ -117,6 +142,18 @@ pub(crate) fn map_giveup(
     e: &HttpError,
     context_overflow: impl Fn(&str) -> Option<ProviderError>,
 ) -> ProviderError {
+    // 网页优先于状态码：见 [`html_page`]。
+    if let Some(status) = is_html_4xx(e)
+        && matches!(
+            reason,
+            GiveUpReason::AuthUnrecoverable
+                | GiveUpReason::ServerSaidNo
+                | GiveUpReason::NotRetryable
+                | GiveUpReason::Exhausted
+        )
+    {
+        return html_page(status, e);
+    }
     match reason {
         GiveUpReason::AuthUnrecoverable => auth(e),
         GiveUpReason::SubscriptionRateLimit => rate_limited(e),
@@ -269,6 +306,40 @@ mod tests {
             key(&map_giveup(GiveUpReason::Exhausted, &timeout, |_| None)),
             "kernel.provider.timeout"
         );
+    }
+
+    #[test]
+    fn 网页正文按网页说_不按状态码猜() {
+        let page = "<!DOCTYPE html><html><head><title>Attention Required! | Cloudflare</title></head><body>blocked</body></html>";
+        // Cloudflare 拦截回 403：不是 key 的问题，不能说成 key 被拒。
+        let e = map_giveup(GiveUpReason::NotRetryable, &http(Some(403), page), |_| None);
+        let ui = e.ui_error();
+        assert_eq!(ui.key(), "kernel.provider.htmlResponse");
+        assert_eq!(ui.text.args.get("status").map(String::as_str), Some("403"));
+        assert_eq!(
+            ui.detail.as_deref(),
+            Some("HTTP 403: Attention Required! | Cloudflare")
+        );
+        // 刷新凭证后仍 401 的网页同理
+        let e = map_giveup(
+            GiveUpReason::AuthUnrecoverable,
+            &http(Some(401), page),
+            |_| None,
+        );
+        assert_eq!(key(&e), "kernel.provider.htmlResponse");
+        // base URL 填成网站首页：404 网页
+        let e = map_giveup(GiveUpReason::NotRetryable, &http(Some(404), page), |_| None);
+        assert_eq!(key(&e), "kernel.provider.htmlResponse");
+
+        // 5xx 网页仍按"上游挂了"说；JSON 正文的 403 仍是 key 被拒。
+        let e = map_giveup(GiveUpReason::Exhausted, &http(Some(503), page), |_| None);
+        assert_eq!(key(&e), "kernel.provider.overloaded");
+        let e = map_giveup(
+            GiveUpReason::NotRetryable,
+            &http(Some(403), r#"{"error":{"message":"invalid api key"}}"#),
+            |_| None,
+        );
+        assert_eq!(key(&e), "kernel.provider.auth");
     }
 
     #[test]

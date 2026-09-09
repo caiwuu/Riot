@@ -33,6 +33,7 @@ pub mod config;
 pub mod content;
 pub mod digest;
 pub mod env;
+pub mod frontmatter;
 pub mod gate;
 pub mod git;
 pub mod git_changes;

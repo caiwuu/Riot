@@ -98,6 +98,12 @@ impl Tool for ScheduleTool {
          定时任务到点跑的那一轮里，**不要再创建同一件事的任务**：它自己就会\
          按周期继续跑。每次运行都记在任务的运行历史里，用户看得到。\n\
          \n\
+         **有限的盯梢要能自己收尾。**「盯到 CI 过」「今天下班前看结果出没出」\
+         这类周期任务是有终点的：把**完成判据和截止时刻**写进 prompt。到点那\
+         一轮会收到一条说明，带着这个任务的 id —— 判据达成或过了截止时刻，\
+         那一轮就该 delete 它；不写进去的话，它会在目标达成后继续跑到用户\
+         自己去删。长期有效的（每日简报、每周提醒）才不写终点。\n\
+         \n\
          in_this_session 怎么选：\n\
          - true：到点在**当前会话**接着跑，上下文都在。适合「这个话题下午\
            再跟进一次」这类一次性跟进。\n\
@@ -107,7 +113,9 @@ impl Tool for ScheduleTool {
            的话，侧栏一天会多出上百个同名会话。\n\
          \n\
          prompt 要自带全部背景：新会话里没有现在的上下文，写清楚做什么、\
-         看哪里、产出什么。续跑的任务可以短一些，但也要点明是接着什么说。\n\
+         看哪里、产出什么。续跑的任务可以短一些，但也要点明是接着什么说。\
+         写的是**意图**，不是工具调用的配方 —— 别把某个工具的参数写死进去，\
+         几周后工具变了那一行就成了错的指令；到点那一轮自己会看当时有什么工具。\n\
          \n\
          创建后向用户复述一遍（任务名、时间、下次运行），确认符合预期。\
          用户想改时间或取消：先 list 拿 id，再 pause / resume / delete。"
@@ -396,6 +404,29 @@ mod tests {
         let created = access.created.lock().expect("锁");
         assert_eq!(created.len(), 1);
         assert!(!created[0].in_this_session, "没说就是新会话");
+    }
+
+    /// 工具描述要教"有终点的盯梢把判据和截止写进 prompt"。
+    ///
+    /// 到点那一轮的唤醒说明（内核侧 `scheduled_wake_reminder`）讲的是"判据
+    /// 达成或过了截止就 delete" —— prompt 里没有截止时刻，那半句就落空，
+    /// 「盯到 CI 过」会在 CI 过了之后继续跑到用户自己去删。
+    #[test]
+    fn 描述里教有限盯梢写终点() {
+        let tool = ScheduleTool::new(Arc::new(FakeAccess::default()));
+        let p = tool.prompt(&PromptContext {
+            cwd: "/w".into(),
+            platform: "test".into(),
+            sandboxed: false,
+            sibling_tools: Vec::new(),
+            today: "2026年9月".into(),
+        });
+        assert!(p.contains("完成判据和截止时刻"), "{p}");
+        assert!(p.contains("delete"), "要点明收尾动作：{p}");
+        assert!(
+            p.contains("不是工具调用的配方"),
+            "prompt 写意图不写工具参数：{p}"
+        );
     }
 
     #[tokio::test]

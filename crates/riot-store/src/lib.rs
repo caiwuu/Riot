@@ -26,6 +26,9 @@
 //! 正是那个抽象的"真实一侧"，mock 它没有意义。测试用临时目录注入路径。
 
 pub mod digests;
+mod task_index;
+
+pub use task_index::TaskIndex;
 
 use std::io::BufRead as _;
 use std::path::{Path, PathBuf};
@@ -301,9 +304,16 @@ impl Transcripts {
         self.dir.join("subagents")
     }
 
-    /// 一个会话的子 agent transcript 目录。里面每个 `.jsonl` 是一个子 agent。
+    /// 一个会话的子 agent transcript 目录。里面每个 `.jsonl` 是一个子 agent，
+    /// 外加一份登记表快照（见 [`Self::task_index`]）。
     pub fn subagents_of(&self, id: &SessionId) -> Transcripts {
         Transcripts::new(self.subagents_dir().join(id.as_str()))
+    }
+
+    /// 这个目录下的子 agent 登记表快照（`tasks.json`，见 [`TaskIndex`]）。
+    /// 只对 [`Self::subagents_of`] 返回的目录有意义。
+    pub fn task_index(&self) -> TaskIndex {
+        TaskIndex::new(&self.dir)
     }
 
     /// 删掉一个会话的全部子 agent transcript。不存在不是错误。

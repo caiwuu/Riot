@@ -330,25 +330,20 @@ fn collect_md(base: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
     }
 }
 
-/// 解析一个命令文件：frontmatter 可选。
+/// 解析一个命令文件：frontmatter 可选（格式同技能，见 [`crate::frontmatter`]）。
 fn parse(raw: &str) -> Result<(String, Option<String>, String), String> {
-    let (front, body) = match raw.strip_prefix("---") {
-        Some(rest) => match rest.split_once("\n---") {
-            Some((f, b)) => (Some(f), b),
-            None => return Err("unterminated frontmatter: no closing ---".into()),
-        },
-        None => (None, raw),
+    use crate::frontmatter::Split;
+    let (front, body) = match crate::frontmatter::split(raw) {
+        Split::Some { front, body } => (Some(front), body),
+        Split::Unterminated => return Err("unterminated frontmatter: no closing ---".into()),
+        Split::None => (None, raw),
     };
 
     let mut description = None;
     let mut argument_hint = None;
     if let Some(front) = front {
-        for line in front.lines() {
-            let Some((key, value)) = line.split_once(':') else {
-                continue;
-            };
-            let value = value.trim().trim_matches('"').trim_matches('\'').to_owned();
-            match key.trim() {
+        for (key, value) in crate::frontmatter::fields(front) {
+            match key.as_str() {
                 "description" => description = Some(value),
                 "argument-hint" => argument_hint = Some(value),
                 _ => {} // allowed-tools / model 等先不支持，忽略

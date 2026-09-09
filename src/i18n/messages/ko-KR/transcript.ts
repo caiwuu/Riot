@@ -24,6 +24,7 @@ export default {
 
   // 메시지 행과 호버 동작
   "transcript.msg.stopped": "생성이 중지되었습니다",
+  "transcript.error.detail": "자세히",
   "transcript.msg.copy": "원문 복사",
   "transcript.msg.regenerate": "다시 생성",
   "transcript.msg.regenerateBusy": "생성 중입니다. 끝나면 다시 생성할 수 있습니다",
@@ -90,7 +91,7 @@ export default {
   "transcript.taskPanel.dismiss": "접기",
   "transcript.taskPanel.dismissTitle": "종료된 작업 접기",
   "transcript.taskPanel.stopTitle": "이 백그라운드 작업 중지",
-  "transcript.subagent.gone": "이 하위 agent의 기록이 더 이상 커널에 없습니다(커널을 다시 시작하면 이전 id는 무효화됩니다).",
+  "transcript.subagent.gone": "이 하위 agent의 기록을 찾을 수 없습니다(기록 파일이 삭제되었거나, 아무것도 남기지 못하고 끝났을 수 있습니다).",
   "transcript.subagent.prompt": "작업",
   "transcript.subagent.starting": "시작하는 중…",
   "transcript.subagent.stopTitle": "이 하위 agent 중지",

@@ -64,6 +64,10 @@ pub struct HistoryOut {
     pub live_thinking: String,
     /// 后台子 agent（跑着的和刚结束的）。事件只在变化时推，面板靠它重建。
     pub tasks: Vec<riot_protocol::BackgroundTaskView>,
+    /// 最近一轮的失败(见 `Meta::last_error`)。前端画在对话流末尾;
+    /// 不在历史里,所以只能从这儿拿。None = 上一轮没失败,或已经开了新的一轮。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<riot_protocol::event::AgentError>,
 }
 
 /// 一个子 agent 的会话（右侧抽屉的只读视图）。
@@ -121,13 +125,26 @@ struct Sink {
     epoch: u64,
 }
 
+/// 一个观看者的帧出口,连同它是"第几次订阅"。
+///
+/// 序号由前端给(bridge 的 `openBrowser`),用法和事件订阅的 [`Sink`] 一样:
+/// 同一个观看者(桌面窗口就一个 key)先后发的 open / close 在宿主侧是几个
+/// 并发任务,落地顺序没有保证。不带序号的话,晚到的旧 close 会把新订阅
+/// 刚装上的通道摘掉、或者旧 open 用一条前端已经弃用的通道盖掉新的 ——
+/// 两种终态下推流都对着空处走,面板永远停在「浏览器启动中…」。
+/// dev 下 StrictMode 每次挂载都连发 open → close → open,三条一乱序就中。
+struct FrameSink {
+    epoch: u64,
+    channel: Channel<tauri::ipc::InvokeResponseBody>,
+}
+
 /// 一个会话的浏览器面板此刻有哪些观看者。
 ///
 /// 帧走 `Channel<InvokeResponseBody>`(二进制),标签变更走 `Channel<bool>`
 /// (一声 ping);两张表分开是因为前端分两次订阅、退订时机也不同。
 #[derive(Default)]
 struct PanelHub {
-    frames: HashMap<String, Channel<tauri::ipc::InvokeResponseBody>>,
+    frames: HashMap<String, FrameSink>,
     tabs: HashMap<String, Channel<bool>>,
     /// 推流任务在跑。第一个观看者进来时起,最后一个走时停。
     streaming: bool,
@@ -137,6 +154,34 @@ struct PanelHub {
     /// 起停互斥。起和停各自要"看一眼登记、再对浏览器发命令",两步之间
     /// 不能插进对方 —— 表锁不能跨 await 拿着,所以另配一把。
     gate: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl PanelHub {
+    /// 装上一个观看者的帧出口。回 `false` 表示这是迟到的旧订阅(表里已经有
+    /// 同观看者更新的一条),没有装上 —— 它的通道前端早已弃用,不能盖掉新的。
+    fn attach(
+        &mut self,
+        viewer: &str,
+        epoch: u64,
+        channel: Channel<tauri::ipc::InvokeResponseBody>,
+    ) -> bool {
+        if self.frames.get(viewer).is_some_and(|s| s.epoch > epoch) {
+            return false;
+        }
+        self.frames
+            .insert(viewer.to_owned(), FrameSink { epoch, channel });
+        true
+    }
+
+    /// 摘掉一个观看者的帧出口 —— 只摘序号对得上的那条,晚到的旧 close 碰到
+    /// 新订阅的通道时什么都不动。回"摘完之后该不该停流"(没人看了,而流还
+    /// 在推)。
+    fn detach(&mut self, viewer: &str, epoch: u64) -> bool {
+        if self.frames.get(viewer).is_some_and(|s| s.epoch == epoch) {
+            self.frames.remove(viewer);
+        }
+        self.frames.is_empty() && self.streaming
+    }
 }
 
 /// 桌面窗口自己作为观看者的 id。远程连接用 `remote:<连接号>`。
@@ -171,6 +216,11 @@ struct Meta {
     /// 内核那边已经水合过这个会话。resume 是幂等的,这个标记只是省掉
     /// 每次操作前的一轮 RPC + 全量历史传输。
     hydrated: bool,
+    /// 最近一轮的失败(有的话)。这是**会话状态**而不是对话内容:失败不进
+    /// transcript(见 riot-core agent_loop「错误不进历史」),前端切回会话
+    /// 时靠它把红卡画回末尾。下一轮一开始就清 —— 用户改好配置再发一句,
+    /// 旧错误就该消失。只在内存里:重启后那句没有回答的提问重发即可。
+    last_error: Option<riot_protocol::event::AgentError>,
 }
 
 struct Inner {
@@ -329,6 +379,7 @@ impl AppState {
                     multitask: p.multitask,
                     busy: false,
                     hydrated: false,
+                    last_error: None,
                 },
             );
         }
@@ -387,13 +438,16 @@ impl AppState {
                     HostNotice::Started { session_id } => {
                         if let Some(m) = state.0.sessions.lock().await.get_mut(&session_id) {
                             m.busy = true;
+                            // 新一轮开始,上一轮的失败就过时了(不论这轮是谁发起的)。
+                            m.last_error = None;
                         }
                         // busy 不进索引，但侧栏指示点要跨观看者跟上。
                         state.emit_sessions_changed();
                     }
-                    HostNotice::Done { session_id } => {
+                    HostNotice::Done { session_id, error } => {
                         if let Some(m) = state.0.sessions.lock().await.get_mut(&session_id) {
                             m.busy = false;
+                            m.last_error = error;
                         }
                         state.emit_sessions_changed();
                         // 这轮结束可能是某个定时任务跑完了：认领、通知、广播。
@@ -571,16 +625,19 @@ impl AppState {
     /// 扇出任务本身也自愈:帧通道被浏览器那头放掉(进程重开、别处停了流)
     /// 时,它把 `streaming` 收回 false;还有人在看就立刻重起一条。
     ///
+    /// 回 `true` 表示这一次真的起了一条新流;`false` 是"已经在推"或"没人看"。
+    /// 新观看者靠它决定要不要让浏览器补发一帧(见 [`Self::browser_open_for`])。
+    ///
     /// 返回装箱的 future:扇出任务里会再调一次自己(自愈重起),async fn
     /// 直接递归会让 future 类型无限嵌套,编译器也判不出 Send。
     fn start_stream<'a>(
         &'a self,
         session_id: &'a str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = HostResult<()>> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = HostResult<bool>> + Send + 'a>> {
         Box::pin(self.start_stream_inner(session_id))
     }
 
-    async fn start_stream_inner(&self, session_id: &str) -> HostResult<()> {
+    async fn start_stream_inner(&self, session_id: &str) -> HostResult<bool> {
         let b = self.panel_browser(session_id).await?;
         let gate = self.panel_gate(session_id).await;
         let _g = gate.lock().await;
@@ -590,11 +647,11 @@ impl AppState {
             let hub = hubs.entry(session_id.to_owned()).or_default();
             if hub.streaming {
                 // 排队等锁的时候别人已经起好了。
-                return Ok(());
+                return Ok(false);
             }
             if hub.frames.is_empty() {
                 // 等锁期间观看者全走了,没必要对着空处编码。
-                return Ok(());
+                return Ok(false);
             }
             hub.streaming = true;
             hub.epoch += 1;
@@ -627,8 +684,9 @@ impl AppState {
                     return;
                 }
                 let mut dead = Vec::new();
-                for (v, ch) in hub.frames.iter() {
-                    if ch
+                for (v, sink) in hub.frames.iter() {
+                    if sink
+                        .channel
                         .send(tauri::ipc::InvokeResponseBody::Raw(buf.clone()))
                         .is_err()
                     {
@@ -675,7 +733,7 @@ impl AppState {
             }
             return Err(HostError::Browser(e));
         }
-        Ok(())
+        Ok(true)
     }
 
     /// 没人看了就停推流。拿着会话的 `gate` 再复核一次 —— 等锁期间可能
@@ -711,48 +769,75 @@ impl AppState {
     /// 第一个观看者进来才真的起 screencast;之后进来的加进扇出表,再让
     /// 浏览器补发一帧,免得静态页面上新观看者一直黑着。
     /// 帧格式:8 字节小端头(宽、高,各 u32,CSS 像素)+ JPEG 字节。
+    ///
+    /// `epoch` 是这次订阅的序号(见 [`FrameSink`])。表里同一观看者已经有
+    /// 更新的一条时,这一次是**迟到的旧 open**:它的通道前端早已弃用,不能
+    /// 拿它盖掉新的,也不该去动推流 —— 那是新订阅的事。只回一份状态让调用
+    /// 方正常收尾。
+    ///
+    /// `[约束]` "起流还是补帧"的判断不能在表锁里看一眼 `streaming` 就定。
+    /// 看完再决定,两步之间可能插进一次 stop;而且正在起的那条流要一秒
+    /// (等浏览器进程、开页),这时候补帧和取状态都是空的。统一交给
+    /// [`Self::start_stream`]:它拿着 `gate` 判"已经在推",等到在途的起停
+    /// 结束才回来 —— 回来时标签页已经开好,状态是真的,补帧也补得到。
     pub async fn browser_open_for(
         &self,
         viewer: &str,
+        epoch: u64,
         session_id: &str,
         on_frame: Channel<tauri::ipc::InvokeResponseBody>,
     ) -> HostResult<crate::browser::access::PanelState> {
         let b = self.panel_browser(session_id).await?;
-        let already = {
-            let mut hubs = self.0.panel_hubs.lock().await;
-            let hub = hubs.entry(session_id.to_owned()).or_default();
-            hub.frames.insert(viewer.to_owned(), on_frame);
-            hub.streaming
-        };
+        let attached = self
+            .0
+            .panel_hubs
+            .lock()
+            .await
+            .entry(session_id.to_owned())
+            .or_default()
+            .attach(viewer, epoch, on_frame);
+        if !attached {
+            return b.state().await.map_err(HostError::Browser);
+        }
 
-        if already {
+        match self.start_stream(session_id).await {
+            Ok(true) => {}
             // 推流已经在跑:新来的这位要等页面自己变化才会收到第一帧,
             // 静态页面上就是一直黑着。补发一帧,让它立刻有画面 —— 手机端
             // 重连时桌面多半还开着面板,走的正是这条路。
-            b.refresh_screencast().await;
-        } else if let Err(e) = self.start_stream(session_id).await {
-            let mut hubs = self.0.panel_hubs.lock().await;
-            if let Some(hub) = hubs.get_mut(session_id) {
-                hub.frames.remove(viewer);
+            Ok(false) => b.refresh_screencast().await,
+            Err(e) => {
+                let mut hubs = self.0.panel_hubs.lock().await;
+                // 只摘自己那条。等起流的这段时间里新一次订阅可能已经落地。
+                if let Some(hub) = hubs.get_mut(session_id)
+                    && hub.frames.get(viewer).is_some_and(|s| s.epoch == epoch)
+                {
+                    hub.frames.remove(viewer);
+                }
+                return Err(e);
             }
-            return Err(e);
         }
         b.state().await.map_err(HostError::Browser)
     }
 
     /// 浏览器面板:这个观看者不看了。最后一个走的才真的停编码。
-    pub async fn browser_close_for(&self, viewer: &str, session_id: &str) -> HostResult<()> {
-        let check = {
-            let mut hubs = self.0.panel_hubs.lock().await;
-            match hubs.get_mut(session_id) {
-                Some(hub) => {
-                    hub.frames.remove(viewer);
-                    hub.frames.is_empty() && hub.streaming
-                }
-                None => false,
-            }
-        };
-        if check {
+    ///
+    /// 只摘 `epoch` 对得上的那条(见 [`FrameSink`]):晚到的旧 close 碰到的是
+    /// 新订阅刚装上的通道,摘掉它等于把正在看的人的画面停掉。
+    pub async fn browser_close_for(
+        &self,
+        viewer: &str,
+        epoch: u64,
+        session_id: &str,
+    ) -> HostResult<()> {
+        let idle = self
+            .0
+            .panel_hubs
+            .lock()
+            .await
+            .get_mut(session_id)
+            .is_some_and(|hub| hub.detach(viewer, epoch));
+        if idle {
             self.stop_stream_if_idle(session_id).await;
         }
         Ok(())
@@ -875,6 +960,7 @@ impl AppState {
                 multitask: false,
                 busy: false,
                 hydrated: false,
+                last_error: None,
             },
         );
         self.persist_index().await;
@@ -955,11 +1041,18 @@ impl AppState {
 
         // 顺手做两件登记:标记已水合;索引里没有标题时从历史第一句自愈
         // (老版本索引、或索引损坏重建后会缺)。
+        let mut last_error = None;
         {
             let mut g = self.0.sessions.lock().await;
             if let Some(m) = g.get_mut(session_id) {
                 m.hydrated = true;
                 m.busy = busy;
+                // 轮子在跑的话失败一定已经过时(新一轮开了),别把旧红卡画在
+                // 流式正文下面。
+                if busy {
+                    m.last_error = None;
+                }
+                last_error = m.last_error.clone();
                 if m.custom_title.is_none() && m.auto_title.is_none() {
                     let first = messages.iter().find_map(|msg| match msg {
                         Message::User { content, .. } => content.iter().find_map(|c| match c {
@@ -988,6 +1081,7 @@ impl AppState {
             live_text,
             live_thinking,
             tasks,
+            last_error,
         })
     }
 
@@ -1362,8 +1456,17 @@ impl AppState {
         if nudge == Some(riot_protocol::Nudge::BuildInParallel) {
             self.set_multitask(session_id, true).await?;
         }
-        self.submit_turn(session_id, text, images, refs, nudge)
-            .await
+        self.submit_turn(
+            session_id,
+            riot_protocol::TurnInput {
+                text: text.to_owned(),
+                images,
+                refs,
+                nudge,
+                scheduled: None,
+            },
+        )
+        .await
     }
 
     /// [`Self::send_turn`] 去掉"前端必须在听"的那道检查。
@@ -1375,10 +1478,7 @@ impl AppState {
     async fn submit_turn(
         &self,
         session_id: &str,
-        text: &str,
-        images: Vec<riot_protocol::ImageInput>,
-        refs: Vec<String>,
-        nudge: Option<riot_protocol::Nudge>,
+        input: riot_protocol::TurnInput,
     ) -> HostResult<Option<String>> {
         self.ensure_hydrated(session_id).await?;
         let sampling = {
@@ -1397,7 +1497,10 @@ impl AppState {
         // 这条命令的失败会当场变成界面上的提示；而轮子跑起来之后的失败只能
         // 走事件流，用户看到的是"发出去了，然后模型说它看不见图" —— 那时候
         // 他已经等了几秒，而且不知道该去改什么。
-        if !images.is_empty() && !config.active_takes_images() && config.vision_target().is_none() {
+        if !input.images.is_empty()
+            && !config.active_takes_images()
+            && config.vision_target().is_none()
+        {
             return Err(ui_error!("host.provider.noVision").into());
         }
 
@@ -1409,7 +1512,7 @@ impl AppState {
             if let Some(m) = g.get_mut(session_id)
                 && m.custom_title.is_none()
                 && m.auto_title.is_none()
-                && let Some(t) = crate::session::title_excerpt(text)
+                && let Some(t) = crate::session::title_excerpt(&input.text)
             {
                 m.auto_title = Some(t);
                 drop(g);
@@ -1424,12 +1527,7 @@ impl AppState {
         let resp = self
             .kernel_call(RpcRequest::TurnSubmit {
                 session_id: sid(session_id),
-                input: riot_protocol::TurnInput {
-                    text: text.to_owned(),
-                    images,
-                    refs,
-                    nudge,
-                },
+                input,
                 config: Box::new(turn_config),
             })
             .await?;
@@ -1440,10 +1538,17 @@ impl AppState {
         };
         // 无论直接开轮还是进了插话队列,此刻都有轮子在跑(排队的前提就是
         // 上一轮还在)。Done 事件会清掉它。
+        self.mark_turn_started(session_id).await;
+        Ok(queued_id)
+    }
+
+    /// 宿主自己发起了一轮:置 busy,顺手把上一轮的失败清掉 —— 用户又发
+    /// 了一句,说明旧错误已经处理过(或者想再试),不该继续挂在末尾。
+    async fn mark_turn_started(&self, session_id: &str) {
         if let Some(m) = self.0.sessions.lock().await.get_mut(session_id) {
             m.busy = true;
+            m.last_error = None;
         }
-        Ok(queued_id)
     }
 
     /// 丢掉指定助手消息及其后的一切，从它前面那条用户提示再跑一轮。
@@ -1464,9 +1569,7 @@ impl AppState {
             config: Box::new(turn_config),
         })
         .await?;
-        if let Some(m) = self.0.sessions.lock().await.get_mut(session_id) {
-            m.busy = true;
-        }
+        self.mark_turn_started(session_id).await;
         Ok(())
     }
 
@@ -1495,9 +1598,7 @@ impl AppState {
             config: Box::new(turn_config),
         })
         .await?;
-        if let Some(m) = self.0.sessions.lock().await.get_mut(session_id) {
-            m.busy = true;
-        }
+        self.mark_turn_started(session_id).await;
         Ok(())
     }
 
@@ -2457,10 +2558,18 @@ impl AppState {
         }
         self.emit_schedule_changed();
 
-        if let Err(e) = self
-            .submit_turn(&session_id, &task.prompt, Vec::new(), Vec::new(), None)
-            .await
-        {
+        // 带上"是谁叫醒的"：内核据此附一条说明，模型才知道这不是用户手敲
+        // 的、自己的任务 id 是什么、目标达成时怎么把自己收掉。
+        let input = riot_protocol::TurnInput {
+            text: task.prompt.clone(),
+            scheduled: Some(riot_protocol::ScheduledWake {
+                task_id: task.id.clone(),
+                name: task.name.clone(),
+                repeat: task.repeat.clone(),
+            }),
+            ..Default::default()
+        };
+        if let Err(e) = self.submit_turn(&session_id, input).await {
             let err = ui_error!("host.schedule.run.turnFailed"; e.to_ui());
             // 刚记的那条"在跑"要改成失败，不然它会一直挂着"还在跑"。
             let mut g = self.0.schedules.lock().await;
@@ -2963,6 +3072,117 @@ mod tests {
             state.require_sink(&id).await.is_err(),
             "最后一个观看者走了，会话就没有出口了"
         );
+    }
+
+    /// 造一个能认出自己收没收到帧的帧出口。
+    fn frame_probe() -> (Channel<tauri::ipc::InvokeResponseBody>, Arc<AtomicU64>) {
+        let hits = Arc::new(AtomicU64::new(0));
+        let h = Arc::clone(&hits);
+        let ch = Channel::new(move |_| {
+            h.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        (ch, hits)
+    }
+
+    /// 面板画面的观看者登记：同一观看者的 open(1) → close(1) → open(2)
+    /// 三条不管以什么顺序落地，终态都得是"表里只有第 2 次订阅的通道，
+    /// 而且没有任何一步判定要停流"。
+    ///
+    /// 这三条是 dev 下 StrictMode 每次挂载面板都会连发的。它们在宿主侧是
+    /// 三个并发任务，落地顺序没有保证；不带序号时六种顺序里有四种是坏的 ——
+    /// 晚到的 close(1) 把 open(2) 刚装上的通道摘掉、把流停了，或者晚到的
+    /// open(1) 用一条前端已经弃用的通道盖掉新的。两种终态帧都到不了前端，
+    /// 面板永远停在「浏览器启动中…」，关掉标签再开才好。
+    #[test]
+    fn 面板观看者登记不受_open_close_落地顺序影响() {
+        const V: &str = "webview:main";
+        #[derive(Clone, Copy, Debug)]
+        enum Op {
+            Open(u64),
+            Close(u64),
+        }
+        use Op::*;
+        let orders = [
+            [Open(1), Close(1), Open(2)],
+            [Open(1), Open(2), Close(1)],
+            [Close(1), Open(1), Open(2)],
+            [Close(1), Open(2), Open(1)],
+            [Open(2), Open(1), Close(1)],
+            [Open(2), Close(1), Open(1)],
+        ];
+        for order in orders {
+            let mut hub = PanelHub::default();
+            let (ch1, hits1) = frame_probe();
+            let (ch2, hits2) = frame_probe();
+            let mut chans = [Some(ch1), Some(ch2)];
+            for op in order {
+                match op {
+                    Open(e) => {
+                        let ch = chans[(e - 1) as usize].take().expect("每个序号只开一次");
+                        // 装上了就走 start_stream：没在推才起（在推的只补一帧）。
+                        // 迟到的旧 open 装不上，也不碰推流。
+                        if hub.attach(V, e, ch) && !hub.streaming {
+                            hub.streaming = true;
+                        }
+                    }
+                    Close(e) => {
+                        // 判"该停"就是 stop_stream_if_idle 真的把流停掉。
+                        if hub.detach(V, e) {
+                            assert!(hub.frames.is_empty(), "{order:?}：还有人在看就不能判定停流");
+                            hub.streaming = false;
+                        }
+                    }
+                }
+            }
+            assert!(
+                hub.streaming,
+                "{order:?}：终态必须在推 —— 第 2 次订阅正看着"
+            );
+            let sink = hub
+                .frames
+                .get(V)
+                .unwrap_or_else(|| panic!("{order:?}：表里该留着一条"));
+            assert_eq!(sink.epoch, 2, "{order:?}：留下的必须是第 2 次订阅");
+            sink.channel
+                .send(tauri::ipc::InvokeResponseBody::Raw(vec![]))
+                .expect("发一帧");
+            assert_eq!(
+                hits1.load(Ordering::SeqCst),
+                0,
+                "{order:?}：帧不能进已弃用的旧通道"
+            );
+            assert_eq!(
+                hits2.load(Ordering::SeqCst),
+                1,
+                "{order:?}：帧要进正在看的新通道"
+            );
+        }
+    }
+
+    /// 序号对得上的 close 照常摘掉出口；最后一个走了才报"该停流"。
+    #[test]
+    fn 面板最后一个观看者走了才停流() {
+        let mut hub = PanelHub {
+            streaming: true,
+            ..PanelHub::default()
+        };
+        hub.attach("webview:main", 1, frame_probe().0);
+        hub.attach("remote:1", 1, frame_probe().0);
+
+        assert!(!hub.detach("remote:1", 1), "桌面还在看，不能停");
+        assert!(
+            !hub.detach("webview:main", 7),
+            "序号对不上的 close 什么都不动"
+        );
+        assert!(hub.frames.contains_key("webview:main"));
+        assert!(hub.detach("webview:main", 1), "最后一个走了才停");
+        assert!(hub.frames.is_empty());
+
+        // 流本来就没在推，空场也不用"停"。
+        let mut idle = PanelHub::default();
+        idle.attach("webview:main", 1, frame_probe().0);
+        assert!(!idle.detach("webview:main", 1));
     }
 
     #[tokio::test]

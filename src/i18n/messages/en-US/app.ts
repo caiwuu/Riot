@@ -108,7 +108,7 @@ export default {
   "app.scopeBadge.label#one": "Pentest scope: {count} site",
   "app.resizer.title": "Drag to resize, double-click to reset",
 
-  "app.welcome.tagline": "Each session is bound to a project folder.",
+  "app.welcome.tagline": "Open a project folder to start a session.",
   "app.welcome.recent": "Recent",
   "app.welcome.dirMissing": "Folder not found",
 

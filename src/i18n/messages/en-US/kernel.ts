@@ -36,6 +36,8 @@ export default {
   "kernel.provider.quota": "The provider account is out of credit.",
   "kernel.provider.modelNotFound": "The provider does not know this model. Check the model name in Settings.",
   "kernel.provider.refused": "The provider refused the request (HTTP {status}).",
+  "kernel.provider.htmlResponse":
+    "The provider returned a web page instead of an API response (HTTP {status}). It was probably blocked by a gateway or firewall, or the API URL is wrong.",
   "kernel.provider.refusedInStream": "The provider reported an error mid-response.",
   "kernel.provider.transport": "Cannot reach the provider. Check your network, proxy or base URL.",
   "kernel.provider.unreachable": "Still cannot reach the provider after several attempts. Check your network, proxy or base URL.",
@@ -77,6 +79,7 @@ export default {
   "kernel.task.activity.completed": "Completed",
   "kernel.task.activity.failed": "Failed",
   "kernel.task.activity.cancelled": "Stopped",
+  "kernel.task.activity.interrupted": "Interrupted by a Riot restart",
   "kernel.task.started": "[{kind}·{model}] {title} started",
   "kernel.task.startedBackground": "[{kind}·{model}] {title} started in the background",
   "kernel.task.launched": "{title} started in the background ({id})",

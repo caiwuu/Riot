@@ -132,8 +132,8 @@ export default {
   "settings.provider.editor.fetch": "Fetch from API",
   "settings.provider.editor.models.empty":
     "No models yet. Use “Add model” in the top right to enter one manually, or fetch from the API.",
-  "settings.provider.editor.currentModel": "Current model",
-  "settings.provider.editor.setCurrent": "Set as current model",
+  "settings.provider.editor.testModel": "Model used for the connection test",
+  "settings.provider.editor.testWith": "Test the connection with this model instead",
   "settings.provider.editor.vision.aria": "Accepts images",
   "settings.provider.editor.vision.title": "This model accepts images",
   "settings.provider.editor.editModel": "Edit model",
@@ -145,6 +145,7 @@ export default {
   "settings.provider.editor.sampling.desc":
     "Defaults for this provider. Fields marked “Model default” are not sent at all and left to the model. Fields a model doesn't set itself use these values; change a single model in its edit dialog, and override per session in the conversation.",
   "settings.provider.editor.test.hint": "Send a minimal request to verify the configuration.",
+  "settings.provider.editor.test.hintModel": "Send a minimal request with {model} to verify the configuration.",
   "settings.provider.editor.testNeedsKey": "Save an API key above first to test the connection",
   "settings.provider.editor.test": "Test connection",
   "settings.provider.editor.test.ok": "Connected: {detail}",

@@ -69,17 +69,33 @@ export class HostError extends Error {
   }
 
   /**
-   * 拼成一句话。模板自己写了 `{detail}` 的按模板；否则有细节就按
-   * `errors.withDetail` 追加在后面。键不认识时只剩细节可给。
+   * 拆成两段：给人看的一句 + 技术细节。对话流里的错误卡把细节折起来，
+   * 所以要分开拿；模板自己写了 `{detail}` 占位的，细节已经进了正文，
+   * 不再单给。键不认识时只剩细节可给，那就把它当正文。
    */
-  static render(p: UiErrorPayload): string {
-    const detail = p.detail ?? "";
-    if (!isKnownKey(p.key)) return detail || p.key;
+  static split(p: UiErrorPayload): SplitError {
+    const detail = (p.detail ?? "").trim();
+    if (!isKnownKey(p.key)) return { text: detail || p.key, detail: null };
     const vars = { ...(p.args ?? {}), detail };
     const text = t(p.key, vars);
-    if (!detail || /\{detail\}/.test(MESSAGES["zh-CN"][p.key])) return text;
-    return t("errors.withDetail", { text, detail });
+    if (!detail || /\{detail\}/.test(MESSAGES["zh-CN"][p.key])) return { text, detail: null };
+    return { text, detail };
   }
+
+  /**
+   * 拼成一句话。有细节就按 `errors.withDetail` 追加在后面 —— 给只放得下
+   * 一行字的地方（通知、状态栏、设置页的测试结果）。
+   */
+  static render(p: UiErrorPayload): string {
+    const { text, detail } = HostError.split(p);
+    return detail ? t("errors.withDetail", { text, detail }) : text;
+  }
+}
+
+/** 一条错误的两段：`text` 是译文，`detail` 是不翻译的技术细节（可能没有）。 */
+export interface SplitError {
+  text: string;
+  detail: string | null;
 }
 
 /**
@@ -98,6 +114,11 @@ export function toHostError(raw: unknown): unknown {
 /** 结构里带着的 `UiError`（不是 throw 出来的）→ 一句话。带细节的按 `errors.withDetail` 拼。 */
 export function renderUiError(p: UiErrorPayload): string {
   return HostError.render(p);
+}
+
+/** 同上，但正文和细节分开给。对话流里的错误卡用。 */
+export function splitUiError(p: UiErrorPayload): SplitError {
+  return HostError.split(p);
 }
 
 export function isHostError(e: unknown): e is HostError {

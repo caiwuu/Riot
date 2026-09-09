@@ -35,6 +35,8 @@ export default {
   "kernel.provider.quota": "プロバイダーアカウントの残高が不足しています。",
   "kernel.provider.modelNotFound": "プロバイダーがこのモデルを認識できません。設定のモデル名を確認してください。",
   "kernel.provider.refused": "プロバイダーがリクエストを拒否しました（HTTP {status}）。",
+  "kernel.provider.htmlResponse":
+    "プロバイダーが API 応答ではなく Web ページを返しました（HTTP {status}）。ゲートウェイやファイアウォールに遮られたか、API の URL が間違っている可能性があります。",
   "kernel.provider.refusedInStream": "プロバイダーが応答の途中でエラーを返しました。",
   "kernel.provider.transport": "プロバイダーに接続できません —— ネットワーク、プロキシ、base URL を確認してください。",
   "kernel.provider.unreachable": "複数回試してもプロバイダーに接続できません —— ネットワーク、プロキシ、base URL を確認してください。",
@@ -76,6 +78,7 @@ export default {
   "kernel.task.activity.completed": "完了",
   "kernel.task.activity.failed": "失敗",
   "kernel.task.activity.cancelled": "停止",
+  "kernel.task.activity.interrupted": "Riot の再起動で中断",
   "kernel.task.started": "[{kind}·{model}] {title} を起動",
   "kernel.task.startedBackground": "[{kind}·{model}] {title} をバックグラウンドで起動",
   "kernel.task.launched": "{title} をバックグラウンドで起動しました（{id}）",

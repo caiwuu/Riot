@@ -73,7 +73,10 @@ mod tests {
     #[test]
     fn 应用自己的页面放行() {
         assert_eq!(decide(&u("tauri://localhost/"), None), Verdict::Allow);
-        assert_eq!(decide(&u("tauri://localhost/index.html#x"), None), Verdict::Allow);
+        assert_eq!(
+            decide(&u("tauri://localhost/index.html#x"), None),
+            Verdict::Allow
+        );
         assert_eq!(decide(&u("http://tauri.localhost/"), None), Verdict::Allow);
         assert_eq!(decide(&u("about:blank"), None), Verdict::Allow);
     }

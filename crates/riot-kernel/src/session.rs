@@ -81,6 +81,9 @@ pub struct TurnInput {
     /// 这条消息是界面上哪个按钮发的（「构建」/「并行构建」）。提醒文本
     /// 由 [`crate::prompt::nudge_reminder`] 生成，附在正文之后。
     pub nudge: Option<riot_protocol::Nudge>,
+    /// 这条消息是定时任务到点发的。提醒文本由
+    /// [`crate::prompt::scheduled_wake_reminder`] 生成，附在正文之后。
+    pub scheduled: Option<riot_protocol::ScheduledWake>,
 }
 
 /// 会话的事件出口。
@@ -439,6 +442,16 @@ struct LastTurn {
     limits: TurnLimits,
 }
 
+/// 一轮**由后台任务通知唤起**的轮次的材料：要送进去的通知、沿用的上一轮
+/// 配置、已经占住 `running` 的令牌。两条路会造它 —— 通知到达时会话正好
+/// 空闲（[`Session::deliver_task_notice`]），以及轮次收场时发现通知刚好
+/// 排进了再没人取的队列（[`Session::settle_turn`]）。
+struct Wake {
+    notices: Vec<Message>,
+    last: LastTurn,
+    cancel: CancellationToken,
+}
+
 /// 自我分叉的种子：父这一轮的请求形状 + 造调度器要的零件。
 ///
 /// 分叉出的子 agent 要和父**同 system、同工具清单**（前缀缓存命中的前提，
@@ -701,6 +714,28 @@ fn is_user_prompt(m: &Message) -> bool {
     m.is_user_prompt()
 }
 
+/// 轮次收场时队列里还躺着后台任务通知：要不要就地唤起新的一轮送进去。
+///
+/// 只有**模型正常说完**（`Completed`）的轮次才唤。其余一律攒进
+/// `pending_notices` 等下一轮开工：
+/// - 用户按停止（`Aborted` / `AbortedTools`）—— 他多半要改说法，这时冒出
+///   一轮"收到通知"是在抢话（ARCHITECTURE.md §7.6 的约束）；
+/// - 出错（`Error`，以及 `run_inner` 本身失败）—— 再唤一轮多半原样再错；
+/// - 跑满步数（`MaxTurns`）/ stop hook 拦下 —— 那是要用户拿主意的收场，
+///   不该被一条通知顺手续上；
+/// - 没等到 `Done`（事件通道断了）—— 界面那头已经没人在听。
+///
+/// 纯函数：这个判定改错的表现是"用户刚按停止它又自己开口"或"子 agent
+/// 跑完了主 agent 不接手"，两头都不报错，值得单独钉住。
+fn leftover_notices_wake(
+    result: &Result<Option<riot_protocol::event::TerminalReason>, UiError>,
+) -> bool {
+    matches!(
+        result,
+        Ok(Some(riot_protocol::event::TerminalReason::Completed))
+    )
+}
+
 /// 重新生成的截断点：指定助手消息前面最近一条用户提示的下标。
 fn cut_at_user_prompt(history: &[Message], assistant_id: &str) -> Option<usize> {
     let ast = history
@@ -757,8 +792,25 @@ impl Session {
         let _ = self.browser.set(browser);
     }
 
+    /// 子 agent 登记表：会持久化的会话跟着落盘（`subagents/<会话>/`），
+    /// 重启后能装回来；没有持久化通道（测试）就只在内存里。
+    fn tasks_for(
+        id: &SessionId,
+        persist: Option<&SessionPersist>,
+        sink: &SessionSink,
+    ) -> Arc<crate::tasks::BackgroundTasks> {
+        Arc::new(match persist {
+            Some(p) => crate::tasks::BackgroundTasks::persisted(
+                sink.clone(),
+                Arc::new(p.store.subagents_of(id)),
+            ),
+            None => crate::tasks::BackgroundTasks::new(sink.clone()),
+        })
+    }
+
     pub fn new(id: SessionId, cwd: std::path::PathBuf, persist: Option<SessionPersist>) -> Self {
         let sink = SessionSink::default();
+        let tasks = Self::tasks_for(&id, persist.as_ref(), &sink);
         Self {
             id,
             cwd,
@@ -767,7 +819,7 @@ impl Session {
             running: Mutex::new(None),
             stopped_by_user: AtomicBool::new(false),
             queue: Arc::new(HostInputQueue::default()),
-            tasks: Arc::new(crate::tasks::BackgroundTasks::new(sink.clone())),
+            tasks,
             sink,
             pending_asks: Arc::new(PendingAsks::default()),
             live_stream: Mutex::new(LiveStream::default()),
@@ -820,6 +872,7 @@ impl Session {
     ) -> Self {
         let id = SessionId::from_raw(settings.id.clone());
         let sink = SessionSink::default();
+        let tasks = Self::tasks_for(&id, persist.as_ref(), &sink);
         Self {
             id,
             cwd,
@@ -828,7 +881,7 @@ impl Session {
             running: Mutex::new(None),
             stopped_by_user: AtomicBool::new(false),
             queue: Arc::new(HostInputQueue::default()),
-            tasks: Arc::new(crate::tasks::BackgroundTasks::new(sink.clone())),
+            tasks,
             sink,
             pending_asks: Arc::new(PendingAsks::default()),
             live_stream: Mutex::new(LiveStream::default()),
@@ -968,6 +1021,7 @@ impl Session {
                     self.created_at_ms.store(m.created_at_ms, Ordering::Relaxed);
                 }
                 self.restore_baselines(&parts.archived, &parts.live);
+                self.restore_tasks(&parts.archived, &parts.live).await;
                 *self.ui_archive.lock().await = parts.archived;
                 if parts.live.is_empty() {
                     return;
@@ -1013,11 +1067,12 @@ impl Session {
         }
     }
 
-    /// 等待所有已提交的追加落盘。退出钩子用。
+    /// 等待所有已提交的追加落盘（transcript 和子 agent 登记表快照）。退出钩子用。
     pub async fn flush_log(&self) {
         if let Some(p) = &self.persist {
             p.log.flush().await;
         }
+        self.tasks.flush().await;
     }
 
     /// 落盘并关闭 transcript 文件句柄。删除会话前必须调用 ——
@@ -1244,8 +1299,7 @@ impl Session {
             tracing::info!(session = %self.id.as_str(), "会话正在关闭，丢弃后台任务通知");
             return;
         }
-        let cancel = CancellationToken::new();
-        let last = {
+        let wake = {
             let mut g = self.running.lock().await;
             if g.is_some() {
                 self.queue.push(QueuedEntry {
@@ -1264,32 +1318,16 @@ impl Session {
                     .push(notice);
                 return;
             };
+            let cancel = CancellationToken::new();
             *g = Some(cancel.clone());
-            last
+            Wake {
+                notices: vec![notice],
+                last,
+                cancel,
+            }
         };
         tracing::info!(session = %self.id.as_str(), "后台任务通知唤起新的一轮");
-        let this = Arc::clone(self);
-        let sink = self.sink();
-        tokio::spawn(async move {
-            if let Err(e) = this
-                .run_locked(
-                    TurnStart::Notices(vec![notice]),
-                    last.model,
-                    last.caps,
-                    sink.clone(),
-                    cancel,
-                    last.limits,
-                )
-                .await
-            {
-                tracing::error!(error = %e, "唤醒轮失败");
-                let _ = sink.send(AgentEvent::Done {
-                    reason: riot_protocol::event::TerminalReason::Error {
-                        error: riot_protocol::event::AgentError::Internal { error: e },
-                    },
-                });
-            }
-        });
+        self.spawn_wake(wake, self.sink());
     }
 
     async fn cancel_turn(&self, by_user: bool) -> bool {
@@ -1357,6 +1395,14 @@ impl Session {
             // 按钮消息极少排队（「构建」只在闲时出现），但排上了指示也不能丢：
             // 少了它，模型收到的只是一句"开始构建计划"，不知道该读哪个文件。
             content.extend(input.nudge.map(crate::prompt::nudge_reminder));
+            // 定时任务到点时上一轮还在跑就会排到这里；提醒同样不能丢，
+            // 否则模型只当它是用户插的一句话，条件达成也不知道该删哪个任务。
+            content.extend(
+                input
+                    .scheduled
+                    .as_ref()
+                    .map(crate::prompt::scheduled_wake_reminder),
+            );
             let msg = Message::User {
                 id: MessageId::from_raw(id.clone()),
                 content,
@@ -1492,6 +1538,47 @@ impl Session {
         self.persist
             .as_ref()
             .map(|p| crate::changes::baselines_path(p.store.dir(), self.id.as_str()))
+    }
+
+    /// 给工具用的文件状态：本会话的读写缓存，改动基线顺手落盘（会持久化的
+    /// 会话）。主 agent 的调度器直接用它；子 agent 只借它记基线 —— 子 agent
+    /// 改的文件也是这个会话改的，改动栏要算得上。
+    fn file_state_for_tools(&self) -> Arc<dyn FileStateCache> {
+        match self.baselines_path() {
+            Some(p) => Arc::new(crate::changes::PersistingBaselines::new(
+                Arc::clone(&self.file_state),
+                p,
+            )),
+            None => Arc::clone(&self.file_state) as Arc<dyn FileStateCache>,
+        }
+    }
+
+    /// 重启后把子 agent 登记表装回内存（照 Cursor：重启之后子 agent 的会话
+    /// 照样能点开）。有快照用快照；盘上有 transcript 却不在快照里的（老
+    /// 会话，早于快照）从对话里的 Task 调用推，推出来的当场落盘 —— 和
+    /// [`Self::restore_baselines`] 同一个路子。
+    async fn restore_tasks(&self, archived: &[Message], live: &[Message]) {
+        if self.persist.is_none() {
+            return;
+        }
+        let mut views = self.tasks.load_index().await;
+        let on_disk: Vec<riot_store::ScannedTranscript> = self
+            .tasks
+            .scan_transcripts()
+            .into_iter()
+            .filter(|s| !views.iter().any(|v| v.id.as_str() == s.meta.id.as_str()))
+            .collect();
+        let rebuilt = !on_disk.is_empty();
+        if rebuilt {
+            let mut all = Vec::with_capacity(archived.len() + live.len());
+            all.extend_from_slice(archived);
+            all.extend_from_slice(live);
+            views.extend(crate::tasks::reconstruct_views(&all, &on_disk));
+        }
+        if views.is_empty() {
+            return;
+        }
+        self.tasks.restore(views, rebuilt);
     }
 
     /// 重启后把改动基线装回内存。有 sidecar 用 sidecar；老会话没有就
@@ -2017,37 +2104,84 @@ impl Session {
             }
         };
 
-        // 残留插话：这一轮被中断/出错，没走到内核的 drain 点。宿主侧
-        // 静默清掉 —— 前端的排队面板留着这些条目，由它决定接力重发
-        // （中断后自动续，出错后停下等用户）。清空必须和 running 置空在
-        // **同一次锁**里：分开的话，一次恰好挤进缝隙的入队会既被这里
-        // 清掉、又让前端以为它还排着 —— 消息就真丢了。
-        let leftover = {
+        let wake = self.settle_turn(&result).await;
+        // 唤醒轮放在摘录写完之后再起：它开工就要读历史，别和写摘录抢锁。
+        // running 已经是它的令牌，这期间到的用户消息会照常排队。
+        if let Some(wake) = wake {
+            tracing::info!(
+                session = %self.id.as_str(),
+                count = wake.notices.len(),
+                "轮次收场时收到后台任务通知，就地唤起新的一轮"
+            );
+            self.spawn_wake(wake, sink);
+        }
+        result.map(|_| ())
+    }
+
+    /// 一轮跑完后的收束：释放 `running`、处置队列残留、撤占位、记轮末模式、
+    /// 刷摘录。返回值非空 = 要接着起一轮唤醒轮（调用方 spawn，见
+    /// [`Self::spawn_wake`]），`running` 已经是那一轮的令牌。
+    ///
+    /// 残留插话：这一轮被中断/出错，没走到内核的 drain 点。宿主侧
+    /// 静默清掉 —— 前端的排队面板留着这些条目，由它决定接力重发
+    /// （中断后自动续，出错后停下等用户）。清空必须和 running 置空在
+    /// **同一次锁**里：分开的话，一次恰好挤进缝隙的入队会既被这里
+    /// 清掉、又让前端以为它还排着 —— 消息就真丢了。
+    ///
+    /// 三种残留三种处置：
+    /// - 用户插话由前端面板接管（中断后自动续、出错后停下等用户）；
+    /// - 后台任务的通知前端看不见。轮次**正常说完**的，就地唤起新的
+    ///   一轮把它们送进去（见 [`leftover_notices_wake`]）—— 这和
+    ///   `deliver_task_notice` 撞上空闲会话时做的是同一件事，只是通知
+    ///   到得早了几毫秒（主循环最后一次 drain 之后、running 释放之前），
+    ///   排进了一个再没人取的队列。攒到下一轮的话，多任务模式下主 agent
+    ///   本来就闲着等通知，"下一轮"要等用户开口 —— 用户看到的是子 agent
+    ///   早已跑完、主 agent 却一直不接手。被中断 / 出错的轮次照旧攒着：
+    ///   用户刚按了停止，多半是要改说法，这时候冒出一轮"收到通知"的
+    ///   对话是在和他抢话；出错的再唤一轮多半原样再错一次。
+    /// - 界面按钮的提醒**作废**。「转到后台」说的是"你手上这件事挪到
+    ///   后台去"，而这件事已经收场了 —— 留到下一轮，用户下次随便问句
+    ///   什么都会被无端分叉到后台。
+    ///
+    /// `[约束]` "唤不唤"的判定和 running 的接管在同一次锁里（和 `submit` /
+    /// `deliver_task_notice` 同一条约束）：分开的话，用户恰好这时发的一句
+    /// 会和唤醒轮抢开轮，一个开成、一个报"上一轮还在进行中"。
+    async fn settle_turn(
+        &self,
+        result: &Result<Option<riot_protocol::event::TerminalReason>, UiError>,
+    ) -> Option<Wake> {
+        let mut notices = Vec::new();
+        let (mut interjections, mut nudges) = (0usize, 0usize);
+        let wake = {
             let mut g = self.running.lock().await;
             *g = None;
-            self.queue.take_all()
+            for e in self.queue.take_all() {
+                match e.kind {
+                    QueuedKind::TaskNotice => notices.push(e.msg),
+                    QueuedKind::Interjection(_) => interjections += 1,
+                    QueuedKind::Nudge => nudges += 1,
+                }
+            }
+            let mut wake = None;
+            if !notices.is_empty()
+                && leftover_notices_wake(result)
+                && !self.closing.load(Ordering::Relaxed)
+                && let Some(last) = self.last_turn.lock().await.clone()
+            {
+                let cancel = CancellationToken::new();
+                *g = Some(cancel.clone());
+                wake = Some(Wake {
+                    notices: std::mem::take(&mut notices),
+                    last,
+                    cancel,
+                });
+            }
+            wake
         };
         // 占位在正常路径上定稿时就撤了；这里兜住半路失败的那条（比如缺
         // key，消息根本没进历史也没落盘）。留着的话，界面上会挂着一条
         // 永远等不到回复、重启之后又消失的用户消息。
         *self.pending_user.lock().await = None;
-        // 三种残留三种处置：
-        // - 用户插话由前端面板接管（中断后自动续、出错后停下等用户）；
-        // - 后台任务的通知前端看不见，攒回来等下一轮开工时注入 —— 不在
-        //   这里立刻唤起新的一轮：用户刚按了停止，多半是要改说法，这时候
-        //   冒出一轮"收到通知"的对话是在和他抢话；
-        // - 界面按钮的提醒**作废**。「转到后台」说的是"你手上这件事挪到
-        //   后台去"，而这件事已经收场了 —— 留到下一轮，用户下次随便问句
-        //   什么都会被无端分叉到后台。
-        let mut notices = Vec::new();
-        let (mut interjections, mut nudges) = (0usize, 0usize);
-        for e in leftover {
-            match e.kind {
-                QueuedKind::TaskNotice => notices.push(e.msg),
-                QueuedKind::Interjection(_) => interjections += 1,
-                QueuedKind::Nudge => nudges += 1,
-            }
-        }
         if !notices.is_empty() {
             tracing::info!(
                 count = notices.len(),
@@ -2070,7 +2204,39 @@ impl Session {
         // 一轮的历史定下来了，摘录跟上。放在 running 释放之后：写摘录要
         // 拿历史锁，不该让"这一轮结束了"的判定多等一次磁盘。
         self.refresh_digest().await;
-        result
+        wake
+    }
+
+    /// 起一轮由后台任务通知唤起的轮次。调用方必须已经把 `running` 置成
+    /// `wake.cancel`（[`Self::deliver_task_notice`] 和 [`Self::settle_turn`]
+    /// 都在自己的锁里做了这件事）。
+    fn spawn_wake(self: &Arc<Self>, wake: Wake, sink: SessionSink) {
+        let Wake {
+            notices,
+            last,
+            cancel,
+        } = wake;
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            if let Err(e) = this
+                .run_locked(
+                    TurnStart::Notices(notices),
+                    last.model,
+                    last.caps,
+                    sink.clone(),
+                    cancel,
+                    last.limits,
+                )
+                .await
+            {
+                tracing::error!(error = %e, "唤醒轮失败");
+                let _ = sink.send(AgentEvent::Done {
+                    reason: riot_protocol::event::TerminalReason::Error {
+                        error: riot_protocol::event::AgentError::Internal { error: e },
+                    },
+                });
+            }
+        });
     }
 
     /// 会话第一条用户消息前面垫的东西：项目约定 + git 快照。
@@ -2292,19 +2458,12 @@ impl Session {
             python_venv,
             crate::packs::doc_runtime().as_ref(),
         );
-        let file_state: Arc<dyn FileStateCache> = match self.baselines_path() {
-            Some(p) => Arc::new(crate::changes::PersistingBaselines::new(
-                Arc::clone(&self.file_state),
-                p,
-            )),
-            None => Arc::clone(&self.file_state) as Arc<dyn FileStateCache>,
-        };
         let scheduler = Scheduler::new(
             tools.registry,
             tools.prompt_ctx,
             Arc::new(SystemFs::new()),
             proc,
-            file_state,
+            self.file_state_for_tools(),
             Arc::clone(&self.ids) as Arc<dyn IdGenerator>,
             clock,
         )
@@ -2793,11 +2952,10 @@ impl Session {
 
     /// 子 agent transcript 的落盘处：`sessions/subagents/<会话>/`。路径规则
     /// 在 store 那边只有一份（`Transcripts::subagents_of`），删会话时按同一
-    /// 份删。None = 本会话不持久化。
+    /// 份删；登记表读盘也从这里读（见 [`Self::tasks_for`]）。None = 本会话
+    /// 不持久化。
     fn subagent_transcripts(&self) -> Option<Arc<riot_store::Transcripts>> {
-        self.persist
-            .as_ref()
-            .map(|p| Arc::new(p.store.subagents_of(&self.id)))
+        self.tasks.transcripts()
     }
 
     /// 自我分叉：用本轮的种子造一个和父同形的子 agent 任务。
@@ -2906,10 +3064,17 @@ impl Session {
 
     /// 一个子 agent 的会话：视图 + 界面该看的消息 + 它派的子 agent。
     /// None = 不认识这个 id。
-    pub fn task_history(&self, agent_id: &str) -> Option<crate::tasks::TaskHistory> {
-        self.tasks.history(agent_id)
+    ///
+    /// 先水合：登记表随历史一起从盘上装回来（见 [`Self::restore_tasks`]），
+    /// 重启后第一个动作就是点开某个子 agent 的话，不水合就是"不认识"。
+    pub async fn task_history(&self, agent_id: &str) -> Option<crate::tasks::TaskHistory> {
+        self.hydrate().await;
+        self.tasks.history(agent_id).await
     }
 
+    /// 返回这一轮的终止原因（主循环发的那条 `Done`）。`None` = 没等到
+    /// `Done` 就散场了（事件通道断开提前 break）。[`Self::run_locked`] 据此
+    /// 决定残留的后台任务通知怎么处置。
     async fn run_inner(
         self: &Arc<Self>,
         input: TurnStart,
@@ -2918,7 +3083,7 @@ impl Session {
         sink: SessionSink,
         cancel: CancellationToken,
         limits: TurnLimits,
-    ) -> Result<(), UiError> {
+    ) -> Result<Option<riot_protocol::event::TerminalReason>, UiError> {
         let provider = match crate::models::provider_from_endpoint(&model) {
             Ok(p) => p,
             Err(e) => {
@@ -3025,6 +3190,7 @@ impl Session {
             host: Arc::new(SessionTaskHost {
                 session: Arc::downgrade(self),
             }),
+            baselines: self.file_state_for_tools(),
         };
         // 分叉里用的那份 Task：同名同形、深度 1。这里的 parent 是占位 ——
         // 分叉的 agent id 到分叉那一刻才有，fork_job 会换成真的。
@@ -3350,6 +3516,7 @@ impl Session {
                 // 指令，离对话越近权重越高；「并行构建」还引用了多任务准则，
                 // 准则在前、指示在后读起来才顺。
                 let nudge = input.nudge;
+                let scheduled = input.scheduled.clone();
                 let mut content =
                     crate::content::user_content(input, vision.as_ref(), self.mention_ctx()).await;
                 // 记忆注入：会话的**第一条**用户消息前置 AGENTS.md（全局 + 项目）。
@@ -3399,6 +3566,15 @@ impl Session {
                 }
                 // 多任务模式的准则同位（见 prompt::multitask_reminder）。
                 content.extend(self.multitask_note());
+                // 定时任务的唤醒说明（见 prompt::scheduled_wake_reminder）：
+                // 它讲的是"谁叫醒了你、目标达成怎么收尾"，是对本轮的注解，
+                // 和上面几条同位。按钮指示和它不会同时出现（到点发的消息
+                // 不带按钮）。
+                content.extend(
+                    scheduled
+                        .as_ref()
+                        .map(crate::prompt::scheduled_wake_reminder),
+                );
                 content.extend(nudge.map(crate::prompt::nudge_reminder));
                 let user_msg = Message::User {
                     id: user_id.clone(),
@@ -3453,6 +3629,7 @@ impl Session {
 
         // 这一轮有没有留下东西。决定被停止时那句提问是撤回还是留下。
         let mut produced = false;
+        let mut terminal = None;
 
         use futures::StreamExt;
         while let Some(mut ev) = stream.next().await {
@@ -3469,6 +3646,7 @@ impl Session {
             // 区分"内核没收到取消"和"收到了但界面没更新"。
             if let AgentEvent::Done { reason } = &ev {
                 tracing::info!(session = %self.id.as_str(), ?reason, "本轮结束");
+                terminal = Some(reason.clone());
                 self.compacting.store(false, Ordering::Relaxed);
                 // 已经说出口的半截话先定稿。排在撤回判定**之前**：它一旦
                 // 落地，这一轮就算有产出，提问不能再撤（撤了那半截回答
@@ -3547,7 +3725,7 @@ impl Session {
             }
         }
 
-        Ok(())
+        Ok(terminal)
     }
 }
 
@@ -5461,6 +5639,49 @@ mod tests {
         assert!(!s.queue_remove(&id), "已撤回的条目删不到第二次");
     }
 
+    /// 定时任务到点时上一轮还在跑：排队的那条消息也要带唤醒说明。
+    ///
+    /// 排队路径的消息内容是入队前就构建好的，和开轮路径不是同一段代码 ——
+    /// 漏了这边，模型只会把它当成用户插的一句话，条件达成也不知道该删哪个任务。
+    #[tokio::test]
+    async fn 定时任务排队时唤醒说明跟着进队列() {
+        let s = Arc::new(Session::new(
+            SessionId::from_raw("s1"),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        ));
+        *s.running.lock().await = Some(CancellationToken::new());
+
+        let input = TurnInput {
+            text: "看看 CI 过了没".into(),
+            scheduled: Some(riot_protocol::ScheduledWake {
+                task_id: "sch_7".into(),
+                name: "盯 CI".into(),
+                repeat: riot_protocol::Repeat::Every { minutes: 5 },
+            }),
+            ..Default::default()
+        };
+        s.submit(input, test_model(), test_caps(), test_sink(), test_limits())
+            .await
+            .expect("忙时提交该入队");
+
+        let entries = s.queue.take_all();
+        assert_eq!(entries.len(), 1);
+        let Message::User { content, .. } = &entries[0].msg else {
+            panic!("该是用户消息");
+        };
+        let reminder = content.iter().find_map(|c| match c {
+            UserContent::Attachment(Attachment::SystemReminder { text })
+                if text.contains("scheduled task") =>
+            {
+                Some(text.clone())
+            }
+            _ => None,
+        });
+        let reminder = reminder.expect("排队的消息要带唤醒说明");
+        assert!(reminder.contains("`sch_7`"), "要带任务 id：{reminder}");
+    }
+
     #[tokio::test]
     async fn 收尾时静默清空残留插话() {
         // 中断/出错的轮次没走到内核的 drain 点，队列里可能剩着插话。
@@ -5888,6 +6109,150 @@ mod tests {
         );
     }
 
+    /// 只有模型正常说完的轮次才就地唤醒；停止、出错、跑满、没等到 Done
+    /// 都攒着 —— 唤错一次的表现是"刚按停止它又自己开口"。
+    #[test]
+    fn 残留通知只在正常完成的轮次上唤醒() {
+        use riot_protocol::event::{AbortSource, AgentError, TerminalReason};
+        let ok = |r: TerminalReason| Ok::<_, UiError>(Some(r));
+        assert!(leftover_notices_wake(&ok(TerminalReason::Completed)));
+        assert!(!leftover_notices_wake(&ok(TerminalReason::Aborted {
+            by: AbortSource::User
+        })));
+        assert!(!leftover_notices_wake(&ok(TerminalReason::AbortedTools {
+            cancelled: 1
+        })));
+        assert!(!leftover_notices_wake(&ok(TerminalReason::MaxTurns {
+            limit: 8
+        })));
+        assert!(!leftover_notices_wake(&ok(
+            TerminalReason::StopHookPrevented {
+                message: "x".into()
+            }
+        )));
+        assert!(!leftover_notices_wake(&ok(TerminalReason::Error {
+            error: AgentError::Internal {
+                error: ui_error!("kernel.turn.panicked"),
+            },
+        })));
+        assert!(
+            !leftover_notices_wake(&Ok(None)),
+            "没等到 Done = 通道断了，没人在听"
+        );
+        assert!(!leftover_notices_wake(&Err(ui_error!(
+            "kernel.turn.panicked"
+        ))));
+    }
+
+    /// 轮次正常说完、队列里却躺着一条刚到的完成通知（主循环最后一次 drain
+    /// 之后才排进来）：收尾处接管 running、把通知交给唤醒轮，不攒到下一轮。
+    ///
+    /// 多任务模式下主 agent 说完就闲着等通知，"下一轮"要等用户开口 ——
+    /// 攒着的表现是子 agent 早已跑完、主 agent 却几分钟不接手。
+    #[tokio::test]
+    async fn 正常收场时残留通知就地唤醒_而非攒到下一轮() {
+        use riot_protocol::event::TerminalReason;
+        let s = Arc::new(Session::new(
+            SessionId::from_raw("s1"),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        ));
+        *s.last_turn.lock().await = Some(LastTurn {
+            model: test_model(),
+            caps: test_caps(),
+            limits: test_limits(),
+        });
+        *s.running.lock().await = Some(CancellationToken::new());
+        s.queue.push(queued_entry("m_q1", "用户插话"));
+        s.queue.push(QueuedEntry {
+            id: "agt_1".into(),
+            kind: QueuedKind::TaskNotice,
+            msg: notice("agt_1"),
+        });
+
+        let wake = s
+            .settle_turn(&Ok(Some(TerminalReason::Completed)))
+            .await
+            .expect("正常说完且有残留通知，要唤醒");
+        assert_eq!(wake.notices.len(), 1);
+        assert!(
+            matches!(&wake.notices[0], Message::User { meta, .. } if meta.task_notice.is_some()),
+            "交给唤醒轮的是那条通知：{:?}",
+            wake.notices[0]
+        );
+        assert!(
+            s.running.lock().await.is_some(),
+            "running 已经是唤醒轮的令牌，这期间的用户消息该排队而不是抢开轮"
+        );
+        assert!(
+            s.pending_notices.lock().unwrap().is_empty(),
+            "通知交给了唤醒轮，不能再攒一份"
+        );
+        assert!(
+            s.queue_snapshot().is_empty(),
+            "残留插话照旧清掉，由前端面板接管"
+        );
+        // 把令牌放回去，免得测试结束时会话看着像还在跑。
+        *s.running.lock().await = None;
+    }
+
+    /// 同样的残留，轮次是被用户停下的：不唤醒，攒到下一轮开工时注入。
+    #[tokio::test]
+    async fn 被停止的轮次残留通知照旧攒着() {
+        use riot_protocol::event::{AbortSource, TerminalReason};
+        let s = Arc::new(Session::new(
+            SessionId::from_raw("s1"),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        ));
+        *s.last_turn.lock().await = Some(LastTurn {
+            model: test_model(),
+            caps: test_caps(),
+            limits: test_limits(),
+        });
+        *s.running.lock().await = Some(CancellationToken::new());
+        s.queue.push(QueuedEntry {
+            id: "agt_1".into(),
+            kind: QueuedKind::TaskNotice,
+            msg: notice("agt_1"),
+        });
+
+        let wake = s
+            .settle_turn(&Ok(Some(TerminalReason::Aborted {
+                by: AbortSource::User,
+            })))
+            .await;
+        assert!(wake.is_none(), "用户刚按了停止，不该冒出一轮来抢话");
+        assert!(s.running.lock().await.is_none());
+        assert_eq!(s.pending_notices.lock().unwrap().len(), 1);
+    }
+
+    /// 会话在关：即便正常说完也不唤醒（通知随后会被丢弃，唤起一轮只是白烧）。
+    #[tokio::test]
+    async fn 关闭中的会话收尾不唤醒() {
+        use riot_protocol::event::TerminalReason;
+        let s = Arc::new(Session::new(
+            SessionId::from_raw("s1"),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        ));
+        *s.last_turn.lock().await = Some(LastTurn {
+            model: test_model(),
+            caps: test_caps(),
+            limits: test_limits(),
+        });
+        s.closing.store(true, Ordering::Relaxed);
+        *s.running.lock().await = Some(CancellationToken::new());
+        s.queue.push(QueuedEntry {
+            id: "agt_1".into(),
+            kind: QueuedKind::TaskNotice,
+            msg: notice("agt_1"),
+        });
+        let wake = s.settle_turn(&Ok(Some(TerminalReason::Completed))).await;
+        assert!(wake.is_none());
+        assert!(s.running.lock().await.is_none());
+    }
+
     /// 用户按停止只停前台，后台任务不受影响。
     #[tokio::test]
     async fn 用户停止不带走后台任务() {
@@ -6076,6 +6441,113 @@ mod tests {
         s.flush_log().await;
         let parts = store.load_parts(&id).await;
         assert!(parts.live.is_empty(), "重启后不该再读回来：{parts:?}");
+    }
+
+    /// 重启后子 agent 的会话照样能点开（照 Cursor）。
+    ///
+    /// 上个进程留下：主 transcript 里一次 Task 调用及其结果、子 agent 的
+    /// transcript，**没有**登记表快照（老会话）。新进程水合时该从历史把
+    /// 登记表推回来：`task.history` 认得这个 id、消息从盘上读、快照随
+    /// `session.resume` 一起回去让卡片认领，而且推出来的当场落盘。
+    #[tokio::test]
+    async fn 重启后子agent的会话照样能看_老会话从历史重建() {
+        use riot_protocol::id::ToolUseId;
+        use riot_protocol::message::{AssistantContent, ToolResultContent};
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let store = Arc::new(riot_store::Transcripts::new(dir.path()));
+        let id = SessionId::from_raw("s1");
+        let agent = "agt_restore00001";
+
+        // 上个进程：主会话历史 + 子 agent 的 transcript。
+        {
+            let log = store.open(riot_store::TranscriptMeta {
+                id: id.clone(),
+                root: dir.path().to_path_buf(),
+                created_at_ms: 0,
+            });
+            log.append(&hist_user("m1", "找入口"));
+            log.append(&Message::Assistant {
+                id: MessageId::from_raw("a1"),
+                content: vec![AssistantContent::ToolUse {
+                    id: ToolUseId::from_raw("tu1"),
+                    name: "Task".into(),
+                    input: serde_json::json!({
+                        "description": "找程序入口", "prompt": "找入口", "subagent_type": "explore"
+                    }),
+                }],
+                usage: None,
+                meta: MessageMeta::default(),
+            });
+            log.append(&Message::User {
+                id: MessageId::from_raw("r1"),
+                content: vec![UserContent::ToolResult {
+                    tool_use_id: ToolUseId::from_raw("tu1"),
+                    content: ToolResultContent::text(format!(
+                        "入口在 main.rs\n\n[子任务 {agent}：m · 10 tokens · 2 次工具调用]"
+                    )),
+                    is_error: false,
+                }],
+                meta: MessageMeta {
+                    created_at_ms: Some(50),
+                    ..MessageMeta::default()
+                },
+            });
+            log.append(&hist_assistant("a2", "入口在 main.rs"));
+            log.flush().await;
+
+            let sub = store.subagents_of(&id).open(riot_store::TranscriptMeta {
+                id: SessionId::from_raw(agent),
+                root: dir.path().to_path_buf(),
+                created_at_ms: 40,
+            });
+            sub.append(&hist_user("sq", "找入口"));
+            sub.append(&hist_assistant("sa", "入口在 main.rs"));
+            sub.flush().await;
+        }
+
+        // 新进程。
+        let log = store.open(riot_store::TranscriptMeta {
+            id: id.clone(),
+            root: dir.path().to_path_buf(),
+            created_at_ms: 0,
+        });
+        let s = Session::new(
+            id.clone(),
+            dir.path().to_path_buf(),
+            Some(SessionPersist {
+                store: Arc::clone(&store),
+                log,
+                artifacts_root: dir.path().join("artifacts"),
+            }),
+        );
+        assert!(
+            s.tasks_snapshot().is_empty(),
+            "还没水合，登记表是空的（惰性）"
+        );
+
+        let h = s.task_history(agent).await.expect("重启后照样认得");
+        assert_eq!(h.task.title, "找程序入口");
+        assert_eq!(h.task.kind, "explore");
+        assert_eq!(h.task.tool_use_id.as_str(), "tu1", "卡片靠它认领");
+        assert_eq!(
+            h.task.status,
+            riot_protocol::task::BackgroundTaskStatus::Completed
+        );
+        assert_eq!(h.task.started_at_ms, 40);
+        let ids: Vec<&str> = h.messages.iter().map(|m| m.id().as_str()).collect();
+        assert_eq!(ids, ["sq", "sa"], "消息从它的 transcript 读");
+        assert!(s.task_history("agt_nobody000000").await.is_none());
+
+        let snap = s.tasks_snapshot();
+        assert_eq!(snap.len(), 1, "随 resume 快照回给界面");
+        assert_eq!(snap[0].id.as_str(), agent);
+
+        // 推出来的登记表当场落盘，下次启动直接读快照。
+        s.flush_log().await;
+        let saved = store.subagents_of(&id).task_index().load().await;
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].title, "找程序入口");
     }
 
     /// 编辑后重发：截到那条提问（含）、换掉它的字、附件原位保留；

@@ -228,4 +228,59 @@ pub struct TurnInput {
     /// 一句短话（"开始构建计划"），指示全在提醒里。见 [`Nudge`]。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nudge: Option<Nudge>,
+    /// 这条消息是定时任务到点发的，不是用户手敲的。内核据此在正文之后附
+    /// 一条 system_reminder，告诉模型是谁叫醒了它。见 [`ScheduledWake`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled: Option<ScheduledWake>,
+}
+
+/// 叫醒这一轮的定时任务。
+///
+/// 没有它的话，到点那一轮收到的是一句和用户手敲的一模一样的话：模型不知道
+/// 自己是被定时任务叫醒的，也不知道任务 id —— 「盯到 CI 过就停」这种有限的
+/// 盯梢，条件达成后它想把自己删掉都得先 list 再按名字对。带上 id 和重复
+/// 规则，它才有办法在目标达成时收尾、在跑不下去时暂停。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduledWake {
+    pub task_id: String,
+    pub name: String,
+    pub repeat: crate::schedule::Repeat,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 宿主和内核可能不是同一个版本（升级后内核二进制先换、宿主还在跑旧的，
+    /// 或反过来）：老宿主发的 `TurnInput` 没有 `scheduled`，新内核必须照常读。
+    #[test]
+    fn 老宿主发的_turn_input_缺_scheduled_也能读() {
+        let v: TurnInput = serde_json::from_value(serde_json::json!({
+            "text": "hi",
+            "images": [],
+            "refs": [],
+        }))
+        .expect("缺字段不能让整条请求解析失败");
+        assert_eq!(v.scheduled, None);
+        assert_eq!(v.nudge, None);
+    }
+
+    #[test]
+    fn scheduled_wake_往返() {
+        let input = TurnInput {
+            text: "盯一下 CI".into(),
+            scheduled: Some(ScheduledWake {
+                task_id: "sch_1".into(),
+                name: "盯 CI".into(),
+                repeat: crate::schedule::Repeat::Every { minutes: 5 },
+            }),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&input).expect("序列化");
+        assert_eq!(v["scheduled"]["taskId"], "sch_1", "{v}");
+        assert_eq!(v["scheduled"]["repeat"]["kind"], "every", "{v}");
+        let back: TurnInput = serde_json::from_value(v).expect("反序列化");
+        assert_eq!(back, input);
+    }
 }

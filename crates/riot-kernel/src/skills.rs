@@ -34,9 +34,11 @@
 //! 正文（Markdown）。可用 $ARGUMENTS 和 ${SKILL_DIR} 占位符。
 //! ```
 //!
-//! frontmatter 只认 `key: value` 单行形式。`description` 必填 ——
-//! 它是模型决定"要不要加载"的唯一依据，没有它的技能等于不存在；
-//! 缺了不静默跳过，作为"有问题的技能"报给设置页，用户看得见原因。
+//! frontmatter 认 `key: value` 单行标量和 `>-` / `|` 块标量（Cursor、Claude
+//! Code 的技能把 description 写成多行就是后者），列表和嵌套不认；解析在
+//! [`crate::frontmatter`]。`description` 必填 —— 它是模型决定"要不要加载"
+//! 的唯一依据，没有它的技能等于不存在；缺了不静默跳过，作为"有问题的技能"
+//! 报给设置页，用户看得见原因。
 //!
 //! # 为什么每轮扫描而不是缓存
 //!
@@ -308,24 +310,18 @@ fn scan_builtin(out: &mut Discovered) {
 
 /// 解析一个 SKILL.md。返回 `(卡片, 是否只给用户调)`。
 fn parse_skill(raw: &str, fallback_name: &str, dir: &Path) -> Result<(SkillCard, bool), UiError> {
-    let rest = raw
-        .strip_prefix("---")
-        .ok_or_else(|| ui_error!("kernel.skill.noFrontmatter"))?;
-    let (front, body) = rest
-        .split_once("\n---")
-        .ok_or_else(|| ui_error!("kernel.skill.unterminatedFrontmatter"))?;
+    use crate::frontmatter::Split;
+    let (front, body) = match crate::frontmatter::split(raw) {
+        Split::Some { front, body } => (front, body),
+        Split::None => return Err(ui_error!("kernel.skill.noFrontmatter")),
+        Split::Unterminated => return Err(ui_error!("kernel.skill.unterminatedFrontmatter")),
+    };
 
     let mut name = None;
     let mut description = None;
     let mut slash_only = false;
-    for line in front.lines() {
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        // 只认单行标量。值两侧的引号剥掉 —— 用户从别处抄来的
-        // frontmatter 常带引号。
-        let value = value.trim().trim_matches('"').trim_matches('\'').to_owned();
-        match key.trim() {
+    for (key, value) in crate::frontmatter::fields(front) {
+        match key.as_str() {
             "name" => name = Some(value),
             "description" => description = Some(value),
             // 只给用户 `/` 调，不进 Skill 工具。
@@ -495,6 +491,41 @@ mod tests {
             "{}",
             d.problems[0].reason
         );
+    }
+
+    /// Cursor / Claude Code 生态的 SKILL.md 把 description 写成 `>-` 加缩进
+    /// 多行。老解析读出来的是字面的 `>-`：非空、过校验、静默进模型清单 ——
+    /// 用户从别处拷一个技能目录过来，清单里就多一行 `- foo: >-`。
+    #[test]
+    fn 多行_description_按块标量解析() {
+        let (_t, project, global) = dirs();
+        write_skill(
+            &global,
+            "code-changes",
+            "---\n\
+             name: code-changes\n\
+             description: >-\n\
+             \x20 When the user asks for a new code project or app, a feature, a bug fix, a\n\
+             \x20 refactor; also for anything involving the `origin` CLI.\n\
+             ---\n\
+             # Code changes\n\
+             正文\n",
+        );
+
+        let d = discover_dirs(&project, &global);
+        assert!(
+            d.problems.is_empty(),
+            "{:?}",
+            d.problems.first().map(|p| &p.reason)
+        );
+        assert_eq!(d.cards.len(), 1);
+        assert_eq!(
+            d.cards[0].description,
+            "When the user asks for a new code project or app, a feature, a bug fix, a \
+             refactor; also for anything involving the `origin` CLI.",
+            "折叠成一段，不能是字面的 `>-`"
+        );
+        assert!(d.cards[0].body.starts_with("# Code changes"), "正文不受影响");
     }
 
     #[test]

@@ -20,6 +20,7 @@ export default {
   "transcript.compactRule": "以上訊息已被壓縮",
 
   "transcript.msg.stopped": "已停止產生",
+  "transcript.error.detail": "詳情",
   "transcript.msg.copy": "複製原文",
   "transcript.msg.regenerate": "重新產生",
   "transcript.msg.regenerateBusy": "產生中，結束後才能重新產生",
@@ -81,7 +82,7 @@ export default {
   "transcript.taskPanel.dismiss": "收合",
   "transcript.taskPanel.dismissTitle": "收合已結束的任務",
   "transcript.taskPanel.stopTitle": "停止這個背景任務",
-  "transcript.subagent.gone": "這個子 agent 的記錄已經不在核心裡（核心重啟後舊 id 會失效）。",
+  "transcript.subagent.gone": "找不到這個子 agent 的記錄（它的記錄檔可能已被刪除，或者它當時沒來得及寫下任何內容）。",
   "transcript.subagent.prompt": "任務",
   "transcript.subagent.starting": "正在啟動…",
   "transcript.subagent.stopTitle": "停止這個子 agent",

@@ -885,6 +885,33 @@ export type ThinkingPolicy =
  */
 export type ThinkingEffort = "low" | "medium" | "high";
 /**
+ * 重复规则。
+ *
+ * `Once` 不带时刻 —— 一次性任务的时刻就是 [`ScheduledTask::next_run_ms`]，
+ * 再存一份就有"哪个说了算"的问题。
+ */
+export type Repeat =
+  | {
+      kind: "once";
+    }
+  | {
+      kind: "every";
+      minutes: number;
+    }
+  | {
+      kind: "daily";
+      time: string;
+    }
+  | {
+      kind: "weekdays";
+      time: string;
+    }
+  | {
+      kind: "weekly";
+      time: string;
+      weekday: number;
+    };
+/**
  * 内核 → 宿主，对 [`RpcRequest`] 的应答。
  */
 export type RpcResponse =
@@ -1075,33 +1102,6 @@ export type WhenSpec =
       weekday: number;
     };
 export type ScheduleRunPhase = "started" | "done";
-/**
- * 重复规则。
- *
- * `Once` 不带时刻 —— 一次性任务的时刻就是 [`ScheduledTask::next_run_ms`]，
- * 再存一份就有"哪个说了算"的问题。
- */
-export type Repeat =
-  | {
-      kind: "once";
-    }
-  | {
-      kind: "every";
-      minutes: number;
-    }
-  | {
-      kind: "daily";
-      time: string;
-    }
-  | {
-      kind: "weekdays";
-      time: string;
-    }
-  | {
-      kind: "weekly";
-      time: string;
-      weekday: number;
-    };
 
 /**
  * 把所有顶层类型收进一个 root，让生成的 schema 共享同一份 `$defs`。
@@ -1267,7 +1267,8 @@ export interface AskChoiceOption {
  * 切回会话时随 `session.resume` 快照整批回来。不进 transcript ——
  * 它描述的是一个活状态，落盘重放会长出永远"运行中"的幽灵；"跑过、
  * 结果是什么"由通知消息（[`TaskNotice`]）和 Task 的 tool_result 记在
- * 历史里。
+ * 历史里。跨越重启靠内核另存的登记表快照（`subagents/<会话>/tasks.json`），
+ * 装回来时"运行中"的一律改成已取消。
  *
  * 名字里的 Background 是历史包袱：最初只给后台任务用，后来同步子 agent
  * 也要在 Task 卡片上直播"标题 · 模型 · 正在做什么"，于是全都登记，
@@ -1511,6 +1512,11 @@ export interface TurnInput {
    */
   nudge?: Nudge | null;
   refs?: string[];
+  /**
+   * 这条消息是定时任务到点发的，不是用户手敲的。内核据此在正文之后附
+   * 一条 system_reminder，告诉模型是谁叫醒了它。见 [`ScheduledWake`]。
+   */
+  scheduled?: ScheduledWake | null;
   text: string;
 }
 /**
@@ -1519,6 +1525,19 @@ export interface TurnInput {
 export interface ImageInput {
   data: string;
   mediaType: string;
+}
+/**
+ * 叫醒这一轮的定时任务。
+ *
+ * 没有它的话，到点那一轮收到的是一句和用户手敲的一模一样的话：模型不知道
+ * 自己是被定时任务叫醒的，也不知道任务 id —— 「盯到 CI 过就停」这种有限的
+ * 盯梢，条件达成后它想把自己删掉都得先 list 再按名字对。带上 id 和重复
+ * 规则，它才有办法在目标达成时收尾、在跑不下去时暂停。
+ */
+export interface ScheduledWake {
+  name: string;
+  repeat: Repeat;
+  taskId: string;
 }
 /**
  * MCP 服务器的启动描述。宿主从设置里组好(过滤掉未启用/没填完的),

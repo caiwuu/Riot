@@ -125,8 +125,8 @@ export default {
   "settings.provider.editor.fetching": "取得中…",
   "settings.provider.editor.fetch": "API から取得",
   "settings.provider.editor.models.empty": "モデルがまだありません。右上の「モデルを追加」で手動入力するか、API から取得してください。",
-  "settings.provider.editor.currentModel": "現在のモデル",
-  "settings.provider.editor.setCurrent": "現在のモデルに設定",
+  "settings.provider.editor.testModel": "接続テストに使うモデル",
+  "settings.provider.editor.testWith": "このモデルで接続テストする",
   "settings.provider.editor.vision.aria": "画像対応",
   "settings.provider.editor.vision.title": "このモデルは画像を受け取れます",
   "settings.provider.editor.editModel": "モデルを編集",
@@ -138,6 +138,7 @@ export default {
   "settings.provider.editor.sampling.desc":
     "このプロバイダーのデフォルト値です。「モデルのデフォルト」と表示された項目は一切送らず、モデルに任せます。モデルが個別に設定していない項目はここの値を使います。個々のモデルはその編集ダイアログで変更でき、会話内ではセッション単位で一時的に上書きできます。",
   "settings.provider.editor.test.hint": "最小のリクエストを送って設定を検証します。",
+  "settings.provider.editor.test.hintModel": "{model} で最小のリクエストを送って設定を検証します。",
   "settings.provider.editor.testNeedsKey": "接続をテストするには、先に上で API key を保存してください",
   "settings.provider.editor.test": "接続をテスト",
   "settings.provider.editor.test.ok": "接続できました：{detail}",

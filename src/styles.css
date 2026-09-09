@@ -615,7 +615,7 @@ button.ghost {
 button.big {
   font-size: 14px;
   padding: 10px 22px;
-  border-radius: 10px;
+  border-radius: 14px;
 }
 
 input,
@@ -2960,6 +2960,65 @@ html[data-host='web'] body {
   border: 1px solid var(--danger-border);
   border-radius: 10px;
   padding: 10px 14px;
+  /* 卡内自己排：正文和「详情」开关在一行，细节折在下面。
+     .msg 的 pre-wrap 留给正文，卡本身别继承它 —— 开关前后的换行会被画出来。 */
+  white-space: normal;
+}
+
+.msg.error .error-line {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.msg.error .error-text {
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+}
+
+/* 「详情」开关做得很轻：它是给排查的人留的门，不是这张卡的重点。
+   靠右、和正文同色但淡一档，hover 才回到正文色。 */
+.error-detail-toggle {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 12px;
+  color: var(--danger-soft);
+  opacity: 0.6;
+  cursor: pointer;
+}
+
+.error-detail-toggle:hover:not(:disabled) {
+  background: none;
+  opacity: 1;
+}
+
+.error-detail-toggle .chevron {
+  color: inherit;
+  width: 12px;
+  height: 12px;
+}
+
+/* 展开的细节：服务方原话、HTTP 状态。等宽、小一号、淡一档 ——
+   它是证据不是结论。长 token / URL 不折行会把卡撑出屏，任意处可断。 */
+.msg.error .error-detail {
+  display: block;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--danger-border);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--danger-soft);
+  opacity: 0.8;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
 }
 
 /* 中性告知：到达轮数上限之类。刻意区别于 error 的红 —— 它不是出错，
@@ -3312,7 +3371,9 @@ html[data-host='web'] body {
 .composer-wrap {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  /* 和 dock 里 todo-panel / changes-bar 的 4px 下边距一致：它们和这里的
+     任务面板、排队面板都是"挂在输入框上方的一条"，离输入框得一样近。 */
+  gap: 4px;
   min-width: 0;
 }
 
@@ -7659,7 +7720,8 @@ button.ta-resize-grip:hover:not(:disabled),
   background: var(--bg-hover);
 }
 
-/* 选中行 hover 时别退回普通 hover 灰，否则"哪个在用"当场消失。 */
+/* 选中行（测试连接要测的那个）hover 时别退回普通 hover 灰，否则"选的是哪个"
+   当场消失。 */
 .model-row.active:hover {
   background: color-mix(in srgb, var(--bg-active) 70%, var(--bg-hover));
 }

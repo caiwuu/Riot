@@ -35,6 +35,8 @@ export default {
   "kernel.provider.quota": "제공자 계정의 사용 한도가 부족합니다.",
   "kernel.provider.modelNotFound": "제공자가 이 모델을 인식하지 못합니다. 설정의 모델 이름을 확인하세요.",
   "kernel.provider.refused": "제공자가 요청을 거부했습니다(HTTP {status}).",
+  "kernel.provider.htmlResponse":
+    "제공자가 API 응답 대신 웹 페이지를 반환했습니다(HTTP {status}). 게이트웨이나 방화벽에 차단되었거나 API 주소가 잘못되었을 수 있습니다.",
   "kernel.provider.refusedInStream": "제공자가 응답 도중 오류를 보냈습니다.",
   "kernel.provider.transport": "제공자에 연결할 수 없습니다 — 네트워크, 프록시 또는 base URL을 확인하세요.",
   "kernel.provider.unreachable": "여러 번 시도했지만 제공자에 연결할 수 없습니다 — 네트워크, 프록시 또는 base URL을 확인하세요.",
@@ -76,6 +78,7 @@ export default {
   "kernel.task.activity.completed": "완료",
   "kernel.task.activity.failed": "실패",
   "kernel.task.activity.cancelled": "중지됨",
+  "kernel.task.activity.interrupted": "Riot 재시작으로 중단됨",
   "kernel.task.started": "[{kind}·{model}] {title} 시작",
   "kernel.task.startedBackground": "[{kind}·{model}] {title} 백그라운드에서 시작",
   "kernel.task.launched": "{title}(이)가 백그라운드에서 시작되었습니다({id})",

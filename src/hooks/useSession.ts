@@ -19,6 +19,7 @@ import {
   type PermissionAsk,
   type PermissionMode,
   type PermissionResponse,
+  type SplitError,
   deleteMessage as deleteMessageBridge,
   editMessage as editMessageBridge,
   getHistory,
@@ -28,10 +29,11 @@ import {
   queueList,
   queueRemove,
   queueTake,
+  isHostError,
   regenerateTurn,
-  renderUiError,
   renderUiText,
   resendTurn,
+  splitUiError,
   respondPermission,
   sendTurn,
   subscribeSession,
@@ -90,7 +92,11 @@ export type Item =
       resultImagePath?: string;
       output: string[];
     }
-  | { kind: "error"; id: string; text: string }
+  /**
+   * 出错。`text` 是给人看的一句话；`detail` 是不翻译的技术细节（服务方原话、
+   * HTTP 状态），界面上折起来 —— 排查时才用得上，平时不该占一大块。
+   */
+  | { kind: "error"; id: string; text: string; detail?: string }
   /** 中性告知（不是出错）：到达轮数上限之类，只是提示"该歇口气了"。 */
   | { kind: "notice"; id: string; text: string }
   /**
@@ -218,6 +224,19 @@ const MAX_TOOL_LINES = 200;
 const SINK_STALE_MS = 30_000;
 /** 忙碌/压缩中这么久收不到事件，主动换出口并对一下历史。 */
 const BUSY_SILENCE_MS = 12_000;
+/**
+ * 主 agent 空闲、但还有子 agent 在跑：这么久收不到事件就换出口对账。
+ *
+ * 多任务模式下主 agent 委派完就闲着，之后发生的一切 —— 子 agent 的活动
+ * 行、它跑完的状态、完成通知唤起的新一轮 —— 全靠事件流送过来。通道要是
+ * 在这段时间死了，界面上看到的就是：子 agent 会话（走 RPC 轮询）早已
+ * 显示完成，主对话里的卡片却一直转圈、主 agent 也不接手，直到用户切个
+ * 窗口或发句话才对上账。上面那条看门狗只在 busy 时工作，管不到这里。
+ *
+ * 比忙碌时的阈值长：跑着的子 agent 每调一次工具就推一条活动行，安静
+ * 半分钟多半是在跑一条长命令 —— 这种情况下的对账是白拉一份历史，别太勤。
+ */
+const TASK_SILENCE_MS = 30_000;
 /** 刚发送的那几秒不要用快照盖界面：乐观气泡还没进宿主历史。 */
 const SEND_GRACE_MS = 8_000;
 /** 切到别的 app 不到这么久、事件还在流，不要重订阅（避免把正在流的正文闪掉）。 */
@@ -371,6 +390,10 @@ export function useSession(
   /** 工具进度行也要合批：`cargo build` 一秒能吐几百行，逐条 setState
    *  等于逐行重渲染整棵树。走和 delta 同一个 rAF 出口。 */
   const pendingProgress = useRef<{ id: string; text: string }[]>([]);
+  /** 子 agent 的视图更新同样合批：一个侦察子 agent 一批并发十个 Grep 就
+   *  推十条，几个并行就是几十条挤在同一瞬间，逐条 setState 等于逐条重渲染
+   *  整个对话。按到达顺序攒着，一帧内同一个子 agent 只留最后一条的效果。 */
+  const pendingTasks = useRef<BackgroundTaskView[]>([]);
   const toolJsonById = useRef(new Map<string, string>());
   /**
    * 工具卡片出现时就地落定的流式内容。
@@ -408,6 +431,11 @@ export function useSession(
     busyRef.current = state.busy;
     compactingRef.current = state.compacting;
   }, [state.busy, state.compacting]);
+  /** 有没有子 agent 在跑（看门狗用，见 TASK_SILENCE_MS）。 */
+  const tasksRunningRef = useRef(false);
+  useEffect(() => {
+    tasksRunningRef.current = state.tasks.some((x) => x.status === "running");
+  }, [state.tasks]);
   // send 在订阅 effect 之后才定义，Done 接力经 ref 调它。
   const sendRef = useRef<
     ((text: string, images?: ImageInput[], refs?: string[]) => Promise<boolean>) | null
@@ -434,11 +462,15 @@ export function useSession(
       const k = pendingThinking.current;
       const chunks = pendingToolJson.current;
       const lines = pendingProgress.current;
-      if (!txt && !k && chunks.length === 0 && lines.length === 0) return;
+      const taskViews = pendingTasks.current;
+      if (!txt && !k && chunks.length === 0 && lines.length === 0 && taskViews.length === 0) {
+        return;
+      }
       pendingText.current = "";
       pendingThinking.current = "";
       pendingToolJson.current = [];
       pendingProgress.current = [];
+      pendingTasks.current = [];
 
       let plan: string | undefined;
       // 工具参数边流边填进卡片：id → 此刻已经到齐的那些字段。
@@ -457,12 +489,17 @@ export function useSession(
         let items = s.items;
         if (partial.size) items = fillToolInput(items, partial);
         if (lines.length) items = appendToolOutput(items, lines);
+        // 每条都是全量视图，按 id 覆盖；同一帧里同一个子 agent 来了几条，
+        // 最后一条赢 —— 和逐条 setState 的终态一样，只是少渲染几次。
+        let tasks = s.tasks;
+        for (const v of taskViews) tasks = upsertTask(tasks, v);
         return {
           ...s,
           streaming: s.streaming + txt,
           thinking: s.thinking + k,
           ...(plan !== undefined ? { streamingPlan: plan } : {}),
           ...(items !== s.items ? { items } : {}),
+          ...(tasks !== s.tasks ? { tasks } : {}),
         };
       });
     };
@@ -569,11 +606,16 @@ export function useSession(
           if (!waitStartAt.has(sessionId)) waitStartAt.set(sessionId, Date.now());
           // 请求开始意味着压缩这一段结束了 —— 成功如此，失败也如此
           // （失败没有事件，只有日志，但轮次照常用完整历史往下走）。
+          //
+          // 一轮的第一次请求（turn 0）还意味着上一轮的失败过时了：不论这轮
+          // 是用户发的还是内核自己起的（后台任务唤醒），旧红卡都该收掉。
+          // 轮内后续的请求不算 —— 中途的「等待授权超时」还没过时。
           setState((s) => ({
             ...s,
             busy: true,
             streamingPlan: null,
             compacting: false,
+            items: event.turn === 0 ? dropErrors(s.items) : s.items,
           }));
           break;
 
@@ -695,7 +737,9 @@ export function useSession(
 
         case "background_task":
           // 每次推全量视图，按 id 覆盖；新来的排在末尾（启动顺序）。
-          setState((s) => ({ ...s, tasks: upsertTask(s.tasks, event.task) }));
+          // 走 rAF 合批（见 pendingTasks）—— 面板和卡片晚一帧无所谓。
+          pendingTasks.current.push(event.task);
+          schedule();
           break;
 
         case "compacting":
@@ -779,12 +823,29 @@ export function useSession(
     let historyReady = false;
     const buffered: AgentEvent[] = [];
 
+    /**
+     * `[约束]` 处理一条事件时抛出的异常不能漏出去。
+     *
+     * Tauri 的 Channel 在 JS 这头按序号排队交付：回调抛了，它就不会把
+     * "下一条该是几号"往前推，之后到的每一条都被当成"还没轮到"攒在缓冲里
+     * —— 通道从那一刻起悄悄死掉，宿主那边 `send` 照样成功，界面上是流式
+     * 正文停住、卡片不再更新，直到看门狗换出口。一条事件处理坏了只该丢
+     * 这一条。
+     */
+    const guarded = (event: AgentEvent) => {
+      try {
+        handle(event);
+      } catch (e) {
+        console.error("[session] event handler threw; dropping this event", event.type, e);
+      }
+    };
+
     const listen = (event: AgentEvent) => {
       if (!historyReady) {
         buffered.push(event);
         return;
       }
-      handle(event);
+      guarded(event);
     };
 
     const restoreQueue = () => {
@@ -827,6 +888,10 @@ export function useSession(
       }
       busyRef.current = busy;
       compactingRef.current = compacting;
+      // 快照里的子 agent 视图是此刻的权威。还没刷出去的旧视图不能在它
+      // 之后再落地 —— 换出口期间丢掉的那条"完成"要是恰好夹在中间，
+      // 卡片就会被一条更早的"运行中"盖回去，然后再没有事件来纠正它。
+      pendingTasks.current = [];
       setState((s) => applyHistorySnap(s, hist));
     };
 
@@ -860,7 +925,7 @@ export function useSession(
         for (const e of buffered) {
           // text/thinking 已经折进 liveText/liveThinking，再 handle 会重拼。
           if (isLiveDelta(e)) continue;
-          handle(e);
+          guarded(e);
         }
         buffered.length = 0;
       });
@@ -889,6 +954,8 @@ export function useSession(
           } else {
             busyRef.current = true;
             compactingRef.current = hist.compacting;
+            // 同 applySnap：快照里的子 agent 视图为准，攒着的旧视图作废。
+            pendingTasks.current = [];
             setState((s) => ({
               ...s,
               busy: true,
@@ -896,6 +963,10 @@ export function useSession(
               // 弹窗也要对账：睡眠期间到的询问，事件早发进死通道了，
               // 只有快照里有它。
               asks: reconcileAsks(s.asks, hist.pendingAsks),
+              // 子 agent 的状态同理：换出口期间丢掉的那条"完成"只有快照
+              // 里有，不吸进来卡片就一直转圈。它不碰条目，和正在流的内容
+              // 没有冲突。
+              tasks: hist.tasks ?? s.tasks,
               // 通道死掉的那段思考/正文只在内核缓冲里。不 catchUp 条目
               // 以免盖掉正在流的工具输出，但半截流要接上，否则字数停住。
               streaming: mergeLive(hist.liveText, s.streaming),
@@ -960,10 +1031,25 @@ export function useSession(
 
     const watchdog = window.setInterval(() => {
       if (cancelled) return;
-      if (!busyRef.current && !compactingRef.current) return;
-      if (Date.now() - lastHeardAt.current < BUSY_SILENCE_MS) return;
       if (Date.now() - lastSendAt.current < SEND_GRACE_MS) return;
-      void ensureLive({ catchUp: false });
+      const silence = Date.now() - lastHeardAt.current;
+      if (busyRef.current || compactingRef.current) {
+        // 轮子在跑时只换出口不盖条目：正在流的正文和工具输出别被快照冲掉。
+        if (silence >= BUSY_SILENCE_MS) {
+          console.warn(`[session] busy but silent for ${Math.round(silence / 1000)}s; resyncing`);
+          void ensureLive({ catchUp: false });
+        }
+        return;
+      }
+      // 主 agent 空闲、子 agent 在跑（见 TASK_SILENCE_MS）。这时本地没有
+      // 正在流的东西，整份按快照对齐：子 agent 的最新状态、完成通知唤起的
+      // 那一轮说了什么，都在快照里。
+      if (tasksRunningRef.current && silence >= TASK_SILENCE_MS) {
+        console.warn(
+          `[session] subagents running but silent for ${Math.round(silence / 1000)}s; resyncing`,
+        );
+        void ensureLive({ catchUp: true });
+      }
     }, 4_000);
 
     return () => {
@@ -1034,10 +1120,12 @@ export function useSession(
       } else {
         busyRef.current = true;
         waitStartAt.set(sessionId, Date.now());
+        // 用户又发了一句 = 上一轮的失败处理过了（或者想再试），红卡当场收掉，
+        // 不等 request_start 回来。
         setState((s) => ({
           ...s,
           busy: true,
-          items: [...s.items, optimistic(s.items)],
+          items: [...dropErrors(s.items), optimistic(s.items)],
         }));
       }
       try {
@@ -1068,7 +1156,7 @@ export function useSession(
           setState((s) => ({
             ...s,
             busy: true,
-            items: [...s.items, optimistic(s.items)],
+            items: [...dropErrors(s.items), optimistic(s.items)],
           }));
         }
         return true;
@@ -1081,10 +1169,7 @@ export function useSession(
           // 排队发送失败时上一轮还在跑，不能把它标成空闲 ——
           // 否则停止键消失了，输出却还在滚。
           busy: wasBusy,
-          items: [
-            ...s.items.filter((it) => it.id !== localId),
-            { kind: "error", id: `err-${Date.now()}`, text: sendFailureText(e) },
-          ],
+          items: [...s.items.filter((it) => it.id !== localId), sendFailureItem(e)],
         }));
         return false;
       }
@@ -1205,20 +1290,14 @@ export function useSession(
             return {
               ...restored,
               busy: false,
-              items: [
-                ...restored.items,
-                { kind: "error", id: `err-${Date.now()}`, text: humanizeError(e) },
-              ],
+              items: [...restored.items, errorItem(e)],
             };
           });
         } catch {
           setState((s) => ({
             ...s,
             busy: false,
-            items: [
-              ...s.items,
-              { kind: "error", id: `err-${Date.now()}`, text: humanizeError(e) },
-            ],
+            items: [...s.items, errorItem(e)],
           }));
         }
       }
@@ -1254,13 +1333,7 @@ export function useSession(
         setState((s) => rebuildFromSnap(s, after));
         return true;
       } catch (e) {
-        setState((s) => ({
-          ...s,
-          items: [
-            ...s.items,
-            { kind: "error", id: `err-${Date.now()}`, text: humanizeError(e) },
-          ],
-        }));
+        setState((s) => ({ ...s, items: [...s.items, errorItem(e)] }));
         return false;
       }
     },
@@ -1299,10 +1372,7 @@ export function useSession(
         }
         messageId = found;
       } catch (e) {
-        setState((s) => ({
-          ...s,
-          items: [...s.items, { kind: "error", id: `err-${Date.now()}`, text: humanizeError(e) }],
-        }));
+        setState((s) => ({ ...s, items: [...s.items, errorItem(e)] }));
         return false;
       }
       busyRef.current = true;
@@ -1331,20 +1401,14 @@ export function useSession(
             return {
               ...restored,
               busy: false,
-              items: [
-                ...restored.items,
-                { kind: "error", id: `err-${Date.now()}`, text: humanizeError(e) },
-              ],
+              items: [...restored.items, errorItem(e)],
             };
           });
         } catch {
           setState((s) => ({
             ...s,
             busy: false,
-            items: [
-              ...s.items,
-              { kind: "error", id: `err-${Date.now()}`, text: humanizeError(e) },
-            ],
+            items: [...s.items, errorItem(e)],
           }));
         }
         return false;
@@ -1460,7 +1524,7 @@ function rebuildFromSnap(s: SessionState, hist: HistorySnap): SessionState {
     ...s,
     busy: hist.busy,
     compacting: hist.compacting,
-    items: historyToItems(messages, archived, false),
+    items: [...historyToItems(messages, archived, false), ...lastErrorItem(hist)],
     tokens: sumUsage([...archived, ...messages]),
     streaming: "",
     thinking: "",
@@ -1531,7 +1595,11 @@ function applyHistorySnap(s: SessionState, hist: HistorySnap): SessionState {
             // 空闲也按快照对账而不是清空：后台子 agent 的询问不属于任何
             // 一轮，前台空闲时它可能正等着人答。快照为准。
             asks: reconcileAsks(s.asks, hist.pendingAsks),
-            items: finalizeIdleItems(s.items, t("transcript.session.unfinished")),
+            // 历史为空但上一轮失败了（第一句就没发出去）：红卡从快照来。
+            items: [
+              ...finalizeIdleItems(dropErrors(s.items), t("transcript.session.unfinished")),
+              ...lastErrorItem(hist),
+            ],
           }
         : {
             asks: reconcileAsks(s.asks, hist.pendingAsks),
@@ -1548,7 +1616,12 @@ function applyHistorySnap(s: SessionState, hist: HistorySnap): SessionState {
   }
 
   const fromHist = historyToItems(messages, archived, busy);
-  const items = mergeLiveTools(mergeOptimisticUser(fromHist, s.items), s.items);
+  // 错误卡以快照为准：历史里没有它（失败不进历史），本地画着的那张要么
+  // 就是快照里这条，要么是宿主已经开了新一轮之后过时的旧卡。
+  const items = [
+    ...mergeLiveTools(mergeOptimisticUser(fromHist, s.items), s.items),
+    ...lastErrorItem(hist),
+  ];
   const tokens = sumUsage([...archived, ...messages]);
   if (busy) {
     return {
@@ -1853,11 +1926,38 @@ export function messagesToItems(msgs: Message[], skipSynthetic = false): Item[] 
         }
       }
     } else {
-      items.push({ kind: "error", id: msg.id, text: msg.text });
+      const it = systemItem(msg);
+      if (it) items.push(it);
     }
   }
 
   return items;
+}
+
+/**
+ * 历史里的 System 消息 → 界面条目。
+ *
+ * error 级的不画：失败现在是会话状态（快照的 `lastError`），不再写进历史；
+ * 老 transcript 里残留的那些描述的都是早已过去的某次尝试，画出来只是
+ * 一排永远消不掉的红卡。其余级别（Stop hook 拦住收尾之类）记录的是轮内
+ * 真实发生的干预，画成中性提示 —— 它不是出错。带词典键的按当前语言翻，
+ * 老记录只有原话就用原话。
+ */
+function systemItem(msg: Extract<Message, { role: "system" }>): Item | null {
+  if (msg.level === "error") return null;
+  const text = msg.ui ? renderUiText({ key: msg.ui.key, args: msg.ui.args ?? {} }) : msg.text;
+  return { kind: "notice", id: msg.id, text };
+}
+
+/** 错误卡是会话状态：新一轮一开，上一轮的失败就过时了，整批收掉。 */
+function dropErrors(items: Item[]): Item[] {
+  return items.some((it) => it.kind === "error") ? items.filter((it) => it.kind !== "error") : items;
+}
+
+/** 快照里带着的"最近一轮失败"→ 画在末尾的那张错误卡。 */
+function lastErrorItem(hist: HistorySnap): Item[] {
+  if (!hist.lastError || hist.busy) return [];
+  return [{ kind: "error", id: "last-error", ...describeError(hist.lastError) }];
 }
 
 /**
@@ -2059,12 +2159,8 @@ function applyMessage(s: SessionState, event: Extract<AgentEvent, { type: "messa
   }
 
   if (msg.role === "system") {
-    // 新消息带词典键，按当前语言显示，技术细节跟在后面；老 transcript
-    // 只有 text，原样上屏。
-    const text = msg.ui
-      ? renderUiError({ key: msg.ui.key, args: msg.ui.args ?? {}, detail: msg.text })
-      : msg.text;
-    items.push({ kind: "error", id: msg.id, text });
+    const it = systemItem(msg);
+    if (it) items.push(it);
   }
   return { ...s, items };
 }
@@ -2112,7 +2208,9 @@ function applyDone(s: SessionState, event: Extract<AgentEvent, { type: "done" }>
 
   const r = event.reason;
   if (r.reason === "error") {
-    items.push({ kind: "error", id: `done-${Date.now()}`, text: describeError(r.error) });
+    // 失败只在 Done 里报一次（内核不再往历史写 System 消息），这里是它
+    // 唯一的画法。宿主同时把它记成会话状态，切走再切回靠快照画回来。
+    items.push({ kind: "error", id: `done-${Date.now()}`, ...describeError(r.error) });
   } else if (r.reason === "max_turns") {
     // 不是报错:模型这一轮自主跑满了步数上限，停下来等指示。用中性
     // 提示，别用红色 error 样式吓人。文案说清"没坏、接着说就行"。
@@ -2219,9 +2317,24 @@ function applyResolved(s: SessionState, requestId: string, reason: DecisionReaso
  * 输入框，重发就行。超时的结果**不确定** —— 命令可能已经落地、轮子已经
  * 在跑，只是回执没回来。这时催用户重发，就是在制造两条一模一样的消息。
  */
-function sendFailureText(e: unknown): string {
-  if (isIpcTimeout(e)) return t("transcript.session.sendTimeout");
-  return humanizeError(e);
+function sendFailureItem(e: unknown): Item {
+  if (isIpcTimeout(e)) {
+    return { kind: "error", id: `err-${Date.now()}`, text: t("transcript.session.sendTimeout") };
+  }
+  return errorItem(e);
+}
+
+/** 错误卡的两段（见 `Item` 的 error 变体）。没有细节就不带这个键。 */
+type ErrorParts = { text: string; detail?: string };
+
+function parts(text: string, detail?: string | null): ErrorParts {
+  const d = detail?.trim();
+  return d ? { text, detail: d } : { text };
+}
+
+/** catch 到的任何东西 → 一张错误卡。 */
+function errorItem(e: unknown): Item {
+  return { kind: "error", id: `err-${Date.now()}`, ...humanizeError(e) };
 }
 
 /**
@@ -2247,37 +2360,42 @@ const KNOWN_ERRORS: [RegExp, MessageKey][] = [
 ];
 
 /**
- * 把一串技术错误链翻成一句人话。识别不了的原样保留 —— 编出来的
- * 解释比看不懂的原文更糟。原文压缩在括号里，报 bug 时用得上。
+ * 把一串技术错误链翻成一句人话，原文放进折叠的细节 —— 报 bug 时用得上，
+ * 平时不该占地方。识别不了的原样当正文 —— 编出来的解释比看不懂的原文更糟。
  */
-function humanizeError(e: unknown): string {
+function humanizeError(e: unknown): ErrorParts {
   // 宿主超时要抢在下面那条 timeout 规则前面：那句话说的是"网络或服务方
   // 没按时响应"，而这一类根本没走到网络 —— 是宿主自己没回话。
-  if (isIpcTimeout(e)) return t("transcript.session.humanize.ipcTimeout", { message: e.message });
+  if (isIpcTimeout(e)) return parts(t("transcript.session.humanize.ipcTimeout", { message: e.message }));
+  // 宿主的结构化错误自带译文和细节，不用再从拼好的字符串里猜。
+  if (isHostError(e)) return fromSplit(splitUiError(e));
   const raw = String(e);
   const lower = raw.toLowerCase();
   for (const [re, key] of KNOWN_ERRORS) {
-    if (re.test(lower)) {
-      const detail = raw.length > 200 ? `${raw.slice(0, 200)}…` : raw;
-      return t("errors.withDetail", { text: t(key), detail });
-    }
+    if (re.test(lower)) return parts(t(key), raw.length > 200 ? `${raw.slice(0, 200)}…` : raw);
   }
-  return raw;
+  return parts(raw);
 }
 
-function describeError(e: AgentError): string {
+function fromSplit(s: SplitError): ErrorParts {
+  return parts(s.text, s.detail);
+}
+
+function describeError(e: AgentError): ErrorParts {
   switch (e.kind) {
     case "provider":
       // 内核已按原因（认证、限流、额度、连不上）选好键，HTTP 原文在 detail 里。
-      return renderUiError(e.error);
+      return fromSplit(splitUiError(e.error));
     case "context_exhausted":
-      return t("transcript.session.err.contextExhausted", { used: e.used, limit: e.limit });
+      return parts(t("transcript.session.err.contextExhausted", { used: e.used, limit: e.limit }));
     case "compact_circuit_open":
-      return tn("transcript.session.err.compactCircuit", e.attempts);
-    case "internal":
-      return t("transcript.session.err.internal", { message: renderUiError(e.error) });
+      return parts(tn("transcript.session.err.compactCircuit", e.attempts));
+    case "internal": {
+      const inner = splitUiError(e.error);
+      return parts(t("transcript.session.err.internal", { message: inner.text }), inner.detail);
+    }
     default:
-      return t("transcript.session.err.unknown");
+      return parts(t("transcript.session.err.unknown"));
   }
 }
 

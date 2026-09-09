@@ -125,8 +125,8 @@ export default {
   "settings.provider.editor.fetching": "가져오는 중…",
   "settings.provider.editor.fetch": "API에서 가져오기",
   "settings.provider.editor.models.empty": "아직 모델이 없습니다. 오른쪽 위의 「모델 추가」로 직접 입력하거나 API에서 가져오세요.",
-  "settings.provider.editor.currentModel": "현재 모델",
-  "settings.provider.editor.setCurrent": "현재 모델로 설정",
+  "settings.provider.editor.testModel": "연결 테스트에 사용할 모델",
+  "settings.provider.editor.testWith": "이 모델로 연결 테스트",
   "settings.provider.editor.vision.aria": "이미지 입력 가능",
   "settings.provider.editor.vision.title": "이 모델은 이미지를 받을 수 있습니다",
   "settings.provider.editor.editModel": "모델 편집",
@@ -138,6 +138,7 @@ export default {
   "settings.provider.editor.sampling.desc":
     "이 제공자의 기본값입니다. 「모델 기본값」으로 표시된 필드는 전혀 보내지 않고 모델이 스스로 정합니다. 모델이 따로 설정하지 않은 필드는 여기 값을 쓰며, 개별 모델은 편집 창에서 바꾸고 대화에서는 세션별로 임시 재정의할 수 있습니다.",
   "settings.provider.editor.test.hint": "최소 요청을 보내 설정을 검증합니다.",
+  "settings.provider.editor.test.hintModel": "{model} 모델로 최소 요청을 보내 설정을 검증합니다.",
   "settings.provider.editor.testNeedsKey": "먼저 위에서 API key를 저장해야 연결을 테스트할 수 있습니다",
   "settings.provider.editor.test": "연결 테스트",
   "settings.provider.editor.test.ok": "연결 정상: {detail}",

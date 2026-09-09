@@ -156,10 +156,6 @@ mod platform {
         title: &str,
         body: &str,
     ) -> Result<(), tauri_plugin_notification::Error> {
-        app.notification()
-            .builder()
-            .title(title)
-            .body(body)
-            .show()
+        app.notification().builder().title(title).body(body).show()
     }
 }

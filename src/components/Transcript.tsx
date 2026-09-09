@@ -50,12 +50,14 @@ import {
   segsToPrompt,
 } from "../lib/promptText";
 import { openPlanPanel } from "../lib/plan";
+import { Chevron } from "./Chevron";
 import { Chip, FileChip } from "./Chip";
 import { ConfirmDialog, type ConfirmRequest } from "./ConfirmDialog";
 import { PlanModeIcon } from "./icons";
 import { LazyMarkdown, Markdown } from "./Markdown";
 import { AskChoiceCard, ModeSwitchCard } from "./PermissionDialog";
 import { type Block, groupBlocks, ProcessGroup, ThinkingBlock } from "./ProcessFold";
+import { SmoothFold } from "./SmoothFold";
 import { TaskNoticeCard } from "./TaskPanel";
 import { ShotViewer, ToolCard } from "./ToolCard";
 
@@ -1041,7 +1043,7 @@ export const Row = memo(function Row({
     case "tool":
       return <ToolCard tool={item} eager={!!hydrate} />;
     case "error":
-      return <div className="msg error">{item.text}</div>;
+      return <ErrorCard item={item} />;
     case "notice":
       return <div className="msg notice">{item.text}</div>;
     case "task_notice":
@@ -1054,6 +1056,44 @@ export const Row = memo(function Row({
       );
   }
 });
+
+/**
+ * 错误卡：常驻的只有一句人话，技术细节折在「详情」里。
+ *
+ * 照 Codex 的处理：出错时用户要知道的是"怎么回事、该做什么"，一屏服务方
+ * 的原始响应（整段 JSON、整张网页）回答不了这两个问题，只会把对话流
+ * 撑成一大块红。原话是排查的人才需要的，点开再看 —— 而且内核那边已经
+ * 只留了说明原因的那一句（见 riot-providers 的 summarize_body）。
+ */
+function ErrorCard({ item }: { item: Extract<Item, { kind: "error" }> }) {
+  const { t } = useT();
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="msg error">
+      <div className="error-line">
+        <span className="error-text">{item.text}</span>
+        {item.detail ? (
+          <button
+            type="button"
+            className="error-detail-toggle"
+            // 只为开合，不把焦点吃过去：WKWebView 会把 focused button 滚进视野。
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+          >
+            {t("transcript.error.detail")}
+            <Chevron open={open} />
+          </button>
+        ) : null}
+      </div>
+      {item.detail ? (
+        <SmoothFold open={open}>
+          <code className="error-detail">{item.detail}</code>
+        </SmoothFold>
+      ) : null}
+    </div>
+  );
+}
 
 /**
  * 气泡上的时刻只到分钟。

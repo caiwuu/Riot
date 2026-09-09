@@ -25,7 +25,7 @@ use riot_core::state::{AgentDeps, AgentState};
 use riot_core::testing::{
     FakeCompactor, MockClock, ScriptedResult, ScriptedToolRunner, SeqIdGenerator,
 };
-use riot_protocol::event::AgentEvent;
+use riot_protocol::event::{AgentEvent, TerminalReason};
 use riot_protocol::id::MessageId;
 use riot_protocol::id::SessionId;
 use riot_protocol::message::{Message, MessageMeta, UserContent};
@@ -317,22 +317,32 @@ async fn provider_内部重试对主循环不可见() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn 不可恢复的错误变成对话内容而不是崩溃() {
+async fn 不可恢复的错误变成_done_而不是崩溃_也不进历史() {
     let t = Arc::new(ScriptedTransport::new(vec![ScriptedResponse::Fail(
         HttpError::status(400, "invalid tool schema"),
     )]));
 
     let events = run(t, ScriptedToolRunner::new(tool_results(&[]))).await;
 
-    assert!(
-        matches!(events.last(), Some(AgentEvent::Done { .. })),
-        "错误是对话内容，不是流的终止方式（INV-4）"
-    );
+    // 流以 Done 收场（INV-4），失败原因带在 Done 里 —— 用户要能看到出了什么事。
+    match events.last() {
+        Some(AgentEvent::Done {
+            reason: TerminalReason::Error { error },
+        }) => assert!(
+            format!("{error:?}").contains("invalid tool schema"),
+            "服务方原话要在 Done 里：{error:?}"
+        ),
+        other => panic!("该以带错误的 Done 收场：{other:?}"),
+    }
 
-    let has_error_msg = events
-        .iter()
-        .any(|e| matches!(e, AgentEvent::Message(Message::System { .. })));
-    assert!(has_error_msg, "用户要能看到出了什么事");
+    // 错误是会话状态不是对话内容：不往历史里写 System 消息（改好之后
+    // 那张红卡不该永远钉在记录里）。
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Message(Message::System { .. }))),
+        "失败不该产生 System 消息"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -349,11 +359,14 @@ async fn 截断的流不会让_agent_静默停住() {
 
     let events = run(t, ScriptedToolRunner::new(tool_results(&[]))).await;
 
-    assert!(matches!(events.last(), Some(AgentEvent::Done { .. })));
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::Message(Message::System { .. }))),
-        "截断必须变成一条用户可见的消息，不能静默"
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                reason: TerminalReason::Error { .. }
+            })
+        ),
+        "截断必须以带错误的 Done 收场让用户看见，不能静默：{:?}",
+        events.last()
     );
 }

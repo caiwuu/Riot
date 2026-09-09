@@ -235,10 +235,15 @@ pub async fn dispatch(
 
         // ── 浏览器面板 ──
         "browser_open" => ok(st
-            .browser_open_for(viewer, &a.take::<String>("sessionId")?, a.chan("onFrame")?)
+            .browser_open_for(
+                viewer,
+                a.take("epoch")?,
+                &a.take::<String>("sessionId")?,
+                a.chan("onFrame")?,
+            )
             .await),
         "browser_close" => ok(st
-            .browser_close_for(viewer, &a.take::<String>("sessionId")?)
+            .browser_close_for(viewer, a.take("epoch")?, &a.take::<String>("sessionId")?)
             .await),
         "browser_watch_tabs" => ok(st
             .browser_watch_tabs_for(viewer, &a.take::<String>("sessionId")?, a.chan("onChange")?)

@@ -254,13 +254,15 @@ function SubagentModel({
   const { t, tx } = useT();
   // 这里不筛模型：任何模型都能读文件、写报告。视觉兼容要筛是因为
   // 挑错了每次截图都是个 400，而这里挑错了只是慢一点或笨一点。
+  // 也不把对话正在用的主模型从候选里剔掉。「跟主模型」和「钉死在 X 上」
+  // 是两回事 —— 前者随输入框上的切换走，后者不动；而且早先剔掉的写法在
+  // 用户把主模型切成已选的那个 X 时，下拉会显示成一片空白。
   const options = cfg.providers.flatMap((p) =>
     p.models.map((m) => ({
       value: `${p.id}/${m.id}`,
       label: `${p.name} · ${m.name?.trim() || m.id}`,
     })),
   );
-  const activeValue = `${cfg.activeProvider}/${cfg.activeModel}`;
   const known = options.some((o) => o.value === cfg.subagentModel);
 
   return (
@@ -270,10 +272,7 @@ function SubagentModel({
           value={known ? cfg.subagentModel : ""}
           onChange={(v) => void onCommit({ ...cfg, subagentModel: v })}
           disabled={options.length === 0}
-          options={[
-            { value: "", label: t("settings.provider.subagent.main") },
-            ...options.filter((o) => o.value !== activeValue),
-          ]}
+          options={[{ value: "", label: t("settings.provider.subagent.main") }, ...options]}
         />
       </Row>
       {cfg.subagentModel && !known ? (

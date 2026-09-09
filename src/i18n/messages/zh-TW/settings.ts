@@ -124,8 +124,8 @@ export default {
   "settings.provider.editor.fetching": "取得中…",
   "settings.provider.editor.fetch": "從 API 取得",
   "settings.provider.editor.models.empty": "還沒有模型。用右上角的「新增模型」手動填，或從 API 取得。",
-  "settings.provider.editor.currentModel": "目前模型",
-  "settings.provider.editor.setCurrent": "設為目前模型",
+  "settings.provider.editor.testModel": "測試連線用的模型",
+  "settings.provider.editor.testWith": "測試連線時改用這個模型",
   "settings.provider.editor.vision.aria": "可接收圖片",
   "settings.provider.editor.vision.title": "這個模型可接收圖片",
   "settings.provider.editor.editModel": "編輯模型",
@@ -137,6 +137,7 @@ export default {
   "settings.provider.editor.sampling.desc":
     "這一家的預設值。寫著「模型預設」的欄位一個都不送，由模型自己決定；模型沒單獨設定的欄位用這裡的值，單個模型在它的編輯視窗裡改，對話裡還能依會話臨時覆寫。",
   "settings.provider.editor.test.hint": "送一個最小請求驗證設定。",
+  "settings.provider.editor.test.hintModel": "用 {model} 送一個最小請求驗證設定。",
   "settings.provider.editor.testNeedsKey": "先在上面儲存 API key，才能測試連線",
   "settings.provider.editor.test": "測試連線",
   "settings.provider.editor.test.ok": "連線正常：{detail}",

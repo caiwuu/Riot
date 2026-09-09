@@ -102,7 +102,7 @@ export default {
   "app.scopeBadge.label": "ペンテスト許可：{count} サイト",
   "app.resizer.title": "ドラッグでサイズ変更、ダブルクリックで初期値に戻す",
 
-  "app.welcome.tagline": "各セッションはプロジェクトフォルダに紐づきます。",
+  "app.welcome.tagline": "プロジェクトフォルダを開いて、会話を始めましょう。",
   "app.welcome.recent": "最近",
   "app.welcome.dirMissing": "フォルダが見つかりません",
 

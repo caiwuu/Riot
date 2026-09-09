@@ -102,7 +102,7 @@ export default {
   "app.scopeBadge.label": "滲透授權 {count} 個網站",
   "app.resizer.title": "拖曳調整大小，按兩下恢復預設",
 
-  "app.welcome.tagline": "每個會話綁定一個專案資料夾。",
+  "app.welcome.tagline": "打開一個專案資料夾，開始對話。",
   "app.welcome.recent": "最近",
   "app.welcome.dirMissing": "找不到這個資料夾",
 

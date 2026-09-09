@@ -180,9 +180,7 @@ pub fn run_agent(
                             yield AgentEvent::Message(msg);
                         }
                         invariants::check_tool_pairing(&state.messages);
-                        let msg = error_message_for_user(&deps, &e);
-                        state.messages.push(msg.clone());
-                        yield AgentEvent::Message(msg);
+                        // 错误只走 Done，不写成消息（见模块尾部「错误不进历史」）。
                         yield AgentEvent::Done {
                             reason: TerminalReason::Error {
                                 error: AgentError::Provider {
@@ -272,9 +270,6 @@ pub fn run_agent(
                         continue;
                     }
                     Recovery::Surface(error) => {
-                        let msg = error_message_for_user(&deps, &err);
-                        state.messages.push(msg.clone());
-                        yield AgentEvent::Message(msg);
                         yield AgentEvent::Done { reason: TerminalReason::Error { error } };
                         return;
                     }
@@ -632,22 +627,19 @@ fn synthesize_orphan_results(state: &AgentState, id_suffix: &str, text: &str) ->
     })
 }
 
-/// 把 provider 错误转成给用户看的系统消息。
-///
-/// `[约束]` 用 `System` 而不是 `Assistant`。System 消息不回送模型 ——
-/// 让模型看到「你上次请求失败了」的元信息会让它开始为错误道歉，
-/// 而不是继续干活。由 INV-7 断言。
-fn error_message_for_user(deps: &AgentDeps, err: &ProviderError) -> Message {
-    let ui = err.ui_error();
-    Message::System {
-        id: deps.ids.message_id(),
-        level: riot_protocol::message::SystemLevel::Error,
-        // `text` 是技术细节：服务方原话。没有原话（数值类错误）就放英文
-        // 表示 —— 老前端和日志读它，新前端读 `ui`。
-        text: ui.detail.clone().unwrap_or_else(|| err.to_string()),
-        ui: Some(ui.text),
-    }
-}
+// ── 错误不进历史 ─────────────────────────────────────────────
+//
+// 失败只通过 `Done { reason: Error }` 报出去，**不**写成 `Message::System`。
+//
+// 早先每次失败都往历史里追加一条 System 消息（不回送模型，只给人看），
+// 图的是重启后还能看到"为什么没有回答"。代价比收益大：错误描述的是某
+// 一次尝试，不是对话内容 —— 用户改好 key / 模型名再发一句，那张红卡还
+// 钉在记录里，每次翻历史都在。宿主把最近一轮的失败当**会话状态**记着
+// （下一轮开始就清），前端在切回会话时靠它把红卡画回末尾；重启后没有
+// 这条状态，那句没有回答的提问重发一次就知道结果。
+//
+// Stop hook 的 Info 级 System 消息不在此列：那记录的是轮内真实发生的
+// 干预，属于"发生了什么"，照常进历史。
 
 /// 让 `AgentDeps` 里的 Arc 用起来顺手一点。
 impl AgentDeps {

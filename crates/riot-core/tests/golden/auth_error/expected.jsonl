@@ -1,3 +1,2 @@
 {"type":"request_start","turn":0,"model":"test-model"}
-{"type":"message","role":"system","id":"msg_1","level":"error","text":"401 Unauthorized","ui":{"key":"kernel.provider.auth"}}
 {"type":"done","reason":{"reason":"error","error":{"kind":"provider","error":{"key":"kernel.provider.auth","detail":"401 Unauthorized"},"retryable":false}}}

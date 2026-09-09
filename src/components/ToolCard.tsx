@@ -114,9 +114,9 @@ const PlanCard = memo(function PlanCard({ tool }: { tool: Tool }) {
  * 什么；整张卡是一个链接，点开右侧抽屉里它的完整会话。
  *
  * 数据来自会话的子 agent 登记表（SubagentsContext，按 tool_use_id 认领），
- * 卡片本身只知道输入参数。登记表没有它（内核重启过）就退回参数里的
- * 描述，agent id 从结果文本里捞 —— 点开会看到"记录已不在"，但至少
- * 知道它存在过。
+ * 卡片本身只知道输入参数。登记表跟着会话落盘，重启后照样认得；实在没有
+ * 它（记录文件被删了、当时一条消息都没写下）就退回参数里的描述，agent id
+ * 从结果文本里捞 —— 点开会看到"找不到记录"，但至少知道它存在过。
  */
 const TaskCard = memo(function TaskCard({ tool }: { tool: Tool }) {
   const { t } = useT();

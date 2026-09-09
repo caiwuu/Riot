@@ -20,6 +20,7 @@ export default {
   "transcript.compactRule": "これより上のメッセージは圧縮されました",
 
   "transcript.msg.stopped": "生成を停止しました",
+  "transcript.error.detail": "詳細",
   "transcript.msg.copy": "原文をコピー",
   "transcript.msg.regenerate": "再生成",
   "transcript.msg.regenerateBusy": "生成中です。終了後に再生成できます",
@@ -81,7 +82,7 @@ export default {
   "transcript.taskPanel.dismiss": "閉じる",
   "transcript.taskPanel.dismissTitle": "終了したタスクを閉じる",
   "transcript.taskPanel.stopTitle": "このバックグラウンドタスクを停止",
-  "transcript.subagent.gone": "このサブエージェントの記録はカーネルに残っていません（カーネル再起動後は古い id が無効になります）。",
+  "transcript.subagent.gone": "このサブエージェントの記録が見つかりません（記録ファイルが削除されたか、何も書き残す前に終わった可能性があります）。",
   "transcript.subagent.prompt": "タスク",
   "transcript.subagent.starting": "起動しています…",
   "transcript.subagent.stopTitle": "このサブエージェントを停止",

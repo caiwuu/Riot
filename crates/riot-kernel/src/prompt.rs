@@ -852,6 +852,75 @@ pub(crate) fn nudge_reminder(nudge: riot_protocol::Nudge) -> UserContent {
     }
 }
 
+/// 定时任务到点那一轮，跟在任务 prompt 之后的一条说明：谁叫醒了你、你的
+/// 任务 id 是什么、目标达成或跑不下去时怎么收尾。
+///
+/// 不注入的话，模型收到的是一句和用户手敲的一模一样的话，两种坏形态直接
+/// 跟着来（对照 Cursor routines 里"self-expiring watch"和"recurring auth
+/// failure → pause"两条）：「每五分钟盯 CI 直到过」在 CI 过了之后还一直
+/// 跑，因为模型不知道该删哪个任务 —— 它连自己是被定时任务叫醒的都不知道；
+/// 一个权限被拒的周期任务每次到点失败一次、报一次，永不停歇。
+///
+/// 一次性任务另说一版：宿主在开跑前已经把它停用了，"目标达成就删"对它
+/// 没有意义，讲了只会让模型多调一次 Schedule。
+///
+/// 走消息侧而不是 system prompt：同一个会话既可能是用户手敲开的，也可能
+/// 是任务续跑进来的（`in_this_session`），这条只属于到点的那一轮。
+pub(crate) fn scheduled_wake_reminder(wake: &riot_protocol::ScheduledWake) -> UserContent {
+    use riot_protocol::Repeat;
+    let head = format!(
+        "This turn was started by the scheduled task 「{}」 (id `{}`, {}). Nobody typed the \
+         message above: it is the prompt saved when the task was created, and the user may not \
+         be watching this session right now — write your report so it stands on its own.",
+        wake.name,
+        wake.task_id,
+        describe_repeat(&wake.repeat),
+    );
+    let text = if matches!(wake.repeat, Repeat::Once) {
+        format!("{head} This task was one-off; it has already been disabled and will not fire again.")
+    } else {
+        format!(
+            "{head}\n\
+             - This task repeats by itself. Do NOT create another scheduled task for the same \
+             job.\n\
+             - Manage it with the Schedule tool by the id above; you do not need to `list` first.\n\
+             - If the task's goal is now achieved — the thing it was watching for has happened, \
+             or a deadline written in its prompt has passed — say so in your report and then \
+             `delete` it. A finished watch that keeps firing wakes the user for nothing.\n\
+             - If this run cannot do its job for a reason that will not fix itself by next time \
+             (permission denied, a missing tool or credential, a target that no longer exists), \
+             `pause` the task and say plainly what needs fixing, instead of failing the same way \
+             again at every run."
+        )
+    };
+    UserContent::Attachment(Attachment::SystemReminder { text })
+}
+
+/// 重复规则的英文说法（提醒是给模型看的，见模块文档）。时刻是宿主存的
+/// 本地墙钟 "HH:MM"，原样给。
+fn describe_repeat(repeat: &riot_protocol::Repeat) -> String {
+    use riot_protocol::Repeat;
+    match repeat {
+        Repeat::Once => "one-off".to_owned(),
+        Repeat::Every { minutes } => format!("repeats every {minutes} minutes"),
+        Repeat::Daily { time } => format!("repeats daily at {time}"),
+        Repeat::Weekdays { time } => format!("repeats on weekdays at {time}"),
+        Repeat::Weekly { weekday, time } => {
+            let day = match weekday {
+                1 => "Monday",
+                2 => "Tuesday",
+                3 => "Wednesday",
+                4 => "Thursday",
+                5 => "Friday",
+                6 => "Saturday",
+                7 => "Sunday",
+                _ => "an unknown weekday",
+            };
+            format!("repeats weekly on {day} at {time}")
+        }
+    }
+}
+
 /// 计划在哪。两条构建提醒共用这一段。
 ///
 /// 正常情况下计划内容就附在同一条消息里（[`current_plan_context`]，从磁盘
@@ -1386,6 +1455,74 @@ mod tests {
                 "旧计划 / 没给待办的计划要有退路：{n:?}: {text}"
             );
         }
+    }
+
+    /// 定时任务的唤醒说明要带任务 id 和收尾规则，一次性任务不讲收尾。
+    ///
+    /// 不带 id 的话"目标达成就删"是句空话 —— 模型得先 list 再按名字对；
+    /// 不讲"跑不下去就 pause"的话，一个坏掉的周期任务会每到点报错一次。
+    #[test]
+    fn 定时任务唤醒说明带_id_和收尾规则() {
+        use riot_protocol::{Repeat, ScheduledWake};
+        let wake = ScheduledWake {
+            task_id: "sch_42".into(),
+            name: "盯 CI".into(),
+            repeat: Repeat::Every { minutes: 5 },
+        };
+        let UserContent::Attachment(Attachment::SystemReminder { text }) =
+            scheduled_wake_reminder(&wake)
+        else {
+            panic!("该是 system-reminder");
+        };
+        assert!(text.contains("「盯 CI」"), "{text}");
+        assert!(text.contains("`sch_42`"), "任务 id 必须在：{text}");
+        assert!(text.contains("every 5 minutes"), "{text}");
+        assert!(text.contains("`delete`"), "目标达成要删：{text}");
+        assert!(text.contains("`pause`"), "跑不下去要暂停：{text}");
+        assert!(
+            text.contains("Do NOT create another scheduled task"),
+            "周期任务自己会继续：{text}"
+        );
+
+        let once = scheduled_wake_reminder(&ScheduledWake {
+            task_id: "sch_1".into(),
+            name: "提醒".into(),
+            repeat: Repeat::Once,
+        });
+        let UserContent::Attachment(Attachment::SystemReminder { text }) = once else {
+            panic!("该是 system-reminder");
+        };
+        assert!(text.contains("one-off"), "{text}");
+        assert!(
+            !text.contains("`delete`") && !text.contains("`pause`"),
+            "一次性任务宿主已经停用，不该再教它删或暂停：{text}"
+        );
+    }
+
+    /// 重复规则的英文说法覆盖全部变体，星期要翻成名字。
+    #[test]
+    fn 重复规则的英文说法() {
+        use riot_protocol::Repeat;
+        assert_eq!(describe_repeat(&Repeat::Once), "one-off");
+        assert_eq!(
+            describe_repeat(&Repeat::Daily {
+                time: "08:00".into()
+            }),
+            "repeats daily at 08:00"
+        );
+        assert_eq!(
+            describe_repeat(&Repeat::Weekdays {
+                time: "09:30".into()
+            }),
+            "repeats on weekdays at 09:30"
+        );
+        assert_eq!(
+            describe_repeat(&Repeat::Weekly {
+                weekday: 5,
+                time: "16:00".into()
+            }),
+            "repeats weekly on Friday at 16:00"
+        );
     }
 
     /// 并行调用的指引必须写进提示词。

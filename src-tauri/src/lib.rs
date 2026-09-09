@@ -633,8 +633,7 @@ async fn check_update(app: tauri::AppHandle) -> HostResult<update::UpdateInfo> {
 /// 同步的 WinRT 调用。
 #[tauri::command]
 async fn notify(app: tauri::AppHandle, title: String, body: String) {
-    let done =
-        tokio::task::spawn_blocking(move || notification::send(&app, &title, &body)).await;
+    let done = tokio::task::spawn_blocking(move || notification::send(&app, &title, &body)).await;
     if let Err(e) = done {
         tracing::warn!(error = %e, "notification task panicked");
     }
@@ -852,16 +851,22 @@ async fn set_api_key(
 ///
 /// 多个观看者（桌面 + 网页）同时看同一个面板时画面按观看者扇出，最后一个
 /// 关掉的才真正停编码 —— 实现在 [`AppState::browser_open_for`]。
+///
+/// `epoch` 是前端给的订阅序号，`browser_close` 带同一个数。和
+/// `subscribe_session` 的 `epoch` 是同一个理由：open / close 在宿主侧是
+/// 并发任务，落地顺序没有保证，没有序号分不出"这条 close 关的是哪次 open"。
 #[tauri::command]
 async fn browser_open(
     state: tauri::State<'_, AppState>,
     webview: tauri::Webview,
     session_id: String,
+    epoch: u64,
     on_frame: Channel<tauri::ipc::InvokeResponseBody>,
 ) -> HostResult<browser::access::PanelState> {
     state
         .browser_open_for(
             &state::webview_viewer(webview.label()),
+            epoch,
             &session_id,
             on_frame,
         )
@@ -869,14 +874,16 @@ async fn browser_open(
 }
 
 /// 关闭面板。停止编码 —— 没人看的时候继续推是白烧 CPU 和电。
+/// `epoch` 要和对应那次 `browser_open` 的一致，理由见那边。
 #[tauri::command]
 async fn browser_close(
     state: tauri::State<'_, AppState>,
     webview: tauri::Webview,
     session_id: String,
+    epoch: u64,
 ) -> HostResult<()> {
     state
-        .browser_close_for(&state::webview_viewer(webview.label()), &session_id)
+        .browser_close_for(&state::webview_viewer(webview.label()), epoch, &session_id)
         .await
 }
 

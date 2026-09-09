@@ -269,6 +269,58 @@ impl FileStateCache for PersistingBaselines {
     }
 }
 
+/// 子 agent 的文件状态：自己的先读后写缓存，改动基线记到父会话头上。
+///
+/// 两样东西刻意分开。"读过没读过"必须各算各的 —— 共享缓存的话，父读过的
+/// 文件子 agent 没看就能改（见 `subagent::TaskTool::build_job`）。但"这个
+/// 会话改了什么"是按会话问的：用户看输入框上方那条改动栏时，不会区分是
+/// 主 agent 还是它派出去的子 agent 动的手。此前子 agent 的基线记在它自己
+/// 那份缓存里，随任务结束一起丢掉，改动栏就漏了它们改的文件（真实事故：
+/// 子 agent 新建的文件在改动栏里一个都没有，主 agent 只改了一个就只显示
+/// 一个）。分叉的子 agent 本来就套着父的缓存，不受影响。
+///
+/// 基线"只有第一次算数"的规矩在父那份缓存里统一执行：父先改过的文件，
+/// 子 agent 再改也不会覆盖掉最初的基线。
+pub struct SubagentFileState {
+    own: Arc<MemoryFileState>,
+    parent: Arc<dyn FileStateCache>,
+}
+
+impl SubagentFileState {
+    pub fn new(parent: Arc<dyn FileStateCache>) -> Self {
+        Self {
+            own: MemoryFileState::shared(),
+            parent,
+        }
+    }
+}
+
+impl FileStateCache for SubagentFileState {
+    fn get(&self, path: &Path) -> Option<FileState> {
+        self.own.get(path)
+    }
+
+    fn put(&self, path: PathBuf, state: FileState) {
+        self.own.put(path, state);
+    }
+
+    fn invalidate(&self, path: &Path) {
+        self.own.invalidate(path);
+    }
+
+    fn recent(&self, limit: usize) -> Vec<(PathBuf, FileState)> {
+        self.own.recent(limit)
+    }
+
+    fn note_baseline(&self, path: PathBuf, before: Option<String>) {
+        self.parent.note_baseline(path, before);
+    }
+
+    fn baselines(&self) -> Vec<(PathBuf, Option<String>)> {
+        self.parent.baselines()
+    }
+}
+
 /// 没有 sidecar 时，从对话记录里把基线捞回来。
 ///
 /// Edit / Write 都要求先 Read，所以第一次改之前的 Read 结果就是基线。
@@ -528,6 +580,42 @@ mod tests {
     fn 没有基线文件就是空的() {
         let dir = tempfile::tempdir().expect("临时目录");
         assert!(load_baselines(&baselines_path(dir.path(), "nope")).is_empty());
+    }
+
+    /// 子 agent 的读写缓存是它自己的，改动基线却要记到父会话头上 ——
+    /// 改动栏按会话统计，不分主 agent 还是子 agent 动的手。
+    #[test]
+    fn 子_agent_的基线进父会话_读写缓存各自分开() {
+        let parent = MemoryFileState::shared();
+        // 父先改过 a.rs：基线是最初那份。
+        parent.note_baseline(PathBuf::from("/work/a.rs"), Some("原始\n".into()));
+
+        let sub = SubagentFileState::new(Arc::clone(&parent) as Arc<dyn FileStateCache>);
+        sub.note_baseline(PathBuf::from("/work/a.rs"), Some("父改过之后\n".into()));
+        sub.note_baseline(PathBuf::from("/work/new.rs"), None);
+
+        let mut got = parent.baselines();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                (PathBuf::from("/work/a.rs"), Some("原始\n".into())),
+                (PathBuf::from("/work/new.rs"), None),
+            ],
+            "子 agent 新建的文件要进父的基线；父先改过的文件不被子 agent 覆盖"
+        );
+
+        // "读过"不共享：父读过的文件，子 agent 没读就不能改。
+        parent.put(
+            PathBuf::from("/work/b.rs"),
+            FileState {
+                content: "b".into(),
+                mtime_ms: 1,
+                view: riot_protocol::tool::FileView::Full,
+            },
+        );
+        assert!(sub.get(Path::new("/work/b.rs")).is_none());
+        assert!(sub.recent(10).is_empty());
     }
 
     fn msg_use(id: &str, name: &str, input: serde_json::Value) -> Message {

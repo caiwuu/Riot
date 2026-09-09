@@ -26,12 +26,20 @@ import {
 
 export { host, TransportDisconnected };
 export type { HostAppearance, LinkStatus };
-export { HostError, describeError, isHostError, renderUiError, renderUiText } from "./errors";
-export type { UiErrorPayload, UiTextPayload } from "./errors";
+export {
+  HostError,
+  describeError,
+  isHostError,
+  renderUiError,
+  renderUiText,
+  splitUiError,
+} from "./errors";
+export type { SplitError, UiErrorPayload, UiTextPayload } from "./errors";
 import { type UiErrorPayload, type UiTextPayload, toHostError } from "./errors";
 import { t } from "../i18n";
 
 import type {
+  AgentError,
   AgentEvent,
   ApiProtocol,
   BackgroundTaskStatus as GeneratedBackgroundTaskStatus,
@@ -1104,6 +1112,11 @@ export interface HistorySnapshot {
   liveThinking: string;
   /** 后台子 agent（跑着的和刚结束的）。事件只在变化时推，面板靠它重建。 */
   tasks: BackgroundTaskView[];
+  /**
+   * 最近一轮的失败。它不在历史里（失败是会话状态，不是对话内容），切回
+   * 会话时靠这个把红卡画回末尾；宿主在下一轮开始时清掉。缺省/空 = 没有。
+   */
+  lastError?: AgentError | null;
 }
 
 export function getHistory(sessionId: string): Promise<HistorySnapshot> {
@@ -1186,11 +1199,32 @@ export interface PanelState {
   active: number;
 }
 
+/** 面板的画面订阅。 */
+export interface BrowserSubscription extends Subscription {
+  /**
+   * 让宿主停掉**这一次**订阅的出口（最后一个观看者走了才真的停编码 ——
+   * 没人看的时候继续推是白烧 CPU）。`unsubscribe` 只停本地分发，两个都要调。
+   */
+  close(): Promise<void>;
+}
+
+/**
+ * 画面订阅的序号。和 `subscribeEpoch` 同一个用法：单调递增、全局唯一。
+ *
+ * `[约束]` open 和它对应的 close 必须带同一个数。两者在宿主侧是并发任务，
+ * 落地顺序没有保证；桌面窗口在宿主眼里又只是同一个观看者 —— 不带序号的
+ * 话，晚到的旧 close 会把新订阅刚装上的通道摘掉（推流被停），或者旧 open
+ * 用一条已经弃用的通道盖掉新的（帧全进死通道）。两种终态面板都永远停在
+ * 「浏览器启动中…」。dev 下 StrictMode 每次挂载都连发 open → close → open，
+ * 三条稍一乱序就中。见宿主 `AppState::browser_open_for`。
+ */
+let browserEpoch = 0;
+
 /**
  * 打开面板，开始接收画面。
  *
- * 返回的 unsubscribe 只停止本地分发；要让宿主停止编码必须调
- * {@link closeBrowser} —— 没人看的时候继续推是白烧 CPU。
+ * 返回的 unsubscribe 只停止本地分发；要让宿主停止编码必须调返回值上的
+ * {@link BrowserSubscription.close}。
  */
 export function openBrowser(
   sessionId: string,
@@ -1202,8 +1236,9 @@ export function openBrowser(
    * 用户看到的是"开了面板、空等两秒、才冒出一个标签页"。
    */
   onReady?: (s: PanelState) => void,
-): Subscription {
+): BrowserSubscription {
   let active = true;
+  const epoch = ++browserEpoch;
   // 帧是二进制:8 字节小端头（宽、高，各 u32）+ JPEG 字节，和宿主的
   // browser_open 对齐。不走 JSON —— 每帧几百 KB 的 base64 要在主线程上
   // JSON.parse，正是滚动时和输入事件抢时间的那一刀。
@@ -1220,7 +1255,7 @@ export function openBrowser(
   // 宽期限：第一次开要拉起整个浏览器进程。
   const ready = invoke<PanelState>(
     "browser_open",
-    { sessionId, onFrame: channel },
+    { sessionId, epoch, onFrame: channel },
     T_SLOW,
   ).then(
     (s) => {
@@ -1235,11 +1270,10 @@ export function openBrowser(
       active = false;
     },
     ready,
+    close() {
+      return invoke("browser_close", { sessionId, epoch });
+    },
   };
-}
-
-export function closeBrowser(sessionId: string): Promise<void> {
-  return invoke("browser_close", { sessionId });
 }
 
 export function browserNavigate(sessionId: string, url: string): Promise<void> {

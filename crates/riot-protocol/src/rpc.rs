@@ -254,9 +254,9 @@ pub enum RpcResponse {
     Nudged {
         queued: bool,
     },
-    /// task.history 的应答。`task` 为 None = 没有这个子 agent（内核重启后
-    /// 旧 id 都会失效）。分叉出的子 agent 只回它自己产生的那段，不回继承
-    /// 的父历史。
+    /// task.history 的应答。`task` 为 None = 没有这个子 agent（登记表里
+    /// 没有，盘上也没有它的记录 —— 登记表跟着会话落盘，重启后旧 id 照样
+    /// 认得）。分叉出的子 agent 只回它自己产生的那段，不回继承的父历史。
     TaskHistory {
         task: Option<crate::task::BackgroundTaskView>,
         messages: Vec<Message>,

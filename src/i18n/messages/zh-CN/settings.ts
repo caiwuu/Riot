@@ -125,8 +125,8 @@ export default {
   "settings.provider.editor.fetching": "获取中…",
   "settings.provider.editor.fetch": "从 API 获取",
   "settings.provider.editor.models.empty": "还没有模型。用右上角的「添加模型」手动填，或从 API 获取。",
-  "settings.provider.editor.currentModel": "当前模型",
-  "settings.provider.editor.setCurrent": "设为当前模型",
+  "settings.provider.editor.testModel": "测试连接用的模型",
+  "settings.provider.editor.testWith": "测试连接时改用这个模型",
   "settings.provider.editor.vision.aria": "能收图片",
   "settings.provider.editor.vision.title": "这个模型能收图片",
   "settings.provider.editor.editModel": "编辑模型",
@@ -138,6 +138,7 @@ export default {
   "settings.provider.editor.sampling.desc":
     "这一家的默认值。写着「模型默认」的字段一个都不发，由模型自己定；模型没单独设的字段用这里的值，单个模型在它的编辑弹窗里改，对话里还能按会话临时覆盖。",
   "settings.provider.editor.test.hint": "发一个最小请求验证配置。",
+  "settings.provider.editor.test.hintModel": "用 {model} 发一个最小请求验证配置。",
   "settings.provider.editor.testNeedsKey": "先在上面保存 API key，才能测试连接",
   "settings.provider.editor.test": "测试连接",
   "settings.provider.editor.test.ok": "连接正常：{detail}",

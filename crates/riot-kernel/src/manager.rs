@@ -230,6 +230,9 @@ impl SessionManager {
         self.attach_host_proxies(&session, &id);
         let history = session.history().await;
         let archived = session.ui_archive().await;
+        // 子 agent 登记表随水合一起从盘上回来：Task 卡片要靖它认领自己的
+        // 子 agent，重启后才点得开。
+        let tasks = session.tasks_snapshot();
         self.sessions
             .lock()
             .await
@@ -243,7 +246,7 @@ impl SessionManager {
             pending_asks: Vec::new(),
             live_text: String::new(),
             live_thinking: String::new(),
-            tasks: Vec::new(),
+            tasks,
         }
     }
 
@@ -273,7 +276,10 @@ impl SessionManager {
         session_id: &str,
         agent_id: &riot_protocol::id::AgentId,
     ) -> Option<crate::tasks::TaskHistory> {
-        self.get(session_id).await?.task_history(agent_id.as_str())
+        self.get(session_id)
+            .await?
+            .task_history(agent_id.as_str())
+            .await
     }
 
     pub async fn delete(&self, session_id: &str) {
@@ -440,6 +446,7 @@ impl SessionManager {
             refs: input.refs,
             extra_context,
             nudge: input.nudge,
+            scheduled: input.scheduled,
         };
         let sink = session.sink();
         Ok(session
@@ -522,8 +529,8 @@ impl SessionManager {
     }
 
     /// 撤回一条排队插话,还原始输入。hook 附加的上下文不带回 —— 放回
-    /// 输入框编辑后重新提交时会重跑 hook。按钮标记也不带回：撤回到输入框
-    /// 的是一句普通的话，用户改完再发就是普通消息。
+    /// 输入框编辑后重新提交时会重跑 hook。按钮标记和定时任务标记也不带回：
+    /// 撤回到输入框的是一句普通的话，用户改完再发就是普通消息。
     pub async fn queue_take(&self, session_id: &str, entry_id: &str) -> Option<RpcTurnInput> {
         let s = self.get(session_id).await?;
         let input = s.queue_take(entry_id)?;
@@ -539,6 +546,7 @@ impl SessionManager {
                 .collect(),
             refs: input.refs,
             nudge: None,
+            scheduled: None,
         })
     }
 

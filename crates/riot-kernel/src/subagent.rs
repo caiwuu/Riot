@@ -73,6 +73,8 @@
 //! - transcript 落在 `sessions/subagents/<会话>/<agent>.jsonl`，和主
 //!   transcript 隔开 —— 放同一目录会被索引重建当成会话捞回来。分叉只
 //!   写它自己产生的那部分（继承的历史在父的 transcript 里已经有了）。
+//!   登记表的快照（`tasks.json`）也在这个目录，重启后子 agent 的会话
+//!   照样能点开、能续接（分叉除外），见 [`crate::tasks`]「跨越重启」。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -92,7 +94,7 @@ use riot_protocol::task::{BackgroundTaskStatus, BackgroundTaskView};
 use riot_protocol::text::UiText;
 use riot_protocol::tool::{PromptContext, Tool, ToolContext, ToolOutcome, UiPayload};
 use riot_protocol::ui_text;
-use riot_runtime::{MemoryFileState, SystemFs, SystemProcessRunner};
+use riot_runtime::{SystemFs, SystemProcessRunner};
 use riot_tools::registry::Registry;
 use riot_tools::scheduler::Scheduler;
 use tokio_util::sync::CancellationToken;
@@ -234,6 +236,10 @@ pub struct SubagentDeps {
     /// 会话的子 agent 登记表：后台任务的面板、续接的历史都在这里。
     pub tasks: Arc<BackgroundTasks>,
     pub host: Arc<dyn TaskHost>,
+    /// 父会话的改动基线（改动栏的数据源）。子 agent 改的文件记到这里，
+    /// 改动栏才算得上它们 —— 读写缓存本身仍是子 agent 自己的一份，见
+    /// [`crate::changes::SubagentFileState`]。
+    pub baselines: Arc<dyn riot_protocol::tool::FileStateCache>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -325,6 +331,15 @@ impl Kind {
             Self::GeneralPurpose => "general-purpose",
             Self::Explore => "explore",
             Self::Fork => "fork",
+        }
+    }
+
+    /// 从登记表里的类型标签还原（[`Self::as_str`] 的反面）。和 [`Self::parse`]
+    /// 的差别只在认 `fork`：那不是模型能选的类型，但落盘的登记表里有。
+    pub fn from_label(s: &str) -> Option<Self> {
+        match s {
+            "fork" => Some(Self::Fork),
+            _ => Self::parse(s),
         }
     }
 
@@ -956,8 +971,11 @@ impl TaskTool {
             Arc::new(SystemFs::new()),
             proc,
             // 全新的先读后写缓存：子 agent 的"读过"和父互不作数 ——
-            // 共享的话，父读过的文件子 agent 没看就能改。
-            MemoryFileState::shared() as Arc<dyn riot_protocol::tool::FileStateCache>,
+            // 共享的话，父读过的文件子 agent 没看就能改。改动基线例外，
+            // 记到父会话头上：改动栏按会话统计，子 agent 改的也是这个会话改的。
+            Arc::new(crate::changes::SubagentFileState::new(Arc::clone(
+                &self.deps.baselines,
+            ))) as Arc<dyn riot_protocol::tool::FileStateCache>,
             Arc::clone(&self.deps.ids),
             Arc::clone(&self.deps.clock),
         )
@@ -1129,7 +1147,7 @@ impl Tool for TaskTool {
                 }
                 Plan::Fork
             }
-            Some(id) if !id.is_empty() => match self.deps.tasks.resume_source(id) {
+            Some(id) if !id.is_empty() => match self.deps.tasks.resume_source(id).await {
                 Ok(source) => Plan::Resume { source },
                 Err(e) => return ToolOutcome::failed(e),
             },
@@ -1460,6 +1478,7 @@ mod tests {
     use riot_protocol::id::{NanoIdGenerator, ToolUseId};
     use riot_protocol::provider::ProviderEvent;
     use riot_protocol::tool::ProgressSink;
+    use riot_runtime::MemoryFileState;
 
     struct AllowAll;
     #[async_trait]
@@ -1541,6 +1560,7 @@ mod tests {
             transcripts: None,
             tasks: Arc::new(BackgroundTasks::new(crate::session::SessionSink::default())),
             host,
+            baselines: MemoryFileState::shared(),
         }
     }
 
@@ -1897,7 +1917,7 @@ mod tests {
         let snap = tasks.snapshot();
         assert_eq!(snap[0].status, BackgroundTaskStatus::Completed);
         assert!(
-            tasks.resume_source(snap[0].id.as_str()).is_ok(),
+            tasks.resume_source(snap[0].id.as_str()).await.is_ok(),
             "跑完的后台任务能续接"
         );
     }
@@ -1979,6 +1999,61 @@ mod tests {
         assert!(error_for_model.contains("没有叫"), "{error_for_model}");
     }
 
+    /// 子 agent 改的文件要进父会话的改动基线 —— 改动栏按会话统计，用户不会
+    /// 区分是主 agent 还是它派出去的子 agent 动的手。此前子 agent 的基线记在
+    /// 自己那份缓存里，任务一结束就丢，改动栏漏掉它们改的所有文件。
+    #[tokio::test]
+    async fn 子_agent_改的文件进父会话的改动基线() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            vec![ProviderEvent::Message(Message::Assistant {
+                id: riot_protocol::id::MessageId::from_raw("a1"),
+                content: vec![AssistantContent::ToolUse {
+                    id: ToolUseId::from_raw("w1"),
+                    name: "Write".into(),
+                    input: serde_json::json!({ "path": "sub.txt", "content": "hi\n" }),
+                }],
+                usage: None,
+                meta: Default::default(),
+            })],
+            vec![ProviderEvent::Message(assistant("写好了"))],
+        ]));
+        let d = SubagentDeps {
+            cwd: dir.path().to_path_buf(),
+            ..deps(Arc::clone(&provider))
+        };
+        let baselines = Arc::clone(&d.baselines);
+        let tool = TaskTool::new(d);
+        let (c, _rx) = ctx();
+        let out = tool
+            .call(
+                serde_json::json!({
+                    "description": "写文件",
+                    "prompt": "新建 sub.txt",
+                    "subagent_type": "general-purpose"
+                }),
+                c,
+            )
+            .await;
+        model_text(&out);
+        assert!(
+            dir.path().join("sub.txt").is_file(),
+            "子 agent 的 Write 该落盘"
+        );
+
+        let got = baselines.baselines();
+        assert_eq!(
+            got.len(),
+            1,
+            "父会话的基线里要有子 agent 改的那个文件：{got:?}"
+        );
+        assert!(got[0].0.ends_with("sub.txt"), "{:?}", got[0].0);
+        assert!(
+            got[0].1.is_none(),
+            "新建文件的基线是 None（那时它还不存在）"
+        );
+    }
+
     /// 嵌套两层到顶：主 agent 派的 general-purpose 有 Task，它再派的没有。
     /// 派出去的子 agent 登记 parent。
     #[tokio::test]
@@ -2027,7 +2102,12 @@ mod tests {
         let child = snap.iter().find(|v| v.title == "二层").expect("登记了");
         assert_eq!(child.parent.as_ref(), Some(&top_id), "记 parent");
         assert_eq!(
-            tasks.history(top_id.as_str()).unwrap().descendants.len(),
+            tasks
+                .history(top_id.as_str())
+                .await
+                .unwrap()
+                .descendants
+                .len(),
             1,
             "查父的会话带上后代"
         );

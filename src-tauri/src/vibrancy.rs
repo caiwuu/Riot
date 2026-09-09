@@ -136,7 +136,10 @@ pub fn remembered(path: &Path) -> Appearance {
     #[allow(clippy::disallowed_methods)]
     match std::fs::read_to_string(path) {
         Ok(raw) => Appearance::parse(raw.trim()).unwrap_or_else(|| {
-            tracing::warn!(value = raw.trim(), "appearance file has an unknown value; using default");
+            tracing::warn!(
+                value = raw.trim(),
+                "appearance file has an unknown value; using default"
+            );
             Appearance::DEFAULT
         }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Appearance::DEFAULT,
@@ -363,7 +366,10 @@ mod tests {
 
     #[test]
     fn json_形态是小写_和前端一致() {
-        assert_eq!(serde_json::to_string(&Appearance::System).unwrap(), "\"system\"");
+        assert_eq!(
+            serde_json::to_string(&Appearance::System).unwrap(),
+            "\"system\""
+        );
         let parsed: Appearance = serde_json::from_str("\"light\"").unwrap();
         assert_eq!(parsed, Appearance::Light);
     }
