@@ -168,10 +168,14 @@ export function mergeSampling(over: Sampling, base: Sampling): Sampling {
  * `[约束]` 顺序要和宿主 `AppConfig::resolve` 一致。反了或少一层，会话面板
  * 上显示的"继承 x"就不是真会发出去的那个 x —— 那比不显示更糟。
  */
-export function inheritedSampling(cfg: AppConfig): Sampling {
-  const p = cfg.providers.find((x) => x.id === cfg.activeProvider);
+export function inheritedSampling(
+  cfg: AppConfig,
+  providerId = cfg.activeProvider,
+  modelId = cfg.activeModel,
+): Sampling {
+  const p = cfg.providers.find((x) => x.id === providerId);
   if (!p) return {};
-  const m = p.models.find((x) => x.id === cfg.activeModel);
+  const m = p.models.find((x) => x.id === modelId);
   return mergeSampling(m?.sampling ?? {}, p.sampling);
 }
 

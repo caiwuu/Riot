@@ -5,7 +5,7 @@
 //!
 //! # 拆进程后的职责划分(ARCHITECTURE.md §2.2)
 //!
-//! 宿主是**会话注册表与设置的权威**:id、项目根、标题、权限模式、采样等
+//! 宿主是**会话注册表与设置的权威**:id、项目根、标题、权限模式、模型、采样等
 //! 全在这里(内存 + index.json),这些操作纯本地、不依赖内核活着。
 //! 内核那边的活会话只是**运行时投影**——首次要跑轮子/拿历史时按需水合
 //! (session.resume,幂等),会话设置随每轮 TurnConfig 传过去。
@@ -113,6 +113,11 @@ pub struct SessionInfo {
     pub python_venv: Option<String>,
     /// 会话级追加的系统提示词。None = 只用内置提示词。
     pub system_prompt: Option<String>,
+    /// 这个会话用的服务方。显示和发轮都必须以它为准，不能拿全局
+    /// `activeProvider` 顶替 —— 那会让 A 会话换模型把 B 也带走。
+    pub provider: String,
+    /// 这个会话用的模型。理由同 `provider`。
+    pub model: String,
     /// 此刻有没有轮子在跑。侧栏靠它给后台忙碌的会话画指示点 ——
     /// 没订阅事件的会话，前端只有这一条途径知道它在干活。
     pub busy: bool,
@@ -213,6 +218,9 @@ struct Meta {
     python_venv: Option<String>,
     system_prompt: Option<String>,
     thinking: riot_protocol::ThinkingPolicy,
+    /// 这个会话用的服务方 / 模型。空 = 还没钉过，解析时回退全局默认。
+    provider: String,
+    model: String,
     /// 多任务模式（见 riot_protocol::TurnConfig::multitask）。
     multitask: bool,
     /// 有没有轮子在跑(send_turn 置真,Done 事件清掉)。侧栏指示点用。
@@ -225,6 +233,48 @@ struct Meta {
     /// 时靠它把红卡画回末尾。下一轮一开始就清 —— 用户改好配置再发一句,
     /// 旧错误就该消失。只在内存里:重启后那句没有回答的提问重发即可。
     last_error: Option<riot_protocol::event::AgentError>,
+}
+
+impl Meta {
+    fn to_info(&self, id: &str) -> SessionInfo {
+        SessionInfo {
+            id: id.to_owned(),
+            root: self.root.display().to_string(),
+            title: self
+                .custom_title
+                .clone()
+                .or_else(|| self.auto_title.clone()),
+            seq: self.seq,
+            sampling: self.sampling,
+            mode: self.mode,
+            thinking: self.thinking,
+            multitask: self.multitask,
+            python_venv: self.python_venv.clone(),
+            system_prompt: self.system_prompt.clone(),
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            busy: self.busy,
+        }
+    }
+
+    fn to_persisted(&self, id: &str) -> crate::persist::PersistedSession {
+        crate::persist::PersistedSession {
+            id: id.to_owned(),
+            root: self.root.display().to_string(),
+            seq: self.seq,
+            created_at_ms: self.created_at_ms,
+            custom_title: self.custom_title.clone(),
+            auto_title: self.auto_title.clone(),
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            mode: self.mode,
+            sampling: self.sampling,
+            python_venv: self.python_venv.clone(),
+            system_prompt: self.system_prompt.clone(),
+            thinking: self.thinking,
+            multitask: self.multitask,
+        }
+    }
 }
 
 struct Inner {
@@ -356,15 +406,33 @@ impl AppState {
     pub fn restore_at(config_path: PathBuf) -> Self {
         let inner = Inner::at(config_path);
         let index = crate::persist::load(&inner.sessions_dir, &inner.transcripts);
+        // 老索引没有 provider/model。按**此刻**的全局默认钉进每个会话，
+        // 之后各自独立 —— 不钉的话它们继续继承 live 全局，A 换模型 B 跟着跳。
+        let (cfg, _) = crate::config::load_at(&inner.config_path);
+        let default_provider = cfg.active_provider.clone();
+        let default_model = cfg.active_model.clone();
 
         let mut map = HashMap::new();
         let mut browsers_map = HashMap::new();
         let mut next_seq = 0u64;
+        let mut stamped = false;
         for p in index.sessions {
             next_seq = next_seq.max(p.seq + 1);
             if let Some(b) = make_browser(inner.browser_hub.as_ref()) {
                 browsers_map.insert(p.id.clone(), b);
             }
+            let provider = if p.provider.is_empty() {
+                stamped |= !default_provider.is_empty();
+                default_provider.clone()
+            } else {
+                p.provider
+            };
+            let model = if p.model.is_empty() {
+                stamped |= !default_model.is_empty();
+                default_model.clone()
+            } else {
+                p.model
+            };
             map.insert(
                 p.id.clone(),
                 Meta {
@@ -380,12 +448,24 @@ impl AppState {
                     python_venv: p.python_venv,
                     system_prompt: p.system_prompt,
                     thinking: p.thinking,
+                    provider,
+                    model,
                     multitask: p.multitask,
                     busy: false,
                     hydrated: false,
                     last_error: None,
                 },
             );
+        }
+        if stamped {
+            let mut sessions: Vec<_> = map.iter().map(|(id, m)| m.to_persisted(id)).collect();
+            sessions.sort_by_key(|p| p.seq);
+            if let Err(e) = crate::persist::save(
+                &inner.sessions_dir,
+                &crate::persist::SessionIndex { sessions },
+            ) {
+                tracing::warn!(error = %e, "升级钉会话模型没写进索引，下次启动还会再钉一次");
+            }
         }
         if !map.is_empty() {
             tracing::info!(count = map.len(), "从磁盘恢复了 {} 个会话", map.len());
@@ -921,7 +1001,6 @@ impl AppState {
             }
             Err(e) => return Err(e.into()),
         };
-        let root_str = fence.root().display().to_string();
 
         // 纯宿主操作:分配 id、登记、落索引。内核那边**不建** —— 第一次
         // send_turn / history 时按需水合(resume 对不存在的会话就是建)。
@@ -936,11 +1015,14 @@ impl AppState {
             .unwrap_or(0);
         // 配置里没写这一项时走同一个出厂档 —— 不在这儿兜一个字面量，
         // 那会和 config.rs 的默认分叉（见 `AppConfig::default_mode`）。
-        let mode = self
-            .config()
-            .await
+        let config = self.config().await;
+        let mode = config
             .default_mode
             .unwrap_or_else(crate::config::default_permission_mode);
+        // 新建会话钉死此刻的全局默认。之后在这个会话里换模型只改它自己，
+        // 别的会话和「新会话默认」都不跟着跳。
+        let provider = config.active_provider.clone();
+        let model = config.active_model.clone();
         if let Some(b) = make_browser(self.0.browser_hub.as_ref()) {
             self.0
                 .browsers
@@ -948,40 +1030,32 @@ impl AppState {
                 .await
                 .insert(id.as_str().to_owned(), b);
         }
-        self.0.sessions.lock().await.insert(
-            id.as_str().to_owned(),
-            Meta {
-                root: fence.root().to_path_buf(),
-                seq,
-                created_at_ms,
-                custom_title: None,
-                auto_title: None,
-                sampling: crate::config::Sampling::default(),
-                mode,
-                python_venv: None,
-                system_prompt: None,
-                thinking: riot_protocol::ThinkingPolicy::default(),
-                multitask: false,
-                busy: false,
-                hydrated: false,
-                last_error: None,
-            },
-        );
-        self.persist_index().await;
-
-        Ok(SessionInfo {
-            id: id.as_str().to_owned(),
-            root: root_str,
-            title: None,
+        let meta = Meta {
+            root: fence.root().to_path_buf(),
             seq,
+            created_at_ms,
+            custom_title: None,
+            auto_title: None,
             sampling: crate::config::Sampling::default(),
             mode,
-            thinking: riot_protocol::ThinkingPolicy::default(),
-            multitask: false,
             python_venv: None,
             system_prompt: None,
+            thinking: riot_protocol::ThinkingPolicy::default(),
+            provider,
+            model,
+            multitask: false,
             busy: false,
-        })
+            hydrated: false,
+            last_error: None,
+        };
+        let info = meta.to_info(id.as_str());
+        self.0
+            .sessions
+            .lock()
+            .await
+            .insert(id.as_str().to_owned(), meta);
+        self.persist_index().await;
+        Ok(info)
     }
 
     /// 所有活着的会话。前端启动或刷新（HMR）后用它对齐状态。
@@ -993,19 +1067,7 @@ impl AppState {
             .lock()
             .await
             .iter()
-            .map(|(id, m)| SessionInfo {
-                id: id.clone(),
-                root: m.root.display().to_string(),
-                title: m.custom_title.clone().or_else(|| m.auto_title.clone()),
-                seq: m.seq,
-                sampling: m.sampling,
-                mode: m.mode,
-                thinking: m.thinking,
-                multitask: m.multitask,
-                python_venv: m.python_venv.clone(),
-                system_prompt: m.system_prompt.clone(),
-                busy: m.busy,
-            })
+            .map(|(id, m)| m.to_info(id))
             .collect();
         out.sort_by_key(|i| i.seq);
         out
@@ -1317,20 +1379,7 @@ impl AppState {
             .lock()
             .await
             .iter()
-            .map(|(id, m)| crate::persist::PersistedSession {
-                id: id.clone(),
-                root: m.root.display().to_string(),
-                seq: m.seq,
-                created_at_ms: m.created_at_ms,
-                custom_title: m.custom_title.clone(),
-                auto_title: m.auto_title.clone(),
-                mode: m.mode,
-                sampling: m.sampling,
-                python_venv: m.python_venv.clone(),
-                system_prompt: m.system_prompt.clone(),
-                thinking: m.thinking,
-                multitask: m.multitask,
-            })
+            .map(|(id, m)| m.to_persisted(id))
             .collect();
         sessions.sort_by_key(|p| p.seq);
 
@@ -1481,6 +1530,35 @@ impl AppState {
         .await
     }
 
+    /// 这个会话这一轮该用的模型。
+    ///
+    /// 会话自己记的优先；空（老会话还没钉过）才回退全局默认。采样覆盖
+    /// 叠在解析结果之上。每轮现解析 —— 中途换模型下一轮生效。
+    async fn session_endpoint(
+        &self,
+        session_id: &str,
+    ) -> HostResult<(AppConfig, String, crate::config::ResolvedModel)> {
+        let (sampling, provider, model) = {
+            let g = self.0.sessions.lock().await;
+            let m = g.get(session_id).ok_or(HostError::NoSession)?;
+            (m.sampling, m.provider.clone(), m.model.clone())
+        };
+        let config = self.config().await;
+        let provider = if provider.is_empty() {
+            config.active_provider.clone()
+        } else {
+            provider
+        };
+        let model_id = if model.is_empty() {
+            config.active_model.clone()
+        } else {
+            model
+        };
+        let mut resolved = config.resolve_named(&provider, &model_id)?;
+        resolved.sampling = sampling.or(resolved.sampling);
+        Ok((config, provider, resolved))
+    }
+
     /// [`Self::send_turn`] 去掉"前端必须在听"的那道检查。
     ///
     /// **只给调度器用。** 定时任务到点时多半没人盯着那个会话 —— 事件没有
@@ -1493,16 +1571,7 @@ impl AppState {
         input: riot_protocol::TurnInput,
     ) -> HostResult<Option<String>> {
         self.ensure_hydrated(session_id).await?;
-        let sampling = {
-            let g = self.0.sessions.lock().await;
-            g.get(session_id).ok_or(HostError::NoSession)?.sampling
-        };
-
-        // 每轮解析"此刻"的激活配置 —— 对话中途切换模型下一轮就生效。
-        // 会话的采样覆盖叠在 provider 默认之上，只盖用户动过的字段。
-        let config = self.config().await;
-        let mut model = config.resolve()?;
-        model.sampling = sampling.or(model.sampling);
+        let (config, provider, model) = self.session_endpoint(session_id).await?;
 
         // `[约束]` 图片处理不了要**在这里**拒绝，而不是让这一轮跑起来。
         //
@@ -1510,8 +1579,8 @@ impl AppState {
         // 走事件流，用户看到的是"发出去了，然后模型说它看不见图" —— 那时候
         // 他已经等了几秒，而且不知道该去改什么。
         if !input.images.is_empty()
-            && !config.active_takes_images()
-            && config.vision_target().is_none()
+            && !config.takes_images(&provider, &model.model)
+            && config.vision_target_for(&provider, &model.model).is_none()
         {
             return Err(ui_error!("host.provider.noVision").into());
         }
@@ -1535,7 +1604,9 @@ impl AppState {
         // 剩下的活全在内核:UserPromptSubmit hook(拦截会变成这条 RPC 的
         // 错误应答,照样当场报给界面)、图片转述、@ 展开、能力装配。
         // 宿主只负责把配置快照打包成 TurnConfig。
-        let turn_config = self.build_turn_config(&config, model, session_id).await?;
+        let turn_config = self
+            .build_turn_config(&config, &provider, model, session_id)
+            .await?;
         let resp = self
             .kernel_call(RpcRequest::TurnSubmit {
                 session_id: sid(session_id),
@@ -1567,14 +1638,10 @@ impl AppState {
     pub async fn regenerate_turn(&self, session_id: &str, message_id: &str) -> HostResult<()> {
         self.require_sink(session_id).await?;
         self.ensure_hydrated(session_id).await?;
-        let sampling = {
-            let g = self.0.sessions.lock().await;
-            g.get(session_id).ok_or(HostError::NoSession)?.sampling
-        };
-        let config = self.config().await;
-        let mut model = config.resolve()?;
-        model.sampling = sampling.or(model.sampling);
-        let turn_config = self.build_turn_config(&config, model, session_id).await?;
+        let (config, provider, model) = self.session_endpoint(session_id).await?;
+        let turn_config = self
+            .build_turn_config(&config, &provider, model, session_id)
+            .await?;
         self.kernel_call(RpcRequest::TurnRegenerate {
             session_id: sid(session_id),
             message_id: message_id.to_owned(),
@@ -1596,14 +1663,10 @@ impl AppState {
     ) -> HostResult<()> {
         self.require_sink(session_id).await?;
         self.ensure_hydrated(session_id).await?;
-        let sampling = {
-            let g = self.0.sessions.lock().await;
-            g.get(session_id).ok_or(HostError::NoSession)?.sampling
-        };
-        let config = self.config().await;
-        let mut model = config.resolve()?;
-        model.sampling = sampling.or(model.sampling);
-        let turn_config = self.build_turn_config(&config, model, session_id).await?;
+        let (config, provider, model) = self.session_endpoint(session_id).await?;
+        let turn_config = self
+            .build_turn_config(&config, &provider, model, session_id)
+            .await?;
         self.kernel_call(RpcRequest::TurnResend {
             session_id: sid(session_id),
             message_id: message_id.to_owned(),
@@ -1624,6 +1687,7 @@ impl AppState {
     async fn build_turn_config(
         &self,
         config: &AppConfig,
+        provider: &str,
         model: crate::config::ResolvedModel,
         session_id: &str,
     ) -> HostResult<riot_protocol::TurnConfig> {
@@ -1641,9 +1705,9 @@ impl AppState {
                 .inspect_err(|e| tracing::warn!(error = %e, "辅助模型缺密钥"))
                 .ok()
         };
-        let cheap_model = named(config.subagent_target());
+        let cheap_model = named(config.subagent_target_for(provider, &model.model));
         let distill = named(config.web.distill_target());
-        let describe = named(config.vision_target());
+        let describe = named(config.vision_target_for(provider, &model.model));
 
         let (mode, python_venv, system_prompt, thinking, multitask) = {
             let g = self.0.sessions.lock().await;
@@ -1668,7 +1732,7 @@ impl AppState {
                 distill,
             },
             vision: riot_protocol::VisionSetup {
-                accepts_images: config.active_takes_images(),
+                accepts_images: config.takes_images(provider, &model.model),
                 describe,
             },
             limits: riot_protocol::TurnLimits {
@@ -1785,13 +1849,7 @@ impl AppState {
     pub async fn compact_session(&self, session_id: &str) -> HostResult<()> {
         self.require_sink(session_id).await?;
         self.ensure_hydrated(session_id).await?;
-        let sampling = {
-            let g = self.0.sessions.lock().await;
-            g.get(session_id).ok_or(HostError::NoSession)?.sampling
-        };
-        let config = self.config().await;
-        let mut model = config.resolve()?;
-        model.sampling = sampling.or(model.sampling);
+        let (_config, _provider, model) = self.session_endpoint(session_id).await?;
         self.kernel_call(RpcRequest::SessionCompact {
             session_id: sid(session_id),
             model: Box::new(model.to_endpoint()?),
@@ -2011,6 +2069,34 @@ impl AppState {
         {
             tracing::debug!(error = %e, "模式没同步到内核(下一轮 TurnConfig 会带)");
         }
+        Ok(())
+    }
+
+    /// 设置这个会话用的服务方 / 模型。下一轮生效。
+    ///
+    /// 只改这一个会话。全局 `activeProvider` / `activeModel` 不动 —— 那是
+    /// 新会话的默认，也是设置页的「当前」。A 换模型不能把 B 带走。
+    pub async fn set_session_model(
+        &self,
+        session_id: &str,
+        provider: String,
+        model: String,
+    ) -> HostResult<()> {
+        if !provider.is_empty() {
+            let config = self.config().await;
+            if config.provider(&provider).is_none() {
+                return Err(
+                    ui_error!("kernel.config.providerNotFound", id = provider.as_str()).into(),
+                );
+            }
+        }
+        {
+            let mut g = self.0.sessions.lock().await;
+            let m = g.get_mut(session_id).ok_or(HostError::NoSession)?;
+            m.provider = provider;
+            m.model = model;
+        }
+        self.persist_index().await;
         Ok(())
     }
 
@@ -3342,6 +3428,120 @@ mod tests {
         };
         assert_eq!(mode_of(&a.id), PermissionMode::Default);
         assert_eq!(mode_of(&b.id), crate::config::default_permission_mode());
+    }
+
+    fn cfg_two_models() -> AppConfig {
+        serde_json::from_str(
+            r#"{
+                "providers": [{
+                    "id": "acme", "name": "Acme", "protocol": "openai",
+                    "baseUrl": "https://api.acme.test", "apiKeyEnv": "ACME_API_KEY",
+                    "models": ["m1", "m2"]
+                }],
+                "activeProvider": "acme",
+                "activeModel": "m1"
+            }"#,
+        )
+        .expect("测试配置")
+    }
+
+    #[tokio::test]
+    async fn 各会话的模型互不影响() {
+        // 模型是会话级的。A 换了模型，B 必须还停在自己那份上。
+        // 上一版写进全局 activeModel，于是输入框上 A 一换，B 跟着跳。
+        let state = state().await;
+        state.set_config(cfg_two_models()).await;
+        let a = state.create_session(&temp_ws("mdl-a")).await.expect("a");
+        let b = state.create_session(&temp_ws("mdl-b")).await.expect("b");
+        assert_eq!(a.provider, "acme");
+        assert_eq!(a.model, "m1");
+        assert_eq!(b.model, "m1");
+
+        state
+            .set_session_model(&a.id, "acme".into(), "m2".into())
+            .await
+            .expect("切 a");
+
+        let listed = state.list_sessions().await;
+        let of = |id: &str| listed.iter().find(|i| i.id == id).expect("在列表里");
+        assert_eq!(of(&a.id).model, "m2");
+        assert_eq!(of(&b.id).model, "m1", "B 不能跟着 A 换模型");
+        assert_eq!(
+            state.config().await.active_model,
+            "m1",
+            "会话换模型不该改新会话的默认"
+        );
+    }
+
+    #[tokio::test]
+    async fn 重启后会话模型还在() {
+        let cfg = temp_cfg("model");
+        let ws = temp_ws("restart-model");
+        crate::config::save_at(&cfg, &cfg_two_models()).expect("写配置");
+
+        let (id_a, id_b) = {
+            let state = AppState::restore_at(cfg.clone());
+            let a = state.create_session(&ws).await.expect("a");
+            let b = state.create_session(&ws).await.expect("b");
+            state
+                .set_session_model(&a.id, "acme".into(), "m2".into())
+                .await
+                .expect("切 a");
+            (a.id, b.id)
+        };
+
+        let state = AppState::restore_at(cfg);
+        let listed = state.list_sessions().await;
+        let of = |id: &str| listed.iter().find(|i| i.id == id).expect("在列表里");
+        assert_eq!(of(&id_a).model, "m2");
+        assert_eq!(of(&id_b).model, "m1");
+    }
+
+    #[tokio::test]
+    async fn 老索引缺模型字段时按当时的全局默认钉死() {
+        // 升级前模型是全局的。恢复时把当时的默认写进每个会话，
+        // 之后再改别的会话，都不该把这几个带跑。
+        let cfg = temp_cfg("stamp");
+        crate::config::save_at(&cfg, &cfg_two_models()).expect("写配置");
+        let sessions_dir = cfg.parent().expect("有父目录").join("sessions");
+        let ws = temp_ws("stamp-ws");
+        crate::persist::save(
+            &sessions_dir,
+            &crate::persist::SessionIndex {
+                sessions: vec![crate::persist::PersistedSession {
+                    id: "old".into(),
+                    root: ws.clone(),
+                    seq: 0,
+                    created_at_ms: 1,
+                    custom_title: None,
+                    auto_title: Some("老会话".into()),
+                    provider: String::new(),
+                    model: String::new(),
+                    mode: PermissionMode::Default,
+                    sampling: crate::config::Sampling::default(),
+                    python_venv: None,
+                    system_prompt: None,
+                    thinking: riot_protocol::ThinkingPolicy::default(),
+                    multitask: false,
+                }],
+            },
+        )
+        .expect("写老索引");
+
+        let state = AppState::restore_at(cfg);
+        let listed = state.list_sessions().await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].provider, "acme");
+        assert_eq!(listed[0].model, "m1", "老会话要钉成当时的全局默认");
+
+        let b = state.create_session(&ws).await.expect("b");
+        state
+            .set_session_model(&b.id, "acme".into(), "m2".into())
+            .await
+            .expect("切 b");
+        let listed = state.list_sessions().await;
+        let old = listed.iter().find(|s| s.id == "old").expect("老会话还在");
+        assert_eq!(old.model, "m1", "钉死之后不再跟着别人跳");
     }
 
     #[tokio::test]

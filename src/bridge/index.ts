@@ -415,6 +415,10 @@ export interface SessionInfo {
   pythonVenv: string | null;
   /** 会话级追加的系统提示词。null = 只用内置提示词。 */
   systemPrompt: string | null;
+  /** 这个会话用的服务方。显示和发轮必须以它为准，不能拿全局 activeProvider 顶替。 */
+  provider: string;
+  /** 这个会话用的模型。理由同 provider。 */
+  model: string;
   /** 此刻有没有轮子在跑。侧栏给后台忙碌的会话画指示点用。 */
   busy: boolean;
 }
@@ -428,9 +432,9 @@ export interface ConfigStatus {
   configBackup?: string | null;
 }
 
-/** 当前激活的 provider 有没有可用的 key。 */
-export function hasActiveKey(s: ConfigStatus): boolean {
-  return Boolean(s.keyStatus[s.config.activeProvider]);
+/** 指定服务方有没有可用的 key。不传则看当前全局激活的那家。 */
+export function hasActiveKey(s: ConfigStatus, providerId = s.config.activeProvider): boolean {
+  return Boolean(s.keyStatus[providerId]);
 }
 
 /** 事件流句柄。取消订阅只是停止分发，不会中断内核 —— 中断要显式调 interrupt。 */
@@ -867,6 +871,15 @@ export function setSessionSystemPrompt(sessionId: string, prompt: string): Promi
 /** 会话级思考策略。下一轮生效。 */
 export function setSessionThinking(sessionId: string, thinking: ThinkingPolicy): Promise<void> {
   return invoke("set_session_thinking", { sessionId, thinking });
+}
+
+/** 这个会话用的服务方 / 模型。下一轮生效。只改这一个会话。 */
+export function setSessionModel(
+  sessionId: string,
+  provider: string,
+  model: string,
+): Promise<void> {
+  return invoke("set_session_model", { sessionId, provider, model });
 }
 
 /** 会话的多任务模式开关。下一轮生效。 */

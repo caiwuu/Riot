@@ -118,7 +118,7 @@ export function TopBar({
         <button
           className="tb-title"
           onClick={(e) => onSessionMenu(e, session)}
-          title={session.root}
+          title={session.title ? `${session.title}\n${session.root}` : session.root}
         >
           <span className="tb-title-text">{session.title ?? t("app.newSession")}</span>
           <Chevron down />

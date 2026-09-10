@@ -31,6 +31,7 @@ import {
   searchFiles,
   setConfig as saveConfig,
   setPermissionMode,
+  setSessionModel,
   setSessionMultitask,
   type SlashCommand,
   slashCommands,
@@ -245,6 +246,9 @@ function ComposerDock({
   busy,
   config,
   onConfig,
+  sessionProvider,
+  sessionModel,
+  onSessionEndpoint,
   initialMode,
   hostMode,
   initialMultitask = false,
@@ -276,6 +280,10 @@ function ComposerDock({
   busy: boolean;
   config: ConfigStatus;
   onConfig: (s: ConfigStatus) => void;
+  /** 这个会话正在用的服务方 / 模型。空 = 还没钉过，显示时回退全局默认。 */
+  sessionProvider: string;
+  sessionModel: string;
+  onSessionEndpoint: (provider: string, model: string) => void;
   /** 宿主侧这个会话的当前模式，不是全局默认值。 */
   initialMode: PermissionMode;
   /** 宿主主动切的模式（批准计划）。null = 没发生过。 */
@@ -461,41 +469,41 @@ function ComposerDock({
   const canSend = hasInput || shots.length > 0;
 
   const cfg = config.config;
-  const hasKey = hasActiveKey(config);
+  // 空 = 老会话还没钉过，显示时回退全局默认。发轮也是同一条线。
+  const sessionProviderId = sessionProvider || cfg.activeProvider;
+  const sessionModelId = sessionModel || cfg.activeModel;
   const activeProvider =
-    cfg.providers.find((p) => p.id === cfg.activeProvider) ?? cfg.providers[0] ?? null;
+    cfg.providers.find((p) => p.id === sessionProviderId) ?? cfg.providers[0] ?? null;
+  const hasKey = hasActiveKey(config, activeProvider?.id ?? sessionProviderId);
 
-  // 内联切换：直接改激活的 provider/model 并回写配置。和设置页共用
-  // 同一条 setConfig 通道，宿主 resolve 一次挡住坏状态。切 provider 时
-  // 若当前模型不属于新家，跳到新家的第一个模型。
+  // 内联切换：只改**这个会话**的 provider/model。全局 active_* 是新会话
+  // 的默认，写进去的话 A 换模型 B 的输入框跟着跳。切 provider 时若当前
+  // 模型不属于新家，跳到新家的第一个模型。
   const switchProvider = (p: ProviderConfig) => {
-    if (p.id === cfg.activeProvider) return;
-    const model = p.models.some((m) => m.id === cfg.activeModel)
-      ? cfg.activeModel
+    if (p.id === sessionProviderId) return;
+    const nextModel = p.models.some((m) => m.id === sessionModelId)
+      ? sessionModelId
       : (p.models[0]?.id ?? "");
-    void saveConfig({ ...cfg, activeProvider: p.id, activeModel: model })
-      .then(onConfig)
+    void setSessionModel(sessionId, p.id, nextModel)
+      .then(() => onSessionEndpoint(p.id, nextModel))
       .catch(() => {});
   };
   const switchModel = (m: string) => {
-    if (m === cfg.activeModel && activeProvider?.id === cfg.activeProvider) return;
-    // 菜单里列的是 activeProvider（含 providers[0] 兜底）的模型，所以
-    // provider 要一起写。只写 activeModel 的话，active 为空时会留下
-    // 「模型有值、provider 是空 id」的配置 —— keyStatus 按空 id 查不到，
+    if (m === sessionModelId && activeProvider?.id === sessionProviderId) return;
+    // 菜单里列的是当前会话服务方（含 providers[0] 兜底）的模型，所以
+    // provider 要一起写。只写 model 的话，服务方为空时会留下
+    // 「模型有值、provider 是空 id」—— keyStatus 按空 id 查不到，
     // 表现为 key 已保存、横幅却说没配。
-    void saveConfig({
-      ...cfg,
-      activeProvider: activeProvider?.id ?? cfg.activeProvider,
-      activeModel: m,
-    })
-      .then(onConfig)
+    const provider = activeProvider?.id ?? sessionProviderId;
+    void setSessionModel(sessionId, provider, m)
+      .then(() => onSessionEndpoint(provider, m))
       .catch(() => {});
   };
 
   // 当前模型的上下文窗口。改它改的是这个模型的压缩时机，写回 ModelConfig
   // 持久化 —— 窗口是模型的固有属性，不是这次对话的临时偏好，下次选中它
   // 还该是这个值。
-  const activeModelCfg = activeProvider?.models.find((m) => m.id === cfg.activeModel);
+  const activeModelCfg = activeProvider?.models.find((m) => m.id === sessionModelId);
   const switchWindow = (raw: string) => {
     if (!activeProvider || !activeModelCfg) return;
     const next = raw ? Number(raw) : undefined;
@@ -804,7 +812,7 @@ function ComposerDock({
     // 只附了图/只挂了块、什么都没打也算一条消息 —— "看这个截图"、
     // "看看这个文件"都是这么发的（见 canSend）。
     // busy 不拦：模型干活时发的消息进排队面板，内核在安全点注入。
-    if (!canSend || !hasKey || !cfg.activeModel) return;
+    if (!canSend || !hasKey || !sessionModelId) return;
 
     // 斜杠命令：内置的当场执行，能展开的展开成 prompt 再走正常发送。
     //
@@ -1340,7 +1348,7 @@ function ComposerDock({
             provider: activeProvider?.name ?? t("composer.banner.currentProvider"),
           })}
         </button>
-      ) : !cfg.activeModel ? (
+      ) : !sessionModelId ? (
         <button className="key-banner" onClick={onOpenSettings}>
           {t("composer.banner.noModel", {
             provider: activeProvider?.name ?? t("composer.banner.currentProvider"),
@@ -1667,7 +1675,7 @@ function ComposerDock({
                 items={cfg.providers.map((p) => ({
                   id: p.id,
                   label: p.name,
-                  active: p.id === cfg.activeProvider,
+                  active: p.id === sessionProviderId,
                   ...(config.keyStatus[p.id]
                     ? {}
                     : { note: t("composer.provider.noKey"), warn: true }),
@@ -1679,12 +1687,12 @@ function ComposerDock({
               />
               <Picker
                 title={t("composer.model.switch")}
-                label={modelLabel(activeProvider, cfg.activeModel) || t("composer.model.pick")}
+                label={modelLabel(activeProvider, sessionModelId) || t("composer.model.pick")}
                 items={(activeProvider?.models ?? []).map((m) => ({
                   id: m.id,
                   // 有显示名就用它。菜单里那一列越短越好读，模型 ID 常常很长。
                   label: m.name?.trim() || m.id,
-                  active: m.id === cfg.activeModel,
+                  active: m.id === sessionModelId,
                   ...(m.vision ? { vision: true } : {}),
                   ...(m.contextWindow ? { note: fmtTokens(m.contextWindow) } : {}),
                 }))}
@@ -1742,7 +1750,7 @@ function ComposerDock({
                 （Cursor 同款）。打字就是在提意见，发送键回来。 */}
             {showBuild ? (
               <BuildButton
-                disabled={building || !hasKey || !cfg.activeModel}
+                disabled={building || !hasKey || !sessionModelId}
                 onBuild={() => void buildPlan(false)}
                 onBuildParallel={() => void buildPlan(true)}
               />
@@ -1750,18 +1758,18 @@ function ComposerDock({
               <button
                 type="submit"
                 className="send"
-                disabled={!canSend || !hasKey || !cfg.activeModel}
+                disabled={!canSend || !hasKey || !sessionModelId}
                 title={
                   busy
                     ? t("composer.send.queueTitle")
-                    : cfg.activeModel
+                    : sessionModelId
                       ? t("composer.send")
                       : t("composer.send.pickModel")
                 }
                 aria-label={
                   busy
                     ? t("composer.send.queue")
-                    : cfg.activeModel
+                    : sessionModelId
                       ? t("composer.send")
                       : t("composer.send.pickModel")
                 }

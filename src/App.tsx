@@ -41,6 +41,7 @@ import {
   type ScheduledTask,
   type SessionInfo,
   setConfig as saveConfig,
+  setSessionModel,
   setWindowTitle,
   subscribeFullscreen,
   subscribeScheduleChanges,
@@ -243,8 +244,11 @@ function sessionEq(a: SessionInfo, b: SessionInfo): boolean {
     a.title === b.title &&
     a.seq === b.seq &&
     a.mode === b.mode &&
+    a.multitask === b.multitask &&
     a.pythonVenv === b.pythonVenv &&
     a.systemPrompt === b.systemPrompt &&
+    a.provider === b.provider &&
+    a.model === b.model &&
     a.busy === b.busy &&
     thinkingEq(a.thinking, b.thinking) &&
     samplingEq(a.sampling, b.sampling)
@@ -917,7 +921,22 @@ export function App() {
 
   const newSession = useCallback(async (root: string) => {
     try {
-      const info = await createSession(root);
+      let info = await createSession(root);
+      // 开新会话跟当前正在看的那份模型走，而不是全局默认。否则刚在 A
+      // 里换成便宜模型，点「新会话」又跳回设置页那个贵的。
+      const src = sessionsRef.current.find((s) => s.id === active);
+      if (src && (src.provider || src.model)) {
+        const provider = src.provider;
+        const model = src.model;
+        if (provider !== info.provider || model !== info.model) {
+          try {
+            await setSessionModel(info.id, provider, model);
+            info = { ...info, provider, model };
+          } catch {
+            // 会话已经建好了，模型停在创建时钉的全局默认上。
+          }
+        }
+      }
       setMissing((prev) => {
         if (!prev.has(root)) return prev;
         const next = new Set(prev);
@@ -937,7 +956,7 @@ export function App() {
       }
       noteError(t("app.error.createSession"), e);
     }
-  }, [noteError, touchSession, t]);
+  }, [active, noteError, touchSession, t]);
 
   const dirPicker = useDirectoryPicker();
   const pickDir = dirPicker.pick;
@@ -1791,6 +1810,11 @@ export function App() {
                       onMissingWorkspace={() => setGoneRoot(s.root)}
                       initialMode={s.mode}
                       initialMultitask={s.multitask}
+                      sessionProvider={s.provider ?? ""}
+                      sessionModel={s.model ?? ""}
+                      onSessionEndpoint={(provider, model) =>
+                        patchSession(s.id, { provider, model })
+                      }
                       onConfig={setConfig}
                       onOpenSettings={() => setShowSettings(true)}
                       permissionPick={permPick?.id === s.id ? permPick.pick : null}
@@ -2144,7 +2168,11 @@ export function App() {
           session={activeSession}
           // 会话继承到的是"模型叠在服务方之上"的结果，和宿主 resolve() 同序。
           // 只传服务方的话，模型上单独设过的字段在这里会显示成另一个数。
-          inherited={inheritedSampling(config.config)}
+          inherited={inheritedSampling(
+            config.config,
+            activeSession.provider || undefined,
+            activeSession.model || undefined,
+          )}
           presets={config.config.prompts ?? []}
           onSavePreset={savePromptPreset}
           onPatch={(patch) => patchSession(activeSession.id, patch)}
@@ -2193,6 +2221,9 @@ function Chat({
   onMissingWorkspace,
   initialMode,
   initialMultitask = false,
+  sessionProvider,
+  sessionModel,
+  onSessionEndpoint,
   onConfig,
   onOpenSettings,
   permissionPick,
@@ -2223,6 +2254,9 @@ function Chat({
   initialMode: PermissionMode;
   /** 宿主侧这个会话的多任务开关。 */
   initialMultitask?: boolean;
+  sessionProvider: string;
+  sessionModel: string;
+  onSessionEndpoint: (provider: string, model: string) => void;
   onConfig: (s: ConfigStatus) => void;
   onOpenSettings: () => void;
   /** 会话设置弹窗选的权限档，透传给 Composer。 */
@@ -2423,6 +2457,9 @@ function Chat({
       busy={session.busy}
       config={config}
       onConfig={onConfig}
+      sessionProvider={sessionProvider}
+      sessionModel={sessionModel}
+      onSessionEndpoint={onSessionEndpoint}
       initialMode={initialMode}
       initialMultitask={initialMultitask}
       hostMode={session.hostMode}

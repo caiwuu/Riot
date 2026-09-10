@@ -563,6 +563,17 @@ async fn set_session_thinking(
     state.set_thinking(&session_id, thinking).await
 }
 
+/// 这个会话用的服务方 / 模型。下一轮生效。只改这一个会话。
+#[tauri::command]
+async fn set_session_model(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    provider: String,
+    model: String,
+) -> HostResult<()> {
+    state.set_session_model(&session_id, provider, model).await
+}
+
 /// 会话的多任务模式开关。下一轮生效。
 #[tauri::command]
 async fn set_session_multitask(
@@ -1623,6 +1634,7 @@ pub fn run() {
             set_session_python_venv,
             set_session_system_prompt,
             set_session_thinking,
+            set_session_model,
             set_session_multitask,
             turn_nudge,
             browser_open,

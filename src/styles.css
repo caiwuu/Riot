@@ -932,13 +932,15 @@ html[data-resizing] .slide-panel {
   color: var(--text);
 }
 
-/* 会话标题即菜单入口。宽度设上限，超长标题截断，别把右边的开关挤走。 */
+/* 会话标题即菜单入口。宽度用固定上限，不跟窗口百分比一起涨；
+   超长标题截断，别把右边的权限档和开关挤走。 */
 .tb-title {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
-  max-width: 42%;
+  max-width: 240px;
+  overflow: hidden;
   background: transparent;
   border: none;
   border-radius: 7px;
@@ -952,12 +954,14 @@ html[data-resizing] .slide-panel {
 }
 
 .tb-title-text {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .tb-title .chevron {
+  flex-shrink: 0;
   width: 16px;
   height: 16px;
 }
@@ -11072,7 +11076,7 @@ button.field-slider-state:hover {
   }
 
   .tb-title {
-    max-width: 60%;
+    max-width: min(240px, 60%);
   }
 
   /* ── 输入区 ── */

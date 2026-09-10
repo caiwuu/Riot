@@ -8,7 +8,7 @@
 //!   就能画出侧边栏（Claude Code 用"只读文件尾 64KB"达到同一目的，那个方案
 //!   依赖"退出时把元数据再追加一遍"的补救，脆；Codex 用 SQLite 索引。小索引
 //!   文件是两者取其轻）。
-//! - **可变会话状态**（权限模式、采样覆盖、venv、追加提示词）—— 它们不属于
+//! - **可变会话状态**（权限模式、模型、采样覆盖、venv、追加提示词）—— 它们不属于
 //!   对话内容，塞进 transcript 就得定义"哪行说了算"的合并规则。
 //!
 //! 索引损坏或丢失时从 transcript 的 Meta 首行重建（[`load`]）：会话和对话
@@ -44,6 +44,11 @@ pub struct PersistedSession {
     /// 历史是惰性加载的，而启动画侧边栏就要标题。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_title: Option<String>,
+    /// 这个会话用的服务方 / 模型。空 = 老索引，恢复时按当时的全局默认钉死。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
     #[serde(default = "default_mode")]
     pub mode: PermissionMode,
     #[serde(default, skip_serializing_if = "Sampling::is_empty")]
@@ -179,6 +184,8 @@ fn from_scan(s: riot_store::ScannedTranscript) -> PersistedSession {
             .first_prompt
             .as_deref()
             .and_then(crate::session::title_excerpt),
+        provider: String::new(),
+        model: String::new(),
         mode: PermissionMode::Default,
         sampling: Sampling::default(),
         python_venv: None,
@@ -246,6 +253,8 @@ mod tests {
             created_at_ms: 1_000 + seq,
             custom_title: None,
             auto_title: Some("标题".into()),
+            provider: String::new(),
+            model: String::new(),
             mode: PermissionMode::Default,
             sampling: Sampling::default(),
             python_venv: None,
@@ -449,6 +458,10 @@ mod tests {
         assert_eq!(idx.sessions.len(), 1);
         assert_eq!(idx.sessions[0].mode, PermissionMode::Default);
         assert!(idx.sessions[0].custom_title.is_none());
+        assert!(
+            idx.sessions[0].provider.is_empty() && idx.sessions[0].model.is_empty(),
+            "缺 provider/model 的老索引不能整体失败，空着留给恢复时按当时的全局默认钉死"
+        );
         assert!(
             idx.sessions[0].thinking.is_default(),
             "缺 thinking 字段回默认 = 不发思考参数，老会话行为不变"

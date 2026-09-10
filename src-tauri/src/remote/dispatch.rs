@@ -229,6 +229,13 @@ pub async fn dispatch(
         "set_session_thinking" => {
             ok(crate::set_session_thinking(st, a.take("sessionId")?, a.take("thinking")?).await)
         }
+        "set_session_model" => ok(crate::set_session_model(
+            st,
+            a.take("sessionId")?,
+            a.take("provider")?,
+            a.take("model")?,
+        )
+        .await),
         "set_session_multitask" => {
             ok(crate::set_session_multitask(st, a.take("sessionId")?, a.take("on")?).await)
         }

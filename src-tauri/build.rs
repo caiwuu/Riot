@@ -43,6 +43,7 @@ const COMMANDS: &[&str] = &[
     "set_session_python_venv",
     "set_session_system_prompt",
     "set_session_thinking",
+    "set_session_model",
     "set_session_multitask",
     "turn_nudge",
     "browser_open",

@@ -553,8 +553,8 @@ pub struct Session {
     /// 进行中的半截流（见 [`LiveStream`]）。随 session.resume 快照回给界面。
     live_stream: Mutex<LiveStream>,
     /// 会话级采样覆盖。字段为 None 表示继承模型/provider 那两层。
-    /// 模型本身不存这里 —— 每轮由宿主按当前激活配置解析传入，
-    /// 用户在对话中途切换模型，下一轮立即生效。
+    /// 模型由宿主按这个会话自己记的那份解析，每轮传入 —— 内核不存，
+    /// 换模型下一轮生效。
     sampling_override: Mutex<Sampling>,
     /// 会话级 Python 虚拟环境（venv 根目录）。
     ///

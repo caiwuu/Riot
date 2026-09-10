@@ -1081,7 +1081,15 @@ impl AppConfig {
     /// 主模型自己能看图时返回 `None` —— 那条路不需要转述，多走一次辅助模型
     /// 只是白花钱，而且转述比原图差。
     pub fn vision_target(&self) -> Option<(&str, &str)> {
-        if self.active_takes_images() {
+        self.vision_target_for(&self.active_provider, &self.active_model)
+    }
+
+    /// 某个会话正在用的那对 provider/model 要不要走视觉转述。
+    ///
+    /// 模型是会话级的：不能拿全局 `active_*` 判断，否则 A 会话切到纯文本
+    /// 模型会让 B 会话（自己能看图）也去转述一遍。
+    pub fn vision_target_for(&self, provider_id: &str, model: &str) -> Option<(&str, &str)> {
+        if self.takes_images(provider_id, model) {
             return None;
         }
         let (p, m) = self.vision_model.trim().split_once('/')?;
@@ -1093,11 +1101,16 @@ impl AppConfig {
     /// 指到主模型自己时返回 `None` —— 那样 `provider_for` 会白建一个一模一样
     /// 的客户端，还会让"这轮用的是便宜档"的提示说谎。
     pub fn subagent_target(&self) -> Option<(&str, &str)> {
+        self.subagent_target_for(&self.active_provider, &self.active_model)
+    }
+
+    /// 某个会话的主模型要不要另配便宜档给子 agent。
+    pub fn subagent_target_for(&self, provider_id: &str, model: &str) -> Option<(&str, &str)> {
         let (p, m) = self.subagent_model.trim().split_once('/')?;
         if p.is_empty() || m.is_empty() {
             return None;
         }
-        (p != self.active_provider || m != self.active_model).then_some((p, m))
+        (p != provider_id || m != model).then_some((p, m))
     }
 
     /// 配置能不能保存：active 必须指向存在的 provider。
@@ -2158,6 +2171,26 @@ mod tests {
         c.providers[0].models[0].vision = true;
         assert_eq!(c.vision_target(), None, "能看图就不该再转述一遍");
         assert!(c.active_takes_images());
+    }
+
+    #[test]
+    fn 视觉转述按会话模型判断不是按全局() {
+        let mut c = one_provider();
+        c.providers[0].models.push(ModelConfig::new("eyes"));
+        c.providers[0].models[1].vision = true;
+        c.vision_model = "acme/eyes".into();
+        c.active_model = "m1".into();
+
+        assert_eq!(
+            c.vision_target_for("acme", "m1"),
+            Some(("acme", "eyes")),
+            "纯文本会话该转述"
+        );
+        assert_eq!(
+            c.vision_target_for("acme", "eyes"),
+            None,
+            "这个会话自己能看图，不该因为全局 active 是纯文本就去转述"
+        );
     }
 
     #[test]
