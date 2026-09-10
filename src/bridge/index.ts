@@ -526,20 +526,31 @@ export function regenerateTurn(sessionId: string, messageId: string): Promise<vo
 
 /**
  * 编辑一条用户提问并从它重新开始（Cursor 编辑气泡后发送的同款）：换掉
- * 它的文字、丢掉它之后的一切、再跑一轮。附件（图片、引用）原位保留。
+ * 它的文字（以及可选的图片）、丢掉它之后的一切、再跑一轮。
+ * `images` 不传则图片原位保留；传了就整表替换（空数组 = 全删）。
  */
-export function resendTurn(sessionId: string, messageId: string, text: string): Promise<void> {
-  return invoke("resend_turn", { sessionId, messageId, text }, T_SLOW);
+export function resendTurn(
+  sessionId: string,
+  messageId: string,
+  text: string,
+  images?: ImageInput[],
+): Promise<void> {
+  return invoke("resend_turn", { sessionId, messageId, text, images }, T_SLOW);
 }
 
 /**
  * 上下文编辑：把一条历史消息的文本段替换成新文本。
  *
- * 只动文本 —— 思考、工具调用/结果、附件原位保留。之后的轮次模型看到的
- * 就是改过的历史。空闲时才能做，忙时宿主会拒绝。
+ * 思考、工具调用/结果、`@` 引用原位保留。`images` 不传则图片不动；
+ * 传了就整表替换。之后的轮次模型看到的就是改过的历史。空闲时才能做。
  */
-export function editMessage(sessionId: string, messageId: string, text: string): Promise<void> {
-  return invoke("edit_message", { sessionId, messageId, text });
+export function editMessage(
+  sessionId: string,
+  messageId: string,
+  text: string,
+  images?: ImageInput[],
+): Promise<void> {
+  return invoke("edit_message", { sessionId, messageId, text, images });
 }
 
 /**

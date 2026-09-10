@@ -25,33 +25,27 @@ import {
   useState,
 } from "react";
 
-import { host } from "../bridge";
-import type { PermissionAsk, PermissionMode, PermissionResponse } from "../bridge";
+import {
+  host,
+  type ImageInput,
+  type PermissionAsk,
+  type PermissionMode,
+  type PermissionResponse,
+} from "../bridge";
 import { useImeGuard } from "../hooks/useImeGuard";
 import type { Item, TextItem } from "../hooks/useSession";
 import { useTimedFlag } from "../hooks/useTimedFlag";
 import { dateTimeFormat, useT } from "../i18n";
 import {
-  caretToEnd,
-  guardChipDeletes,
-  handleChipKey,
-  IME_TAIL_MS,
-  insertLineBreak,
-  normalizePads,
-  readEditor,
-  writeEditor,
-} from "../lib/chipEditor";
-import {
   SLASH_HEAD_RE,
   extractElemSpans,
   extractMentionSpans,
   mentionCovers,
-  promptToSegs,
-  segsToPrompt,
 } from "../lib/promptText";
 import { openPlanPanel } from "../lib/plan";
 import { Chevron } from "./Chevron";
 import { Chip, FileChip } from "./Chip";
+import { Composer } from "./Composer";
 import { ConfirmDialog, type ConfirmRequest } from "./ConfirmDialog";
 import { PlanModeIcon } from "./icons";
 import { LazyMarkdown, Markdown } from "./Markdown";
@@ -434,12 +428,12 @@ export function Transcript({
   onAnswerChoice?: (r: PermissionResponse) => void;
   onRegenerate?: (itemId: string) => void;
   /** 上下文编辑：把这条气泡的文本换掉。false = 没改成，编辑框保留草稿。 */
-  onEditEntry?: (item: TextItem, text: string) => Promise<boolean>;
+  onEditEntry?: (item: TextItem, text: string, images?: ImageInput[]) => Promise<boolean>;
   /**
    * 编辑后重发（只对用户气泡）：换字、丢掉之后的一切、从它再跑一轮。
    * false = 没发出去，编辑框保留草稿。
    */
-  onResendEntry?: (item: TextItem, text: string) => Promise<boolean>;
+  onResendEntry?: (item: TextItem, text: string, images?: ImageInput[]) => Promise<boolean>;
   /** 上下文删除：把这条气泡从历史里抹掉。 */
   onDeleteEntry?: (item: TextItem) => Promise<boolean>;
 }) {
@@ -924,9 +918,9 @@ export const Row = memo(function Row({
   /** 贴底 / 查找中：立刻解析 markdown 和工具详情。 */
   hydrate?: boolean;
   /** 上下文编辑（见 Transcript 的同名 prop）。 */
-  onEditEntry?: (item: TextItem, text: string) => Promise<boolean>;
+  onEditEntry?: (item: TextItem, text: string, images?: ImageInput[]) => Promise<boolean>;
   /** 编辑后重发（见 Transcript 的同名 prop）。只有用户气泡用它。 */
-  onResendEntry?: (item: TextItem, text: string) => Promise<boolean>;
+  onResendEntry?: (item: TextItem, text: string, images?: ImageInput[]) => Promise<boolean>;
   /** 上下文删除。收到的是 Transcript 的确认包装 —— 点击先弹确认框。 */
   onDeleteEntry?: (item: TextItem) => void;
   /** 编辑/删除此刻可用（空闲）。生成中改历史会和正在写的轮子打架。 */
@@ -941,19 +935,22 @@ export const Row = memo(function Row({
       if (editing && onEditEntry) {
         return (
           <div className="msg user editing">
-            <MsgEditor
+            <Composer
+              variant="edit"
               initial={item.text}
               parseChips
+              allowImages
+              initialImages={item.images ?? []}
               onCancel={() => setEditing(false)}
-              onSave={async (text) => {
-                const ok = await onEditEntry(item, text);
+              onSave={async (text, images) => {
+                const ok = await onEditEntry(item, text, images);
                 if (ok) setEditing(false);
                 return ok;
               }}
               {...(onResendEntry
                 ? {
-                    onResend: async (text: string) => {
-                      const ok = await onResendEntry(item, text);
+                    onResend: async (text: string, images?: ImageInput[]) => {
+                      const ok = await onResendEntry(item, text, images);
                       if (ok) setEditing(false);
                       return ok;
                     },
@@ -1009,7 +1006,8 @@ export const Row = memo(function Row({
       if (editing && onEditEntry) {
         return (
           <div className="msg assistant editing">
-            <MsgEditor
+            <Composer
+              variant="edit"
               initial={item.text}
               onCancel={() => setEditing(false)}
               onSave={async (text) => {
@@ -1239,170 +1237,6 @@ function MsgTime({ at }: { at: number }) {
     >
       {dateTimeFormat(HHMM_OPTS).format(d)}
     </time>
-  );
-}
-
-/**
- * 消息的内联编辑框（上下文修改）。
- *
- * 两种落法：
- * - **发送**（只有用户气泡有，`onResend`）：换字、丢掉之后的一切、从这条
- *   重新跑 —— Cursor 编辑气泡后回车的同款。⌘/Ctrl+Enter 走它，是主按钮。
- * - **保存**：只改上下文里的原文，之后的对话不动。助手气泡只有这一种，
- *   那时 ⌘/Ctrl+Enter 走它。
- * Esc 取消。落不成（忙、消息已被压缩、内核拒绝）时编辑框留着 —— 草稿不能丢。
- *
- * 用户消息（`parseChips`）用和输入框同一套 contenteditable 块机械：
- * 文件引用、页面元素在编辑时也是色块，和气泡里看到的一致，而不是一串
- * 裸标记。助手消息保持纯文本 —— 回复里长得像 `@路径` 的字符串是内容，
- * 解析成块再序列化会改写它。
- */
-function MsgEditor({
-  initial,
-  parseChips = false,
-  onSave,
-  onResend,
-  onCancel,
-}: {
-  initial: string;
-  parseChips?: boolean;
-  onSave: (text: string) => Promise<boolean>;
-  onResend?: (text: string) => Promise<boolean>;
-  onCancel: () => void;
-}) {
-  const { t } = useT();
-  /** 正在落哪一种；null = 空闲。两个按钮各自显示自己的进行中文案。 */
-  const [saving, setSaving] = useState<"save" | "resend" | null>(null);
-  const [hasText, setHasText] = useState(!!initial.trim());
-  const ref = useRef<HTMLDivElement>(null);
-  // 中文 IME：组字中不能动 DOM（normalize 合并文本节点会打断组字）。
-  const imeRef = useRef(false);
-  // 上一次 compositionend 的时刻，给贴块的原生删除判归属（见 IME_TAIL_MS）。
-  const imeEndAt = useRef(-Infinity);
-
-  const read = () => (ref.current ? segsToPrompt(readEditor(ref.current)) : "");
-
-  const refresh = () => {
-    const el = ref.current;
-    if (!el) return;
-    if (!imeRef.current) normalizePads(el);
-    setHasText(read().trim().length > 0);
-  };
-
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    writeEditor(el, parseChips ? promptToSegs(initial) : [{ kind: "text", value: initial }]);
-    el.focus();
-    caretToEnd(el);
-    // 只在挂载时灌一次：编辑区是非受控的，内容住在 DOM 里。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    return guardChipDeletes(
-      el,
-      () => imeRef.current || performance.now() - imeEndAt.current < IME_TAIL_MS,
-      refresh,
-    );
-    // refresh 只碰 ref 和 setState，没有会过期的闭包。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const commit = async (kind: "save" | "resend", op: (text: string) => Promise<boolean>) => {
-    const text = read().trim();
-    if (saving || !text) return;
-    setSaving(kind);
-    try {
-      await op(text);
-    } finally {
-      setSaving(null);
-    }
-  };
-  const save = () => commit("save", onSave);
-  // 主动作：有"发送"就是发送，否则是保存。快捷键和主按钮走同一个。
-  const primary = () => (onResend ? commit("resend", onResend) : save());
-
-  return (
-    <div className="msg-editor">
-      <div
-        ref={ref}
-        className="msg-editbox"
-        contentEditable={saving === null}
-        suppressContentEditableWarning
-        role="textbox"
-        aria-multiline="true"
-        onInput={refresh}
-        onCompositionStart={() => {
-          imeRef.current = true;
-        }}
-        onCompositionEnd={() => {
-          imeEndAt.current = performance.now();
-          setTimeout(() => {
-            imeRef.current = false;
-          }, 0);
-          refresh();
-        }}
-        // 和输入框一致：富文本粘贴一律降级成纯文本。
-        onPaste={(e) => {
-          e.preventDefault();
-          document.execCommand("insertText", false, e.clipboardData.getData("text/plain"));
-        }}
-        onKeyDown={(e) => {
-          const el = ref.current;
-          // 输入法消费掉的键一律不碰（229 那一条的来历见 Composer 的同款注释）。
-          const imeKey = e.nativeEvent.isComposing || e.keyCode === 229 || imeRef.current;
-          // 块的键盘机械和输入框共用。这里回车就是换行（⌘/Ctrl+回车才是保存），
-          // 贴着块的那一下要自己插 —— 原因见 insertLineBreak。
-          if (el && !imeKey) {
-            const lineBreak = e.key === "Enter" && !e.metaKey && !e.ctrlKey;
-            if (handleChipKey(e, el) || (lineBreak && insertLineBreak(el))) {
-              e.preventDefault();
-              refresh();
-              return;
-            }
-          }
-          if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-            e.preventDefault();
-            void primary();
-          } else if (e.key === "Escape" && !imeKey) {
-            e.preventDefault();
-            e.stopPropagation();
-            onCancel();
-          }
-        }}
-      />
-      <div className="msg-editor-btns">
-        <span className="msg-editor-hint">
-          {onResend ? t("transcript.editor.hintResend") : t("transcript.editor.hintSave")}
-        </span>
-        <button type="button" onClick={onCancel} disabled={saving !== null}>
-          {t("common.cancel")}
-        </button>
-        <button
-          type="button"
-          className={onResend ? undefined : "msg-editor-save"}
-          onClick={() => void save()}
-          disabled={saving !== null || !hasText}
-          title={onResend ? t("transcript.editor.saveOnlyTitle") : undefined}
-        >
-          {saving === "save" ? t("common.saving") : t("common.save")}
-        </button>
-        {onResend ? (
-          <button
-            type="button"
-            className="msg-editor-save"
-            onClick={() => void primary()}
-            disabled={saving !== null || !hasText}
-            title={t("transcript.editor.resendTitle")}
-          >
-            {saving === "resend" ? t("transcript.editor.sending") : t("transcript.editor.send")}
-          </button>
-        ) : null}
-      </div>
-    </div>
   );
 }
 

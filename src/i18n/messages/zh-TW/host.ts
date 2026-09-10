@@ -40,7 +40,7 @@ export default {
   "host.sandbox.installFailed": "命令隔離安裝失敗。",
   "host.sandbox.uninstallFailed": "命令隔離解除安裝失敗。",
   "host.preview.outOfScope":
-    "{path} 不在應用程式能讀的範圍內。可讀的是專案目錄、應用程式自己的資料目錄，以及桌面 / 下載項目 / 文件 / 圖片這些常用資料夾。要用別處的檔案，把它所在的目錄作為專案開啟，或者先複製到上面這些位置。",
+    "{path} 不在應用程式能讀的範圍內。可讀的是專案目錄、應用程式自己的資料目錄、系統暫存目錄，以及桌面 / 下載項目 / 文件 / 圖片這些常用資料夾。要用別處的檔案，把它所在的目錄作為專案開啟，或者先複製到上面這些位置。",
   "host.file.readFailed": "讀取檔案失敗。",
   "host.file.notFile": "這個路徑不是檔案。",
   "host.file.tooLarge": "檔案太大（{size} MB），應用程式內預覽最多 {max} MB。請用系統應用程式開啟。",

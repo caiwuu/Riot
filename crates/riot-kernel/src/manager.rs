@@ -469,19 +469,28 @@ impl SessionManager {
             .await?)
     }
 
-    /// 编辑一条用户提问并从它重新开始：换文字、丢掉之后的一切、再跑一轮。
+    /// 编辑一条用户提问并从它重新开始：换文字（以及可选的图片）、丢掉之后的一切、再跑一轮。
     pub async fn resend(
         &self,
         session_id: &str,
         message_id: &str,
         text: &str,
+        images: Option<Vec<riot_protocol::ImageInput>>,
         config: TurnConfig,
     ) -> Result<(), RpcError> {
         let session = self.require(session_id).await?;
         let (caps, limits) = self.setup_turn(&session, &config).await;
         let sink = session.sink();
+        let images = images.map(|imgs| {
+            imgs.into_iter()
+                .map(|i| ImageInput {
+                    media_type: i.media_type,
+                    data: i.data,
+                })
+                .collect()
+        });
         Ok(session
-            .resend_from(message_id, text, config.model, caps, sink, limits)
+            .resend_from(message_id, text, images, config.model, caps, sink, limits)
             .await?)
     }
 
@@ -496,15 +505,24 @@ impl SessionManager {
         Ok(s.compact_now(model, sink).await?)
     }
 
-    /// 上下文编辑:替换一条活历史消息的文本段。空闲时才能做。
+    /// 上下文编辑:替换一条活历史消息的文本段（以及可选的图片）。空闲时才能做。
     pub async fn edit_message(
         &self,
         session_id: &str,
         message_id: &str,
         text: &str,
+        images: Option<Vec<riot_protocol::ImageInput>>,
     ) -> Result<(), RpcError> {
         let s = self.require(session_id).await?;
-        Ok(s.edit_message(message_id, text).await?)
+        let images = images.map(|imgs| {
+            imgs.into_iter()
+                .map(|i| ImageInput {
+                    media_type: i.media_type,
+                    data: i.data,
+                })
+                .collect()
+        });
+        Ok(s.edit_message(message_id, text, images).await?)
     }
 
     /// 上下文删除:抹掉一条活历史消息的可见内容,空心则整条移除。

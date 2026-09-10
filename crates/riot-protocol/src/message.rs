@@ -161,6 +161,23 @@ impl Message {
         }
     }
 
+    /// 用户提问的附图（`Image` / `DescribedImage`）整表换成 `images`。
+    ///
+    /// `@` 文件、系统注入、工具结果一律不动。新图插在最前，和
+    /// 组装用户内容时「图在字前」的顺序一致。
+    ///
+    /// 返回 `false` = 不是用户消息，原样未动。
+    pub fn edit_user_images(&mut self, images: Vec<Attachment>) -> bool {
+        let Message::User { content, .. } = self else {
+            return false;
+        };
+        content.retain(|c| !matches!(c, UserContent::Attachment(a) if a.is_user_image()));
+        for (i, image) in images.into_iter().enumerate() {
+            content.insert(i, UserContent::Attachment(image));
+        }
+        true
+    }
+
     /// 真正的用户提问：有正文、附图或 `@` 文件的用户消息。工具结果的
     /// 合成消息、纯系统注入都不算。
     ///
@@ -333,6 +350,13 @@ pub enum Attachment {
         /// 给模型的转述，自带"当作亲眼所见"的使用指示。
         text: String,
     },
+}
+
+impl Attachment {
+    /// 用户亲手附的图（含视觉兼容留下的转述图）。`@` 文件和系统注入不算。
+    pub fn is_user_image(&self) -> bool {
+        matches!(self, Self::Image { .. } | Self::DescribedImage { .. })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -561,6 +585,45 @@ mod tests {
         assert_eq!(content.len(), 2);
         assert!(matches!(&content[0], UserContent::Text { text } if text == "新话"));
         assert!(matches!(&content[1], UserContent::Attachment(_)));
+    }
+
+    /// 编辑图片整表替换，文件引用留下。
+    #[test]
+    fn edit_user_images_replaces_pictures_keeps_files() {
+        let mut m = Message::User {
+            id: MessageId::from_raw("m1"),
+            content: vec![
+                UserContent::Attachment(Attachment::Image {
+                    media_type: "image/png".into(),
+                    data: "old".into(),
+                }),
+                UserContent::Text {
+                    text: "看图".into(),
+                },
+                UserContent::Attachment(Attachment::UserFile {
+                    path: "a.rs".into(),
+                    content: "fn".into(),
+                }),
+            ],
+            meta: MessageMeta::default(),
+        };
+        assert!(m.edit_user_images(vec![Attachment::Image {
+            media_type: "image/jpeg".into(),
+            data: "new".into(),
+        }]));
+        let Message::User { content, .. } = &m else {
+            unreachable!()
+        };
+        assert_eq!(content.len(), 3);
+        assert!(matches!(
+            &content[0],
+            UserContent::Attachment(Attachment::Image { data, .. }) if data == "new"
+        ));
+        assert!(matches!(&content[1], UserContent::Text { text } if text == "看图"));
+        assert!(matches!(
+            &content[2],
+            UserContent::Attachment(Attachment::UserFile { .. })
+        ));
     }
 
     /// 轮边界的判定：真实输入（文字/图/`@` 文件）算提问，工具结果的

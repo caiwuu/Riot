@@ -121,6 +121,7 @@ pub async fn dispatch(
             a.take("sessionId")?,
             a.take("messageId")?,
             a.take("text")?,
+            a.take("images")?,
         )
         .await),
         "edit_message" => ok(crate::edit_message(
@@ -128,6 +129,7 @@ pub async fn dispatch(
             a.take("sessionId")?,
             a.take("messageId")?,
             a.take("text")?,
+            a.take("images")?,
         )
         .await),
         "delete_message" => {

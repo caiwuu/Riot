@@ -286,6 +286,11 @@ fn search_hint(e: &WebError) -> String {
             "搜索后端返回 HTTP {code}：{body}。\
              可能是地址配错了或者后端没开启 JSON 输出。告诉用户去检查设置，不要重试。"
         ),
+        WebError::Transport { message } if message.contains("上游引擎") => {
+            format!(
+                "{message}。请改用 WebFetch 抓已经知道的网址，或让用户到「设置 → 联网」换 SearXNG 实例。不要反复调用这个工具，也不要据此认定工具坏了。"
+            )
+        }
         WebError::Transport { message } => {
             format!("连不上搜索后端：{message}。让用户检查「设置 → 联网」，不要重试。")
         }
@@ -352,6 +357,20 @@ mod tests {
             out.contains("截断"),
             "超长正文必须截断：{}",
             &out[..200.min(out.len())]
+        );
+    }
+
+    #[test]
+    fn 上游引擎全挂时不要说搜不到() {
+        let e = WebError::Transport {
+            message: "搜索后端的上游引擎都没有返回结果：brave（限流）。这不是搜索词的问题，换词也不会有结果".into(),
+        };
+        let h = search_hint(&e);
+        assert!(h.contains("WebFetch"), "{h}");
+        assert!(h.contains("不要反复"), "{h}");
+        assert!(
+            !h.contains("连不上"),
+            "HTTP 通了、引擎挂了，说连不上会让模型换词重试：{h}"
         );
     }
 

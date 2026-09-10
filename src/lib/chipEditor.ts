@@ -1,7 +1,7 @@
 //! contenteditable 块编辑器的机械：块节点、光标、守卫字符、键盘行为。
 //!
-//! 从 Composer 拆出，输入框（Composer）和消息编辑框（Transcript 的
-//! MsgEditor）共用 —— 改光标/退格/守卫的行为只动这个文件，两处一起生效。
+//! 从 Composer 拆出，底部输入框和消息内联编辑（都是 Composer）共用 ——
+//! 改光标/退格/守卫的行为只动这个文件，两处一起生效。
 //! 块的"知识"（种类、属性、样式类）在 `chips.ts`；React 静态渲染在
 //! `components/Chip.tsx`；这里只有命令式 DOM —— contenteditable 里
 //! React 一 re-render 就冲掉光标，进不来。

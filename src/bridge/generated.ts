@@ -677,12 +677,17 @@ export type RpcRequest =
       params: {
         config: TurnConfig;
         /**
+         * 新的图片清单。`None` = 图片原位保留（老宿主 / 只改字）；
+         * `Some` = 整表替换，空数组就是把图全删掉。`@` 引用不动。
+         */
+        images?: ImageInput[] | null;
+        /**
          * 要改的用户消息 id。必须是活历史里的用户提问。
          */
         message_id: string;
         session_id: string;
         /**
-         * 新文本。附件（图片、引用）原位保留，只换文字。
+         * 新文本。
          */
         text: string;
       };
@@ -741,6 +746,11 @@ export type RpcRequest =
   | {
       method: "history.edit";
       params: {
+        /**
+         * 用户提问的新图片清单。`None` = 图片不动；`Some` = 整表替换。
+         * 助手消息忽略这个字段。
+         */
+        images?: ImageInput[] | null;
         /**
          * 内核消息 id（不是界面条目 id）。
          */

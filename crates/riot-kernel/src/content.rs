@@ -202,11 +202,56 @@ pub(crate) async fn user_content(
     content
 }
 
+/// 编辑用户提问时，按新清单重排附图。
+///
+/// 数据对得上的旧图（含视觉兼容的转述）原样留下，免得只是挪一下顺序
+/// 或删掉旁边那张就把转述重做一遍。对不上的当新图，存成 [`Attachment::Image`]
+/// —— 编辑这条路径没有视觉通道，转述留给下次真正发送。
+pub(crate) fn attachments_for_edit(
+    incoming: Vec<ImageInput>,
+    existing: &[UserContent],
+) -> Vec<Attachment> {
+    incoming
+        .into_iter()
+        .filter(|img| img.data.len() <= MAX_IMAGE_B64)
+        .map(|img| {
+            for c in existing {
+                match c {
+                    UserContent::Attachment(Attachment::Image { media_type, data })
+                        if data == &img.data =>
+                    {
+                        return Attachment::Image {
+                            media_type: media_type.clone(),
+                            data: data.clone(),
+                        };
+                    }
+                    UserContent::Attachment(Attachment::DescribedImage {
+                        media_type,
+                        data,
+                        text,
+                    }) if data == &img.data => {
+                        return Attachment::DescribedImage {
+                            media_type: media_type.clone(),
+                            data: data.clone(),
+                            text: text.clone(),
+                        };
+                    }
+                    _ => {}
+                }
+            }
+            Attachment::Image {
+                media_type: img.media_type,
+                data: img.data,
+            }
+        })
+        .collect()
+}
+
 /// 用户这条消息的正文。
 ///
 /// 空文本也要留个位置:用户可能只丢了一张图什么都没说，而空的 user 消息
 /// 会被一部分服务方拒。
-fn prompt_text(text: &str) -> String {
+pub(crate) fn prompt_text(text: &str) -> String {
     if text.trim().is_empty() {
         "看这张图。".to_owned()
     } else {

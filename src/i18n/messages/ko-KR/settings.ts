@@ -204,7 +204,8 @@ export default {
   "settings.permission.sandbox.desc":
     "운영 체제가 명령이 수정할 수 있는 범위를 제한합니다. 켜져 있으면 규칙에 걸리지 않고 읽기 전용도 아닌 명령을 바로 허용하며, 경계는 커널이 지킵니다. macOS에서는 바로 사용할 수 있고 Windows에서는 한 번 설치가 필요합니다.",
   "settings.permission.sandbox.workspaceWrite": "격리 (권장)",
-  "settings.permission.sandbox.workspaceWrite.desc": "작업 공간과 빌드 캐시만 수정할 수 있으며, 읽기와 네트워크는 제한하지 않습니다.",
+  "settings.permission.sandbox.workspaceWrite.desc":
+    "작업 공간, 임시 폴더, 빌드 캐시만 수정할 수 있으며, macOS에서는 데스크톱 / 다운로드도 가능합니다. 읽기와 네트워크는 제한하지 않습니다.",
   "settings.permission.sandbox.workspaceWriteNoNet": "격리 및 네트워크 차단",
   "settings.permission.sandbox.workspaceWriteNoNet.desc": "명령의 네트워크도 차단합니다. npm, cargo의 의존성 다운로드가 실패합니다.",
   "settings.permission.sandbox.off": "격리 안 함",

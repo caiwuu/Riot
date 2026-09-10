@@ -118,6 +118,17 @@ impl SandboxPolicy {
         // sandbox_win::activate 现建现授权、退出即删。
         #[cfg(not(windows))]
         writable.extend(temp_dirs());
+        // 桌面 / 下载是交付物的自然落点。预览围栏已经认这两处，命令却
+        // 写不进去的话，模型只能申请 `sandbox: false` —— 用几天就会觉得
+        // 「路径限制不友好」。
+        //
+        // `[取舍]` 不放 Documents / Pictures：那里躺着合同、税表、相册，
+        // 扩大可写面换来的是提示注入一次就能改私人文件。桌面和下载是
+        // 「本来就当投递箱用」的，覆盖可见、密钥几乎不在。
+        // Windows 不加：沙箱是另一个账户，给真实用户的 Desktop 打可继承
+        // ACE 贵，而且和「不放全局 TEMP」是同一个理由。
+        #[cfg(not(windows))]
+        writable.extend(user_drop_dirs());
 
         // 相对主目录的构建缓存，按平台各一张表 —— 路径约定不同（Unix 系
         // 工具直接在 ~ 下建点目录，Windows 的 npm/pip/pnpm 走
@@ -387,13 +398,30 @@ fn looks_denied(stderr: &str) -> bool {
 /// 只非 Windows 用：Windows 不放全局 temp（见 workspace_write）。
 #[cfg(not(windows))]
 fn temp_dirs() -> Vec<PathBuf> {
-    let mut out = vec![PathBuf::from("/tmp"), PathBuf::from("/private/tmp")];
+    let mut out = vec![
+        PathBuf::from("/tmp"),
+        PathBuf::from("/private/tmp"),
+        PathBuf::from("/var/tmp"),
+        PathBuf::from("/private/var/tmp"),
+    ];
     let tmp = std::env::temp_dir();
     if let Ok(real) = tmp.canonicalize() {
         out.push(real);
     }
     out.push(tmp);
     out
+}
+
+/// 用户当作投递箱的目录。只 Unix：见 `workspace_write` 里不放 Windows 的理由。
+#[cfg(not(windows))]
+fn user_drop_dirs() -> Vec<PathBuf> {
+    let Some(home) = home_dir() else {
+        return Vec::new();
+    };
+    ["Desktop", "Downloads"]
+        .into_iter()
+        .map(|name| home.join(name))
+        .collect()
 }
 
 /// `~/.cargo` 边界内的**敏感面**：可写区之内、但写它等于换取**沙箱外**
@@ -830,6 +858,42 @@ mod tests {
     /// 那几棵树（真机实测：沙箱里的 cargo 重下了一遍真实用户已经有的
     /// crate）。授权它们换不到可用性，只换来每会话十几秒的 ACE 传播、外加
     /// 一个得再花十几秒堵回去的逃逸面。理由全文见 `workspace_write`。
+    /// 桌面 / 下载进可写表（存在才收）。和预览围栏对齐，少逼一次出沙箱。
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_桌面和下载进可写表() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let SandboxPolicy::WorkspaceWrite { writable, .. } =
+            SandboxPolicy::workspace_write(dir.path(), &[])
+        else {
+            panic!("该是 WorkspaceWrite");
+        };
+        let Some(home) = home_dir() else {
+            eprintln!("拿不到 home，跳过");
+            return;
+        };
+        for name in ["Desktop", "Downloads"] {
+            let p = home.join(name);
+            if !p.is_dir() {
+                continue;
+            }
+            let real = p.canonicalize().unwrap_or(p);
+            assert!(
+                writable.iter().any(|w| w == &real || w.ends_with(name)),
+                "{name} 该进可写表：{writable:?}"
+            );
+        }
+        if let Some(docs) = home_dir().map(|h| h.join("Documents"))
+            && docs.is_dir()
+        {
+            let real = docs.canonicalize().unwrap_or(docs);
+            assert!(
+                !writable.iter().any(|w| w == &real),
+                "Documents 不该默认可写：{writable:?}"
+            );
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_不授权主目录缓存() {

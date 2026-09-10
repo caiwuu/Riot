@@ -308,9 +308,10 @@ async fn dispatch(request: RpcRequest, manager: &manager::SessionManager) -> Rpc
             session_id,
             message_id,
             text,
+            images,
             config,
         } => match manager
-            .resend(session_id.as_str(), &message_id, &text, *config)
+            .resend(session_id.as_str(), &message_id, &text, images, *config)
             .await
         {
             Ok(()) => RpcResponse::Ok,
@@ -378,8 +379,9 @@ async fn dispatch(request: RpcRequest, manager: &manager::SessionManager) -> Rpc
             session_id,
             message_id,
             text,
+            images,
         } => match manager
-            .edit_message(session_id.as_str(), &message_id, &text)
+            .edit_message(session_id.as_str(), &message_id, &text, images)
             .await
         {
             Ok(()) => RpcResponse::Ok,

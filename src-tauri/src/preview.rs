@@ -16,6 +16,9 @@
 //!   `<config>/artifacts/<会话>/`，界面点开的就是它们；
 //! - **用户的常用文件夹**（桌面 / 下载 / 文档 / 图片 / 影片 / 音乐）：拖进
 //!   输入框、或从系统对话框选的图，绝大多数来自这几处。
+//! - **系统临时目录**（`/tmp`、`TMPDIR`）：沙箱可写集已经包含它们，agent
+//!   把自测、中间产物写到这里是常态。预览不认的话，命令写成功、点开却说
+//!   "不在范围内" —— 那正是这对围栏最常见的误伤。
 //!
 //! 剩下的一律拒。挡掉的是 `~/.ssh`、`~/.aws`、`~/.config`、
 //! `~/Library/Keychains`、`/etc` 这一类 —— 它们不在任何一条预览入口的语义
@@ -76,10 +79,27 @@ async fn roots(state: &AppState) -> Vec<PathBuf> {
         }
     }
 
+    // 和沙箱可写集对齐（`riot_runtime::sandbox` 的 `temp_dirs`）：
+    // `/tmp` 世界可写、不存长期密钥，和 `~/.ssh` 不是一类目标。
+    out.extend(temp_dirs());
+
     // 项目根和会话根大量重复（一个项目下十几个会话是常态），而每个根都要
     // 走一次 canonicalize —— 预览每张图都白花这些系统调用。
     let mut seen = std::collections::HashSet::new();
     out.retain(|p| seen.insert(p.clone()));
+    out
+}
+
+/// 预览围栏认的临时目录。和沙箱可写集同形状，两边各写一份会只修一边。
+fn temp_dirs() -> Vec<PathBuf> {
+    let mut out = vec![std::env::temp_dir()];
+    #[cfg(unix)]
+    {
+        out.push(PathBuf::from("/tmp"));
+        out.push(PathBuf::from("/private/tmp"));
+        out.push(PathBuf::from("/var/tmp"));
+        out.push(PathBuf::from("/private/var/tmp"));
+    }
     out
 }
 
@@ -182,6 +202,41 @@ mod tests {
         let b_real =
             crate::fence::strip_verbatim(std::fs::canonicalize(b.path()).expect("canonicalize"));
         assert!(got.starts_with(&b_real), "解析到了 {}", got.display());
+    }
+
+    /// agent 把自测文件写到 /tmp 是常态；沙箱已经让它写，预览必须能打开。
+    #[test]
+    fn 临时目录里的文件放行() {
+        let project = tempfile::tempdir().expect("建项目目录");
+        let file = tempfile::NamedTempFile::new().expect("建临时文件");
+        std::fs::write(file.path(), "tmp").expect("写临时文件");
+
+        let mut roots = vec![project.path().to_path_buf()];
+        roots.extend(temp_dirs());
+        assert!(
+            resolve_in(&roots, &file.path().display().to_string()).is_some(),
+            "临时目录里的文件该放行：{}",
+            file.path().display()
+        );
+    }
+
+    /// 加了临时目录之后，系统路径仍然过不去。不能用 tempfile 当"外面"：
+    /// 它本身就建在 TMPDIR 下，入根之后反而是围栏内。
+    #[test]
+    fn 临时目录入根也不放行系统路径() {
+        let project = tempfile::tempdir().expect("建项目目录");
+        let mut roots = vec![project.path().to_path_buf()];
+        roots.extend(temp_dirs());
+        let secret = if cfg!(windows) {
+            r"C:\Windows\System32\config\SAM"
+        } else {
+            "/etc/passwd"
+        };
+        assert_eq!(
+            resolve_in(&roots, secret),
+            None,
+            "系统路径被临时目录那条根带进去了"
+        );
     }
 
     /// 围栏内一个指向围栏外的符号链接，跟着它走就等于没有围栏。

@@ -2652,7 +2652,7 @@
           "type": "object"
         },
         {
-          "description": "编辑一条用户提问并从它重新开始（Cursor 编辑气泡后发送的同款语义）：\n替换这条消息的文本，丢掉它之后的一切，再从它跑一轮。",
+          "description": "编辑一条用户提问并从它重新开始（Cursor 编辑气泡后发送的同款语义）：\n替换这条消息的文本（以及可选的图片），丢掉它之后的一切，再从它跑一轮。",
           "properties": {
             "method": {
               "const": "turn.resend",
@@ -2663,6 +2663,16 @@
                 "config": {
                   "$ref": "#/$defs/TurnConfig"
                 },
+                "images": {
+                  "description": "新的图片清单。`None` = 图片原位保留（老宿主 / 只改字）；\n`Some` = 整表替换，空数组就是把图全删掉。`@` 引用不动。",
+                  "items": {
+                    "$ref": "#/$defs/ImageInput"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                },
                 "message_id": {
                   "description": "要改的用户消息 id。必须是活历史里的用户提问。",
                   "type": "string"
@@ -2671,7 +2681,7 @@
                   "type": "string"
                 },
                 "text": {
-                  "description": "新文本。附件（图片、引用）原位保留，只换文字。",
+                  "description": "新文本。",
                   "type": "string"
                 }
               },
@@ -2891,7 +2901,7 @@
           "type": "object"
         },
         {
-          "description": "上下文编辑：把一条历史消息的文本段替换成新文本。\n\n只动文本 —— 思考、工具调用/结果、附件原位保留（见\n`Message::edit_text`）。只对活历史生效；空闲时才能做。",
+          "description": "上下文编辑：把一条历史消息的文本段替换成新文本。\n\n文本总是换。思考、工具调用/结果、`@` 引用原位保留（见\n`Message::edit_text`）。图片见 `images`。只对活历史生效；空闲时才能做。",
           "properties": {
             "method": {
               "const": "history.edit",
@@ -2899,6 +2909,16 @@
             },
             "params": {
               "properties": {
+                "images": {
+                  "description": "用户提问的新图片清单。`None` = 图片不动；`Some` = 整表替换。\n助手消息忽略这个字段。",
+                  "items": {
+                    "$ref": "#/$defs/ImageInput"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                },
                 "message_id": {
                   "description": "内核消息 id（不是界面条目 id）。",
                   "type": "string"
@@ -3984,7 +4004,7 @@
       "oneOf": [
         {
           "const": "workspace_write",
-          "description": "读全开、写限于工作区和构建缓存、联网照常。",
+          "description": "读全开、写限于工作区 / 临时目录 / 桌面 / 下载和构建缓存、联网照常。",
           "type": "string"
         },
         {

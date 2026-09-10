@@ -48,14 +48,18 @@ pub enum RpcRequest {
         config: Box<TurnConfig>,
     },
     /// 编辑一条用户提问并从它重新开始（Cursor 编辑气泡后发送的同款语义）：
-    /// 替换这条消息的文本，丢掉它之后的一切，再从它跑一轮。
+    /// 替换这条消息的文本（以及可选的图片），丢掉它之后的一切，再从它跑一轮。
     #[serde(rename = "turn.resend")]
     TurnResend {
         session_id: SessionId,
         /// 要改的用户消息 id。必须是活历史里的用户提问。
         message_id: String,
-        /// 新文本。附件（图片、引用）原位保留，只换文字。
+        /// 新文本。
         text: String,
+        /// 新的图片清单。`None` = 图片原位保留（老宿主 / 只改字）；
+        /// `Some` = 整表替换，空数组就是把图全删掉。`@` 引用不动。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        images: Option<Vec<crate::turn::ImageInput>>,
         config: Box<TurnConfig>,
     },
     /// 中断当前轮。
@@ -108,14 +112,18 @@ pub enum RpcRequest {
 
     /// 上下文编辑：把一条历史消息的文本段替换成新文本。
     ///
-    /// 只动文本 —— 思考、工具调用/结果、附件原位保留（见
-    /// `Message::edit_text`）。只对活历史生效；空闲时才能做。
+    /// 文本总是换。思考、工具调用/结果、`@` 引用原位保留（见
+    /// `Message::edit_text`）。图片见 `images`。只对活历史生效；空闲时才能做。
     #[serde(rename = "history.edit")]
     HistoryEdit {
         session_id: SessionId,
         /// 内核消息 id（不是界面条目 id）。
         message_id: String,
         text: String,
+        /// 用户提问的新图片清单。`None` = 图片不动；`Some` = 整表替换。
+        /// 助手消息忽略这个字段。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        images: Option<Vec<crate::turn::ImageInput>>,
     },
     /// 上下文删除：按"轮"成对删 —— 这条消息所属的用户提问，连同它
     /// 引出的全部回应（工具调用、结果、回复），整段从历史移除。提问
@@ -448,5 +456,55 @@ mod tests {
             panic!("该解成 TurnRegenerate");
         };
         assert_eq!(message_id, "msg_1");
+    }
+
+    /// 老宿主的编辑/重发没有 `images`，新内核必须照常读成「图片不动」。
+    #[test]
+    fn 老宿主发的_edit_和_resend_缺_images_也能读() {
+        let edit: RpcRequest = serde_json::from_value(serde_json::json!({
+            "method": "history.edit",
+            "params": {
+                "session_id": "s1",
+                "message_id": "m1",
+                "text": "新话"
+            }
+        }))
+        .expect("缺 images 不能让整条请求解析失败");
+        let RpcRequest::HistoryEdit { images, text, .. } = edit else {
+            panic!("该解成 HistoryEdit");
+        };
+        assert_eq!(text, "新话");
+        assert_eq!(images, None);
+
+        let resend: RpcRequest = serde_json::from_value(serde_json::json!({
+            "method": "turn.resend",
+            "params": {
+                "session_id": "s1",
+                "message_id": "m1",
+                "text": "新话",
+                "config": {
+                    "model": {
+                        "protocol": "openai",
+                        "base_url": "https://example.com",
+                        "api_path": "",
+                        "api_key": "",
+                        "model": "t"
+                    },
+                    "web": { "fetch_enabled": false, "search_enabled": false },
+                    "vision": { "accepts_images": false },
+                    "limits": {
+                        "ask_timeout_secs": 60,
+                        "max_turns": 32,
+                        "compact_threshold_tokens": 100000
+                    },
+                    "mode": "default"
+                }
+            }
+        }))
+        .expect("缺 images 不能让整条请求解析失败");
+        let RpcRequest::TurnResend { images, .. } = resend else {
+            panic!("该解成 TurnResend");
+        };
+        assert_eq!(images, None);
     }
 }

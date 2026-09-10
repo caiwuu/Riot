@@ -42,7 +42,7 @@ export default {
   "host.sandbox.installFailed": "命令隔离安装失败。",
   "host.sandbox.uninstallFailed": "命令隔离卸载失败。",
   "host.preview.outOfScope":
-    "{path} 不在应用能读的范围内。可读的是项目目录、应用自己的数据目录，以及桌面 / 下载 / 文档 / 图片这些常用文件夹。要用别处的文件，把它所在的目录作为项目打开，或者先拷到上面这些位置。",
+    "{path} 不在应用能读的范围内。可读的是项目目录、应用自己的数据目录、系统临时目录，以及桌面 / 下载 / 文档 / 图片这些常用文件夹。要用别处的文件，把它所在的目录作为项目打开，或者先拷到上面这些位置。",
   "host.file.readFailed": "读文件失败。",
   "host.file.notFile": "这个路径不是文件。",
   "host.file.tooLarge": "文件太大（{size} MB），应用内预览最多 {max} MB。请用系统应用打开。",

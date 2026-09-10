@@ -83,20 +83,27 @@ impl Tool for Bash {
         // 沙箱那一段只在真的沙箱着时才给。没沙箱还讲一堆边界规则，模型会
         // 把普通的权限错误当成沙箱拦截，然后去申请一个根本不存在的豁免。
         let sandbox = if ctx.sandboxed {
-            "\n\
-             - Commands run inside an **OS sandbox**. Writes are limited to the working \
-             directory, temp directories and build caches; reads are unrestricted. \
-             Connecting to unix sockets and sending Apple Events is denied, so tools \
-             that talk to a local daemon or another app — `docker`, `osascript` — always \
-             fail in the sandbox.\n\
-             - When a command fails and its output carries `[riot:sandbox]`, the boundary \
-             MAY be the cause. If the target really is outside the boundary and the \
-             operation is necessary, re-run it with `sandbox: false`: it executes outside \
-             and asks the user to confirm. If the failure is unrelated (wrong path, \
-             missing dependency, a genuinely failing test), fix it normally and do NOT \
-             reach for this parameter — it interrupts the user every single time.\n"
+            let writes = if ctx.platform == "windows" {
+                "the working directory, the session temp directory and build caches"
+            } else {
+                "the working directory, temp directories, Desktop, Downloads and build caches"
+            };
+            format!(
+                "\n\
+                 - Commands run inside an **OS sandbox**. Writes are limited to {writes}; \
+                 reads are unrestricted. \
+                 Connecting to unix sockets and sending Apple Events is denied, so tools \
+                 that talk to a local daemon or another app — `docker`, `osascript` — always \
+                 fail in the sandbox.\n\
+                 - When a command fails and its output carries `[riot:sandbox]`, the boundary \
+                 MAY be the cause. If the target really is outside the boundary and the \
+                 operation is necessary, re-run it with `sandbox: false`: it executes outside \
+                 and asks the user to confirm. If the failure is unrelated (wrong path, \
+                 missing dependency, a genuinely failing test), fix it normally and do NOT \
+                 reach for this parameter — it interrupts the user every single time.\n"
+            )
         } else {
-            ""
+            String::new()
         };
         // Windows 上命令不是交给 cmd/PowerShell，而是 Git Bash（见
         // shell_program）。但模型看到「平台：windows」后最自然的联想就是

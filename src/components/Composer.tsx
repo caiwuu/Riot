@@ -2,12 +2,14 @@
  * 输入区：contenteditable 编辑器（引用块/命令块）、附件（截图/文件）、
  * 斜杠菜单、@ 补全、模式与模型选择、排队面板。从 App.tsx 拆出。
  *
+ * 消息内联编辑也走这一个组件（`variant: "edit"`）：同一套附件条、`+`、
+ * 粘贴/拖放，不要再养一个只能改字的精简框。
+ *
  * 纯文本解析在 `../lib/promptText`（与 Transcript 共用一份规则）；
- * contenteditable 的块机械在 `../lib/chipEditor`（与消息编辑框共用）；
- * 这里只放 Composer 组件本身。
+ * contenteditable 的块机械在 `../lib/chipEditor`。
  */
 
-import { Fragment, useEffect, useId, useRef, useState } from "react";
+import { Fragment, useContext, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
 import {
   type BackgroundTaskView,
@@ -55,6 +57,17 @@ import {
 } from "../lib/contextWindow";
 import { type ChipSeg, isChipSeg } from "../lib/chips";
 import { registerFileDrop } from "../lib/fileDrag";
+import {
+  IMAGE_EXT,
+  MAX_SHOTS,
+  PASTE_KEY,
+  type Shot,
+  hasAttachment,
+  mergeShots,
+  shotToInput,
+  shotsFromDataUrls,
+  toShot,
+} from "../lib/shots";
 import { asDirRef, basename, isDirRef, joinRoot, looksAbsPath, parentOf } from "../pathDisplay";
 import {
   caretToEnd,
@@ -92,6 +105,7 @@ import {
   modelLabel,
   useDropdown,
 } from "./pickers";
+import { ProjectRootContext } from "./Markdown";
 import { BackgroundTasksPanel } from "./TaskPanel";
 import { ShotViewer } from "./ToolCard";
 
@@ -114,14 +128,6 @@ const execModeCache = new Map<string, PermissionMode>();
 export interface PermissionPick {
   mode: PermissionMode;
   seq: number;
-}
-
-/** 待发的一张图。`data` 是 base64，不含 `data:` 前缀。 */
-interface Shot {
-  id: string;
-  name: string;
-  mediaType: string;
-  data: string;
 }
 
 /**
@@ -147,52 +153,6 @@ export function forgetComposerSession(sessionId: string) {
   shotsCache.delete(sessionId);
 }
 
-/**
- * 一条消息最多附几张图。
- *
- * 不是技术上限，是成本上限:每张图都要过一遍模型的视觉编码，五张已经能吃掉
- * 相当可观的一段上下文。真要看更多，分两条消息发更清楚。
- */
-const MAX_SHOTS = 5;
-
-/**
- * 缩到长边不超过这个值。
- *
- * 1568 是 Anthropic 文档给的"再大也不会更清楚"的门槛，两家的视觉编码都在
- * 这个量级上把图切成图块。粘一张 Retina 截图往往是 3000 多宽，缩一半之后
- * 体积掉到四分之一，而模型看到的信息一样多。
- */
-const MAX_EDGE = 1568;
-
-/** 认得出是图片的扩展名。拖进来的路径靠它分流。 */
-const IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i;
-
-/** 粘贴快捷键在界面上怎么写。 */
-const PASTE_KEY = navigator.userAgent.includes("Mac") ? "⌘V" : "Ctrl+V";
-
-/** 看着像一条绝对路径吗。三种写法:`/a/b`、`file://…`、`C:\a\b` 或 UNC。 */
-function looksAbsolute(line: string): boolean {
-  return (
-    line.startsWith("/") ||
-    line.startsWith("file://") ||
-    line.startsWith("\\\\") ||
-    /^[A-Za-z]:[\\/]/.test(line)
-  );
-}
-
-/**
- * 这次粘贴带的是附件吗（图、或在文件管理器里复制的文件）。
- *
- * 三条判据满足一条就算:
- * - `files` 有东西 —— 截图这种剪贴板里躺着像素的；
- * - types 里有 `Files` —— webview 认出了文件；
- * - 文字整段都是绝对路径 —— 在访达里 ⌘C 一个文件，WebKit 只把**路径当
- *   文字**递过来，前两条都是空的。真正的路径要再问一次系统粘贴板
- *   （见 `clipboardPaths`），这里只负责决定"值不值得问"。
- *
- * 宁可问多了:一行以 `/` 开头的普通文字（shell 命令、注释）会白问一次
- * IPC，然后按文本粘贴，用户看不出区别。
- */
 /** 块后面默认跟的那一个空格：块和正文之间本来就该有一格，不让用户自己敲。 */
 const SPACE: Seg = { kind: "text", value: " " };
 
@@ -203,73 +163,6 @@ function slashGroup(c: SlashCommand): "skill" | "command" {
 
 function slashGroupLabel(g: ReturnType<typeof slashGroup>): string {
   return g === "skill" ? t("composer.slash.group.skills") : t("composer.slash.group.commands");
-}
-
-function hasAttachment(dt: DataTransfer | null): boolean {
-  if (!dt) return false;
-  if (dt.files.length > 0 || dt.types.includes("Files")) return true;
-  const lines = dt
-    .getData("text/plain")
-    .split("\n")
-    .filter((l) => l.trim());
-  return lines.length > 0 && lines.every(looksAbsolute);
-}
-
-/** 把 webview 的 `File` 读成待发的图。 */
-async function toShot(file: File): Promise<Shot> {
-  const buf = await file.arrayBuffer();
-  return {
-    id: `${file.name}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    name: file.name || t("composer.attach.pastedImage"),
-    mediaType: file.type || "image/png",
-    data: bytesToBase64(new Uint8Array(buf)),
-  };
-}
-
-/**
- * 长边超了就缩，并统一转成 JPEG。
- *
- * 原图是 PNG 的截图尤其值得转:同样内容 JPEG 往往只有三分之一大，而模型
- * 判断的是布局和颜色，不是无损像素。
- *
- * 缩不动（canvas 用不了、图解不开）时原样返回 —— 有图比没图好。
- */
-async function shrink(shot: Shot): Promise<Shot> {
-  try {
-    const img = new Image();
-    img.src = `data:${shot.mediaType};base64,${shot.data}`;
-    await img.decode();
-    const edge = Math.max(img.naturalWidth, img.naturalHeight);
-    if (edge <= MAX_EDGE) return shot;
-
-    const scale = MAX_EDGE / edge;
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.round(img.naturalWidth * scale);
-    canvas.height = Math.round(img.naturalHeight * scale);
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return shot;
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    const url = canvas.toDataURL("image/jpeg", 0.85);
-    const data = url.slice(url.indexOf(",") + 1);
-    return { ...shot, mediaType: "image/jpeg", data };
-  } catch {
-    return shot;
-  }
-}
-
-/**
- * 字节转 base64。
- *
- * 分块喂给 `String.fromCharCode`:一次展开几 MB 的数组会超过参数个数上限，
- * 表现是 `RangeError: too many arguments`，而那个报错完全不像"图太大"。
- */
-function bytesToBase64(bytes: Uint8Array): string {
-  const CHUNK = 0x8000;
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-  }
-  return btoa(binary);
 }
 
 /**
@@ -344,7 +237,7 @@ export function QueuePanel({
   );
 }
 
-export function Composer({
+function ComposerDock({
   sessionId,
   workspace,
   workspaceMissing,
@@ -508,6 +401,8 @@ export function Composer({
   const [slashNote, setSlashNote] = useState("");
   /** 待发的图。发出去就清空。挂载时从模块级缓存恢复（见 shotsCache）。 */
   const [shots, setShots] = useState<Shot[]>(() => shotsCache.get(sessionId) ?? []);
+  const shotsLive = useRef(shots);
+  shotsLive.current = shots;
   /** 输入框里点开的待发图。和对话流共用 ShotViewer。 */
   const [viewShot, setViewShot] = useState<Shot | null>(null);
 
@@ -1080,24 +975,11 @@ export function Composer({
    * 单图上限，要么白烧一大截上下文 —— 而模型看布局用不到那个分辨率。
    */
   const addShots = async (items: { data: string; mediaType: string; name: string }[]) => {
-    const scaled = await Promise.all(
-      items.map((it) =>
-        shrink({
-          id: `${it.name}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          ...it,
-        }),
-      ),
-    );
-    setShots((prev) => {
-      const merged = [...prev, ...scaled];
-      // 超上限要说出来 —— 静默丢掉的话，用户以为十张全发出去了。
-      if (merged.length > MAX_SHOTS) {
-        setDropError(
-          t("composer.attach.tooMany", { max: MAX_SHOTS, extra: merged.length - MAX_SHOTS }),
-        );
-      }
-      return merged.slice(0, MAX_SHOTS);
-    });
+    const { shots, extra } = await mergeShots(shotsLive.current, items);
+    if (extra) {
+      setDropError(t("composer.attach.tooMany", { max: MAX_SHOTS, extra }));
+    }
+    setShots(shots);
   };
 
   /** webview 给的 `File`（剪贴板里只有像素的那种）:图片收下，其它的说清为什么不收。 */
@@ -1963,5 +1845,381 @@ function BuildButton({
       ) : null}
     </div>
   );
+}
+
+/**
+ * 对话流里改一条消息。皮和底部输入框是同一个 Composer：附件条、`+`、
+ * contenteditable、粘贴/拖放。没有模式/模型/排队 —— 那些是会话级的，
+ * 改一条历史不该动它们。
+ *
+ * 用户消息解析块、允许附图；助手消息保持纯文本，回复里长得像 `@路径`
+ * 的字符串是内容，解析成块再序列化会改写它。
+ *
+ * 两种落法：发送（丢掉之后的一切再跑）和保存（只换上下文原文）。
+ * Esc 取消。落不成时框留着，草稿不能丢。
+ */
+export type ComposerEditProps = {
+  variant: "edit";
+  initial: string;
+  initialImages?: string[];
+  parseChips?: boolean;
+  allowImages?: boolean;
+  onSave: (text: string, images?: ImageInput[]) => Promise<boolean>;
+  onResend?: (text: string, images?: ImageInput[]) => Promise<boolean>;
+  onCancel: () => void;
+};
+
+function ComposerEdit({
+  initial,
+  initialImages = [],
+  parseChips = false,
+  allowImages = false,
+  onSave,
+  onResend,
+  onCancel,
+}: ComposerEditProps) {
+  const { t } = useT();
+  const workspace = useContext(ProjectRootContext);
+  const [saving, setSaving] = useState<"save" | "resend" | null>(null);
+  const [hasText, setHasText] = useState(!!initial.trim());
+  const [shots, setShots] = useState<Shot[]>(() => shotsFromDataUrls(initialImages));
+  const [viewShot, setViewShot] = useState<Shot | null>(null);
+  const [dropError, setDropError] = useState("");
+  const [treeOver, setTreeOver] = useState(false);
+  const shotsLive = useRef(shots);
+  shotsLive.current = shots;
+  const ref = useRef<HTMLDivElement>(null);
+  const formRef = useRef<HTMLFormElement>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const imeRef = useRef(false);
+  const imeEndAt = useRef(-Infinity);
+
+  const read = () => (ref.current ? segsToPrompt(readEditor(ref.current)) : "");
+
+  const refresh = () => {
+    const el = ref.current;
+    if (!el) return;
+    if (!imeRef.current) normalizePads(el);
+    setHasText(read().trim().length > 0);
+  };
+
+  const canCommit = hasText || (allowImages && shots.length > 0);
+
+  const addShots = async (items: { data: string; mediaType: string; name: string }[]) => {
+    const { shots: next, extra } = await mergeShots(shotsLive.current, items);
+    if (extra) setDropError(t("composer.attach.tooMany", { max: MAX_SHOTS, extra }));
+    setShots(next);
+  };
+
+  const takeFiles = async (files: File[]) => {
+    const images = files.filter((f) => f.type.startsWith("image/"));
+    const rest = files.filter((f) => !f.type.startsWith("image/"));
+    if (images.length) {
+      await addShots(await Promise.all(images.map(toShot)));
+    }
+    if (rest.length) {
+      setDropError(
+        t("composer.attach.notImage", { name: rest[0]?.name ?? t("composer.attach.thisFile") }),
+      );
+    }
+  };
+
+  const takePaths = async (paths: string[]) => {
+    const images = paths.filter((p) => IMAGE_EXT.test(p));
+    const files = paths.filter((p) => !IMAGE_EXT.test(p));
+    if (images.length && allowImages) {
+      const readPaths = await Promise.all(
+        images.map((p) => readImage(p).catch((e: unknown) => String(e))),
+      );
+      const ok = readPaths.filter(
+        (r): r is Awaited<ReturnType<typeof readImage>> => typeof r !== "string",
+      );
+      await addShots(ok);
+      const failed = readPaths.filter((r): r is string => typeof r === "string");
+      if (failed.length) setDropError(failed[0] ?? "");
+    }
+    if (files.length && parseChips) {
+      const el = ref.current;
+      if (el) {
+        el.focus();
+        const sel = window.getSelection();
+        const inside =
+          sel && sel.rangeCount > 0 && el.contains(sel.getRangeAt(0).startContainer);
+        if (!inside) caretToEnd(el);
+        const dirs = await existingDirs(files).catch(() => new Set<string>());
+        for (const p of files) {
+          const inWs = workspace && (p.startsWith(`${workspace}/`) || p.startsWith(`${workspace}\\`));
+          const value = inWs ? p.slice(workspace.length + 1) : p;
+          insertChipAtCaret(el, {
+            kind: "ref",
+            value: dirs.has(p) ? asDirRef(value) : value,
+          });
+        }
+        refresh();
+      }
+    }
+  };
+
+  const pasteFiles = async (files: File[]): Promise<boolean> => {
+    const paths = await clipboardPaths().catch(() => []);
+    if (paths.length) {
+      await takePaths(paths);
+      return true;
+    }
+    if (files.length) {
+      await takeFiles(files);
+      return true;
+    }
+    return false;
+  };
+
+  const pickAttachments = () => {
+    if (host.nativePaths) {
+      void pickFiles().then(takePaths).catch(() => {});
+      return;
+    }
+    fileInputRef.current?.click();
+  };
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    writeEditor(el, parseChips ? promptToSegs(initial) : [{ kind: "text", value: initial }]);
+    el.focus();
+    caretToEnd(el);
+    // 只在挂载时灌一次：编辑区是非受控的，内容住在 DOM 里。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    return guardChipDeletes(
+      el,
+      () => imeRef.current || performance.now() - imeEndAt.current < IME_TAIL_MS,
+      refresh,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const takePathsRef = useRef(takePaths);
+  takePathsRef.current = takePaths;
+  useEffect(() => {
+    const el = formRef.current;
+    if (!el) {
+      setTreeOver(false);
+      return;
+    }
+    return registerFileDrop({
+      el,
+      onOver: setTreeOver,
+      onDrop: (item) => {
+        setTreeOver(false);
+        void takePathsRef.current([item.abs]);
+      },
+    });
+  }, []);
+
+  const commit = async (
+    kind: "save" | "resend",
+    op: (text: string, images?: ImageInput[]) => Promise<boolean>,
+  ) => {
+    const text = read().trim();
+    if (saving || (!text && shotsLive.current.length === 0)) return;
+    const images = allowImages ? shotsLive.current.map(shotToInput) : undefined;
+    setSaving(kind);
+    try {
+      await op(text, images);
+    } finally {
+      setSaving(null);
+    }
+  };
+  const save = () => commit("save", onSave);
+  const primary = () => (onResend ? commit("resend", onResend) : save());
+
+  return (
+    <div className="composer-wrap">
+      {dropError ? (
+        <button
+          type="button"
+          className="key-banner"
+          onClick={() => setDropError("")}
+          title={t("composer.banner.dismiss")}
+        >
+          {dropError}
+        </button>
+      ) : null}
+
+      <form
+        ref={formRef}
+        className={treeOver ? "composer dragging" : "composer"}
+        onSubmit={(e) => {
+          e.preventDefault();
+          void primary();
+        }}
+      >
+        {allowImages && shots.length ? (
+          <div className="attachments">
+            {shots.map((s) => (
+              <div className="attachment" key={s.id} title={s.name}>
+                <button
+                  type="button"
+                  className="attachment-view"
+                  onClick={() => setViewShot(s)}
+                  aria-label={t("composer.attach.view", { name: s.name })}
+                >
+                  <img src={`data:${s.mediaType};base64,${s.data}`} alt={s.name} />
+                </button>
+                <button
+                  type="button"
+                  className="attachment-remove"
+                  onClick={() => setShots((prev) => prev.filter((x) => x.id !== s.id))}
+                  aria-label={t("common.remove")}
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {viewShot ? (
+          <ShotViewer
+            src={`data:${viewShot.mediaType};base64,${viewShot.data}`}
+            alt={viewShot.name}
+            onClose={() => setViewShot(null)}
+          />
+        ) : null}
+
+        <div
+          ref={ref}
+          className={hasText || shots.length ? "composer-input" : "composer-input empty"}
+          contentEditable={saving === null}
+          suppressContentEditableWarning
+          role="textbox"
+          aria-multiline="true"
+          aria-label={t("transcript.msg.editLabel")}
+          onInput={refresh}
+          onCompositionStart={() => {
+            imeRef.current = true;
+          }}
+          onCompositionEnd={() => {
+            imeEndAt.current = performance.now();
+            setTimeout(() => {
+              imeRef.current = false;
+            }, 0);
+            refresh();
+          }}
+          onPaste={(e) => {
+            e.preventDefault();
+            const text = e.clipboardData.getData("text/plain");
+            if (allowImages && hasAttachment(e.clipboardData)) {
+              void pasteFiles(Array.from(e.clipboardData.files)).then((took) => {
+                if (took) return;
+                ref.current?.focus();
+                document.execCommand("insertText", false, text);
+                refresh();
+              });
+              return;
+            }
+            document.execCommand("insertText", false, text);
+            refresh();
+          }}
+          onKeyDown={(e) => {
+            const el = ref.current;
+            const imeKey = e.nativeEvent.isComposing || e.keyCode === 229 || imeRef.current;
+            if (el && !imeKey) {
+              const lineBreak = e.key === "Enter" && !e.metaKey && !e.ctrlKey;
+              if (handleChipKey(e, el) || (lineBreak && insertLineBreak(el))) {
+                e.preventDefault();
+                refresh();
+                return;
+              }
+            }
+            if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+              e.preventDefault();
+              void primary();
+            } else if (e.key === "Escape" && !imeKey) {
+              e.preventDefault();
+              e.stopPropagation();
+              onCancel();
+            }
+          }}
+        />
+
+        <div className="composer-bar">
+          <div className="composer-tools">
+            {allowImages ? (
+              <>
+                <button
+                  type="button"
+                  className="composer-icon"
+                  onClick={pickAttachments}
+                  disabled={saving !== null}
+                  title={host.nativePaths ? t("composer.attach.title") : t("composer.attach.title.web")}
+                  aria-label={t("composer.attach.title")}
+                >
+                  <PlusIcon />
+                </button>
+                {host.nativePaths ? null : (
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    hidden
+                    onChange={(e) => {
+                      const files = Array.from(e.target.files ?? []);
+                      e.target.value = "";
+                      if (files.length) void takeFiles(files);
+                    }}
+                  />
+                )}
+              </>
+            ) : null}
+            <span className="composer-edit-hint">
+              {onResend ? t("transcript.editor.hintResend") : t("transcript.editor.hintSave")}
+            </span>
+          </div>
+          <div className="composer-actions">
+            <button type="button" onClick={onCancel} disabled={saving !== null}>
+              {t("common.cancel")}
+            </button>
+            <button
+              type="button"
+              className={onResend ? undefined : "composer-edit-save"}
+              onClick={() => void save()}
+              disabled={saving !== null || !canCommit}
+              title={onResend ? t("transcript.editor.saveOnlyTitle") : undefined}
+            >
+              {saving === "save" ? t("common.saving") : t("common.save")}
+            </button>
+            {onResend ? (
+              <button
+                type="submit"
+                className="composer-edit-save"
+                disabled={saving !== null || !canCommit}
+                title={t("transcript.editor.resendTitle")}
+              >
+                {saving === "resend" ? t("transcript.editor.sending") : t("transcript.editor.send")}
+              </button>
+            ) : null}
+          </div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+type ComposerDockProps = Parameters<typeof ComposerDock>[0];
+
+function isComposerEdit(props: ComposerEditProps | ComposerDockProps): props is ComposerEditProps {
+  return "variant" in props && props.variant === "edit";
+}
+
+export function Composer(props: ComposerEditProps): ReturnType<typeof ComposerEdit>;
+export function Composer(props: ComposerDockProps): ReturnType<typeof ComposerDock>;
+export function Composer(props: ComposerEditProps | ComposerDockProps) {
+  if (isComposerEdit(props)) return <ComposerEdit {...props} />;
+  return <ComposerDock {...props} />;
 }
 

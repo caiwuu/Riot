@@ -39,7 +39,7 @@ use tokio::io::{AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::sync::{mpsc, oneshot};
 
 use riot_protocol::id::SessionId;
-use riot_protocol::message::{Message, UserContent};
+use riot_protocol::message::{Attachment, Message, UserContent};
 
 /// transcript 里的一行。
 ///
@@ -91,9 +91,15 @@ pub enum Record {
     ///
     /// 加载时经 `Message::edit_text` 重放 —— 和内核编辑当刻的内存操作是
     /// 同一个函数，重启后的历史必须和编辑时看到的一字不差。
+    /// `images` 有值时再走 `edit_user_images`（`None` = 老记录，图片不动）。
     /// 旧加载器不认识这行会当坏行跳过，代价是编辑丢失（原文回来），
     /// 不会读出损坏的历史。
-    Edit { id: String, text: String },
+    Edit {
+        id: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        images: Option<Vec<EditedImage>>,
+    },
     /// 上下文删除：整条移除 `id` 这条消息。
     ///
     /// 删除按"轮"成对做（提问连同它引出的全部回应），轮边界由**内核**
@@ -102,6 +108,65 @@ pub enum Record {
     /// 记录写下的是"删了哪些"这个**结果**，重放不需要再判定一遍；
     /// 判定逻辑将来变了，旧记录的重放结果也不会跟着漂移。
     Delete { id: String },
+}
+
+/// transcript 里记下的一张用户附图。`text` 有值 = 当时是视觉兼容的转述图。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EditedImage {
+    pub media_type: String,
+    pub data: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+impl EditedImage {
+    pub fn from_attachment(a: &Attachment) -> Option<Self> {
+        match a {
+            Attachment::Image { media_type, data } => Some(Self {
+                media_type: media_type.clone(),
+                data: data.clone(),
+                text: None,
+            }),
+            Attachment::DescribedImage {
+                media_type,
+                data,
+                text,
+            } => Some(Self {
+                media_type: media_type.clone(),
+                data: data.clone(),
+                text: Some(text.clone()),
+            }),
+            _ => None,
+        }
+    }
+
+    fn into_attachment(self) -> Attachment {
+        match self.text {
+            Some(text) => Attachment::DescribedImage {
+                media_type: self.media_type,
+                data: self.data,
+                text,
+            },
+            None => Attachment::Image {
+                media_type: self.media_type,
+                data: self.data,
+            },
+        }
+    }
+}
+
+/// 一条用户消息此刻的附图，按编辑落盘的形状。
+pub fn edited_images_of(msg: &Message) -> Vec<EditedImage> {
+    match msg {
+        Message::User { content, .. } => content
+            .iter()
+            .filter_map(|c| match c {
+                UserContent::Attachment(a) => EditedImage::from_attachment(a),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// 会话的不变事实，写在 transcript 首行。
@@ -226,8 +291,8 @@ impl Transcripts {
                 Ok(Record::Withdraw { id }) => {
                     apply_withdraw(&mut live, &mut archived, &id);
                 }
-                Ok(Record::Edit { id, text }) => {
-                    apply_edit(&mut live, &mut archived, &id, &text);
+                Ok(Record::Edit { id, text, images }) => {
+                    apply_edit(&mut live, &mut archived, &id, &text, images.as_deref());
                 }
                 Ok(Record::Delete { id }) => {
                     apply_delete(&mut live, &mut archived, &id);
@@ -381,10 +446,19 @@ fn apply_withdraw(live: &mut Vec<Message>, archived: &mut Vec<Message>, id: &str
 /// 加载时应用一条上下文编辑。写入时消息一定在活历史里（内核只允许编辑
 /// 活历史），归档那边是防御：坏行跳过后顺序可能错乱，找得到就照改。
 /// 找不到就不动（文件坏了也不该把整份历史扔掉）。
-fn apply_edit(live: &mut [Message], archived: &mut [Message], id: &str, text: &str) {
+fn apply_edit(
+    live: &mut [Message],
+    archived: &mut [Message],
+    id: &str,
+    text: &str,
+    images: Option<&[EditedImage]>,
+) {
     for list in [live, archived] {
         if let Some(m) = list.iter_mut().find(|m| m.id().as_str() == id) {
             m.edit_text(text);
+            if let Some(images) = images {
+                m.edit_user_images(images.iter().cloned().map(EditedImage::into_attachment).collect());
+            }
             return;
         }
     }
@@ -446,10 +520,11 @@ enum Cmd {
     Withdraw {
         id: String,
     },
-    /// 上下文编辑：替换这条消息的文本段。
+    /// 上下文编辑：替换这条消息的文本段，可选同时换图。
     Edit {
         id: String,
         text: String,
+        images: Option<Vec<EditedImage>>,
     },
     /// 上下文删除：抹掉这条消息的可见内容。
     Delete {
@@ -551,12 +626,14 @@ impl SessionLog {
     }
 
     /// 记下一次上下文编辑。必须在内存历史已经改完之后调用。
-    pub fn append_edit(&self, id: &str, text: &str) {
+    /// `images` = `None` 重放时只换字；`Some` 连图一起换。
+    pub fn append_edit(&self, id: &str, text: &str, images: Option<Vec<EditedImage>>) {
         if self
             .sender()
             .send(Cmd::Edit {
                 id: id.to_owned(),
                 text: text.to_owned(),
+                images,
             })
             .is_err()
         {
@@ -624,7 +701,7 @@ async fn write_loop(path: PathBuf, meta: TranscriptMeta, mut rx: mpsc::Unbounded
                 }),
                 Cmd::Rewind { keep_until } => Some(Record::Rewind { keep_until }),
                 Cmd::Withdraw { id } => Some(Record::Withdraw { id }),
-                Cmd::Edit { id, text } => Some(Record::Edit { id, text }),
+                Cmd::Edit { id, text, images } => Some(Record::Edit { id, text, images }),
                 Cmd::Delete { id } => Some(Record::Delete { id }),
                 Cmd::Flush(ack) => {
                     acks.push(ack);
@@ -1246,7 +1323,7 @@ mod tests {
         let log = store.open(meta("s1"));
         log.append(&user("m1", "第一句"));
         log.append(&assistant("a1", "答错了的回复"));
-        log.append_edit("a1", "改对之后的回复");
+        log.append_edit("a1", "改对之后的回复", None);
         log.flush().await;
 
         let (_, msgs) = store.load(&SessionId::from_raw("s1")).await;
@@ -1257,6 +1334,67 @@ mod tests {
 
         let raw = std::fs::read_to_string(d.path().join("s1.jsonl")).expect("读原文");
         assert!(raw.contains("答错了的回复"), "原文留在文件里可审计");
+    }
+
+    #[tokio::test]
+    async fn 老格式编辑记录没有_images_字段也能读() {
+        let d = dir();
+        let path = d.path().join("s1.jsonl");
+        let meta = serde_json::to_string(&Record::Meta(meta("s1"))).unwrap();
+        let msg = serde_json::to_string(&Record::Message {
+            message: Box::new(user("m1", "旧话")),
+        })
+        .unwrap();
+        std::fs::write(
+            &path,
+            format!("{meta}\n{msg}\n{{\"type\":\"edit\",\"id\":\"m1\",\"text\":\"新话\"}}\n"),
+        )
+        .unwrap();
+
+        let store = Transcripts::new(d.path());
+        let (_, msgs) = store.load(&SessionId::from_raw("s1")).await;
+        assert_eq!(msgs, vec![user("m1", "新话")]);
+    }
+
+    #[tokio::test]
+    async fn 编辑记录带图重放后替换附图() {
+        let d = dir();
+        let store = Transcripts::new(d.path());
+        let log = store.open(meta("s1"));
+        let with_image = Message::User {
+            id: riot_protocol::id::MessageId::from_raw("m1"),
+            content: vec![
+                UserContent::Attachment(Attachment::Image {
+                    media_type: "image/png".into(),
+                    data: "old".into(),
+                }),
+                UserContent::Text {
+                    text: "旧话".into(),
+                },
+            ],
+            meta: riot_protocol::message::MessageMeta::default(),
+        };
+        log.append(&with_image);
+        log.append_edit(
+            "m1",
+            "新话",
+            Some(vec![EditedImage {
+                media_type: "image/jpeg".into(),
+                data: "new".into(),
+                text: None,
+            }]),
+        );
+        log.flush().await;
+
+        let (_, msgs) = store.load(&SessionId::from_raw("s1")).await;
+        let Message::User { content, .. } = &msgs[0] else {
+            panic!("用户消息");
+        };
+        assert!(matches!(
+            &content[0],
+            UserContent::Attachment(Attachment::Image { data, .. }) if data == "new"
+        ));
+        assert!(matches!(&content[1], UserContent::Text { text } if text == "新话"));
     }
 
     #[tokio::test]

@@ -1573,13 +1573,14 @@ impl AppState {
         Ok(())
     }
 
-    /// 编辑一条用户提问并从它重新开始：换文字、丢掉之后的一切、再跑一轮。
+    /// 编辑一条用户提问并从它重新开始：换文字（以及可选的图片）、丢掉之后的一切、再跑一轮。
     /// 和 [`Self::regenerate_turn`] 同一套装配。
     pub async fn resend_turn(
         &self,
         session_id: &str,
         message_id: &str,
         text: &str,
+        images: Option<Vec<riot_protocol::ImageInput>>,
     ) -> HostResult<()> {
         self.require_sink(session_id).await?;
         self.ensure_hydrated(session_id).await?;
@@ -1595,6 +1596,7 @@ impl AppState {
             session_id: sid(session_id),
             message_id: message_id.to_owned(),
             text: text.to_owned(),
+            images,
             config: Box::new(turn_config),
         })
         .await?;
@@ -1676,18 +1678,20 @@ impl AppState {
         })
     }
 
-    /// 上下文编辑：替换一条历史消息的文本段。空闲时才能做，内核会拒绝并发。
+    /// 上下文编辑：替换一条历史消息的文本段（以及可选的图片）。空闲时才能做，内核会拒绝并发。
     pub async fn edit_message(
         &self,
         session_id: &str,
         message_id: &str,
         text: &str,
+        images: Option<Vec<riot_protocol::ImageInput>>,
     ) -> HostResult<()> {
         self.ensure_hydrated(session_id).await?;
         self.kernel_call(RpcRequest::HistoryEdit {
             session_id: sid(session_id),
             message_id: message_id.to_owned(),
             text: text.to_owned(),
+            images,
         })
         .await?;
         Ok(())

@@ -102,7 +102,7 @@ pub struct VisionSetup {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxKind {
-    /// 读全开、写限于工作区和构建缓存、联网照常。
+    /// 读全开、写限于工作区 / 临时目录 / 桌面 / 下载和构建缓存、联网照常。
     #[default]
     WorkspaceWrite,
     /// 同上,另外掐掉网络。

@@ -203,7 +203,8 @@ export default {
   "settings.permission.sandbox.desc":
     "由作業系統限制命令能改什麼。開著時，沒有規則命中、也不是唯讀的命令可以直接放行 —— 邊界由核心守著。macOS 開箱即用，Windows 需要安裝一次。",
   "settings.permission.sandbox.workspaceWrite": "隔離（建議）",
-  "settings.permission.sandbox.workspaceWrite.desc": "只能改工作區和建置快取，讀取和網路不受限。",
+  "settings.permission.sandbox.workspaceWrite.desc":
+    "只能改工作區、暫存目錄和建置快取；macOS 上桌面 / 下載項目也可以。讀取和網路不受限。",
   "settings.permission.sandbox.workspaceWriteNoNet": "隔離並斷網",
   "settings.permission.sandbox.workspaceWriteNoNet.desc": "另外切斷命令的網路。npm、cargo 拉相依套件會失敗。",
   "settings.permission.sandbox.off": "不隔離",

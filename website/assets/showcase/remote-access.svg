@@ -1,0 +1,64 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="1600"
+  height="1000"
+  viewBox="0 0 1600 1000"
+  fill="none"
+>
+  <title>远程连接截图占位图</title>
+  <rect width="1600" height="1000" fill="#e9ebe8" />
+  <rect x="48.5" y="48.5" width="1503" height="903" stroke="#c6cbc4" />
+  <path
+    d="M48 104V48H104M1496 48H1552V104M1552 896V952H1496M104 952H48V896"
+    stroke="#848e80"
+    stroke-width="3"
+  />
+  <text
+    x="94"
+    y="152"
+    fill="#677060"
+    font-family="Arial, sans-serif"
+    font-size="42"
+  >
+    RIOT / REMOTE ACCESS
+  </text>
+  <text
+    x="800"
+    y="491"
+    text-anchor="middle"
+    fill="#384332"
+    font-family="system-ui, 'PingFang SC', 'Microsoft YaHei', sans-serif"
+    font-size="66"
+  >
+    远程连接
+  </text>
+  <text
+    x="800"
+    y="584"
+    text-anchor="middle"
+    fill="#71796b"
+    font-family="system-ui, 'PingFang SC', 'Microsoft YaHei', sans-serif"
+    font-size="52"
+  >
+    截图待补充
+  </text>
+  <text
+    x="94"
+    y="895"
+    fill="#677060"
+    font-family="Arial, sans-serif"
+    font-size="42"
+  >
+    01 / SCREENSHOT PLACEHOLDER
+  </text>
+  <text
+    x="1506"
+    y="895"
+    text-anchor="end"
+    fill="#677060"
+    font-family="Arial, sans-serif"
+    font-size="42"
+  >
+    16:10
+  </text>
+</svg>

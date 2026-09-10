@@ -779,6 +779,22 @@ async fn prompt_windows_给出_cmd_语法对照() {
     assert!(!p.contains("cmd.exe"), "{p}");
 }
 
+#[test]
+fn prompt_沙箱可写范围按平台说() {
+    let mut ctx = prompt_ctx();
+    ctx.sandboxed = true;
+    let mac = Bash.prompt(&ctx);
+    assert!(mac.contains("Desktop"), "macOS 要把桌面说进可写范围：{mac}");
+    assert!(mac.contains("Downloads"), "{mac}");
+
+    ctx.platform = "windows".into();
+    let win = Bash.prompt(&ctx);
+    assert!(
+        !win.contains("Desktop"),
+        "Windows 沙箱并不放真实用户的桌面：{win}"
+    );
+}
+
 #[tokio::test]
 async fn describe_优先用模型给的描述() {
     let d = Bash.describe(&serde_json::json!({

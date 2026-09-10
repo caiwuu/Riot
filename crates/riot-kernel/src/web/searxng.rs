@@ -27,6 +27,12 @@ const MAX_BYTES: usize = 8 * 1024 * 1024;
 struct Envelope {
     #[serde(default)]
     results: Vec<Raw>,
+    #[serde(default)]
+    answers: Vec<RawAnswer>,
+    #[serde(default)]
+    infoboxes: Vec<RawInfobox>,
+    #[serde(default)]
+    unresponsive_engines: Vec<Unresponsive>,
 }
 
 #[derive(Deserialize)]
@@ -38,6 +44,68 @@ struct Raw {
     /// SearXNG 管摘要叫 `content`。
     #[serde(default)]
     content: String,
+}
+
+/// Wikipedia 等引擎常把唯一有用的条目放在这里，而 `results` 是空的。
+///
+/// 内置实例限流时尤其常见：Brave/Google/DDG 全挂，只剩 Wikipedia 的
+/// infobox。只读 `results` 会把这次搜索报成"没有结果"，模型再推断成
+/// "WebSearch 坏了、总是返回空"。
+#[derive(Deserialize)]
+struct RawInfobox {
+    #[serde(default)]
+    infobox: String,
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    urls: Vec<RawUrl>,
+}
+
+#[derive(Deserialize)]
+struct RawUrl {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    url: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawAnswer {
+    Text(#[allow(dead_code)] String),
+    Obj {
+        #[serde(default)]
+        answer: String,
+        #[serde(default)]
+        url: String,
+    },
+}
+
+/// `[["brave","timeout"], …]`，偶尔是少一个字段的残缺数组。
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Unresponsive {
+    Pair(String, String),
+    List(Vec<String>),
+}
+
+impl Unresponsive {
+    fn pair(self) -> Option<(String, String)> {
+        match self {
+            Self::Pair(name, reason) => Some((name, reason)),
+            Self::List(v) if v.len() >= 2 => Some((v[0].clone(), v[1].clone())),
+            Self::List(v) if v.len() == 1 => Some((v[0].clone(), String::new())),
+            Self::List(_) => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Parsed {
+    hits: Vec<SearchHit>,
+    unresponsive: Vec<(String, String)>,
 }
 
 /// 查一次 SearXNG。
@@ -111,14 +179,22 @@ pub async fn search(
         });
     }
 
-    let mut hits = parse(&body)?;
+    let parsed = parse(&body)?;
+    let had_any = !parsed.hits.is_empty();
+    let mut hits = parsed.hits;
     hits.truncate(q.max_results);
     retain_by_domain(&mut hits, q);
+    // 上游引擎全挂时 `results` 是空数组、HTTP 仍是 200。当成"搜不到"
+    // 交回去，模型会换词重试、再断定工具坏了。只有真正零命中且引擎
+    // 也没报错，才是"这个词没有结果"。
+    if hits.is_empty() && !had_any && !parsed.unresponsive.is_empty() {
+        return Err(engines_failed(&parsed.unresponsive));
+    }
     Ok(hits)
 }
 
 /// 解析响应体，顺带认出"JSON 输出没开"这一种失败。
-fn parse(body: &str) -> Result<Vec<SearchHit>, WebError> {
+fn parse(body: &str) -> Result<Parsed, WebError> {
     let env: Envelope = serde_json::from_str(body).map_err(|e| {
         // 拿到 HTML 说明实例活着但没开 JSON 格式，这是最常见的情况，
         // 值得一条能照着做的提示而不是 serde 的原始报错。
@@ -137,23 +213,104 @@ fn parse(body: &str) -> Result<Vec<SearchHit>, WebError> {
         }
     })?;
 
-    Ok(env
-        .results
+    let unresponsive = env
+        .unresponsive_engines
         .into_iter()
-        // 没有 URL 的结果对模型毫无用处 —— 它既不能引用也不能抓。
-        .filter(|r| !r.url.trim().is_empty())
-        .map(|r| SearchHit {
-            title: if r.title.trim().is_empty() {
-                r.url.clone()
-            } else {
-                r.title
-            },
-            url: r.url,
-            snippet: r.content,
-            // SearXNG 只给摘要。正文由模型选中之后用 WebFetch 抓。
-            raw_content: None,
+        .filter_map(Unresponsive::pair)
+        .collect();
+
+    let mut hits = Vec::new();
+    for r in env.results {
+        push_hit(&mut hits, r.title, r.url, r.content);
+    }
+    for box_ in env.infoboxes {
+        let (title, url) = infobox_cite(&box_);
+        push_hit(&mut hits, title, url, box_.content);
+    }
+    for answer in env.answers {
+        match answer {
+            RawAnswer::Obj { answer, url } => push_hit(&mut hits, String::new(), url, answer),
+            RawAnswer::Text(_) => {}
+        }
+    }
+
+    Ok(Parsed {
+        hits,
+        unresponsive,
+    })
+}
+
+fn push_hit(hits: &mut Vec<SearchHit>, title: String, url: String, snippet: String) {
+    let url = url.trim().to_owned();
+    if url.is_empty() || hits.iter().any(|h| h.url == url) {
+        return;
+    }
+    hits.push(SearchHit {
+        title: if title.trim().is_empty() {
+            url.clone()
+        } else {
+            title
+        },
+        url,
+        snippet,
+        raw_content: None,
+    });
+}
+
+fn infobox_cite(box_: &RawInfobox) -> (String, String) {
+    let url = box_
+        .urls
+        .iter()
+        .map(|u| u.url.trim())
+        .find(|u| !u.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            let id = box_.id.trim();
+            (id.starts_with("http://") || id.starts_with("https://")).then(|| id.to_owned())
         })
-        .collect())
+        .unwrap_or_default();
+    let title = if !box_.infobox.trim().is_empty() {
+        box_.infobox.clone()
+    } else {
+        box_.urls
+            .iter()
+            .map(|u| u.title.trim())
+            .find(|t| !t.is_empty())
+            .unwrap_or("")
+            .to_owned()
+    };
+    (title, url)
+}
+
+fn engines_failed(engines: &[(String, String)]) -> WebError {
+    let brief = engines
+        .iter()
+        .map(|(name, reason)| format!("{name}（{}）", reason_label(reason)))
+        .collect::<Vec<_>>()
+        .join("、");
+    WebError::Transport {
+        message: format!(
+            "搜索后端的上游引擎都没有返回结果：{brief}。这不是搜索词的问题，换词也不会有结果"
+        ),
+    }
+}
+
+fn reason_label(reason: &str) -> String {
+    let r = reason.to_ascii_lowercase();
+    if r.contains("too many requests") || r.contains("rate") {
+        "限流".into()
+    } else if r.contains("timeout") {
+        "超时".into()
+    } else if r.contains("captcha") {
+        "验证码".into()
+    } else {
+        let t = reason.trim();
+        if t.is_empty() {
+            "无响应".into()
+        } else {
+            t.to_owned()
+        }
+    }
 }
 
 /// `site:` 语法的兜底。不是每个上游引擎都认它。
@@ -220,7 +377,7 @@ mod tests {
 
     #[test]
     fn 解析正常响应() {
-        let hits = parse(
+        let parsed = parse(
             r#"{"results":[
                 {"title":"Tokio","url":"https://tokio.rs","content":"异步运行时"},
                 {"title":"","url":"https://docs.rs/tokio","content":""}
@@ -228,25 +385,85 @@ mod tests {
         )
         .expect("解析");
 
-        assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].title, "Tokio");
-        assert_eq!(hits[0].snippet, "异步运行时");
+        assert_eq!(parsed.hits.len(), 2);
+        assert_eq!(parsed.hits[0].title, "Tokio");
+        assert_eq!(parsed.hits[0].snippet, "异步运行时");
         // 没标题时拿 URL 顶上，总比在结果列表里显示一个空链接强
-        assert_eq!(hits[1].title, "https://docs.rs/tokio");
+        assert_eq!(parsed.hits[1].title, "https://docs.rs/tokio");
     }
 
     #[test]
     fn 丢掉没有链接的结果() {
         // 没 URL 的结果模型既不能引用也不能抓，留着只是占位置
-        let hits = parse(r#"{"results":[{"title":"x","url":"  ","content":"y"}]}"#).expect("解析");
-        assert!(hits.is_empty());
+        let parsed =
+            parse(r#"{"results":[{"title":"x","url":"  ","content":"y"}]}"#).expect("解析");
+        assert!(parsed.hits.is_empty());
     }
 
     #[test]
     fn 空结果不是错误() {
-        assert!(parse(r#"{"results":[]}"#).expect("解析").is_empty());
+        let empty = parse(r#"{"results":[]}"#).expect("解析");
+        assert!(empty.hits.is_empty());
+        assert!(empty.unresponsive.is_empty());
         // 有些版本压根不返回 results 字段
-        assert!(parse(r#"{"query":"x"}"#).expect("解析").is_empty());
+        assert!(parse(r#"{"query":"x"}"#).expect("解析").hits.is_empty());
+    }
+
+    #[test]
+    fn 信息框也算结果() {
+        // 内置实例限流时 Wikipedia 只给 infobox，results 是空的。丢掉它
+        // 就是用户看到的"WebSearch 总是返回空"。
+        let parsed = parse(
+            r#"{"results":[],"infoboxes":[{
+                "infobox":"Hello",
+                "id":"https://en.wikipedia.org/wiki/Hello",
+                "content":"A greeting",
+                "urls":[{"title":"Wikipedia","url":"https://en.wikipedia.org/wiki/Hello"}]
+            }]}"#,
+        )
+        .expect("解析");
+        assert_eq!(parsed.hits.len(), 1);
+        assert_eq!(parsed.hits[0].title, "Hello");
+        assert_eq!(parsed.hits[0].url, "https://en.wikipedia.org/wiki/Hello");
+        assert_eq!(parsed.hits[0].snippet, "A greeting");
+    }
+
+    #[test]
+    fn 答案带链接也算结果() {
+        let parsed = parse(
+            r#"{"results":[],"answers":[{"answer":"42","url":"https://example.com/a"}]}"#,
+        )
+        .expect("解析");
+        assert_eq!(parsed.hits.len(), 1);
+        assert_eq!(parsed.hits[0].url, "https://example.com/a");
+        assert_eq!(parsed.hits[0].snippet, "42");
+    }
+
+    #[test]
+    fn 引擎全挂记到unresponsive() {
+        let parsed = parse(
+            r#"{"results":[],"unresponsive_engines":[
+                ["brave","too many requests"],
+                ["duckduckgo","timeout"]
+            ]}"#,
+        )
+        .expect("解析");
+        assert!(parsed.hits.is_empty());
+        assert_eq!(parsed.unresponsive.len(), 2);
+        assert_eq!(parsed.unresponsive[0].0, "brave");
+    }
+
+    #[test]
+    fn 引擎失败的文案不假装搜不到() {
+        let e = engines_failed(&[
+            ("brave".into(), "too many requests".into()),
+            ("startpage".into(), "Suspended: CAPTCHA".into()),
+        ]);
+        let msg = e.to_string();
+        assert!(msg.contains("上游引擎"), "{msg}");
+        assert!(msg.contains("限流"), "{msg}");
+        assert!(msg.contains("验证码"), "{msg}");
+        assert!(msg.contains("不是搜索词"), "{msg}");
     }
 
     #[test]

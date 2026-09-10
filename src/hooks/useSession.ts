@@ -1346,8 +1346,8 @@ export function useSession(
    * 编辑框应保留草稿。
    */
   const editEntry = useCallback(
-    (item: TextItem, text: string) =>
-      mutateHistory(item, (messageId) => editMessageBridge(sessionId, messageId, text)),
+    (item: TextItem, text: string, images?: ImageInput[]) =>
+      mutateHistory(item, (messageId) => editMessageBridge(sessionId, messageId, text, images)),
     [sessionId, mutateHistory],
   );
 
@@ -1360,7 +1360,7 @@ export function useSession(
    * 套；失败拉快照回滚。
    */
   const resendEntry = useCallback(
-    async (item: TextItem, text: string): Promise<boolean> => {
+    async (item: TextItem, text: string, images?: ImageInput[]): Promise<boolean> => {
       if (busyRef.current) return false;
       let messageId: string;
       try {
@@ -1380,7 +1380,7 @@ export function useSession(
       mutateQueued(() => []);
       setState((s) => ({
         ...s,
-        items: trimThroughEdited(s.items, item.id, text),
+        items: trimThroughEdited(s.items, item.id, text, images),
         streaming: "",
         thinking: "",
         streamingPlan: null,
@@ -1389,7 +1389,7 @@ export function useSession(
         queued: [],
       }));
       try {
-        await resendTurn(sessionId, messageId, text);
+        await resendTurn(sessionId, messageId, text, images);
         return true;
       } catch (e) {
         waitStartAt.delete(sessionId);
@@ -1764,13 +1764,31 @@ function assistantMessageId(itemId: string): string {
   return itemId.replace(/-t\d*$/, "");
 }
 
-/** 截到这条用户气泡（含）并换掉它的文字，之后的一切丢掉。找不到就原样返回。 */
-function trimThroughEdited(items: Item[], userItemId: string, text: string): Item[] {
+/** 截到这条用户气泡（含）并换掉它的文字（以及可选的图），之后的一切丢掉。找不到就原样返回。 */
+function trimThroughEdited(
+  items: Item[],
+  userItemId: string,
+  text: string,
+  images?: ImageInput[],
+): Item[] {
   const at = items.findIndex((it) => it.id === userItemId);
   if (at < 0) return items;
   const kept = items.slice(0, at + 1);
   const target = kept[at];
-  if (target?.kind === "user") kept[at] = { ...target, text };
+  if (target?.kind === "user") {
+    if (images === undefined) {
+      kept[at] = { ...target, text };
+    } else {
+      const { images: _was, ...rest } = target;
+      kept[at] = {
+        ...rest,
+        text,
+        ...(images.length
+          ? { images: images.map((img) => `data:${img.mediaType};base64,${img.data}`) }
+          : {}),
+      };
+    }
+  }
   return kept;
 }
 

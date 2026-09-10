@@ -210,15 +210,18 @@ async fn regenerate_turn(
     state.regenerate_turn(&session_id, &message_id).await
 }
 
-/// 编辑一条用户提问并从它重新开始：换文字、丢掉之后的一切、再跑一轮。
+/// 编辑一条用户提问并从它重新开始：换文字（以及可选的图片）、丢掉之后的一切、再跑一轮。
 #[tauri::command]
 async fn resend_turn(
     state: tauri::State<'_, AppState>,
     session_id: String,
     message_id: String,
     text: String,
+    images: Option<Vec<riot_protocol::ImageInput>>,
 ) -> HostResult<()> {
-    state.resend_turn(&session_id, &message_id, &text).await
+    state
+        .resend_turn(&session_id, &message_id, &text, images)
+        .await
 }
 
 /// 手动压缩会话历史（`/compact`）。空闲时才能做；完成发 Compacted 事件。
@@ -227,15 +230,19 @@ async fn session_compact(state: tauri::State<'_, AppState>, session_id: String) 
     state.compact_session(&session_id).await
 }
 
-/// 上下文编辑：替换一条历史消息的文本段（思考、工具调用、附件不动）。
+/// 上下文编辑：替换一条历史消息的文本段（思考、工具调用、`@` 引用不动）。
+/// `images` 有值时用户提问的附图整表替换。
 #[tauri::command]
 async fn edit_message(
     state: tauri::State<'_, AppState>,
     session_id: String,
     message_id: String,
     text: String,
+    images: Option<Vec<riot_protocol::ImageInput>>,
 ) -> HostResult<()> {
-    state.edit_message(&session_id, &message_id, &text).await
+    state
+        .edit_message(&session_id, &message_id, &text, images)
+        .await
 }
 
 /// 上下文删除：抹掉一条历史消息的可见内容；消息因此空心则整条移除。

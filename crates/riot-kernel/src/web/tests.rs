@@ -368,6 +368,44 @@ async fn 结果条数不超过上限() {
 }
 
 #[tokio::test]
+async fn 只有信息框也当成搜索结果() {
+    // 内置实例限流时 Wikipedia 只给 infobox。丢掉它，模型看到的就是空。
+    let json = r#"{"results":[],"infoboxes":[{
+        "infobox":"Tokio",
+        "id":"https://en.wikipedia.org/wiki/Tokio",
+        "content":"Rust async runtime"
+    }]}"#;
+    let (base, _) = fake_server(json, "application/json").await;
+
+    let hits = web(&base)
+        .search(query("tokio"), &CancellationToken::new())
+        .await
+        .expect("信息框必须变成结果");
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].url, "https://en.wikipedia.org/wiki/Tokio");
+    assert_eq!(hits[0].title, "Tokio");
+}
+
+#[tokio::test]
+async fn 上游引擎全挂要报错而不是空成功() {
+    let json = r#"{"results":[],"unresponsive_engines":[
+        ["brave","too many requests"],
+        ["duckduckgo","timeout"]
+    ]}"#;
+    let (base, _) = fake_server(json, "application/json").await;
+
+    let e = web(&base)
+        .search(query("tokio"), &CancellationToken::new())
+        .await
+        .expect_err("引擎全挂不能装成搜不到");
+
+    let msg = e.to_string();
+    assert!(msg.contains("上游引擎"), "{msg}");
+    assert!(msg.contains("不是搜索词"), "{msg}");
+}
+
+#[tokio::test]
 async fn 测试连接连通但没结果算失败() {
     // "通了但没结果"和"成功"对用户来说要做的事完全不同：前者要去
     // SearXNG 里启用搜索引擎，后者什么都不用做。

@@ -204,7 +204,8 @@ export default {
   "settings.permission.sandbox.desc":
     "コマンドが変更できる範囲を OS が制限します。オンの間は、どのルールにも一致せず読み取り専用でもないコマンドが確認なしで実行できます —— 境界はカーネルが守ります。macOS ではそのまま使え、Windows では一度インストールが必要です。",
   "settings.permission.sandbox.workspaceWrite": "分離（推奨）",
-  "settings.permission.sandbox.workspaceWrite.desc": "ワークスペースとビルドキャッシュのみ変更可能。読み取りとネットワークは制限しません。",
+  "settings.permission.sandbox.workspaceWrite.desc":
+    "ワークスペース、一時フォルダ、ビルドキャッシュのみ変更可能。macOS ではデスクトップ / ダウンロードも可。読み取りとネットワークは制限しません。",
   "settings.permission.sandbox.workspaceWriteNoNet": "分離してネットワーク遮断",
   "settings.permission.sandbox.workspaceWriteNoNet.desc": "さらにコマンドのネットワークも遮断します。npm や cargo の依存取得は失敗します。",
   "settings.permission.sandbox.off": "分離しない",

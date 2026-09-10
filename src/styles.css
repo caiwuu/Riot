@@ -5655,6 +5655,26 @@ body.file-dragging.file-drop-hot * {
   padding: revert;
 }
 
+/* revert 是 class+元素，压过 viewer 自己的 .pptx-slideshow-button。
+   color: revert 退回宿主深色主题的 --text，叠在它的白底上就是白底白字
+   （截图里只剩 F5/P 徽章勉强能辨认）。toolbar 已经藏了，这颗放映钮
+   是内容区仅存的控件，按它的浅色皮把对比度补回来；hover 一并盖住
+   全局 button:hover 渗进来的深色底。 */
+.preview-panel-viewer .pptx-slideshow-button,
+.preview-panel-viewer .pptx-slideshow-button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.94);
+  color: #2a5e90;
+  border: 1px solid rgba(42, 94, 144, 0.16);
+  border-radius: 999px;
+  padding: 8px 14px;
+  font: 13px/1.2 inherit;
+}
+
+.preview-panel-viewer .pptx-slideshow-button:hover:not(:disabled) {
+  border-color: rgba(42, 94, 144, 0.34);
+  color: #1d4a75;
+}
+
 /* 内容贴边。fit.padding 已给 0（那是官方唯一统一的边距口子，管的是
    缩放计算），但各渲染管线的**容器装饰留白**没有统一配置 —— 这里是
    已装 8 条管线（preset-office + preset-lite）逐个排查后的完整清单，
@@ -8556,7 +8576,7 @@ button.field-slider-state:hover {
 
 /* 远程图片不加载（原因见 MdImage），画成带图标的链接，点了去浏览器看。 */
 .md-img-remote::before {
-  content: "▣";
+  content: '▣';
   margin-right: 4px;
   font-size: 0.85em;
   color: var(--text-dim);
@@ -8828,62 +8848,42 @@ button.field-slider-state:hover {
   content-visibility: visible;
 }
 
-/* 用户气泡进入编辑态时撑满整行 —— 85% 宽的小卡片里改长文太憋屈。 */
-.msg.user.editing {
+/* 编辑态撑满整行，并脱掉气泡壳 —— 里面是完整 Composer，再套一层
+   卡片底会像框中框。 */
+.msg.user.editing,
+.msg.assistant.editing {
   width: 100%;
   max-width: 100%;
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
 }
 
-.msg-editor {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-/* 编辑框是 contenteditable（块要渲染成色块），不是 textarea。
-   高度贴内容长、封顶四成屏 —— 原来 textarea 靠 JS fit，这里 CSS 就够。 */
-.msg-editbox {
-  width: 100%;
-  min-height: 64px;
-  max-height: 40vh;
-  overflow-y: auto;
-  background: var(--bg);
-  color: var(--text);
-  border: 1px solid var(--border-strong);
-  border-radius: 10px;
-  padding: 10px 12px;
-  font-family: inherit;
-  font-size: 14px;
-  line-height: 1.55;
-  /* 和 .composer-input 一致：行尾空格要有渲染盒，光标才停得上去。 */
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.msg-editbox:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
-.msg-editor-btns {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.msg-editor-hint {
-  flex: 1;
+/* 编辑栏里的说明让位给取消/保存/发送；太长就折，别把键挤没。 */
+.composer-edit-hint {
+  flex: 1 1 160px;
+  min-width: 0;
   color: var(--text-faint);
   font-size: 12px;
+  line-height: 1.4;
 }
 
-.msg-editor-save {
+.msg.editing .composer-bar {
+  flex-wrap: wrap;
+}
+
+/* 编辑就是来改附件的，叉不用等 hover 才现身。 */
+.msg.editing .attachment-remove {
+  opacity: 1;
+}
+
+.composer-edit-save {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--on-accent);
 }
 
-.msg-editor-save:hover:not(:disabled) {
+.composer-edit-save:hover:not(:disabled) {
   background: var(--accent);
   filter: brightness(1.1);
 }

@@ -220,7 +220,7 @@ export default {
     "The operating system limits what commands can modify. While on, commands that match no rule and aren't read-only run without asking; the kernel holds the boundary. Works out of the box on macOS; Windows needs a one-time install.",
   "settings.permission.sandbox.workspaceWrite": "Isolated (recommended)",
   "settings.permission.sandbox.workspaceWrite.desc":
-    "Can only modify the workspace and build caches; reading and network are unrestricted.",
+    "Can only modify the workspace, temp directories, and build caches; on macOS, Desktop / Downloads too. Reading and network are unrestricted.",
   "settings.permission.sandbox.workspaceWriteNoNet": "Isolated, no network",
   "settings.permission.sandbox.workspaceWriteNoNet.desc":
     "Also cuts the command's network access. npm and cargo will fail to fetch dependencies.",

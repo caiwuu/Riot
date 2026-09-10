@@ -1695,22 +1695,23 @@ impl Session {
     }
 
     /// 编辑一条用户提问并从它重新开始（Cursor 编辑气泡后发送的同款语义）：
-    /// 替换文本、丢掉它之后的一切、再从它跑一轮。
+    /// 替换文本（以及可选的图片）、丢掉它之后的一切、再从它跑一轮。
     ///
     /// 和 [`Self::regenerate`] 是同一条路，只差"截到哪、改不改字"：重新
     /// 生成截到助手消息前面那条提问、不改字；这里截到被编辑的提问本身、
-    /// 换掉它的文字。附件（图片、引用）原位保留 —— 用户改的是话，不是图。
-    /// 忙着的时候拒绝，理由同重新生成。
+    /// 换掉它的文字。`images` 为 `None` 时图片原位保留；`Some` 整表替换。
+    /// `@` 引用不动。忙着的时候拒绝，理由同重新生成。
     pub async fn resend_from(
         self: &Arc<Self>,
         message_id: &str,
         text: &str,
+        images: Option<Vec<ImageInput>>,
         model: riot_protocol::ModelEndpoint,
         caps: TurnCapabilities,
         sink: SessionSink,
         limits: TurnLimits,
     ) -> Result<(), SessionError> {
-        if text.trim().is_empty() {
+        if !edit_has_content(text, images.as_deref()) {
             return Err(SessionError::invalid(ui_error!("kernel.history.emptyText")));
         }
         let cancel = CancellationToken::new();
@@ -1721,7 +1722,10 @@ impl Session {
             }
             *g = Some(cancel.clone());
         }
-        if let Err(e) = self.truncate_to_edited_prompt(message_id, text).await {
+        if let Err(e) = self
+            .truncate_to_edited_prompt(message_id, text, images)
+            .await
+        {
             *self.running.lock().await = None;
             return Err(e);
         }
@@ -1761,8 +1765,8 @@ impl Session {
         });
     }
 
-    /// 截断活历史到指定用户提问（含）并换掉它的文字；transcript 记一条
-    /// 截断加一条编辑，重启重放出来和内存一致。
+    /// 截断活历史到指定用户提问（含）并换掉它的文字（以及可选的图片）；
+    /// transcript 记一条截断加一条编辑，重启重放出来和内存一致。
     ///
     /// 只对活历史生效，理由同 [`Self::edit_message`]：归档里的消息模型已经
     /// 看不见，从那里"重新开始"会让活历史变空。
@@ -1770,6 +1774,7 @@ impl Session {
         &self,
         message_id: &str,
         text: &str,
+        images: Option<Vec<ImageInput>>,
     ) -> Result<(), SessionError> {
         self.hydrate().await;
         let mut live = self.history.lock().await;
@@ -1783,16 +1788,19 @@ impl Session {
             )));
         }
         live.truncate(at + 1);
-        if !live[at].edit_text(text) {
-            return Err(SessionError::invalid(ui_error!("kernel.history.noText")));
-        }
+        let applied = apply_message_edit(&mut live[at], text, images).map_err(|e| {
+            SessionError::invalid(match e {
+                ApplyEditError::Empty => ui_error!("kernel.history.emptyText"),
+                ApplyEditError::NoText => ui_error!("kernel.history.noText"),
+            })
+        })?;
         let env_seen = crate::env::last_snapshot_text(&live);
         drop(live);
 
         if let Some(p) = &self.persist {
-            // 顺序即重放顺序：先截到这条（含），再把它的文字换掉。
+            // 顺序即重放顺序：先截到这条（含），再把它的文字（和可选的图）换掉。
             p.log.append_rewind(message_id);
-            p.log.append_edit(message_id, text);
+            p.log.append_edit(message_id, &applied.text, applied.images);
         }
         self.after_history_cut(env_seen).await;
         Ok(())
@@ -1858,14 +1866,20 @@ impl Session {
 
     /// 上下文编辑：把一条活历史消息的文本段替换成新文本。
     ///
-    /// 只动文本（见 [`Message::edit_text`]）：思考、工具调用/结果、附件
-    /// 原位保留，配对和签名都不受影响。空闲时才能做 —— 和正在写历史的
-    /// 轮子并发，transcript 的追加顺序和界面都会打架。
+    /// 文本总是换（见 [`Message::edit_text`]）。思考、工具调用/结果、`@`
+    /// 引用原位保留。`images` 为 `Some` 时用户提问的附图整表替换。
+    /// 空闲时才能做 —— 和正在写历史的轮子并发，transcript 的追加顺序
+    /// 和界面都会打架。
     ///
     /// 只对活历史生效。归档（压缩前）的消息模型已经看不见，改它对上下文
     /// 没有任何效果 —— 与其静默假装成功，不如把这层告诉用户。
-    pub async fn edit_message(&self, message_id: &str, text: &str) -> Result<(), SessionError> {
-        if text.trim().is_empty() {
+    pub async fn edit_message(
+        &self,
+        message_id: &str,
+        text: &str,
+        images: Option<Vec<ImageInput>>,
+    ) -> Result<(), SessionError> {
+        if !edit_has_content(text, images.as_deref()) {
             return Err(SessionError::invalid(ui_error!("kernel.history.emptyText")));
         }
         self.with_idle_lock(async {
@@ -1874,14 +1888,15 @@ impl Session {
                 drop(live);
                 return Err(self.missing_message_error(message_id).await);
             };
-            if !msg.edit_text(text) {
-                return Err(SessionError::invalid(ui_error!(
-                    "kernel.history.systemNoText"
-                )));
-            }
+            let applied = apply_message_edit(msg, text, images).map_err(|e| {
+                SessionError::invalid(match e {
+                    ApplyEditError::Empty => ui_error!("kernel.history.emptyText"),
+                    ApplyEditError::NoText => ui_error!("kernel.history.systemNoText"),
+                })
+            })?;
             drop(live);
             if let Some(p) = &self.persist {
-                p.log.append_edit(message_id, text);
+                p.log.append_edit(message_id, &applied.text, applied.images);
             }
             // 原地编辑不改条数和末条，指纹抓不住 —— 这里必须显式作废。
             self.drop_precompact().await;
@@ -3729,6 +3744,55 @@ impl Session {
     }
 }
 
+/// 编辑后至少要留下字或图。两头都空就不成一条消息。
+fn edit_has_content(text: &str, images: Option<&[ImageInput]>) -> bool {
+    !text.trim().is_empty() || images.is_some_and(|imgs| !imgs.is_empty())
+}
+
+enum ApplyEditError {
+    Empty,
+    NoText,
+}
+
+struct AppliedEdit {
+    text: String,
+    images: Option<Vec<riot_store::EditedImage>>,
+}
+
+/// 把一条消息的文本（以及可选的附图）换成编辑结果。
+fn apply_message_edit(
+    msg: &mut Message,
+    text: &str,
+    images: Option<Vec<ImageInput>>,
+) -> Result<AppliedEdit, ApplyEditError> {
+    if !edit_has_content(text, images.as_deref()) {
+        return Err(ApplyEditError::Empty);
+    }
+    let resolved = if text.trim().is_empty() {
+        crate::content::prompt_text("")
+    } else {
+        text.to_owned()
+    };
+    if !msg.edit_text(&resolved) {
+        return Err(ApplyEditError::NoText);
+    }
+    let persist_images = if let Some(incoming) = images {
+        let existing = match msg {
+            Message::User { content, .. } => content.as_slice(),
+            _ => &[],
+        };
+        let atts = crate::content::attachments_for_edit(incoming, existing);
+        msg.edit_user_images(atts);
+        Some(riot_store::edited_images_of(msg))
+    } else {
+        None
+    };
+    Ok(AppliedEdit {
+        text: resolved,
+        images: persist_images,
+    })
+}
+
 /// Task 工具通向会话的那条 Weak 引用（见 [`crate::subagent::TaskHost`]）。
 ///
 /// 会话没了（被删、内核在关）就什么都不做：后台子 agent 的收尾撞上一个
@@ -5468,7 +5532,7 @@ mod tests {
         *s.history.lock().await = history.clone();
         s.spawn_precompact(&provider, "m", history.clone(), summary_shape())
             .await;
-        s.edit_message("u1", "改过的第一问")
+        s.edit_message("u1", "改过的第一问", None)
             .await
             .expect("编辑成功");
         assert!(
@@ -6602,12 +6666,18 @@ mod tests {
 
         // 只认用户提问。
         assert!(
-            s.truncate_to_edited_prompt("a2", "改回复").await.is_err(),
+            s.truncate_to_edited_prompt("a2", "改回复", None)
+                .await
+                .is_err(),
             "从助手消息重发要被拒"
         );
-        assert!(s.truncate_to_edited_prompt("ghost", "x").await.is_err());
+        assert!(
+            s.truncate_to_edited_prompt("ghost", "x", None)
+                .await
+                .is_err()
+        );
 
-        s.truncate_to_edited_prompt("m2", "第二问（改）")
+        s.truncate_to_edited_prompt("m2", "第二问（改）", None)
             .await
             .expect("能重发");
 
@@ -6632,6 +6702,84 @@ mod tests {
         s.flush_log().await;
         let parts = store.load_parts(&id).await;
         assert_eq!(parts.live, hist, "重启重放出来必须和内存一致");
+    }
+
+    /// 编辑后重发也可以把图整表换掉（含删光）。
+    #[tokio::test]
+    async fn 编辑后重发_可以换掉或删掉图片() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let store = Arc::new(riot_store::Transcripts::new(dir.path()));
+        let id = SessionId::from_raw("s1");
+        let log = store.open(riot_store::TranscriptMeta {
+            id: id.clone(),
+            root: dir.path().to_path_buf(),
+            created_at_ms: 0,
+        });
+        let s = Session::new(
+            id.clone(),
+            dir.path().to_path_buf(),
+            Some(SessionPersist {
+                store: Arc::clone(&store),
+                log,
+                artifacts_root: dir.path().join("artifacts"),
+            }),
+        );
+        let with_image = Message::User {
+            id: MessageId::from_raw("m1"),
+            content: vec![
+                UserContent::Attachment(Attachment::Image {
+                    media_type: "image/png".into(),
+                    data: "OLD".into(),
+                }),
+                UserContent::Text {
+                    text: "看这张".into(),
+                },
+            ],
+            meta: MessageMeta::default(),
+        };
+        s.history.lock().await.push(with_image);
+        if let Some(p) = &s.persist {
+            p.log.append(&s.history.lock().await[0]);
+        }
+        s.flush_log().await;
+
+        s.truncate_to_edited_prompt(
+            "m1",
+            "换成这张",
+            Some(vec![ImageInput {
+                media_type: "image/jpeg".into(),
+                data: "NEW".into(),
+            }]),
+        )
+        .await
+        .expect("能换图");
+
+        let hist = s.history().await;
+        let Message::User { content, .. } = &hist[0] else {
+            panic!("提问");
+        };
+        assert!(matches!(
+            &content[0],
+            UserContent::Attachment(Attachment::Image { data, .. }) if data == "NEW"
+        ));
+
+        s.truncate_to_edited_prompt("m1", "不要图了", Some(vec![]))
+            .await
+            .expect("能删图");
+        let hist = s.history().await;
+        let Message::User { content, .. } = &hist[0] else {
+            panic!("提问");
+        };
+        assert!(
+            !content
+                .iter()
+                .any(|c| matches!(c, UserContent::Attachment(a) if a.is_user_image())),
+            "图该删干净：{content:?}"
+        );
+
+        s.flush_log().await;
+        let parts = store.load_parts(&id).await;
+        assert_eq!(parts.live, hist, "换图也要能重放");
     }
 
     /// 上下文编辑改的是活历史和 transcript 两份，重启后必须还是改过的样子。
@@ -6661,7 +6809,9 @@ mod tests {
             }
         }
 
-        s.edit_message("a1", "改对了").await.expect("能编辑");
+        s.edit_message("a1", "改对了", None)
+            .await
+            .expect("能编辑");
 
         let hist = s.history().await;
         assert_eq!(hist[1], hist_assistant("a1", "改对了"), "内存里是新文本");
@@ -6671,9 +6821,9 @@ mod tests {
         assert_eq!(parts.live[1], hist_assistant("a1", "改对了"), "重启后也是");
 
         // 空文本不是编辑，指路删除。
-        assert!(s.edit_message("a1", "  ").await.is_err());
+        assert!(s.edit_message("a1", "  ", None).await.is_err());
         // 不存在的消息要报得出来。
-        assert!(s.edit_message("ghost", "x").await.is_err());
+        assert!(s.edit_message("ghost", "x", None).await.is_err());
     }
 
     /// 会话摘录跟着上下文变：编辑后是新文本、删除后不再出现、改名后
@@ -6734,7 +6884,9 @@ mod tests {
         // hydrate 会去读 transcript：先让它落盘，否则水合读到半截。
         s.flush_log().await;
 
-        s.edit_message("a1", "改对了").await.expect("能编辑");
+        s.edit_message("a1", "改对了", None)
+            .await
+            .expect("能编辑");
         let text = std::fs::read_to_string(&digest_path).expect("编辑后摘录存在");
         assert!(
             text.contains("改对了") && !text.contains("答错了"),

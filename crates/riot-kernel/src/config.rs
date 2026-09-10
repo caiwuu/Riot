@@ -872,7 +872,7 @@ pub fn load_secret(name: &str) -> Option<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SandboxMode {
-    /// 读全开、写限于工作区和构建缓存、联网照常。
+    /// 读全开、写限于工作区 / 临时目录 / 桌面 / 下载和构建缓存、联网照常。
     WorkspaceWrite,
     /// 同上，另外掐掉网络。`npm install` 之类会失败，换取"数据出不去"。
     WorkspaceWriteNoNet,
