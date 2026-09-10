@@ -33,7 +33,10 @@ pub use browser::{
     Event as BrowserEvent, InteractError, InterceptOp, Nav as BrowserNav, NetQuery, NoBrowser,
     Target as BrowserTarget, WaitCondition,
 };
-pub use changes::{ChangeStatus, DiffLine, FileChange, GitChanges, Hunk, LineKind};
+pub use changes::{
+    ChangeStatus, DiffLine, FileChange, GitChanges, Hunk, LineKind, RestorePreview, RestoreResult,
+    RestoreSkip,
+};
 pub use compact::{CompactBudget, CompactResult, Compactor};
 pub use env::{BrowserGlance, EnvAlert, EnvProbe, EnvSnapshot, NoEnvProbe};
 pub use event::{

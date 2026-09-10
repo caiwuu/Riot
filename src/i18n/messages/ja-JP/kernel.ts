@@ -19,6 +19,8 @@ export default {
   "kernel.history.noText": "このメッセージには編集できるテキストがありません。",
   "kernel.history.systemNoText": "これはシステム通知のため、編集できるテキストがありません。",
   "kernel.history.systemNoDelete": "これはシステム通知のため、削除できません。",
+  "kernel.history.noCheckpoint": "この質問にはファイルのチェックポイントがないため、会話から戻せません。",
+  "kernel.history.noRedo": "やり直せる回退はありません。再送信や会話の続きをすると復元できなくなります。",
 
   // ── 圧縮 ────────────────────────────────────────────────────
   "kernel.compact.empty": "まだ会話がないため、圧縮するものがありません。",

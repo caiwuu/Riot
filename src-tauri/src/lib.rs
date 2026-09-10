@@ -14,8 +14,8 @@ pub mod fence;
 // 留在宿主的是需要 OS/tauri 能力的部分:browser、term、term_access、fence、
 // persist、gui_env、askpass、kernel(进程监管)。
 pub use riot_kernel::{
-    changes, classifier, config, content, git, hooks, memory, mentions, models, session, skills,
-    slash, subagent, vision, web,
+    changes, checkpoint, classifier, config, content, git, hooks, memory, mentions, models,
+    session, skills, slash, subagent, vision, web,
 };
 mod askpass;
 mod gui_env;
@@ -253,6 +253,35 @@ async fn delete_message(
     message_id: String,
 ) -> HostResult<()> {
     state.delete_message(&session_id, &message_id).await
+}
+
+/// 回退预览：会动哪些文件、有没有手改。
+#[tauri::command]
+async fn restore_preview(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    message_id: String,
+) -> HostResult<riot_protocol::RestorePreview> {
+    state.restore_preview(&session_id, &message_id).await
+}
+
+/// 丢掉这条用户提问的回复及之后的对话，文件回到它发出时。
+#[tauri::command]
+async fn restore_checkpoint(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    message_id: String,
+) -> HostResult<riot_protocol::RestoreResult> {
+    state.restore_checkpoint(&session_id, &message_id).await
+}
+
+/// 把最近一次 Restore 撤回去。
+#[tauri::command]
+async fn redo_checkpoint(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+) -> HostResult<riot_protocol::RestoreResult> {
+    state.redo_checkpoint(&session_id).await
 }
 
 /// 可用的斜杠命令（内置 + 项目 + 全局）。`root` 为 null 时只列内置和全局。
@@ -1562,6 +1591,9 @@ pub fn run() {
             resend_turn,
             edit_message,
             delete_message,
+            restore_preview,
+            restore_checkpoint,
+            redo_checkpoint,
             queue_list,
             queue_remove,
             queue_take,

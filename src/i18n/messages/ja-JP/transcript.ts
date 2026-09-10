@@ -32,6 +32,28 @@ export default {
   "transcript.msg.deleteBusy": "生成中です。終了後に削除できます",
   "transcript.msg.deleteTurnBody":
     "このメッセージが属する質問と、それから生じたすべての応答（返答、ツール呼び出し）がコンテキストから削除され、以降の会話はこのターンの影響を受けなくなります。",
+  "transcript.restore.title": "ここに戻す",
+  "transcript.restore.busy": "生成中です。終了後に戻せます",
+  "transcript.restore.confirm": "戻す",
+  "transcript.restore.body":
+    "以降の会話は破棄されます。{files} 個のファイルが変わります。この質問は残るので、直して再送信できます。",
+  "transcript.restore.dirty": "前回の完了後にディスクが手で変わっています。その変更も上書きされます。",
+  "transcript.restore.afterSlice":
+    "この質問の後に初めて触ったファイルが {count} 個あり、セッション開始時に戻すか削除します。",
+  "transcript.restore.skipped": "スキップ：{files}。",
+  "transcript.restore.bashNote": "ターミナル経由の変更はこの回退では見えません。",
+  "transcript.restore.previewFail": "この回退をプレビューできませんでした。",
+  "transcript.restore.redo": "回退前に戻す",
+  "transcript.restore.partialFail": "書き戻せなかったファイルがあります：{files}",
+  "transcript.restore.skip.binary": "バイナリ",
+  "transcript.restore.skip.tooLarge": "大きすぎる",
+  "transcript.restore.skip.unreadable": "読めない",
+  "transcript.resend.title": "送信してファイルを戻す",
+  "transcript.resend.body":
+    "以降の会話は破棄されます。{files} 個のファイルを戻してから、この質問を再実行します。",
+  "transcript.regenerate.title": "再生成してファイルを戻す",
+  "transcript.regenerate.body":
+    "この返答と以降の会話は破棄されます。{files} 個のファイルを質問送信時の状態に戻してから、再生成します。",
 
   "transcript.editor.hintResend": "送信：ここからやり直し、以降の会話は破棄 · 保存：コンテキスト内の原文だけを変更",
   "transcript.editor.hintSave": "保存するとコンテキスト内の原文が置き換わり、以降の会話は新しい内容に基づきます",

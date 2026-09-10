@@ -98,8 +98,11 @@ fn block_style(value: &str) -> Option<Style> {
         _ => return None,
     };
     let rest = &value[1..];
-    (rest.len() <= 2 && rest.chars().all(|c| matches!(c, '-' | '+') || c.is_ascii_digit()))
-        .then_some(style)
+    (rest.len() <= 2
+        && rest
+            .chars()
+            .all(|c| matches!(c, '-' | '+') || c.is_ascii_digit()))
+    .then_some(style)
 }
 
 fn is_indented(line: &str) -> bool {
@@ -270,7 +273,10 @@ mod tests {
     #[test]
     fn 空值加缩进续行按折叠处理() {
         let f = fields("description:\n  发布新版本时用。\n  跑测试、打 tag。\nname: x");
-        assert_eq!(get(&f, "description"), Some("发布新版本时用。 跑测试、打 tag。"));
+        assert_eq!(
+            get(&f, "description"),
+            Some("发布新版本时用。 跑测试、打 tag。")
+        );
         assert_eq!(get(&f, "name"), Some("x"));
     }
 

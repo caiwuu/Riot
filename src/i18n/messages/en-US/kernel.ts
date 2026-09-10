@@ -20,6 +20,8 @@ export default {
   "kernel.history.noText": "This message has no editable text.",
   "kernel.history.systemNoText": "This is a system notice; it has no editable text.",
   "kernel.history.systemNoDelete": "This is a system notice; it cannot be deleted.",
+  "kernel.history.noCheckpoint": "This prompt has no file checkpoint, so it cannot be restored.",
+  "kernel.history.noRedo": "There is nothing to redo. Sending again or continuing the chat clears the restore.",
 
   // ── Compact ────────────────────────────────────────────────
   "kernel.compact.empty": "There is no conversation to compact yet.",

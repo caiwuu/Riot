@@ -301,8 +301,8 @@ export function FilePreviewPanel({
   onToggleTree: () => void;
   /**
    * 递增一次就重新读一遍磁盘：树重列已展开的目录，正在看的那个标签
-   * 重新读字节。轮次结束时由外层推 —— 模型刚改完的文件，用户切过来
-   * 看到的必须是改完的样子。
+   * 重新读字节。外层在编辑落盘、轮次结束、回退时推 —— 跑轮当中改完
+   * 的文件，开着的预览必须跟着换成新内容。
    */
   refreshKey: number;
   /** 树里点了一个文件。 */
@@ -438,8 +438,8 @@ export function FilePreviewPanel({
 /**
  * 单个标签的渲染区。挂载后常驻（见上方保活注释），visible 只控 display。
  *
- * `rev` 变一次就重新读一遍盘。文件是活的 —— agent 改完之后这里还挂着
- * 打开那一刻的字节，用户得关掉标签再开一次才看得到新内容。
+ * `rev` 变一次就重新读一遍盘。文件是活的，外层在编辑落盘时推 rev，
+ * 正在看的标签跟着换成新内容；没在看的标签切回来再补读。
  */
 function PreviewBody({ path, visible, rev }: { path: string; visible: boolean; rev: number }) {
   const { t, locale } = useT();
@@ -454,7 +454,7 @@ function PreviewBody({ path, visible, rev }: { path: string; visible: boolean; r
     openPath(path).catch(() => flashOpenErr(true));
   };
 
-  // 藏着的标签不跟着刷 —— 开了八个标签的话，每轮结束就是八次全量读盘，
+  // 藏着的标签不跟着刷 —— 开了八个标签的话，每次落盘就是八次全量读盘，
   // 而其中七个用户根本没在看。切回来时 visible 一翻这个 effect 会再跑
   // 一次，那一刻才补读，看到的照样是最新的。
   //

@@ -1866,6 +1866,11 @@ export type ComposerEditProps = {
   allowImages?: boolean;
   onSave: (text: string, images?: ImageInput[]) => Promise<boolean>;
   onResend?: (text: string, images?: ImageInput[]) => Promise<boolean>;
+  /**
+   * 点发送之后、进入发送态之前。用来弹「会回退文件」的确认。
+   * false = 用户取消，框留着、不进发送中。
+   */
+  onBeforeResend?: () => Promise<boolean>;
   onCancel: () => void;
 };
 
@@ -1876,11 +1881,14 @@ function ComposerEdit({
   allowImages = false,
   onSave,
   onResend,
+  onBeforeResend,
   onCancel,
 }: ComposerEditProps) {
   const { t } = useT();
   const workspace = useContext(ProjectRootContext);
   const [saving, setSaving] = useState<"save" | "resend" | null>(null);
+  /** 发送前确认框还开着：别让 Esc / 取消把编辑框拆掉。 */
+  const [gating, setGating] = useState(false);
   const [hasText, setHasText] = useState(!!initial.trim());
   const [shots, setShots] = useState<Shot[]>(() => shotsFromDataUrls(initialImages));
   const [viewShot, setViewShot] = useState<Shot | null>(null);
@@ -2035,7 +2043,23 @@ function ComposerEdit({
     }
   };
   const save = () => commit("save", onSave);
-  const primary = () => (onResend ? commit("resend", onResend) : save());
+  const blocked = saving !== null || gating;
+  const primary = async () => {
+    if (blocked) return;
+    if (!onResend) {
+      save();
+      return;
+    }
+    if (onBeforeResend) {
+      setGating(true);
+      try {
+        if (!(await onBeforeResend())) return;
+      } finally {
+        setGating(false);
+      }
+    }
+    void commit("resend", onResend);
+  };
 
   return (
     <div className="composer-wrap">
@@ -2093,7 +2117,7 @@ function ComposerEdit({
         <div
           ref={ref}
           className={hasText || shots.length ? "composer-input" : "composer-input empty"}
-          contentEditable={saving === null}
+          contentEditable={!blocked}
           suppressContentEditableWarning
           role="textbox"
           aria-multiline="true"
@@ -2138,7 +2162,7 @@ function ComposerEdit({
             if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
               e.preventDefault();
               void primary();
-            } else if (e.key === "Escape" && !imeKey) {
+            } else if (e.key === "Escape" && !imeKey && !blocked) {
               e.preventDefault();
               e.stopPropagation();
               onCancel();
@@ -2154,7 +2178,7 @@ function ComposerEdit({
                   type="button"
                   className="composer-icon"
                   onClick={pickAttachments}
-                  disabled={saving !== null}
+                  disabled={blocked}
                   title={host.nativePaths ? t("composer.attach.title") : t("composer.attach.title.web")}
                   aria-label={t("composer.attach.title")}
                 >
@@ -2181,14 +2205,14 @@ function ComposerEdit({
             </span>
           </div>
           <div className="composer-actions">
-            <button type="button" onClick={onCancel} disabled={saving !== null}>
+            <button type="button" onClick={onCancel} disabled={blocked}>
               {t("common.cancel")}
             </button>
             <button
               type="button"
               className={onResend ? undefined : "composer-edit-save"}
               onClick={() => void save()}
-              disabled={saving !== null || !canCommit}
+              disabled={blocked || !canCommit}
               title={onResend ? t("transcript.editor.saveOnlyTitle") : undefined}
             >
               {saving === "save" ? t("common.saving") : t("common.save")}
@@ -2197,7 +2221,7 @@ function ComposerEdit({
               <button
                 type="submit"
                 className="composer-edit-save"
-                disabled={saving !== null || !canCommit}
+                disabled={blocked || !canCommit}
                 title={t("transcript.editor.resendTitle")}
               >
                 {saving === "resend" ? t("transcript.editor.sending") : t("transcript.editor.send")}

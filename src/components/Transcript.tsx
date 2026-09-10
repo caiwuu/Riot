@@ -27,15 +27,17 @@ import {
 
 import {
   host,
+  restorePreview,
   type ImageInput,
   type PermissionAsk,
   type PermissionMode,
   type PermissionResponse,
+  type RestorePreview,
 } from "../bridge";
 import { useImeGuard } from "../hooks/useImeGuard";
 import type { Item, TextItem } from "../hooks/useSession";
 import { useTimedFlag } from "../hooks/useTimedFlag";
-import { dateTimeFormat, useT } from "../i18n";
+import { dateTimeFormat, type MessageKey, useT } from "../i18n";
 import {
   SLASH_HEAD_RE,
   extractElemSpans,
@@ -403,6 +405,10 @@ export function Transcript({
   onEditEntry,
   onResendEntry,
   onDeleteEntry,
+  checkpointIds,
+  onRestoreEntry,
+  redoAvailable,
+  onRedo,
 }: {
   sessionId: string;
   items: Item[];
@@ -436,6 +442,13 @@ export function Transcript({
   onResendEntry?: (item: TextItem, text: string, images?: ImageInput[]) => Promise<boolean>;
   /** 上下文删除：把这条气泡从历史里抹掉。 */
   onDeleteEntry?: (item: TextItem) => Promise<boolean>;
+  /** 有文件切片的用户提问 id。只在这些气泡上画回退。 */
+  checkpointIds?: string[];
+  /** 回退到这条用户提问发出时。 */
+  onRestoreEntry?: (item: TextItem) => Promise<boolean>;
+  /** 最近一次回退还能前进回去。图标画在被留下的那条提问上。 */
+  redoAvailable?: boolean;
+  onRedo?: () => void;
 }) {
   const { t } = useT();
   const boxRef = useRef<HTMLDivElement>(null);
@@ -542,6 +555,112 @@ export function Transcript({
     },
     [onDeleteEntry, t],
   );
+
+  const requestRestore = useCallback(
+    (item: TextItem) => {
+      if (!onRestoreEntry) return;
+      const messageId = checkpointMessageId(item);
+      void restorePreview(sessionId, messageId)
+        .then((p) => {
+          setConfirmDel({
+            title: t("transcript.restore.title"),
+            body: restoreConfirmBody(p, t),
+            confirmLabel: t("transcript.restore.confirm"),
+            action: () => void onRestoreEntry(item),
+          });
+        })
+        .catch(() => {
+          setConfirmDel({
+            title: t("transcript.restore.title"),
+            body: t("transcript.restore.previewFail"),
+            confirmLabel: t("common.ok"),
+            danger: false,
+            action: () => {},
+          });
+        });
+    },
+    [onRestoreEntry, sessionId, t],
+  );
+
+  /**
+   * 重发 / 重新生成之前：内核会按那条提问的检查点把文件写回去。
+   * 真会改到磁盘才弹确认；没有切片、或磁盘已经一致，直接放行。
+   * resolve(false) = 用户取消。
+   */
+  const confirmFileRestore = useCallback(
+    (
+      messageId: string,
+      titleKey: MessageKey,
+      bodyKey: MessageKey,
+      confirmLabel: string,
+    ): Promise<boolean> =>
+      new Promise<boolean>((resolve) => {
+        let settled = false;
+        const finish = (ok: boolean) => {
+          if (settled) return;
+          settled = true;
+          resolve(ok);
+        };
+        void restorePreview(sessionId, messageId)
+          .then((p) => {
+            if (p.files === 0) {
+              finish(true);
+              return;
+            }
+            setConfirmDel({
+              title: t(titleKey),
+              body: restoreConfirmBody(p, t, bodyKey),
+              confirmLabel,
+              action: () => finish(true),
+              onCancel: () => finish(false),
+            });
+          })
+          .catch(() => finish(true));
+      }),
+    [sessionId, t],
+  );
+
+  /** 编辑后点发送。 */
+  const confirmResend = useCallback(
+    (item: TextItem) => {
+      if (item.id.startsWith("local-")) return Promise.resolve(true);
+      return confirmFileRestore(
+        checkpointMessageId(item),
+        "transcript.resend.title",
+        "transcript.resend.body",
+        t("transcript.editor.send"),
+      );
+    },
+    [confirmFileRestore, t],
+  );
+
+  /**
+   * 重新生成和重发走同一条内核路径：先把磁盘回到那条提问发出时再跑。
+   * 所以也要同样的确认 —— 用户上一轮结束后手改过的文件会被盖掉，
+   * 不能因为按的是「重新生成」而不是「发送」就静默动手。
+   */
+  const requestRegenerate = useCallback(
+    (assistantItemId: string) => {
+      if (!onRegenerate) return;
+      const prompt = userPromptBefore(items, assistantItemId);
+      if (!prompt || prompt.id.startsWith("local-")) {
+        onRegenerate(assistantItemId);
+        return;
+      }
+      void confirmFileRestore(
+        checkpointMessageId(prompt),
+        "transcript.regenerate.title",
+        "transcript.regenerate.body",
+        t("transcript.msg.regenerate"),
+      ).then((ok) => {
+        if (ok) onRegenerate(assistantItemId);
+      });
+    },
+    [confirmFileRestore, items, onRegenerate, t],
+  );
+
+  /** 回退后留下的那条提问：它上面的回退图标翻成前进。 */
+  const redoId = redoAvailable && onRedo ? lastRestoredUserId(items) : undefined;
 
   const pinBottom = () => {
     const box = boxRef.current;
@@ -800,10 +919,16 @@ export function Transcript({
                   hydrate={findOpen || i >= hydrateFrom}
                   regenEnabled={!busy}
                   mutateEnabled={!busy}
-                  {...(onRegenerate ? { onRegenerate } : {})}
+                  {...(onRegenerate ? { onRegenerate: requestRegenerate } : {})}
                   {...(onEditEntry ? { onEditEntry } : {})}
-                  {...(onResendEntry ? { onResendEntry } : {})}
+                  {...(onResendEntry
+                    ? { onResendEntry, onConfirmResend: confirmResend }
+                    : {})}
                   {...(onDeleteEntry ? { onDeleteEntry: requestDelete } : {})}
+                  {...(onRestoreEntry
+                    ? { checkpointIds, onRestoreEntry: requestRestore }
+                    : {})}
+                  {...(redoId && onRedo ? { redoId, onRedo } : {})}
                 />
               ) : (
                 <ProcessGroup
@@ -909,7 +1034,12 @@ export const Row = memo(function Row({
   hydrate,
   onEditEntry,
   onResendEntry,
+  onConfirmResend,
   onDeleteEntry,
+  checkpointIds,
+  onRestoreEntry,
+  redoId,
+  onRedo,
   mutateEnabled,
 }: {
   item: Item;
@@ -921,8 +1051,15 @@ export const Row = memo(function Row({
   onEditEntry?: (item: TextItem, text: string, images?: ImageInput[]) => Promise<boolean>;
   /** 编辑后重发（见 Transcript 的同名 prop）。只有用户气泡用它。 */
   onResendEntry?: (item: TextItem, text: string, images?: ImageInput[]) => Promise<boolean>;
+  /** 发送前确认会不会回退文件。false = 取消，编辑框留着。 */
+  onConfirmResend?: (item: TextItem) => Promise<boolean>;
   /** 上下文删除。收到的是 Transcript 的确认包装 —— 点击先弹确认框。 */
   onDeleteEntry?: (item: TextItem) => void;
+  checkpointIds?: string[];
+  onRestoreEntry?: (item: TextItem) => void;
+  /** 回退后留下的那条提问 id。这条上的回退图标翻成前进。 */
+  redoId?: string;
+  onRedo?: () => void;
   /** 编辑/删除此刻可用（空闲）。生成中改历史会和正在写的轮子打架。 */
   mutateEnabled?: boolean;
 }) {
@@ -954,6 +1091,7 @@ export const Row = memo(function Row({
                       if (ok) setEditing(false);
                       return ok;
                     },
+                    ...(onConfirmResend ? { onBeforeResend: () => onConfirmResend(item) } : {}),
                   }
                 : {})}
             />
@@ -999,6 +1137,11 @@ export const Row = memo(function Row({
             {...(item.at ? { at: item.at } : {})}
             {...(onEditEntry ? { onEdit: () => setEditing(true) } : {})}
             {...(onDeleteEntry ? { onDelete: () => onDeleteEntry(item) } : {})}
+            {...(redoId && item.id === redoId && onRedo
+              ? { onRedo }
+              : canRestoreUser(item, checkpointIds) && onRestoreEntry
+                ? { onRestore: () => onRestoreEntry(item) }
+                : {})}
           />
         </div>
       );
@@ -1148,6 +1291,8 @@ function MsgActions({
   regenEnabled,
   onEdit,
   onDelete,
+  onRestore,
+  onRedo,
   mutateEnabled,
 }: {
   text: string;
@@ -1159,6 +1304,10 @@ function MsgActions({
   onEdit?: () => void;
   /** 从上下文删除。undefined = 这条不可删。 */
   onDelete?: () => void;
+  /** 回退到这条提问发出时。undefined = 没有检查点。 */
+  onRestore?: () => void;
+  /** 把最近一次回退撤回去。有它时画前进图标，不再画回退。 */
+  onRedo?: () => void;
   /** 编辑/删除此刻可用（空闲）。 */
   mutateEnabled?: boolean;
 }) {
@@ -1203,6 +1352,31 @@ function MsgActions({
           onClick={onEdit}
         >
           <EditIcon />
+        </button>
+      ) : null}
+      {onRedo ? (
+        <button
+          type="button"
+          className="msg-action"
+          title={mutateEnabled ? t("transcript.restore.redo") : t("transcript.restore.busy")}
+          aria-label={t("transcript.restore.redo")}
+          disabled={!mutateEnabled}
+          onClick={onRedo}
+        >
+          <RedoIcon />
+        </button>
+      ) : onRestore ? (
+        <button
+          type="button"
+          className="msg-action"
+          title={
+            mutateEnabled ? t("transcript.restore.title") : t("transcript.restore.busy")
+          }
+          aria-label={t("transcript.restore.title")}
+          disabled={!mutateEnabled}
+          onClick={onRestore}
+        >
+          <RestoreIcon />
         </button>
       ) : null}
       {onDelete ? (
@@ -1279,6 +1453,107 @@ function EditIcon() {
       <path d="M8.6 4.4l3 3" stroke="currentColor" strokeWidth="1.3" />
     </svg>
   );
+}
+
+function RestoreIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M3.2 8A4.8 4.8 0 1 0 4.4 4.4"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
+      <path
+        d="M3 2.6v2.6h2.6"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function RedoIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M12.8 8A4.8 4.8 0 1 1 11.6 4.4"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
+      <path
+        d="M13 2.6v2.6H10.4"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+/** 回退后留下的那条提问：对话被截到它，它就是最后一条用户气泡。 */
+function lastRestoredUserId(items: Item[]): string | undefined {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    if (it?.kind === "user") return it.id;
+  }
+  return undefined;
+}
+
+/** 这条助手回复前面最近的用户提问 —— 重新生成会截回到它、文件也回到它发出时。 */
+function userPromptBefore(items: Item[], assistantItemId: string): TextItem | undefined {
+  const at = items.findIndex((it) => it.id === assistantItemId);
+  if (at < 0) return undefined;
+  for (let i = at - 1; i >= 0; i--) {
+    const it = items[i];
+    if (it?.kind === "user") return it;
+  }
+  return undefined;
+}
+
+function checkpointMessageId(item: Item): string {
+  return item.id.replace(/-[tuk]\d*$/, "");
+}
+
+function canRestoreUser(item: Item, ids?: string[]): boolean {
+  if (item.kind !== "user") return false;
+  if (item.id.startsWith("local-")) return false;
+  const id = checkpointMessageId(item);
+  // 事件流换上的正式 id 没有 `-uN` 后缀：切片跟提问一起拍，不必等快照。
+  if (item.id === id) return true;
+  return !!ids?.includes(id);
+}
+
+function restoreConfirmBody(
+  p: RestorePreview,
+  t: (key: MessageKey, vars?: Record<string, string | number>) => string,
+  bodyKey: MessageKey = "transcript.restore.body",
+): string {
+  const parts = [t(bodyKey, { files: p.files })];
+  if (p.dirty) parts.push(t("transcript.restore.dirty"));
+  if (p.afterSlice) parts.push(t("transcript.restore.afterSlice", { count: p.afterSlice }));
+  if (p.skipped.length) {
+    const names = p.skipped
+      .map((s) => `${s.path} (${skipReason(s.reason, t)})`)
+      .join(t("transcript.listSep"));
+    parts.push(t("transcript.restore.skipped", { files: names }));
+  }
+  parts.push(t("transcript.restore.bashNote"));
+  return parts.join(" ");
+}
+
+function skipReason(
+  reason: string,
+  t: (key: MessageKey, vars?: Record<string, string | number>) => string,
+): string {
+  if (reason === "binary") return t("transcript.restore.skip.binary");
+  if (reason === "too_large") return t("transcript.restore.skip.tooLarge");
+  if (reason === "unreadable") return t("transcript.restore.skip.unreadable");
+  return reason;
 }
 
 function TrashIcon() {

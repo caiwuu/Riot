@@ -135,6 +135,13 @@ pub async fn dispatch(
         "delete_message" => {
             ok(crate::delete_message(st, a.take("sessionId")?, a.take("messageId")?).await)
         }
+        "restore_preview" => {
+            ok(crate::restore_preview(st, a.take("sessionId")?, a.take("messageId")?).await)
+        }
+        "restore_checkpoint" => {
+            ok(crate::restore_checkpoint(st, a.take("sessionId")?, a.take("messageId")?).await)
+        }
+        "redo_checkpoint" => ok(crate::redo_checkpoint(st, a.take("sessionId")?).await),
         "queue_list" => ok(crate::queue_list(st, a.take("sessionId")?).await),
         "queue_remove" => {
             ok(crate::queue_remove(st, a.take("sessionId")?, a.take("entryId")?).await)

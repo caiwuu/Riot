@@ -32,6 +32,26 @@ export default {
   "transcript.msg.deleteBusy": "產生中，結束後才能刪除",
   "transcript.msg.deleteTurnBody":
     "這則訊息所屬的提問，連同它引出的全部回應（回覆、工具呼叫），會一起從上下文中刪除，之後的對話不再受這一輪影響。",
+  "transcript.restore.title": "回退到這裡",
+  "transcript.restore.busy": "產生中，結束後才能回退",
+  "transcript.restore.confirm": "回退",
+  "transcript.restore.body": "之後的對話會被丟掉。將改動 {files} 個檔案。提問本身會留下，方便改完再送。",
+  "transcript.restore.dirty": "上次完成後磁碟又被改過，這些手改也會被覆蓋。",
+  "transcript.restore.afterSlice": "另有 {count} 個檔案是這則之後才第一次改到的，會回到工作階段開始時或刪除。",
+  "transcript.restore.skipped": "跳過：{files}。",
+  "transcript.restore.bashNote": "用終端機改過的檔案這次回退看不到。",
+  "transcript.restore.previewFail": "沒辦法預覽這次回退。",
+  "transcript.restore.redo": "恢復到回退前",
+  "transcript.restore.partialFail": "有些檔案沒寫回去：{files}",
+  "transcript.restore.skip.binary": "二進位",
+  "transcript.restore.skip.tooLarge": "太大",
+  "transcript.restore.skip.unreadable": "讀不了",
+  "transcript.resend.title": "送出並回退檔案",
+  "transcript.resend.body":
+    "之後的對話會被丟掉。將回退 {files} 個檔案的修改，然後從這則提問重新開始。",
+  "transcript.regenerate.title": "重新產生並回退檔案",
+  "transcript.regenerate.body":
+    "這則回覆及之後的對話會被丟掉。將回退 {files} 個檔案到提問送出時，然後重新產生。",
 
   "transcript.editor.hintResend": "送出：從這則重新開始，之後的對話會被丟棄 · 儲存：只改上下文裡的原文",
   "transcript.editor.hintSave": "儲存後取代上下文裡的原文，之後的對話按新內容走",

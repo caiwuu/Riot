@@ -56,6 +56,8 @@ import type {
   PermissionMode,
   PermissionResponse,
   QueuedSummary as GeneratedQueuedSummary,
+  RestorePreview,
+  RestoreResult,
   RunTargetSpec,
   ScheduleDraft,
   SchedulePatch,
@@ -77,6 +79,8 @@ export type {
   PermissionAsk,
   PermissionMode,
   PermissionResponse,
+  RestorePreview,
+  RestoreResult,
   RunTargetSpec,
   ScheduleDraft,
   SchedulePatch,
@@ -560,6 +564,27 @@ export function editMessage(
  */
 export function deleteMessage(sessionId: string, messageId: string): Promise<void> {
   return invoke("delete_message", { sessionId, messageId });
+}
+
+/** 回退预览：会动哪些文件、有没有手改、哪些跳过。 */
+export function restorePreview(
+  sessionId: string,
+  messageId: string,
+): Promise<RestorePreview> {
+  return invoke<RestorePreview>("restore_preview", { sessionId, messageId }, T_SLOW);
+}
+
+/** 丢掉这条用户提问的回复及之后的对话，文件回到它发出时。提问留下。 */
+export function restoreCheckpoint(
+  sessionId: string,
+  messageId: string,
+): Promise<RestoreResult> {
+  return invoke<RestoreResult>("restore_checkpoint", { sessionId, messageId }, T_SLOW);
+}
+
+/** 把最近一次 Restore 撤回去（文件 + 被截掉的对话）。 */
+export function redoCheckpoint(sessionId: string): Promise<RestoreResult> {
+  return invoke<RestoreResult>("redo_checkpoint", { sessionId }, T_SLOW);
 }
 
 /** 一条斜杠命令。模板正文留在宿主，展开走 slashExpand。 */
@@ -1128,6 +1153,10 @@ export interface HistorySnapshot {
    * 会话时靠这个把红卡画回末尾；宿主在下一轮开始时清掉。缺省/空 = 没有。
    */
   lastError?: AgentError | null;
+  /** 有文件切片的用户提问 id。界面只在这些气泡上画回退。 */
+  checkpointIds?: string[];
+  /** 最近一次 Restore 还能 Redo。 */
+  redoAvailable?: boolean;
 }
 
 export function getHistory(sessionId: string): Promise<HistorySnapshot> {

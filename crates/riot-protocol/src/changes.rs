@@ -81,3 +81,37 @@ pub struct GitChanges {
     #[serde(default)]
     pub refs: Vec<String>,
 }
+
+/// 回退预览 / 结果里跳过或失败的一个文件。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreSkip {
+    pub path: String,
+    /// 稳定键：`binary` / `too_large` / `unreadable`，或写盘失败的短描述。
+    pub reason: String,
+}
+
+/// `history.restore_preview` 的应答：回退前给确认框看的数字。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RestorePreview {
+    pub message_id: String,
+    /// 会写回或删除的文件数（不含 skipped，磁盘已一致的也不计）。
+    pub files: usize,
+    /// 上次轮次结束后磁盘又被改过（相对 `head.json`）。
+    pub dirty: bool,
+    pub skipped: Vec<RestoreSkip>,
+    /// 这条提问之后才第一次动到的文件数（会回到会话 v0 或删除）。
+    pub after_slice: usize,
+}
+
+/// `history.restore` / `history.redo` 的应答。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreResult {
+    pub restored: usize,
+    pub deleted: usize,
+    pub skipped: Vec<RestoreSkip>,
+    pub failed: Vec<RestoreSkip>,
+    pub redo_available: bool,
+}

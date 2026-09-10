@@ -19,6 +19,8 @@ export default {
   "kernel.history.noText": "這則訊息沒有可編輯的文字。",
   "kernel.history.systemNoText": "這則是系統提示，沒有可編輯的文字。",
   "kernel.history.systemNoDelete": "這則是系統提示，不支援刪除。",
+  "kernel.history.noCheckpoint": "這則提問沒有檔案檢查點，沒辦法依對話回退。",
+  "kernel.history.noRedo": "沒有可以恢復的回退。重新送出或繼續對話之後就不能再還原了。",
 
   // ── 壓縮 ────────────────────────────────────────────────────
   "kernel.compact.empty": "還沒有對話內容，沒什麼可壓縮的。",

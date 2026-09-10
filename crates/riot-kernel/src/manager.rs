@@ -75,6 +75,10 @@ pub struct ResumeSnapshot {
     pub live_thinking: String,
     /// 后台子 agent（跑着的和刚结束的）。事件只在变化时推，面板靠它重建。
     pub tasks: Vec<riot_protocol::task::BackgroundTaskView>,
+    /// 有文件切片的用户提问 id。
+    pub checkpoint_ids: Vec<String>,
+    /// 最近一次 Restore 还能 Redo。
+    pub redo_available: bool,
 }
 
 /// 活会话注册表。内核 bin 持有一个。
@@ -206,6 +210,8 @@ impl SessionManager {
                 live_text,
                 live_thinking,
                 tasks: s.tasks_snapshot(),
+                checkpoint_ids: s.checkpoint_ids(),
+                redo_available: s.redo_available(),
             };
         }
         let id = SessionId::from_raw(session_id.to_owned());
@@ -233,6 +239,8 @@ impl SessionManager {
         // 子 agent 登记表随水合一起从盘上回来：Task 卡片要靖它认领自己的
         // 子 agent，重启后才点得开。
         let tasks = session.tasks_snapshot();
+        let checkpoint_ids = session.checkpoint_ids();
+        let redo_available = session.redo_available();
         self.sessions
             .lock()
             .await
@@ -247,6 +255,8 @@ impl SessionManager {
             live_text: String::new(),
             live_thinking: String::new(),
             tasks,
+            checkpoint_ids,
+            redo_available,
         }
     }
 
@@ -311,6 +321,10 @@ impl SessionManager {
         if let Some(root) = root {
             self.digests.remove(&root, &id).await;
         }
+        crate::checkpoint::remove_all(&crate::checkpoint::dir_of(
+            self.transcripts.dir(),
+            session_id,
+        ));
     }
 
     pub async fn history(&self, session_id: &str) -> Option<(Vec<Message>, Vec<Message>)> {
@@ -530,6 +544,29 @@ impl SessionManager {
     pub async fn delete_message(&self, session_id: &str, message_id: &str) -> Result<(), RpcError> {
         let s = self.require(session_id).await?;
         Ok(s.delete_message(message_id).await?)
+    }
+
+    pub async fn restore_preview(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> Result<riot_protocol::RestorePreview, RpcError> {
+        let s = self.require(session_id).await?;
+        Ok(s.restore_preview(message_id).await?)
+    }
+
+    pub async fn restore(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> Result<riot_protocol::RestoreResult, RpcError> {
+        let s = self.require(session_id).await?;
+        Ok(s.restore(message_id).await?)
+    }
+
+    pub async fn redo(&self, session_id: &str) -> Result<riot_protocol::RestoreResult, RpcError> {
+        let s = self.require(session_id).await?;
+        Ok(s.redo().await?)
     }
 
     pub async fn queue_list(&self, session_id: &str) -> Vec<riot_protocol::QueuedSummary> {

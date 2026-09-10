@@ -2369,6 +2369,99 @@
         }
       ]
     },
+    "RestorePreview": {
+      "description": "`history.restore_preview` 的应答：回退前给确认框看的数字。",
+      "properties": {
+        "afterSlice": {
+          "description": "这条提问之后才第一次动到的文件数（会回到会话 v0 或删除）。",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "dirty": {
+          "description": "上次轮次结束后磁盘又被改过（相对 `head.json`）。",
+          "type": "boolean"
+        },
+        "files": {
+          "description": "会写回或删除的文件数（不含 skipped，磁盘已一致的也不计）。",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "messageId": {
+          "type": "string"
+        },
+        "skipped": {
+          "items": {
+            "$ref": "#/$defs/RestoreSkip"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "messageId",
+        "files",
+        "dirty",
+        "skipped",
+        "afterSlice"
+      ],
+      "type": "object"
+    },
+    "RestoreResult": {
+      "description": "`history.restore` / `history.redo` 的应答。",
+      "properties": {
+        "deleted": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "failed": {
+          "items": {
+            "$ref": "#/$defs/RestoreSkip"
+          },
+          "type": "array"
+        },
+        "redoAvailable": {
+          "type": "boolean"
+        },
+        "restored": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skipped": {
+          "items": {
+            "$ref": "#/$defs/RestoreSkip"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "restored",
+        "deleted",
+        "skipped",
+        "failed",
+        "redoAvailable"
+      ],
+      "type": "object"
+    },
+    "RestoreSkip": {
+      "description": "回退预览 / 结果里跳过或失败的一个文件。",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "reason": {
+          "description": "稳定键：`binary` / `too_large` / `unreadable`，或写盘失败的短描述。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "reason"
+      ],
+      "type": "object"
+    },
     "RpcError": {
       "description": "内核回给宿主的错误。\n\n`code` 给宿主分支用（比如\"这一轮还在跑\"要不要重试）；`error` 是给前端\n翻译的键和参数，见 [`crate::text`]。这里没有任何一种语言的文案。",
       "properties": {
@@ -2974,6 +3067,89 @@
           "type": "object"
         },
         {
+          "description": "回退到这条用户提问发出时的文件切片：预览会改哪些、有没有手改。",
+          "properties": {
+            "method": {
+              "const": "history.restore_preview",
+              "type": "string"
+            },
+            "params": {
+              "properties": {
+                "message_id": {
+                  "type": "string"
+                },
+                "session_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session_id",
+                "message_id"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "丢掉这条用户提问的回复及之后的对话，文件回到它发出时的样子。\n提问本身留下，方便改完再发。空闲时才能做。",
+          "properties": {
+            "method": {
+              "const": "history.restore",
+              "type": "string"
+            },
+            "params": {
+              "properties": {
+                "message_id": {
+                  "type": "string"
+                },
+                "session_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session_id",
+                "message_id"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "把最近一次 Restore 撤回去（文件 + 被截掉的对话）。空闲时才能做。",
+          "properties": {
+            "method": {
+              "const": "history.redo",
+              "type": "string"
+            },
+            "params": {
+              "properties": {
+                "session_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "session_id"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
           "description": "手动压缩(/compact)。带模型端点 —— 压缩要调 LLM。",
           "properties": {
             "method": {
@@ -3386,6 +3562,14 @@
                   "description": "有没有轮子在跑。决定界面显示停止键还是发送键。",
                   "type": "boolean"
                 },
+                "checkpoint_ids": {
+                  "default": [],
+                  "description": "有文件切片的用户提问 id。界面只在这些气泡上画「回退到这里」。",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
                 "compacting": {
                   "type": "boolean"
                 },
@@ -3413,6 +3597,11 @@
                   },
                   "type": "array"
                 },
+                "redo_available": {
+                  "default": false,
+                  "description": "最近一次 Restore 还能 Redo。",
+                  "type": "boolean"
+                },
                 "tasks": {
                   "default": [],
                   "description": "这个会话的后台子 agent（跑着的和刚结束的）。事件只在变化时推，\n切走再切回的面板靠这份快照重建。",
@@ -3432,6 +3621,54 @@
             },
             "result": {
               "const": "session_resumed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "result",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/RestorePreview"
+            },
+            "result": {
+              "const": "restore_preview",
+              "type": "string"
+            }
+          },
+          "required": [
+            "result",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/RestoreResult"
+            },
+            "result": {
+              "const": "history_restored",
+              "type": "string"
+            }
+          },
+          "required": [
+            "result",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/RestoreResult"
+            },
+            "result": {
+              "const": "history_redone",
               "type": "string"
             }
           },

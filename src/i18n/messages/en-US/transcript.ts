@@ -33,6 +33,28 @@ export default {
   "transcript.msg.deleteBusy": "Generating — you can delete once it finishes",
   "transcript.msg.deleteTurnBody":
     "The prompt this message belongs to, together with everything it produced (replies, tool calls), will be removed from the context. Later conversation will no longer be affected by this turn.",
+  "transcript.restore.title": "Restore to here",
+  "transcript.restore.busy": "Generating — you can restore once it finishes",
+  "transcript.restore.confirm": "Restore",
+  "transcript.restore.body":
+    "Later conversation will be discarded. {files} file(s) will change. This prompt stays so you can edit and resend.",
+  "transcript.restore.dirty": "The disk changed after the last turn finished; those hand edits will be overwritten too.",
+  "transcript.restore.afterSlice":
+    "{count} file(s) were first touched after this prompt and will revert to the session baseline or be deleted.",
+  "transcript.restore.skipped": "Skipped: {files}.",
+  "transcript.restore.bashNote": "Files changed via the terminal are not covered.",
+  "transcript.restore.previewFail": "Couldn't preview this restore.",
+  "transcript.restore.redo": "Restore to before undo",
+  "transcript.restore.partialFail": "Some files could not be written back: {files}",
+  "transcript.restore.skip.binary": "binary",
+  "transcript.restore.skip.tooLarge": "too large",
+  "transcript.restore.skip.unreadable": "unreadable",
+  "transcript.resend.title": "Send and restore files",
+  "transcript.resend.body":
+    "Later conversation will be discarded. {files} file(s) will be restored, then this prompt will run again.",
+  "transcript.regenerate.title": "Regenerate and restore files",
+  "transcript.regenerate.body":
+    "This reply and everything after it will be discarded. {files} file(s) will be restored to when the prompt was sent, then the prompt will run again.",
 
   "transcript.editor.hintResend":
     "Send: restart from here, discarding everything after · Save: only change the text in context",

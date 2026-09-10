@@ -207,6 +207,11 @@ impl FileStateCache for MemoryFileState {
             .map(|(p, b)| (p.clone(), b.clone()))
             .collect()
     }
+
+    fn forget_baseline(&self, path: &Path) {
+        let Ok(mut g) = self.inner.lock() else { return };
+        g.baseline.remove(path);
+    }
 }
 
 #[cfg(test)]

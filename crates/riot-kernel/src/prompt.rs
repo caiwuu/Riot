@@ -877,7 +877,9 @@ pub(crate) fn scheduled_wake_reminder(wake: &riot_protocol::ScheduledWake) -> Us
         describe_repeat(&wake.repeat),
     );
     let text = if matches!(wake.repeat, Repeat::Once) {
-        format!("{head} This task was one-off; it has already been disabled and will not fire again.")
+        format!(
+            "{head} This task was one-off; it has already been disabled and will not fire again."
+        )
     } else {
         format!(
             "{head}\n\

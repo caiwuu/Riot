@@ -4,7 +4,7 @@
 //! 但所有调用仍然穿过这里定义的类型 —— 这样阶段 B 拆进程时
 //! 只需要换一个 transport 实现。见 ARCHITECTURE.md §2.2
 
-use crate::changes::{FileChange, GitChanges};
+use crate::changes::{FileChange, GitChanges, RestorePreview, RestoreResult};
 use crate::event::AgentEvent;
 use crate::id::{RequestId, SessionId, TurnId};
 use crate::message::Message;
@@ -134,6 +134,22 @@ pub enum RpcRequest {
         session_id: SessionId,
         message_id: String,
     },
+    /// 回退到这条用户提问发出时的文件切片：预览会改哪些、有没有手改。
+    #[serde(rename = "history.restore_preview")]
+    HistoryRestorePreview {
+        session_id: SessionId,
+        message_id: String,
+    },
+    /// 丢掉这条用户提问的回复及之后的对话，文件回到它发出时的样子。
+    /// 提问本身留下，方便改完再发。空闲时才能做。
+    #[serde(rename = "history.restore")]
+    HistoryRestore {
+        session_id: SessionId,
+        message_id: String,
+    },
+    /// 把最近一次 Restore 撤回去（文件 + 被截掉的对话）。空闲时才能做。
+    #[serde(rename = "history.redo")]
+    HistoryRedo { session_id: SessionId },
 
     /// 手动压缩(/compact)。带模型端点 —— 压缩要调 LLM。
     #[serde(rename = "session.compact")]
@@ -235,7 +251,16 @@ pub enum RpcResponse {
         /// 切走再切回的面板靠这份快照重建。
         #[serde(default)]
         tasks: Vec<crate::task::BackgroundTaskView>,
+        /// 有文件切片的用户提问 id。界面只在这些气泡上画「回退到这里」。
+        #[serde(default)]
+        checkpoint_ids: Vec<String>,
+        /// 最近一次 Restore 还能 Redo。
+        #[serde(default)]
+        redo_available: bool,
     },
+    RestorePreview(RestorePreview),
+    HistoryRestored(RestoreResult),
+    HistoryRedone(RestoreResult),
     SessionList {
         sessions: Vec<SessionSummary>,
     },
@@ -456,6 +481,30 @@ mod tests {
             panic!("该解成 TurnRegenerate");
         };
         assert_eq!(message_id, "msg_1");
+    }
+
+    #[test]
+    fn restore_uses_dotted_method_names() {
+        let preview: RpcRequest = serde_json::from_value(serde_json::json!({
+            "method": "history.restore_preview",
+            "params": { "session_id": "s1", "message_id": "u1" }
+        }))
+        .expect("history.restore_preview 要能从 JSON 读出来");
+        assert!(matches!(preview, RpcRequest::HistoryRestorePreview { .. }));
+
+        let restore: RpcRequest = serde_json::from_value(serde_json::json!({
+            "method": "history.restore",
+            "params": { "session_id": "s1", "message_id": "u1" }
+        }))
+        .expect("history.restore 要能从 JSON 读出来");
+        assert!(matches!(restore, RpcRequest::HistoryRestore { .. }));
+
+        let redo: RpcRequest = serde_json::from_value(serde_json::json!({
+            "method": "history.redo",
+            "params": { "session_id": "s1" }
+        }))
+        .expect("history.redo 要能从 JSON 读出来");
+        assert!(matches!(redo, RpcRequest::HistoryRedo { .. }));
     }
 
     /// 老宿主的编辑/重发没有 `images`，新内核必须照常读成「图片不动」。

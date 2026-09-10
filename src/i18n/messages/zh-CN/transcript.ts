@@ -39,6 +39,26 @@ export default {
   "transcript.msg.deleteBusy": "生成中，结束后才能删除",
   "transcript.msg.deleteTurnBody":
     "这条消息所属的提问，连同它引出的全部回应（回复、工具调用），会一起从上下文中删除，之后的对话不再受这一轮影响。",
+  "transcript.restore.title": "回退到这里",
+  "transcript.restore.busy": "生成中，结束后才能回退",
+  "transcript.restore.confirm": "回退",
+  "transcript.restore.body": "之后的对话会被丢掉。将改动 {files} 个文件。提问本身会留下，方便改完再发。",
+  "transcript.restore.dirty": "上次完成后磁盘又被改过，这些手改也会被覆盖。",
+  "transcript.restore.afterSlice": "另有 {count} 个文件是这条之后才第一次改到的，会回到会话开始时或删除。",
+  "transcript.restore.skipped": "跳过：{files}。",
+  "transcript.restore.bashNote": "用终端改过的文件这次回退看不到。",
+  "transcript.restore.previewFail": "没法预览这次回退。",
+  "transcript.restore.redo": "恢复到回退前",
+  "transcript.restore.partialFail": "有些文件没写回去：{files}",
+  "transcript.restore.skip.binary": "二进制",
+  "transcript.restore.skip.tooLarge": "太大",
+  "transcript.restore.skip.unreadable": "读不了",
+  "transcript.resend.title": "发送并回退文件",
+  "transcript.resend.body":
+    "之后的对话会被丢掉。将回退 {files} 个文件的修改，然后从这条提问重新开始。",
+  "transcript.regenerate.title": "重新生成并回退文件",
+  "transcript.regenerate.body":
+    "这条回复及之后的对话会被丢掉。将回退 {files} 个文件到提问发出时，然后重新生成。",
 
   // 消息内联编辑框
   "transcript.editor.hintResend": "发送：从这条重新开始，之后的对话会被丢弃 · 保存：只改上下文里的原文",

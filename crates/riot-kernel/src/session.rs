@@ -29,6 +29,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use riot_core::{AgentDeps, AgentState, run_agent};
+use riot_protocol::changes::RestoreResult;
 use riot_protocol::event::{AgentEvent, StreamDelta};
 use riot_protocol::id::{IdGenerator, MessageId, NanoIdGenerator, SessionId};
 use riot_protocol::message::{Attachment, Message, MessageMeta, UserContent};
@@ -176,6 +177,13 @@ impl From<SessionError> for RpcError {
     fn from(e: SessionError) -> Self {
         RpcError::new(e.code(), e.ui_error())
     }
+}
+
+/// `cut_history_to` 的产物：锚点还在，尾巴留给 Redo。
+struct HistoryCut {
+    keep_id: String,
+    discarded_live: Vec<Message>,
+    discarded_archived: Vec<Message>,
 }
 
 /// 排队中的一条待注入消息。
@@ -1534,6 +1542,248 @@ impl Session {
         crate::git_changes::collect(&self.cwd, base).await
     }
 
+    fn checkpoints_dir(&self) -> Option<std::path::PathBuf> {
+        self.persist
+            .as_ref()
+            .map(|p| crate::checkpoint::dir_of(p.store.dir(), self.id.as_str()))
+    }
+
+    /// 有文件切片的用户提问 id。切回会话时界面靠它决定画不画回退。
+    pub fn checkpoint_ids(&self) -> Vec<String> {
+        self.checkpoints_dir()
+            .map(|d| crate::checkpoint::list_ids(&d))
+            .unwrap_or_default()
+    }
+
+    /// 还有没走完的 Restore 可以 Redo（栈非空）。
+    pub fn redo_available(&self) -> bool {
+        self.checkpoints_dir()
+            .is_some_and(|d| crate::checkpoint::redo_available(&d))
+    }
+
+    fn clear_redo(&self) {
+        if let Some(dir) = self.checkpoints_dir() {
+            crate::checkpoint::clear_redo(&dir);
+        }
+    }
+
+    async fn capture_checkpoint(&self, user_msg_id: &str) {
+        let Some(dir) = self.checkpoints_dir() else {
+            return;
+        };
+        let snap =
+            crate::checkpoint::capture(self.file_state.baselines().into_iter().map(|(p, _)| p))
+                .await;
+        if let Err(e) = crate::checkpoint::save_snapshot(
+            &crate::checkpoint::slice_path(&dir, user_msg_id),
+            &snap,
+        ) {
+            tracing::warn!(error = %e, "检查点没写上盘");
+        }
+    }
+
+    async fn write_head_checkpoint(&self) {
+        let Some(dir) = self.checkpoints_dir() else {
+            return;
+        };
+        let snap =
+            crate::checkpoint::capture(self.file_state.baselines().into_iter().map(|(p, _)| p))
+                .await;
+        if let Err(e) = crate::checkpoint::save_snapshot(&crate::checkpoint::head_path(&dir), &snap)
+        {
+            tracing::warn!(error = %e, "head 检查点没写上盘");
+        }
+    }
+
+    async fn apply_snapshot(&self, snap: &crate::checkpoint::FileSnapshot) -> RestoreResult {
+        crate::checkpoint::apply(
+            snap,
+            &self.file_state.baselines(),
+            self.file_state_for_tools().as_ref(),
+            &self.cwd,
+        )
+        .await
+    }
+
+    async fn apply_checkpoint_if_present(&self, user_msg_id: &str) {
+        let Some(dir) = self.checkpoints_dir() else {
+            return;
+        };
+        let Some(snap) =
+            crate::checkpoint::load_snapshot(&crate::checkpoint::slice_path(&dir, user_msg_id))
+        else {
+            return;
+        };
+        let report = self.apply_snapshot(&snap).await;
+        if !report.failed.is_empty() {
+            tracing::warn!(failed = report.failed.len(), "重发前写回检查点有文件失败");
+        }
+    }
+
+    async fn require_live_user_prompt(&self, message_id: &str) -> Result<(), SessionError> {
+        let live = self.history.lock().await;
+        let Some(m) = live.iter().find(|m| m.id().as_str() == message_id) else {
+            drop(live);
+            return Err(self.missing_message_error(message_id).await);
+        };
+        if !m.is_user_prompt() {
+            return Err(SessionError::invalid(ui_error!(
+                "kernel.history.resendNotPrompt"
+            )));
+        }
+        Ok(())
+    }
+
+    /// 回退预览：会动哪些文件、有没有手改、哪些跳过。不占 `running`。
+    pub async fn restore_preview(
+        &self,
+        message_id: &str,
+    ) -> Result<riot_protocol::RestorePreview, SessionError> {
+        self.hydrate().await;
+        self.require_live_user_prompt(message_id).await?;
+        let Some(dir) = self.checkpoints_dir() else {
+            return Err(SessionError::invalid(ui_error!(
+                "kernel.history.noCheckpoint"
+            )));
+        };
+        let Some(snap) =
+            crate::checkpoint::load_snapshot(&crate::checkpoint::slice_path(&dir, message_id))
+        else {
+            return Err(SessionError::invalid(ui_error!(
+                "kernel.history.noCheckpoint"
+            )));
+        };
+        let head = crate::checkpoint::load_snapshot(&crate::checkpoint::head_path(&dir));
+        Ok(crate::checkpoint::preview(
+            message_id,
+            &snap,
+            &self.file_state.baselines(),
+            head.as_ref(),
+            &self.cwd,
+        )
+        .await)
+    }
+
+    /// 丢掉这条用户提问的回复及之后的对话，文件回到它发出时。提问留下。
+    pub async fn restore(&self, message_id: &str) -> Result<RestoreResult, SessionError> {
+        self.with_idle_lock(async {
+            self.require_live_user_prompt(message_id).await?;
+            let Some(dir) = self.checkpoints_dir() else {
+                return Err(SessionError::invalid(ui_error!(
+                    "kernel.history.noCheckpoint"
+                )));
+            };
+            let Some(snap) =
+                crate::checkpoint::load_snapshot(&crate::checkpoint::slice_path(&dir, message_id))
+            else {
+                return Err(SessionError::invalid(ui_error!(
+                    "kernel.history.noCheckpoint"
+                )));
+            };
+            // 校验都过了才动手。先停子 agent 再拍现场、再写盘：被截掉的轮次
+            // 后面可能还有子 agent 在往这些文件里写，晚一步它就把刚写回的
+            // 内容又盖掉（cancel 只是令牌，尽力而为；after_history_cut 里
+            // 还会再喊一次，幂等）。
+            self.tasks.cancel_all();
+            let baselines = self.file_state.baselines();
+            let paths: Vec<std::path::PathBuf> = baselines.iter().map(|(p, _)| p.clone()).collect();
+            let files = crate::checkpoint::capture(paths).await;
+            let cut = self.cut_history_to(message_id).await?;
+            if let Err(e) = crate::checkpoint::push_redo(
+                &dir,
+                &crate::checkpoint::RedoDump {
+                    files,
+                    baselines,
+                    discarded_live: cut.discarded_live,
+                    discarded_archived: cut.discarded_archived,
+                },
+            ) {
+                tracing::warn!(error = %e, "redo 栈没写上盘，这次回退将无法 Redo");
+            }
+            let mut result = self.apply_snapshot(&snap).await;
+            // head 是脏检查的对照。回退刚把磁盘换成切片，不刷的话下一次
+            // 预览会把这次回退本身当成"用户手改过"报出来。
+            self.write_head_checkpoint().await;
+            if let Some(p) = &self.persist {
+                p.log.append_rewind(&cut.keep_id);
+            }
+            let env_seen = crate::env::last_snapshot_text(&self.history.lock().await);
+            self.after_history_cut(env_seen).await;
+            result.redo_available = crate::checkpoint::redo_available(&dir);
+            Ok(result)
+        })
+        .await
+    }
+
+    /// 把最近一次 Restore 撤回去。
+    pub async fn redo(&self) -> Result<RestoreResult, SessionError> {
+        self.with_idle_lock(async {
+            let Some(dir) = self.checkpoints_dir() else {
+                return Err(SessionError::invalid(ui_error!("kernel.history.noRedo")));
+            };
+            let Some(dump) = crate::checkpoint::pop_redo(&dir) else {
+                return Err(SessionError::invalid(ui_error!("kernel.history.noRedo")));
+            };
+            let mut result = self.apply_snapshot(&dump.files).await;
+            // 回退时被 forget 掉的基线（切片之后新建的文件）补回来，不然
+            // 文件在盘上、改动栏里却没了。`note_baseline` 只补空缺，已有的
+            // 不会被盖；只挑缺的补是为了少写几次基线 sidecar。
+            {
+                let have: std::collections::HashSet<std::path::PathBuf> = self
+                    .file_state
+                    .baselines()
+                    .into_iter()
+                    .map(|(p, _)| p)
+                    .collect();
+                let cache = self.file_state_for_tools();
+                for (path, before) in dump.baselines {
+                    if !have.contains(&path) {
+                        cache.note_baseline(path, before);
+                    }
+                }
+            }
+            self.write_head_checkpoint().await;
+            {
+                let mut live = self.history.lock().await;
+                let mut archived = self.ui_archive.lock().await;
+                archived.extend(dump.discarded_archived);
+                live.extend(dump.discarded_live);
+            }
+            if let Some(p) = &self.persist {
+                p.log.append_unrewind();
+            }
+            result.redo_available = crate::checkpoint::redo_available(&dir);
+            let env_seen = crate::env::last_snapshot_text(&self.history.lock().await);
+            *self.live_stream.lock().await = LiveStream::default();
+            *self.env_seen.lock().await = env_seen;
+            Ok(result)
+        })
+        .await
+    }
+
+    /// 截断内存历史到 `keep_id`（含）。不落盘、不做善后。
+    async fn cut_history_to(&self, keep_id: &str) -> Result<HistoryCut, SessionError> {
+        let mut live = self.history.lock().await;
+        let mut archived = self.ui_archive.lock().await;
+        if let Some(i) = live.iter().position(|m| m.id().as_str() == keep_id) {
+            return Ok(HistoryCut {
+                keep_id: keep_id.to_owned(),
+                discarded_live: live.split_off(i + 1),
+                discarded_archived: Vec::new(),
+            });
+        }
+        if let Some(i) = archived.iter().position(|m| m.id().as_str() == keep_id) {
+            return Ok(HistoryCut {
+                keep_id: keep_id.to_owned(),
+                discarded_live: std::mem::take(&mut *live),
+                discarded_archived: archived.split_off(i + 1),
+            });
+        }
+        drop(live);
+        drop(archived);
+        Err(self.missing_message_error(keep_id).await)
+    }
+
     fn baselines_path(&self) -> Option<std::path::PathBuf> {
         self.persist
             .as_ref()
@@ -1686,10 +1936,18 @@ impl Session {
             }
             *g = Some(cancel.clone());
         }
-        if let Err(e) = self.rewind_to_prompt(assistant_id).await {
-            *self.running.lock().await = None;
-            return Err(e);
-        }
+        // 先截历史再写盘：截断会校验目标、水合、停掉子 agent。校验不过
+        // 就什么都没动；写盘放在它后面，才不会出现"报了错、文件却已经被
+        // 回退、Redo 栈还被清了"的局面。
+        let keep_id = match self.rewind_to_prompt(assistant_id).await {
+            Ok(id) => id,
+            Err(e) => {
+                *self.running.lock().await = None;
+                return Err(e);
+            }
+        };
+        self.apply_checkpoint_if_present(&keep_id).await;
+        self.clear_redo();
         self.spawn_rerun(model, caps, sink, cancel, limits);
         Ok(())
     }
@@ -1722,6 +1980,7 @@ impl Session {
             }
             *g = Some(cancel.clone());
         }
+        // 顺序同 regenerate：先校验并截断，再按这条提问的切片写盘。
         if let Err(e) = self
             .truncate_to_edited_prompt(message_id, text, images)
             .await
@@ -1729,6 +1988,8 @@ impl Session {
             *self.running.lock().await = None;
             return Err(e);
         }
+        self.apply_checkpoint_if_present(message_id).await;
+        self.clear_redo();
         self.spawn_rerun(model, caps, sink, cancel, limits);
         Ok(())
     }
@@ -1794,30 +2055,33 @@ impl Session {
                 ApplyEditError::NoText => ui_error!("kernel.history.noText"),
             })
         })?;
+        // 重发是一次新的发送：气泡上的时刻跟这次走，不能沿用第一次。
+        // 时钟和 run_inner 同源（注入的 Clock trait，不直接碰 SystemTime）。
+        let clock: Arc<dyn riot_protocol::tool::Clock> =
+            Arc::new(riot_providers::watchdog::TokioClock);
+        let sent_at_ms = clock.now_ms();
+        live[at].restamp(sent_at_ms);
         let env_seen = crate::env::last_snapshot_text(&live);
         drop(live);
 
         if let Some(p) = &self.persist {
             // 顺序即重放顺序：先截到这条（含），再把它的文字（和可选的图）换掉。
             p.log.append_rewind(message_id);
-            p.log.append_edit(message_id, &applied.text, applied.images);
+            p.log
+                .append_edit(message_id, &applied.text, applied.images, Some(sent_at_ms));
         }
         self.after_history_cut(env_seen).await;
         Ok(())
     }
 
-    /// 截断内存历史（以及 transcript）到指定助手消息前面那条用户提示。
-    ///
-    /// 归档里的旧回复也能点：截回那条就把压缩后的活历史一并丢掉。
-    pub async fn rewind_to_prompt(&self, assistant_id: &str) -> Result<String, SessionError> {
+    /// 找到助手消息前面那条用户提示的 id（活历史或归档）。
+    async fn prompt_before_assistant(&self, assistant_id: &str) -> Result<String, SessionError> {
         self.hydrate().await;
-        let mut live = self.history.lock().await;
-        let mut archived = self.ui_archive.lock().await;
-
+        let live = self.history.lock().await;
+        let archived = self.ui_archive.lock().await;
         let mut all = Vec::with_capacity(archived.len() + live.len());
         all.extend_from_slice(&archived);
         all.extend_from_slice(&live);
-
         let keep = cut_at_user_prompt(&all, assistant_id).ok_or_else(|| {
             SessionError::invalid(if all.iter().any(|m| m.id().as_str() == assistant_id) {
                 ui_error!("kernel.history.noPromptBefore")
@@ -1825,22 +2089,16 @@ impl Session {
                 ui_error!("kernel.history.notInContext")
             })
         })?;
-        let keep_id = all[keep].id().as_str().to_owned();
-        let archive_len = archived.len();
-        if keep < archive_len {
-            archived.truncate(keep + 1);
-            live.clear();
-        } else {
-            live.truncate(keep - archive_len + 1);
-        }
-        // 环境指纹恢复成"截断后模型还看得见的最后一份快照"（不变量同
-        // hydrate）。往两个方向都不能错：截掉的历史带走了快照而指纹还记着
-        // "已发过"，下一轮差分判定"没变化"，模型对着被截的上下文失明；
-        // 反过来简单归零的话，留下的历史里若还有旧快照、下一轮环境恰好
-        // 变空，"首轮安静跳过"会让旧快照被「没有新快照 = 没变」反向背书。
-        let env_seen = crate::env::last_snapshot_text(&live);
-        drop(live);
-        drop(archived);
+        Ok(all[keep].id().as_str().to_owned())
+    }
+
+    /// 截断内存历史（以及 transcript）到指定助手消息前面那条用户提示。
+    ///
+    /// 归档里的旧回复也能点：截回那条就把压缩后的活历史一并丢掉。
+    pub async fn rewind_to_prompt(&self, assistant_id: &str) -> Result<String, SessionError> {
+        let keep_id = self.prompt_before_assistant(assistant_id).await?;
+        let _ = self.cut_history_to(&keep_id).await?;
+        let env_seen = crate::env::last_snapshot_text(&self.history.lock().await);
 
         if let Some(p) = &self.persist {
             p.log.append_rewind(&keep_id);
@@ -1862,6 +2120,9 @@ impl Session {
         *self.env_band.lock().await = 0;
         self.forget_multitask_announce();
         self.drop_precompact().await;
+        // 截掉的历史后面可能还有子 agent 在写文件。不取消的话，回退后它们
+        // 会继续往已经"没发生过"的工作区里落盘。
+        self.tasks.cancel_all();
     }
 
     /// 上下文编辑：把一条活历史消息的文本段替换成新文本。
@@ -1896,7 +2157,8 @@ impl Session {
             })?;
             drop(live);
             if let Some(p) = &self.persist {
-                p.log.append_edit(message_id, &applied.text, applied.images);
+                p.log
+                    .append_edit(message_id, &applied.text, applied.images, None);
             }
             // 原地编辑不改条数和末条，指纹抓不住 —— 这里必须显式作废。
             self.drop_precompact().await;
@@ -1956,6 +2218,9 @@ impl Session {
             *self.env_band.lock().await = 0;
             self.forget_multitask_announce();
             self.drop_precompact().await;
+            // 历史形状变了，上次回退截下的尾巴接不回原位（可能接在一条助手
+            // 回复后面）。Redo 作废。
+            self.clear_redo();
             self.refresh_digest().await;
             Ok(())
         })
@@ -2064,6 +2329,10 @@ impl Session {
 
         if let Some(p) = &self.persist {
             p.log.append_withdraw(id.as_str());
+        }
+        // 提问不在了，它的切片也别留成孤儿。
+        if let Some(dir) = self.checkpoints_dir() {
+            crate::checkpoint::remove_slice(&dir, id.as_str());
         }
         *self.env_seen.lock().await = env_seen;
         *self.env_band.lock().await = 0;
@@ -2863,6 +3132,8 @@ impl Session {
         };
         if result.is_ok() {
             self.refresh_digest().await;
+            // 活历史整段换成了总结，上次回退截下的尾巴没有原位可接。Redo 作废。
+            self.clear_redo();
         }
         *self.running.lock().await = None;
         // `[约束]` 宣布完成必须在 running 释放**之后**。前端收到 Compacted
@@ -3602,6 +3873,9 @@ impl Session {
                     p.log.append(&user_msg);
                 }
                 history.push(user_msg);
+                // 新提问是一条新的对话分支：之前那次 Restore 的 Redo 作废。
+                self.clear_redo();
+                self.capture_checkpoint(user_id.as_str()).await;
                 submitted = Some(user_id);
             }
         }
@@ -3739,6 +4013,9 @@ impl Session {
                     .await;
             }
         }
+
+        // 含取消定稿：head 是"这一轮结束后磁盘什么样"，脏检查对着它。
+        self.write_head_checkpoint().await;
 
         Ok(terminal)
     }
@@ -6683,9 +6960,13 @@ mod tests {
 
         let hist = s.history().await;
         assert_eq!(hist.len(), 3, "截到 m2（含）：{hist:?}");
-        let Message::User { content, .. } = &hist[2] else {
+        let Message::User { content, meta, .. } = &hist[2] else {
             panic!("末条是提问")
         };
+        assert!(
+            meta.created_at_ms.is_some(),
+            "重发要换上这次的时刻，不能沿用第一次"
+        );
         assert!(
             content
                 .iter()
@@ -6809,9 +7090,7 @@ mod tests {
             }
         }
 
-        s.edit_message("a1", "改对了", None)
-            .await
-            .expect("能编辑");
+        s.edit_message("a1", "改对了", None).await.expect("能编辑");
 
         let hist = s.history().await;
         assert_eq!(hist[1], hist_assistant("a1", "改对了"), "内存里是新文本");
@@ -6884,9 +7163,7 @@ mod tests {
         // hydrate 会去读 transcript：先让它落盘，否则水合读到半截。
         s.flush_log().await;
 
-        s.edit_message("a1", "改对了", None)
-            .await
-            .expect("能编辑");
+        s.edit_message("a1", "改对了", None).await.expect("能编辑");
         let text = std::fs::read_to_string(&digest_path).expect("编辑后摘录存在");
         assert!(
             text.contains("改对了") && !text.contains("答错了"),
@@ -7540,5 +7817,257 @@ mod tests {
             reminders[0].contains("do NOT comment on it"),
             "防分心护栏：{reminders:?}"
         );
+    }
+
+    // 下面这组回退测试在临时目录里摆真实文件，被测的正是"真写盘"。
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)]
+    async fn 回退留下提问并写回文件_redo能还原() {
+        let (s, dir) = compact_session();
+        let a = dir.path().join("a.rs");
+        let n = dir.path().join("n.rs");
+        tokio::fs::write(&a, "at-c\n").await.unwrap();
+        s.file_state.note_baseline(a.clone(), Some("v0\n".into()));
+        if let Some(p) = &s.persist {
+            p.log.append(&hist_user("u1", "C"));
+            p.log.append(&hist_assistant("a1", "答 C"));
+            p.log.append(&hist_user("u2", "D"));
+            p.log.flush().await;
+        }
+        s.capture_checkpoint("u1").await;
+        tokio::fs::write(&a, "at-d\n").await.unwrap();
+        tokio::fs::write(&n, "new\n").await.unwrap();
+        s.file_state.note_baseline(n.clone(), None);
+
+        let result = s.restore("u1").await.expect("restore");
+        assert!(result.failed.is_empty(), "{result:?}");
+        let hist = s.history().await;
+        assert_eq!(hist.last().map(|m| m.id().as_str()), Some("u1"));
+        assert_eq!(hist.len(), 1);
+        assert_eq!(tokio::fs::read_to_string(&a).await.unwrap(), "at-c\n");
+        assert!(!n.exists(), "切片之后新建的文件应删掉");
+        assert!(s.redo_available());
+
+        assert!(
+            s.file_state.baselines().iter().all(|(p, _)| p != &n),
+            "回退后新建文件的基线要摘掉"
+        );
+
+        let redone = s.redo().await.expect("redo");
+        assert!(redone.failed.is_empty(), "{redone:?}");
+        let hist = s.history().await;
+        assert_eq!(hist.len(), 3);
+        assert_eq!(hist.last().map(|m| m.id().as_str()), Some("u2"));
+        assert_eq!(tokio::fs::read_to_string(&a).await.unwrap(), "at-d\n");
+        assert_eq!(tokio::fs::read_to_string(&n).await.unwrap(), "new\n");
+        assert!(!s.redo_available());
+        assert!(
+            s.file_state
+                .baselines()
+                .iter()
+                .any(|(p, b)| p == &n && b.is_none()),
+            "前进要把回退时摘掉的基线补回来，不然改动栏里它没了：{:?}",
+            s.file_state.baselines()
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)]
+    async fn 回退后预览不把回退本身当成手改() {
+        let (s, dir) = compact_session();
+        let a = dir.path().join("a.rs");
+        tokio::fs::write(&a, "at-c\n").await.unwrap();
+        s.file_state.note_baseline(a.clone(), Some("v0\n".into()));
+        if let Some(p) = &s.persist {
+            p.log.append(&hist_user("u1", "C"));
+            p.log.append(&hist_assistant("a1", "答 C"));
+            p.log.append(&hist_user("u2", "D"));
+            p.log.append(&hist_assistant("a2", "答 D"));
+            p.log.flush().await;
+        }
+        s.capture_checkpoint("u1").await;
+        tokio::fs::write(&a, "at-d\n").await.unwrap();
+        s.capture_checkpoint("u2").await;
+        tokio::fs::write(&a, "at-e\n").await.unwrap();
+        s.write_head_checkpoint().await;
+
+        assert!(!s.restore_preview("u2").await.unwrap().dirty);
+        s.restore("u2").await.expect("restore u2");
+        assert!(
+            !s.restore_preview("u1").await.unwrap().dirty,
+            "连续回退：上一次回退写的盘不是用户手改"
+        );
+        s.redo().await.expect("redo");
+        assert!(
+            !s.restore_preview("u2").await.unwrap().dirty,
+            "前进写的盘也不是手改"
+        );
+
+        tokio::fs::write(&a, "hand\n").await.unwrap();
+        assert!(
+            s.restore_preview("u2").await.unwrap().dirty,
+            "真手改仍要报出来"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)]
+    async fn 重发目标不合法时不动磁盘也不清redo() {
+        let (s, dir) = compact_session();
+        let s = Arc::new(s);
+        let a = dir.path().join("a.rs");
+        tokio::fs::write(&a, "c\n").await.unwrap();
+        s.file_state.note_baseline(a.clone(), Some("v0\n".into()));
+        if let Some(p) = &s.persist {
+            p.log.append(&hist_user("u1", "C"));
+            p.log.append(&hist_assistant("a1", "答"));
+            p.log.append(&hist_user("u2", "D"));
+            p.log.append(&hist_assistant("a2", "答 D"));
+            p.log.flush().await;
+        }
+        s.capture_checkpoint("u1").await;
+        // 给助手 id 也摆一份切片：旧顺序（先写盘再校验）会照着它把文件改掉。
+        s.capture_checkpoint("a1").await;
+        tokio::fs::write(&a, "d\n").await.unwrap();
+        s.capture_checkpoint("u2").await;
+        tokio::fs::write(&a, "e\n").await.unwrap();
+        s.restore("u2").await.expect("先回退一次，留一层 redo");
+        assert_eq!(tokio::fs::read_to_string(&a).await.unwrap(), "d\n");
+        assert!(s.redo_available());
+
+        // a1 是助手消息，不是能重发的提问：必须在碰磁盘之前就被拒掉。
+        let err = s
+            .resend_from(
+                "a1",
+                "改",
+                None,
+                test_model(),
+                test_caps(),
+                test_sink(),
+                test_limits(),
+            )
+            .await
+            .expect_err("助手消息不能重发");
+        assert!(matches!(err, SessionError::Invalid(_)), "{err}");
+        assert_eq!(
+            tokio::fs::read_to_string(&a).await.unwrap(),
+            "d\n",
+            "校验失败不能已经把文件回退了"
+        );
+        assert!(s.redo_available(), "校验失败不能顺手把 Redo 栈清了");
+        assert!(s.running.lock().await.is_none(), "running 要放开");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)]
+    async fn 删除消息清掉redo() {
+        let (s, dir) = compact_session();
+        let a = dir.path().join("a.rs");
+        tokio::fs::write(&a, "c\n").await.unwrap();
+        s.file_state.note_baseline(a.clone(), Some("v0\n".into()));
+        if let Some(p) = &s.persist {
+            p.log.append(&hist_user("u1", "C"));
+            p.log.append(&hist_assistant("a1", "答"));
+            p.log.append(&hist_user("u2", "D"));
+            p.log.append(&hist_assistant("a2", "答 D"));
+            p.log.flush().await;
+        }
+        s.capture_checkpoint("u2").await;
+        s.restore("u2").await.expect("restore");
+        assert!(s.redo_available());
+        s.delete_message("u1").await.expect("删掉前一轮");
+        assert!(
+            !s.redo_available(),
+            "历史形状变了，截下的尾巴接不回原位，Redo 必须作废"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)]
+    async fn 连续回退再前进_更早那层还能前进() {
+        let (s, dir) = compact_session();
+        let a = dir.path().join("a.rs");
+        tokio::fs::write(&a, "at-c\n").await.unwrap();
+        s.file_state.note_baseline(a.clone(), Some("v0\n".into()));
+        if let Some(p) = &s.persist {
+            p.log.append(&hist_user("u1", "C"));
+            p.log.append(&hist_assistant("a1", "答 C"));
+            p.log.append(&hist_user("u2", "D"));
+            p.log.append(&hist_assistant("a2", "答 D"));
+            p.log.flush().await;
+        }
+        s.capture_checkpoint("u1").await;
+        tokio::fs::write(&a, "at-d\n").await.unwrap();
+        s.capture_checkpoint("u2").await;
+        tokio::fs::write(&a, "at-e\n").await.unwrap();
+
+        s.restore("u2").await.expect("先回退最后一条");
+        assert_eq!(
+            s.history().await.last().map(|m| m.id().as_str()),
+            Some("u2")
+        );
+        assert!(s.redo_available());
+
+        s.restore("u1").await.expect("再回退倒数第二条");
+        assert_eq!(
+            s.history().await.last().map(|m| m.id().as_str()),
+            Some("u1")
+        );
+        assert_eq!(tokio::fs::read_to_string(&a).await.unwrap(), "at-c\n");
+
+        s.redo().await.expect("前进回到 u2");
+        let hist = s.history().await;
+        assert_eq!(hist.last().map(|m| m.id().as_str()), Some("u2"));
+        assert_eq!(tokio::fs::read_to_string(&a).await.unwrap(), "at-d\n");
+        assert!(
+            s.redo_available(),
+            "第一次回退的前进还在，气泡应画前进不是回退"
+        );
+
+        s.redo().await.expect("再前进回到全部");
+        let hist = s.history().await;
+        assert_eq!(hist.len(), 4);
+        assert_eq!(tokio::fs::read_to_string(&a).await.unwrap(), "at-e\n");
+        assert!(!s.redo_available());
+    }
+
+    #[tokio::test]
+    async fn 没有检查点不能回退() {
+        let (s, _dir) = compact_session();
+        if let Some(p) = &s.persist {
+            p.log.append(&hist_user("u1", "C"));
+            p.log.flush().await;
+        }
+        let err = s.restore("u1").await.expect_err("该失败");
+        assert!(matches!(err, SessionError::Invalid(_)));
+    }
+
+    #[tokio::test]
+    async fn 忙碌时不能回退() {
+        let (s, _dir) = compact_session();
+        *s.running.lock().await = Some(CancellationToken::new());
+        let err = s.restore("u1").await.expect_err("该忙碌");
+        assert!(matches!(err, SessionError::Busy));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)]
+    async fn 重发清掉redo() {
+        let (s, dir) = compact_session();
+        let a = dir.path().join("a.rs");
+        tokio::fs::write(&a, "c\n").await.unwrap();
+        s.file_state.note_baseline(a.clone(), Some("v0\n".into()));
+        if let Some(p) = &s.persist {
+            p.log.append(&hist_user("u1", "C"));
+            p.log.append(&hist_assistant("a1", "答"));
+            p.log.flush().await;
+        }
+        s.capture_checkpoint("u1").await;
+        tokio::fs::write(&a, "d\n").await.unwrap();
+        s.restore("u1").await.expect("restore");
+        assert!(s.redo_available());
+        s.apply_checkpoint_if_present("u1").await;
+        s.clear_redo();
+        assert!(!s.redo_available(), "Resend/Regenerate 之后不能再 Redo");
     }
 }

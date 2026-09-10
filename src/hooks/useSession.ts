@@ -30,9 +30,11 @@ import {
   queueRemove,
   queueTake,
   isHostError,
+  redoCheckpoint,
   regenerateTurn,
   renderUiText,
   resendTurn,
+  restoreCheckpoint,
   splitUiError,
   respondPermission,
   sendTurn,
@@ -208,6 +210,12 @@ export interface SessionState {
    * 每次推一份全量视图，这里按 id 覆盖；切回会话时用快照整批替换。
    */
   tasks: BackgroundTaskView[];
+  /** 有文件切片的用户提问 id。 */
+  checkpointIds: string[];
+  /** 最近一次 Restore 还能 Redo。 */
+  redoAvailable: boolean;
+  /** 回退/重做改了磁盘：外层拿它刷新改动栏。 */
+  filesRev: number;
 }
 
 const MAX_TOOL_LINES = 200;
@@ -300,6 +308,9 @@ const EMPTY_STATE: SessionState = {
   queued: [],
   withdrawn: null,
   tasks: [],
+  checkpointIds: [],
+  redoAvailable: false,
+  filesRev: 0,
 };
 
 /**
@@ -686,6 +697,9 @@ export function useSession(
                     ...stampOf(event.meta),
                   },
                 ],
+                // 内核在提问落盘时拍切片。快照里的名单要等下次
+                // getHistory，这里先记上，不然最新一条气泡没有回退。
+                checkpointIds: rememberCheckpoint(s.checkpointIds, event.id),
               }));
               break;
             }
@@ -1125,6 +1139,7 @@ export function useSession(
         setState((s) => ({
           ...s,
           busy: true,
+          redoAvailable: false,
           items: [...dropErrors(s.items), optimistic(s.items)],
         }));
       }
@@ -1277,6 +1292,8 @@ export function useSession(
         busy: true,
         asks: [],
         queued: [],
+        redoAvailable: false,
+        filesRev: s.filesRev + 1,
       }));
       try {
         await regenerateTurn(sessionId, messageId);
@@ -1380,13 +1397,15 @@ export function useSession(
       mutateQueued(() => []);
       setState((s) => ({
         ...s,
-        items: trimThroughEdited(s.items, item.id, text, images),
+        items: trimThroughEdited(s.items, item.id, text, images, Date.now()),
         streaming: "",
         thinking: "",
         streamingPlan: null,
         busy: true,
         asks: [],
         queued: [],
+        redoAvailable: false,
+        filesRev: s.filesRev + 1,
       }));
       try {
         await resendTurn(sessionId, messageId, text, images);
@@ -1416,6 +1435,88 @@ export function useSession(
     },
     [sessionId, mutateQueued, setState],
   );
+
+  /**
+   * 回退到这条用户提问发出时：丢掉它的回复和之后的对话，文件回到当时。
+   * 提问留下。失败拉快照回滚。
+   */
+  const restoreEntry = useCallback(
+    async (item: TextItem): Promise<boolean> => {
+      if (busyRef.current) return false;
+      let messageId: string;
+      try {
+        const hist = await getHistory(sessionId);
+        if (hist.busy) return false;
+        const found = locateMessage(hist.messages, item);
+        if (!found) {
+          throw new Error(t("transcript.session.messageGone"));
+        }
+        messageId = found;
+      } catch (e) {
+        setState((s) => ({ ...s, items: [...s.items, errorItem(e)] }));
+        return false;
+      }
+      setState((s) => ({
+        ...s,
+        items: trimThroughEdited(s.items, item.id, item.kind === "user" ? item.text : ""),
+        streaming: "",
+        thinking: "",
+        streamingPlan: null,
+        asks: [],
+        queued: [],
+        redoAvailable: true,
+        filesRev: s.filesRev + 1,
+      }));
+      try {
+        const result = await restoreCheckpoint(sessionId, messageId);
+        setState((s) => ({
+          ...s,
+          redoAvailable: result.redoAvailable,
+          filesRev: s.filesRev + 1,
+          items: result.failed.length
+            ? [...s.items, restoreFailNotice(result.failed)]
+            : s.items,
+        }));
+        return true;
+      } catch (e) {
+        try {
+          const hist = await getHistory(sessionId);
+          setState((s) => {
+            const restored = applyHistorySnap(s, hist);
+            return { ...restored, items: [...restored.items, errorItem(e)] };
+          });
+        } catch {
+          setState((s) => ({ ...s, items: [...s.items, errorItem(e)] }));
+        }
+        return false;
+      }
+    },
+    [sessionId, setState],
+  );
+
+  /** 把最近一次 Restore 撤回去。对话只能靠快照接回。 */
+  const redoRestore = useCallback(async (): Promise<boolean> => {
+    if (busyRef.current) return false;
+    try {
+      const result = await redoCheckpoint(sessionId);
+      const hist = await getHistory(sessionId);
+      setState((s) => {
+        const restored = applyHistorySnap(s, hist);
+        return {
+          ...restored,
+          redoAvailable: result.redoAvailable,
+          filesRev: s.filesRev + 1,
+          items: result.failed.length
+            ? [...restored.items, restoreFailNotice(result.failed)]
+            : restored.items,
+        };
+      });
+      return true;
+    } catch (e) {
+      setState((s) => ({ ...s, items: [...s.items, errorItem(e)] }));
+      return false;
+    }
+  }, [sessionId, setState]);
 
   /** 上下文删除：按轮成对删（这条气泡所属的提问连同全部回应）。 */
   const deleteEntry = useCallback(
@@ -1497,6 +1598,8 @@ export function useSession(
     editEntry,
     resendEntry,
     deleteEntry,
+    restoreEntry,
+    redoRestore,
     queueDelete,
     queueEdit,
     queueSendNow,
@@ -1530,6 +1633,8 @@ function rebuildFromSnap(s: SessionState, hist: HistorySnap): SessionState {
     thinking: "",
     streamingPlan: null,
     asks: [],
+    checkpointIds: hist.checkpointIds ?? s.checkpointIds,
+    redoAvailable: hist.redoAvailable ?? s.redoAvailable,
   };
 }
 
@@ -1580,6 +1685,8 @@ function applyHistorySnap(s: SessionState, hist: HistorySnap): SessionState {
   // 后台任务以快照为准：事件只在变化时推，切走期间的变化只有快照里有。
   // 老宿主没这个字段时保留本地那份。
   const tasks = hist.tasks ?? s.tasks;
+  const checkpointIds = hist.checkpointIds ?? s.checkpointIds;
+  const redoAvailable = hist.redoAvailable ?? s.redoAvailable;
 
   if (messages.length === 0 && archived.length === 0) {
     return {
@@ -1587,6 +1694,8 @@ function applyHistorySnap(s: SessionState, hist: HistorySnap): SessionState {
       busy,
       compacting,
       tasks,
+      checkpointIds,
+      redoAvailable,
       ...(!busy
         ? {
             streaming: "",
@@ -1631,6 +1740,8 @@ function applyHistorySnap(s: SessionState, hist: HistorySnap): SessionState {
       items,
       tokens,
       tasks,
+      checkpointIds,
+      redoAvailable,
       // 半截流以快照为准：内核收齐了每一条增量，本地这份在切走/通道
       // 断开期间是缺头的。快照为空（老内核或刚好没在流）才退回本地。
       streaming: mergeLive(
@@ -1651,6 +1762,8 @@ function applyHistorySnap(s: SessionState, hist: HistorySnap): SessionState {
     items,
     tokens,
     tasks,
+    checkpointIds,
+    redoAvailable,
     streaming: "",
     thinking: "",
     streamingPlan: null,
@@ -1764,25 +1877,41 @@ function assistantMessageId(itemId: string): string {
   return itemId.replace(/-t\d*$/, "");
 }
 
+/** 回退 / 前进有文件没写回去：在对话里留一条提示，点过的人要知道哪几个没成。 */
+function restoreFailNotice(
+  failed: { path: string; reason: string }[],
+): Item {
+  return {
+    kind: "notice",
+    id: `restore-fail-${Date.now()}`,
+    text: t("transcript.restore.partialFail", {
+      files: failed.map((f) => f.path).join(t("transcript.listSep")),
+    }),
+  };
+}
+
 /** 截到这条用户气泡（含）并换掉它的文字（以及可选的图），之后的一切丢掉。找不到就原样返回。 */
 function trimThroughEdited(
   items: Item[],
   userItemId: string,
   text: string,
   images?: ImageInput[],
+  sentAt?: number,
 ): Item[] {
-  const at = items.findIndex((it) => it.id === userItemId);
-  if (at < 0) return items;
-  const kept = items.slice(0, at + 1);
-  const target = kept[at];
+  const idx = items.findIndex((it) => it.id === userItemId);
+  if (idx < 0) return items;
+  const kept = items.slice(0, idx + 1);
+  const target = kept[idx];
   if (target?.kind === "user") {
+    const at = sentAt ?? target.at;
     if (images === undefined) {
-      kept[at] = { ...target, text };
+      kept[idx] = { ...target, text, ...(at !== undefined ? { at } : {}) };
     } else {
       const { images: _was, ...rest } = target;
-      kept[at] = {
+      kept[idx] = {
         ...rest,
         text,
+        ...(at !== undefined ? { at } : {}),
         ...(images.length
           ? { images: images.map((img) => `data:${img.mediaType};base64,${img.data}`) }
           : {}),
@@ -2057,6 +2186,11 @@ function stripNoticePreamble(text: string): string {
   return m ? text.slice(m.index + m[0].length).trim() : text;
 }
 
+/** 提问落盘时内核会拍切片。事件到了先记上，不等下次拉历史。 */
+function rememberCheckpoint(ids: string[], messageId: string): string[] {
+  return ids.includes(messageId) ? ids : [...ids, messageId];
+}
+
 /** 按 id 覆盖；没有就追加到末尾。 */
 function upsertTask(tasks: BackgroundTaskView[], task: BackgroundTaskView): BackgroundTaskView[] {
   const at = tasks.findIndex((t) => t.id === task.id);
@@ -2080,6 +2214,7 @@ function applyMessage(s: SessionState, event: Extract<AgentEvent, { type: "messa
     if (msg.meta?.synthetic && msg.content.some((c) => c.type === "text")) {
       return { ...s, items };
     }
+    let sawPrompt = false;
     for (const c of msg.content) {
       if (c.type === "tool_result") {
         // 找到对应的工具卡片填结果。倒着找 —— 同一个工具在一次会话里
@@ -2131,9 +2266,12 @@ function applyMessage(s: SessionState, event: Extract<AgentEvent, { type: "messa
         } else {
           items.push(bubble);
         }
+        sawPrompt = true;
       }
     }
-    return { ...s, items };
+    return sawPrompt
+      ? { ...s, items, checkpointIds: rememberCheckpoint(s.checkpointIds, msg.id) }
+      : { ...s, items };
   }
 
   if (msg.role === "assistant") {

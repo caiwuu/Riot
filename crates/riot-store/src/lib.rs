@@ -80,6 +80,12 @@ pub enum Record {
     /// 旧加载器不认识这个类型会当坏行跳过 —— 那会把本该丢掉的回复
     /// 读回来，所以新版本必须处理它，不能靠"坏行跳过"凑合。
     Rewind { keep_until: String },
+    /// 撤消最近一次 [`Self::Rewind`]：把被截掉的尾巴接回活历史。
+    ///
+    /// 尾巴仍在文件里（Rewind 只改加载，不删行）。加载时用栈把上次
+    /// Rewind 丢掉的消息推回去。旧加载器不认识这行会当坏行跳过 ——
+    /// 那会让 Redo 之后重启仍停在回退点，所以新版本必须处理它。
+    Unrewind,
     /// 撤回：丢掉 `id` 这条消息**及其之后**的一切。
     ///
     /// 用户在模型开口之前按了停止，那句话回到了输入框，不该留在记录里。
@@ -92,6 +98,8 @@ pub enum Record {
     /// 加载时经 `Message::edit_text` 重放 —— 和内核编辑当刻的内存操作是
     /// 同一个函数，重启后的历史必须和编辑时看到的一字不差。
     /// `images` 有值时再走 `edit_user_images`（`None` = 老记录，图片不动）。
+    /// `created_at_ms` 有值 = 重发，换上这次发送的时刻；`None` = 只改字，
+    /// 时间不动（保存原文 / 老记录）。
     /// 旧加载器不认识这行会当坏行跳过，代价是编辑丢失（原文回来），
     /// 不会读出损坏的历史。
     Edit {
@@ -99,6 +107,8 @@ pub enum Record {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         images: Option<Vec<EditedImage>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_at_ms: Option<u64>,
     },
     /// 上下文删除：整条移除 `id` 这条消息。
     ///
@@ -268,6 +278,7 @@ impl Transcripts {
         let mut meta = None;
         let mut live = Vec::new();
         let mut archived = Vec::new();
+        let mut rewind_stack = Vec::new();
         let mut skipped = 0usize;
         for (i, line) in bytes.split(|&b| b == b'\n').enumerate() {
             if line.is_empty() {
@@ -286,13 +297,28 @@ impl Transcripts {
                     apply_boundary(&mut live, &mut archived, keep_from.as_deref());
                 }
                 Ok(Record::Rewind { keep_until }) => {
-                    apply_rewind(&mut live, &mut archived, &keep_until);
+                    apply_rewind(&mut live, &mut archived, &keep_until, &mut rewind_stack);
+                }
+                Ok(Record::Unrewind) => {
+                    apply_unrewind(&mut live, &mut archived, &mut rewind_stack);
                 }
                 Ok(Record::Withdraw { id }) => {
                     apply_withdraw(&mut live, &mut archived, &id);
                 }
-                Ok(Record::Edit { id, text, images }) => {
-                    apply_edit(&mut live, &mut archived, &id, &text, images.as_deref());
+                Ok(Record::Edit {
+                    id,
+                    text,
+                    images,
+                    created_at_ms,
+                }) => {
+                    apply_edit(
+                        &mut live,
+                        &mut archived,
+                        &id,
+                        &text,
+                        images.as_deref(),
+                        created_at_ms,
+                    );
                 }
                 Ok(Record::Delete { id }) => {
                     apply_delete(&mut live, &mut archived, &id);
@@ -420,14 +446,48 @@ fn apply_boundary(live: &mut Vec<Message>, archived: &mut Vec<Message>, keep_fro
     }
 }
 
-fn apply_rewind(live: &mut Vec<Message>, archived: &mut Vec<Message>, keep_until: &str) {
+/// 一次 Rewind 从活历史 / 归档里摘掉的尾巴。Unrewind 按栈把它接回去。
+struct RewindCut {
+    live_tail: Vec<Message>,
+    archived_tail: Vec<Message>,
+    /// 锚点在归档里：当时把整份活历史一起摘掉了。
+    cleared_live: bool,
+}
+
+fn apply_rewind(
+    live: &mut Vec<Message>,
+    archived: &mut Vec<Message>,
+    keep_until: &str,
+    stack: &mut Vec<RewindCut>,
+) {
     if let Some(i) = live.iter().position(|m| m.id().as_str() == keep_until) {
-        live.truncate(i + 1);
+        stack.push(RewindCut {
+            live_tail: live.split_off(i + 1),
+            archived_tail: Vec::new(),
+            cleared_live: false,
+        });
         return;
     }
     if let Some(i) = archived.iter().position(|m| m.id().as_str() == keep_until) {
-        archived.truncate(i + 1);
-        live.clear();
+        stack.push(RewindCut {
+            live_tail: std::mem::take(live),
+            archived_tail: archived.split_off(i + 1),
+            cleared_live: true,
+        });
+    }
+}
+
+fn apply_unrewind(
+    live: &mut Vec<Message>,
+    archived: &mut Vec<Message>,
+    stack: &mut Vec<RewindCut>,
+) {
+    let Some(cut) = stack.pop() else { return };
+    if cut.cleared_live {
+        archived.extend(cut.archived_tail);
+        *live = cut.live_tail;
+    } else {
+        live.extend(cut.live_tail);
     }
 }
 
@@ -452,12 +512,22 @@ fn apply_edit(
     id: &str,
     text: &str,
     images: Option<&[EditedImage]>,
+    created_at_ms: Option<u64>,
 ) {
     for list in [live, archived] {
         if let Some(m) = list.iter_mut().find(|m| m.id().as_str() == id) {
             m.edit_text(text);
             if let Some(images) = images {
-                m.edit_user_images(images.iter().cloned().map(EditedImage::into_attachment).collect());
+                m.edit_user_images(
+                    images
+                        .iter()
+                        .cloned()
+                        .map(EditedImage::into_attachment)
+                        .collect(),
+                );
+            }
+            if let Some(at) = created_at_ms {
+                m.restamp(at);
             }
             return;
         }
@@ -516,15 +586,18 @@ enum Cmd {
     Rewind {
         keep_until: String,
     },
+    /// 撤消最近一次截断。
+    Unrewind,
     /// 撤回：连这条消息一起丢掉。
     Withdraw {
         id: String,
     },
-    /// 上下文编辑：替换这条消息的文本段，可选同时换图。
+    /// 上下文编辑：替换这条消息的文本段，可选同时换图、换时刻。
     Edit {
         id: String,
         text: String,
         images: Option<Vec<EditedImage>>,
+        created_at_ms: Option<u64>,
     },
     /// 上下文删除：抹掉这条消息的可见内容。
     Delete {
@@ -613,6 +686,13 @@ impl SessionLog {
         }
     }
 
+    /// 记下一次 Redo：撤消最近的截断。必须在内存历史已经接回之后调用。
+    pub fn append_unrewind(&self) {
+        if self.sender().send(Cmd::Unrewind).is_err() {
+            tracing::debug!(path = %self.path.display(), "写入任务已关闭，丢弃撤消截断记录");
+        }
+    }
+
     /// 记下一次撤回：这条消息（及其之后）不再属于这个会话。
     /// 必须在内存历史已经去掉它之后调用。
     pub fn append_withdraw(&self, id: &str) {
@@ -627,13 +707,21 @@ impl SessionLog {
 
     /// 记下一次上下文编辑。必须在内存历史已经改完之后调用。
     /// `images` = `None` 重放时只换字；`Some` 连图一起换。
-    pub fn append_edit(&self, id: &str, text: &str, images: Option<Vec<EditedImage>>) {
+    /// `created_at_ms` = `Some` 重发放上这次发送的时刻；`None` 时间不动。
+    pub fn append_edit(
+        &self,
+        id: &str,
+        text: &str,
+        images: Option<Vec<EditedImage>>,
+        created_at_ms: Option<u64>,
+    ) {
         if self
             .sender()
             .send(Cmd::Edit {
                 id: id.to_owned(),
                 text: text.to_owned(),
                 images,
+                created_at_ms,
             })
             .is_err()
         {
@@ -700,8 +788,19 @@ async fn write_loop(path: PathBuf, meta: TranscriptMeta, mut rx: mpsc::Unbounded
                     keep_from,
                 }),
                 Cmd::Rewind { keep_until } => Some(Record::Rewind { keep_until }),
+                Cmd::Unrewind => Some(Record::Unrewind),
                 Cmd::Withdraw { id } => Some(Record::Withdraw { id }),
-                Cmd::Edit { id, text, images } => Some(Record::Edit { id, text, images }),
+                Cmd::Edit {
+                    id,
+                    text,
+                    images,
+                    created_at_ms,
+                } => Some(Record::Edit {
+                    id,
+                    text,
+                    images,
+                    created_at_ms,
+                }),
                 Cmd::Delete { id } => Some(Record::Delete { id }),
                 Cmd::Flush(ack) => {
                     acks.push(ack);
@@ -1192,6 +1291,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn 撤消截断把丢掉的尾巴接回() {
+        let d = dir();
+        let store = Transcripts::new(d.path());
+        let log = store.open(meta("s1"));
+        log.append(&user("m1", "第一句"));
+        log.append(&assistant("a1", "旧答"));
+        log.append(&user("m2", "第二句"));
+        log.append(&assistant("a2", "要丢掉再接回的"));
+        log.append_rewind("m2");
+        log.append_unrewind();
+        log.flush().await;
+
+        let parts = store.load_parts(&SessionId::from_raw("s1")).await;
+        assert_eq!(
+            parts.live,
+            vec![
+                user("m1", "第一句"),
+                assistant("a1", "旧答"),
+                user("m2", "第二句"),
+                assistant("a2", "要丢掉再接回的"),
+            ],
+            "Unrewind 应把 Rewind 丢掉的助手回复接回来"
+        );
+        assert!(parts.archived.is_empty());
+    }
+
+    #[tokio::test]
+    async fn 撤消之后再截断只留下最后一次() {
+        let d = dir();
+        let store = Transcripts::new(d.path());
+        let log = store.open(meta("s1"));
+        log.append(&user("m1", "一"));
+        log.append(&assistant("a1", "答一"));
+        log.append(&user("m2", "二"));
+        log.append(&assistant("a2", "答二"));
+        log.append_rewind("m1");
+        log.append_unrewind();
+        log.append_rewind("m1");
+        log.flush().await;
+
+        let parts = store.load_parts(&SessionId::from_raw("s1")).await;
+        assert_eq!(
+            parts.live,
+            vec![user("m1", "一")],
+            "最后一次 Rewind 之后没有 Unrewind，尾巴不该回来"
+        );
+    }
+
+    #[tokio::test]
     async fn 重新生成可以截回压缩边界之前() {
         let d = dir();
         let store = Transcripts::new(d.path());
@@ -1323,7 +1471,7 @@ mod tests {
         let log = store.open(meta("s1"));
         log.append(&user("m1", "第一句"));
         log.append(&assistant("a1", "答错了的回复"));
-        log.append_edit("a1", "改对之后的回复", None);
+        log.append_edit("a1", "改对之后的回复", None, None);
         log.flush().await;
 
         let (_, msgs) = store.load(&SessionId::from_raw("s1")).await;
@@ -1357,6 +1505,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn 重发编辑记录重放后换上新时刻() {
+        let d = dir();
+        let store = Transcripts::new(d.path());
+        let log = store.open(meta("s1"));
+        let first = Message::User {
+            id: riot_protocol::id::MessageId::from_raw("m1"),
+            content: vec![UserContent::Text {
+                text: "旧话".into(),
+            }],
+            meta: MessageMeta {
+                created_at_ms: Some(1_000),
+                ..Default::default()
+            },
+        };
+        log.append(&first);
+        log.append_edit("m1", "新话", None, Some(9_999));
+        log.flush().await;
+
+        let (_, msgs) = store.load(&SessionId::from_raw("s1")).await;
+        let Message::User { meta, .. } = &msgs[0] else {
+            panic!("用户消息");
+        };
+        assert_eq!(meta.created_at_ms, Some(9_999));
+    }
+
+    #[tokio::test]
     async fn 编辑记录带图重放后替换附图() {
         let d = dir();
         let store = Transcripts::new(d.path());
@@ -1383,6 +1557,7 @@ mod tests {
                 data: "new".into(),
                 text: None,
             }]),
+            None,
         );
         log.flush().await;
 

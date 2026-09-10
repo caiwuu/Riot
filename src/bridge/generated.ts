@@ -767,6 +767,26 @@ export type RpcRequest =
       };
     }
   | {
+      method: "history.restore_preview";
+      params: {
+        message_id: string;
+        session_id: string;
+      };
+    }
+  | {
+      method: "history.restore";
+      params: {
+        message_id: string;
+        session_id: string;
+      };
+    }
+  | {
+      method: "history.redo";
+      params: {
+        session_id: string;
+      };
+    }
+  | {
       method: "session.compact";
       params: {
         model: ModelEndpoint;
@@ -941,6 +961,10 @@ export type RpcResponse =
          * 有没有轮子在跑。决定界面显示停止键还是发送键。
          */
         busy: boolean;
+        /**
+         * 有文件切片的用户提问 id。界面只在这些气泡上画「回退到这里」。
+         */
+        checkpoint_ids?: string[];
         compacting: boolean;
         /**
          * 正在流式生成的正文。流式增量不进历史 —— 不带这段的话，
@@ -958,12 +982,28 @@ export type RpcResponse =
          */
         pending_asks?: PendingAsk[];
         /**
+         * 最近一次 Restore 还能 Redo。
+         */
+        redo_available?: boolean;
+        /**
          * 这个会话的后台子 agent（跑着的和刚结束的）。事件只在变化时推，
          * 切走再切回的面板靠这份快照重建。
          */
         tasks?: BackgroundTaskView[];
       };
       result: "session_resumed";
+    }
+  | {
+      data: RestorePreview;
+      result: "restore_preview";
+    }
+  | {
+      data: RestoreResult;
+      result: "history_restored";
+    }
+  | {
+      data: RestoreResult;
+      result: "history_redone";
     }
   | {
       data: {
@@ -1572,6 +1612,45 @@ export interface McpServerSpec {
 export interface PendingAsk {
   detail: PermissionAsk;
   request_id: string;
+}
+/**
+ * `history.restore_preview` 的应答：回退前给确认框看的数字。
+ */
+export interface RestorePreview {
+  /**
+   * 这条提问之后才第一次动到的文件数（会回到会话 v0 或删除）。
+   */
+  afterSlice: number;
+  /**
+   * 上次轮次结束后磁盘又被改过（相对 `head.json`）。
+   */
+  dirty: boolean;
+  /**
+   * 会写回或删除的文件数（不含 skipped，磁盘已一致的也不计）。
+   */
+  files: number;
+  messageId: string;
+  skipped: RestoreSkip[];
+}
+/**
+ * 回退预览 / 结果里跳过或失败的一个文件。
+ */
+export interface RestoreSkip {
+  path: string;
+  /**
+   * 稳定键：`binary` / `too_large` / `unreadable`，或写盘失败的短描述。
+   */
+  reason: string;
+}
+/**
+ * `history.restore` / `history.redo` 的应答。
+ */
+export interface RestoreResult {
+  deleted: number;
+  failed: RestoreSkip[];
+  redoAvailable: boolean;
+  restored: number;
+  skipped: RestoreSkip[];
 }
 export interface SessionSummary {
   cwd: string;

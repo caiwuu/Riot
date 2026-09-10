@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-restore-checkpoint"
+description = "Enables the restore_checkpoint command without any pre-configured scope."
+commands.allow = ["restore_checkpoint"]
+
+[[permission]]
+identifier = "deny-restore-checkpoint"
+description = "Denies the restore_checkpoint command without any pre-configured scope."
+commands.deny = ["restore_checkpoint"]

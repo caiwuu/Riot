@@ -28,6 +28,7 @@ use std::io::Write as _;
 // 内核进程不碰配置文件,每轮所需的配置值随 RPC 传入。
 pub mod bridge;
 pub mod changes;
+pub mod checkpoint;
 pub mod classifier;
 pub mod config;
 pub mod content;
@@ -279,6 +280,8 @@ async fn dispatch(request: RpcRequest, manager: &manager::SessionManager) -> Rpc
                 live_text: snap.live_text,
                 live_thinking: snap.live_thinking,
                 tasks: snap.tasks,
+                checkpoint_ids: snap.checkpoint_ids,
+                redo_available: snap.redo_available,
             }
         }
         Req::SessionDelete { session_id } => {
@@ -395,6 +398,27 @@ async fn dispatch(request: RpcRequest, manager: &manager::SessionManager) -> Rpc
             .await
         {
             Ok(()) => RpcResponse::Ok,
+            Err(error) => RpcResponse::Error { error },
+        },
+        Req::HistoryRestorePreview {
+            session_id,
+            message_id,
+        } => match manager
+            .restore_preview(session_id.as_str(), &message_id)
+            .await
+        {
+            Ok(preview) => RpcResponse::RestorePreview(preview),
+            Err(error) => RpcResponse::Error { error },
+        },
+        Req::HistoryRestore {
+            session_id,
+            message_id,
+        } => match manager.restore(session_id.as_str(), &message_id).await {
+            Ok(result) => RpcResponse::HistoryRestored(result),
+            Err(error) => RpcResponse::Error { error },
+        },
+        Req::HistoryRedo { session_id } => match manager.redo(session_id.as_str()).await {
+            Ok(result) => RpcResponse::HistoryRedone(result),
             Err(error) => RpcResponse::Error { error },
         },
         Req::SessionChanges { session_id } => RpcResponse::Changes {

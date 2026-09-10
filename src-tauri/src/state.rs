@@ -68,6 +68,10 @@ pub struct HistoryOut {
     /// 不在历史里,所以只能从这儿拿。None = 上一轮没失败,或已经开了新的一轮。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<riot_protocol::event::AgentError>,
+    /// 有文件切片的用户提问 id。界面只在这些气泡上画回退。
+    pub checkpoint_ids: Vec<String>,
+    /// 最近一次 Restore 还能 Redo。
+    pub redo_available: bool,
 }
 
 /// 一个子 agent 的会话（右侧抽屉的只读视图）。
@@ -1032,6 +1036,8 @@ impl AppState {
             live_text,
             live_thinking,
             tasks,
+            checkpoint_ids,
+            redo_available,
         } = resp
         else {
             return Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
@@ -1082,6 +1088,8 @@ impl AppState {
             live_thinking,
             tasks,
             last_error,
+            checkpoint_ids,
+            redo_available,
         })
     }
 
@@ -1127,6 +1135,10 @@ impl AppState {
                 }
             }
             crate::changes::remove_baselines(&crate::changes::baselines_path(
+                &self.0.sessions_dir,
+                session_id,
+            ));
+            crate::checkpoint::remove_all(&crate::checkpoint::dir_of(
                 &self.0.sessions_dir,
                 session_id,
             ));
@@ -1706,6 +1718,67 @@ impl AppState {
         })
         .await?;
         Ok(())
+    }
+
+    pub async fn restore_preview(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> HostResult<riot_protocol::RestorePreview> {
+        self.ensure_hydrated(session_id).await?;
+        match self
+            .kernel_call(RpcRequest::HistoryRestorePreview {
+                session_id: sid(session_id),
+                message_id: message_id.to_owned(),
+            })
+            .await?
+        {
+            RpcResponse::RestorePreview(p) => Ok(p),
+            _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
+                riot_protocol::ui_error!(
+                    "host.kernel.unexpectedReply",
+                    method = "history.restore_preview"
+                ),
+            ))),
+        }
+    }
+
+    pub async fn restore_checkpoint(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> HostResult<riot_protocol::RestoreResult> {
+        self.ensure_hydrated(session_id).await?;
+        match self
+            .kernel_call(RpcRequest::HistoryRestore {
+                session_id: sid(session_id),
+                message_id: message_id.to_owned(),
+            })
+            .await?
+        {
+            RpcResponse::HistoryRestored(r) => Ok(r),
+            _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
+                riot_protocol::ui_error!("host.kernel.unexpectedReply", method = "history.restore"),
+            ))),
+        }
+    }
+
+    pub async fn redo_checkpoint(
+        &self,
+        session_id: &str,
+    ) -> HostResult<riot_protocol::RestoreResult> {
+        self.ensure_hydrated(session_id).await?;
+        match self
+            .kernel_call(RpcRequest::HistoryRedo {
+                session_id: sid(session_id),
+            })
+            .await?
+        {
+            RpcResponse::HistoryRedone(r) => Ok(r),
+            _ => Err(HostError::Kernel(crate::kernel::KernelError::Rpc(
+                riot_protocol::ui_error!("host.kernel.unexpectedReply", method = "history.redo"),
+            ))),
+        }
     }
 
     /// 手动压缩会话历史（`/compact`）。完成时发 Compacted 事件。
@@ -3403,6 +3476,22 @@ mod tests {
             "会话删了子 agent 日志还留着：{}",
             dir.display()
         );
+    }
+
+    #[tokio::test]
+    async fn 删除会话连检查点目录一起删() {
+        let state = state().await;
+        let info = state
+            .create_session(&temp_ws("ckpt-del"))
+            .await
+            .expect("会话");
+        let dir = crate::checkpoint::dir_of(&state.0.sessions_dir, &info.id);
+        std::fs::create_dir_all(&dir).expect("建检查点目录");
+        std::fs::write(dir.join("u1.json"), "{}").expect("写切片");
+
+        state.delete_session(&info.id).await;
+
+        assert!(!dir.exists(), "会话删了检查点目录还留着：{}", dir.display());
     }
 
     /// 启动时收孤儿子 agent 日志目录，不碰活着的会话。

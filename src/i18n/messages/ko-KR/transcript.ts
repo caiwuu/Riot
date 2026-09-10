@@ -36,6 +36,28 @@ export default {
   "transcript.msg.deleteBusy": "생성 중입니다. 끝나면 삭제할 수 있습니다",
   "transcript.msg.deleteTurnBody":
     "이 메시지가 속한 질문과 그로 인해 생긴 모든 응답(답변, 도구 호출)이 컨텍스트에서 함께 삭제되며, 이후 대화는 이 턴의 영향을 받지 않습니다.",
+  "transcript.restore.title": "여기로 되돌리기",
+  "transcript.restore.busy": "생성 중입니다. 끝나면 되돌릴 수 있습니다",
+  "transcript.restore.confirm": "되돌리기",
+  "transcript.restore.body":
+    "이후 대화는 버려집니다. 파일 {files}개가 바뀝니다. 이 질문은 남아 고친 뒤 다시 보낼 수 있습니다.",
+  "transcript.restore.dirty": "마지막 턴이 끝난 뒤 디스크가 손으로 바뀌었습니다. 그 수정도 덮어씁니다.",
+  "transcript.restore.afterSlice":
+    "이 질문 이후에 처음 건드린 파일이 {count}개 있으며, 세션 시작 상태로 되돌리거나 삭제합니다.",
+  "transcript.restore.skipped": "건너뜀: {files}.",
+  "transcript.restore.bashNote": "터미널로 바꾼 파일은 이번 되돌리기에 포함되지 않습니다.",
+  "transcript.restore.previewFail": "이번 되돌리기를 미리 볼 수 없습니다.",
+  "transcript.restore.redo": "되돌리기 전으로",
+  "transcript.restore.partialFail": "일부 파일을 다시 쓰지 못했습니다: {files}",
+  "transcript.restore.skip.binary": "바이너리",
+  "transcript.restore.skip.tooLarge": "너무 큼",
+  "transcript.restore.skip.unreadable": "읽을 수 없음",
+  "transcript.resend.title": "보내고 파일 되돌리기",
+  "transcript.resend.body":
+    "이후 대화는 버려집니다. 파일 {files}개를 되돌린 뒤 이 질문부터 다시 실행합니다.",
+  "transcript.regenerate.title": "다시 생성하고 파일 되돌리기",
+  "transcript.regenerate.body":
+    "이 답변과 이후 대화는 버려집니다. 파일 {files}개를 질문을 보낸 시점으로 되돌린 뒤 다시 생성합니다.",
 
   // 메시지 인라인 편집기
   "transcript.editor.hintResend": "보내기: 여기서부터 다시 시작하며 이후 대화는 버려집니다 · 저장: 컨텍스트의 원문만 바꿉니다",

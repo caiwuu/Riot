@@ -73,6 +73,17 @@ impl Message {
         }
     }
 
+    /// 换上新的产生时刻。编辑后重发是一次新的发送，界面要显示这次的时间，
+    /// 不能沿用第一次发出去的戳（[`Self::stamp`] 只补空缺，盖不掉旧值）。
+    pub fn restamp(&mut self, now_ms: u64) {
+        match self {
+            Message::User { meta, .. } | Message::Assistant { meta, .. } => {
+                meta.created_at_ms = Some(now_ms);
+            }
+            Message::System { .. } => {}
+        }
+    }
+
     /// 抹掉 usage。
     ///
     /// assistant 上的 usage 描述的是**产生它那次请求**的整个上下文有多大，
@@ -723,5 +734,24 @@ mod tests {
             ui: None,
         };
         sys.stamp(1_000);
+    }
+
+    #[test]
+    fn restamp_overwrites() {
+        let mut m = Message::User {
+            id: MessageId::from_raw("m1"),
+            content: vec![UserContent::Text {
+                text: "问题".into(),
+            }],
+            meta: MessageMeta {
+                created_at_ms: Some(1_000),
+                ..Default::default()
+            },
+        };
+        m.restamp(9_999);
+        let Message::User { meta, .. } = &m else {
+            unreachable!()
+        };
+        assert_eq!(meta.created_at_ms, Some(9_999));
     }
 }

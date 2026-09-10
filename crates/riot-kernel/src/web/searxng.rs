@@ -234,10 +234,7 @@ fn parse(body: &str) -> Result<Parsed, WebError> {
         }
     }
 
-    Ok(Parsed {
-        hits,
-        unresponsive,
-    })
+    Ok(Parsed { hits, unresponsive })
 }
 
 fn push_hit(hits: &mut Vec<SearchHit>, title: String, url: String, snippet: String) {
@@ -430,10 +427,9 @@ mod tests {
 
     #[test]
     fn 答案带链接也算结果() {
-        let parsed = parse(
-            r#"{"results":[],"answers":[{"answer":"42","url":"https://example.com/a"}]}"#,
-        )
-        .expect("解析");
+        let parsed =
+            parse(r#"{"results":[],"answers":[{"answer":"42","url":"https://example.com/a"}]}"#)
+                .expect("解析");
         assert_eq!(parsed.hits.len(), 1);
         assert_eq!(parsed.hits[0].url, "https://example.com/a");
         assert_eq!(parsed.hits[0].snippet, "42");

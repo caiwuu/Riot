@@ -366,7 +366,7 @@ export function App() {
   const [execModes, setExecModes] = useState<Record<string, PermissionMode>>({});
   /** 会话设置弹窗选的权限档，送去给 Composer 落地。 */
   const [permPick, setPermPick] = useState<{ id: string; pick: PermissionPick } | null>(null);
-  /** 递增一次，改动面板重新比对一次。轮次结束时推一下。 */
+  /** 递增一次，改动面板 / 预览抽屉重新读盘。编辑落盘、轮次结束、回退时推。 */
   const [changesRev, setChangesRev] = useState(0);
   /** 每个会话的计划（从对话条目派生，由 Chat 上报）。右侧抽屉的计划
    *  面板、标签上的标题都从这里取。 */
@@ -1816,6 +1816,7 @@ export function App() {
                         openFilePreview(abs);
                       }}
                       onTurnEnd={() => setChangesRev((n) => n + 1)}
+                      onFilesChanged={() => setChangesRev((n) => n + 1)}
                       onBusy={(b) => patchSession(s.id, { busy: b })}
                       onPlanChange={onPlanChange}
                       onPlanOpen={() => openTab({ kind: "plan" })}
@@ -2202,6 +2203,7 @@ function Chat({
   onAgentBrowser,
   onAgentPreview,
   onTurnEnd,
+  onFilesChanged,
   onBusy,
   onPlanChange,
   onPlanOpen,
@@ -2238,9 +2240,12 @@ function Chat({
   /** 模型的 PreviewFile 工具成功后，把文件在预览面板展示给用户。
    *  路径是模型传的原文，可能是相对路径 —— 由外层按会话根目录解析。 */
   onAgentPreview?: (path: string) => void;
-  /** 一轮跑完。改动面板据此重新比对 —— 抽屉是常驻的，模型改完文件
+  /** 一轮跑完。改动面板据此再对一次 —— 抽屉是常驻的，模型改完文件
    *  不刷新的话，那里还停在上一轮的样子。 */
   onTurnEnd?: () => void;
+  /** 磁盘变了：回退/重做，以及跑轮当中的 Edit / Write 落盘。
+   *  预览抽屉挂着打开那一刻的字节，不推一下还是旧的。 */
+  onFilesChanged?: () => void;
   /** 忙碌状态变化。侧栏的"正在跑"指示点靠它即时更新。 */
   onBusy?: (busy: boolean) => void;
   /** 这个会话的计划变了（新计划、正在流的正文、能不能构建）。右侧抽屉
@@ -2266,6 +2271,8 @@ function Chat({
   const busy = session.busy;
   const turnEndRef = useRef(onTurnEnd);
   turnEndRef.current = onTurnEnd;
+  const filesChangedRef = useRef(onFilesChanged);
+  filesChangedRef.current = onFilesChanged;
   const busyRef = useRef(onBusy);
   busyRef.current = onBusy;
   // 跳过挂载那次：挂载时的 busy 是历史快照，不是一次"变化"。
@@ -2287,6 +2294,14 @@ function Chat({
     // 窗口在前台时不发 —— 用户正看着呢。
     if (!document.hasFocus()) notifyTurnDone();
   }, [busy]);
+  // 回退不占 busy，上面那个 effect 看不到。filesRev 变了就通知外层重读
+  // 预览 / 改动面板。跳过挂载：缓存里带回来的数字不是一次新的写盘。
+  const filesRevSeen = useRef(session.filesRev);
+  useEffect(() => {
+    if (filesRevSeen.current === session.filesRev) return;
+    filesRevSeen.current = session.filesRev;
+    filesChangedRef.current?.();
+  }, [session.filesRev]);
   const empty =
     session.items.length === 0 &&
     !session.streaming &&
@@ -2333,6 +2348,17 @@ function Chat({
     }
     return `${n}|${sub}`;
   }, [editCount, session.items, session.tasks]);
+
+  // 预览抽屉 / Git 面板跟改动条用同一条线索：Edit / Write 一落盘就重读，
+  // 不能等轮子结束。跳过挂载；后台保活的会话不推 —— 切回来面板会整块
+  // 重挂，那一次读的就是新的。
+  const changesKeySeen = useRef(changesKey);
+  useEffect(() => {
+    if (changesKeySeen.current === changesKey) return;
+    changesKeySeen.current = changesKey;
+    if (!visible) return;
+    filesChangedRef.current?.();
+  }, [changesKey, visible]);
 
   // 输入框上方那一格的占位规则:跑轮期间有没做完的任务清单,就让
   // 任务临时顶掉改动条;清单全部完成、或轮子停了(含切回已结束的
@@ -2440,7 +2466,7 @@ function Chat({
       ) : (
         <SessionChangesBar
           sessionId={sessionId}
-          refreshKey={changesKey}
+          refreshKey={`${changesKey}/${session.filesRev}`}
           paused={!visible}
         />
       )}
@@ -2488,6 +2514,10 @@ function Chat({
             onEditEntry={session.editEntry}
             onResendEntry={session.resendEntry}
             onDeleteEntry={session.deleteEntry}
+            checkpointIds={session.checkpointIds}
+            onRestoreEntry={session.restoreEntry}
+            redoAvailable={session.redoAvailable}
+            onRedo={() => void session.redoRestore()}
             {...(modeAsk ? { modeAsk } : {})}
             {...(choiceAsk ? { choiceAsk } : {})}
             // 切回 agent 时落成这个会话进规划前那一档（Composer 上报的）。

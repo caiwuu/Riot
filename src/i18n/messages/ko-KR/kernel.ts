@@ -19,6 +19,8 @@ export default {
   "kernel.history.noText": "이 메시지에는 편집할 수 있는 텍스트가 없습니다.",
   "kernel.history.systemNoText": "이 메시지는 시스템 프롬프트라 편집할 수 있는 텍스트가 없습니다.",
   "kernel.history.systemNoDelete": "이 메시지는 시스템 프롬프트라 삭제할 수 없습니다.",
+  "kernel.history.noCheckpoint": "이 질문에는 파일 체크포인트가 없어 대화 기준으로 되돌릴 수 없습니다.",
+  "kernel.history.noRedo": "다시 적용할 되돌리기가 없습니다. 다시 보내거나 대화를 이어가면 복원할 수 없습니다.",
 
   // ── 압축 ────────────────────────────────────────────────────
   "kernel.compact.empty": "아직 대화 내용이 없어 압축할 것이 없습니다.",

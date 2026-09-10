@@ -413,6 +413,13 @@ pub trait FileStateCache: Send + Sync {
     fn baselines(&self) -> Vec<(PathBuf, Option<String>)> {
         Vec::new()
     }
+
+    /// 忘掉这个文件的会话基线。
+    ///
+    /// 回退时：切片之后才第一次出现的文件回到「会话没动过」—— 新建的删掉，
+    /// 基线也要摘掉，不然改动栏会永远挂着一个已经不存在的「已删除」。
+    /// 默认空实现：测试替身不必为此各写一遍。
+    fn forget_baseline(&self, _path: &std::path::Path) {}
 }
 
 #[derive(Debug, Clone, PartialEq)]

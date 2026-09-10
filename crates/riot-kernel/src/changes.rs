@@ -267,6 +267,13 @@ impl FileStateCache for PersistingBaselines {
     fn baselines(&self) -> Vec<(PathBuf, Option<String>)> {
         self.inner.baselines()
     }
+
+    fn forget_baseline(&self, path: &Path) {
+        self.inner.forget_baseline(path);
+        if let Err(e) = save_baselines(&self.path, &self.inner.baselines()) {
+            tracing::warn!(error = %e, "基线没写上盘，重启后这次改动会从面板里消失");
+        }
+    }
 }
 
 /// 子 agent 的文件状态：自己的先读后写缓存，改动基线记到父会话头上。
@@ -318,6 +325,10 @@ impl FileStateCache for SubagentFileState {
 
     fn baselines(&self) -> Vec<(PathBuf, Option<String>)> {
         self.parent.baselines()
+    }
+
+    fn forget_baseline(&self, path: &Path) {
+        self.parent.forget_baseline(path);
     }
 }
 
@@ -616,6 +627,15 @@ mod tests {
         );
         assert!(sub.get(Path::new("/work/b.rs")).is_none());
         assert!(sub.recent(10).is_empty());
+
+        sub.forget_baseline(Path::new("/work/new.rs"));
+        assert!(
+            parent
+                .baselines()
+                .iter()
+                .all(|(p, _)| p != Path::new("/work/new.rs")),
+            "子 agent 忘掉的基线要从父会话摘掉"
+        );
     }
 
     fn msg_use(id: &str, name: &str, input: serde_json::Value) -> Message {

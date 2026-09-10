@@ -21,6 +21,8 @@ export default {
   "kernel.history.noText": "这条消息没有可编辑的文本。",
   "kernel.history.systemNoText": "这条是系统提示，没有可编辑的文本。",
   "kernel.history.systemNoDelete": "这条是系统提示，不支持删除。",
+  "kernel.history.noCheckpoint": "这条提问没有文件检查点，没法按对话回退。",
+  "kernel.history.noRedo": "没有可以恢复的回退。重新发送或继续对话之后就不能再还原了。",
 
   // ── 压缩 ────────────────────────────────────────────────────
   "kernel.compact.empty": "还没有对话内容，没什么可压缩的。",

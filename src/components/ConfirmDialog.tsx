@@ -12,6 +12,8 @@ export interface ConfirmRequest {
   action: () => void;
   /** 默认 true。非破坏性确认（「知道了」）设 false，用主按钮而不是红色。 */
   danger?: boolean;
+  /** 取消 / Esc / 点遮罩。确认走 `action`，不会进这里。 */
+  onCancel?: () => void;
 }
 
 /**
@@ -32,14 +34,19 @@ export function ConfirmDialog({
   onClose: () => void;
 }) {
   const { t } = useT();
+  const cancel = () => {
+    const fn = c.onCancel;
+    onClose();
+    fn?.();
+  };
   return (
-    <Modal className="confirm" label={c.title} alert onClose={onClose} portal={!!portal}>
+    <Modal className="confirm" label={c.title} alert onClose={cancel} portal={!!portal}>
       <div className="confirm-body">
         <h3>{c.title}</h3>
         <p>{c.body}</p>
       </div>
       <div className="modal-actions">
-        <button autoFocus onClick={onClose}>
+        <button autoFocus onClick={cancel}>
           {t("common.cancel")}
         </button>
         <button

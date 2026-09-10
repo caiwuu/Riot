@@ -525,7 +525,10 @@ mod tests {
              refactor; also for anything involving the `origin` CLI.",
             "折叠成一段，不能是字面的 `>-`"
         );
-        assert!(d.cards[0].body.starts_with("# Code changes"), "正文不受影响");
+        assert!(
+            d.cards[0].body.starts_with("# Code changes"),
+            "正文不受影响"
+        );
     }
 
     #[test]
