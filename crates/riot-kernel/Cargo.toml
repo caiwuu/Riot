@@ -32,6 +32,7 @@ reqwest = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 shell-words = { workspace = true }
 similar = { version = "3.1.2", default-features = false, features = ["text", "inline"] }
 thiserror = { workspace = true }

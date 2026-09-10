@@ -52,6 +52,7 @@ export default {
   "transcript.restore.skip.binary": "바이너리",
   "transcript.restore.skip.tooLarge": "너무 큼",
   "transcript.restore.skip.unreadable": "읽을 수 없음",
+  "transcript.restore.skip.storeFailed": "스냅샷 저장 실패",
   "transcript.resend.title": "보내고 파일 되돌리기",
   "transcript.resend.body":
     "이후 대화는 버려집니다. 파일 {files}개를 되돌린 뒤 이 질문부터 다시 실행합니다.",

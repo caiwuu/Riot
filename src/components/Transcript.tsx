@@ -1553,6 +1553,7 @@ function skipReason(
   if (reason === "binary") return t("transcript.restore.skip.binary");
   if (reason === "too_large") return t("transcript.restore.skip.tooLarge");
   if (reason === "unreadable") return t("transcript.restore.skip.unreadable");
+  if (reason === "store_failed") return t("transcript.restore.skip.storeFailed");
   return reason;
 }
 

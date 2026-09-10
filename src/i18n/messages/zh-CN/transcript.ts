@@ -53,6 +53,7 @@ export default {
   "transcript.restore.skip.binary": "二进制",
   "transcript.restore.skip.tooLarge": "太大",
   "transcript.restore.skip.unreadable": "读不了",
+  "transcript.restore.skip.storeFailed": "切片没存上",
   "transcript.resend.title": "发送并回退文件",
   "transcript.resend.body":
     "之后的对话会被丢掉。将回退 {files} 个文件的修改，然后从这条提问重新开始。",

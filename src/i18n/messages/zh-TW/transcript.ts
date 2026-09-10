@@ -46,6 +46,7 @@ export default {
   "transcript.restore.skip.binary": "二進位",
   "transcript.restore.skip.tooLarge": "太大",
   "transcript.restore.skip.unreadable": "讀不了",
+  "transcript.restore.skip.storeFailed": "切片沒存上",
   "transcript.resend.title": "送出並回退檔案",
   "transcript.resend.body":
     "之後的對話會被丟掉。將回退 {files} 個檔案的修改，然後從這則提問重新開始。",

@@ -48,6 +48,7 @@ export default {
   "transcript.restore.skip.binary": "バイナリ",
   "transcript.restore.skip.tooLarge": "大きすぎる",
   "transcript.restore.skip.unreadable": "読めない",
+  "transcript.restore.skip.storeFailed": "スナップショット未保存",
   "transcript.resend.title": "送信してファイルを戻す",
   "transcript.resend.body":
     "以降の会話は破棄されます。{files} 個のファイルを戻してから、この質問を再実行します。",

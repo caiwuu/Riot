@@ -1638,7 +1638,9 @@ export interface RestorePreview {
 export interface RestoreSkip {
   path: string;
   /**
-   * 稳定键：`binary` / `too_large` / `unreadable`，或写盘失败的短描述。
+   * 稳定键：`binary` / `too_large` / `unreadable`（拍照时跳过）、
+   * `store_failed`（正文没存进 blob 库）、`blob_missing`（写回时正文找不到了），
+   * 或写盘失败的短描述。
    */
   reason: string;
 }

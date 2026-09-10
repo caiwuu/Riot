@@ -49,6 +49,7 @@ export default {
   "transcript.restore.skip.binary": "binary",
   "transcript.restore.skip.tooLarge": "too large",
   "transcript.restore.skip.unreadable": "unreadable",
+  "transcript.restore.skip.storeFailed": "snapshot not saved",
   "transcript.resend.title": "Send and restore files",
   "transcript.resend.body":
     "Later conversation will be discarded. {files} file(s) will be restored, then this prompt will run again.",

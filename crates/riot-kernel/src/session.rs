@@ -1567,13 +1567,19 @@ impl Session {
         }
     }
 
+    fn baseline_paths(&self) -> Vec<std::path::PathBuf> {
+        self.file_state
+            .baselines()
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect()
+    }
+
     async fn capture_checkpoint(&self, user_msg_id: &str) {
         let Some(dir) = self.checkpoints_dir() else {
             return;
         };
-        let snap =
-            crate::checkpoint::capture(self.file_state.baselines().into_iter().map(|(p, _)| p))
-                .await;
+        let snap = crate::checkpoint::capture(&dir, self.baseline_paths()).await;
         if let Err(e) = crate::checkpoint::save_snapshot(
             &crate::checkpoint::slice_path(&dir, user_msg_id),
             &snap,
@@ -1582,21 +1588,27 @@ impl Session {
         }
     }
 
+    /// 轮次结束 / 回退 / 前进之后：刷 head，顺手清掉没人引用的 blob。
+    /// 这些时刻都在 `running` 下，和拍切片串行（见 checkpoint 模块文档）。
     async fn write_head_checkpoint(&self) {
         let Some(dir) = self.checkpoints_dir() else {
             return;
         };
-        let snap =
-            crate::checkpoint::capture(self.file_state.baselines().into_iter().map(|(p, _)| p))
-                .await;
+        let snap = crate::checkpoint::capture(&dir, self.baseline_paths()).await;
         if let Err(e) = crate::checkpoint::save_snapshot(&crate::checkpoint::head_path(&dir), &snap)
         {
             tracing::warn!(error = %e, "head 检查点没写上盘");
         }
+        crate::checkpoint::gc(&dir);
     }
 
-    async fn apply_snapshot(&self, snap: &crate::checkpoint::FileSnapshot) -> RestoreResult {
+    async fn apply_snapshot(
+        &self,
+        dir: &std::path::Path,
+        snap: &crate::checkpoint::FileSnapshot,
+    ) -> RestoreResult {
         crate::checkpoint::apply(
+            dir,
             snap,
             &self.file_state.baselines(),
             self.file_state_for_tools().as_ref(),
@@ -1614,7 +1626,7 @@ impl Session {
         else {
             return;
         };
-        let report = self.apply_snapshot(&snap).await;
+        let report = self.apply_snapshot(&dir, &snap).await;
         if !report.failed.is_empty() {
             tracing::warn!(failed = report.failed.len(), "重发前写回检查点有文件失败");
         }
@@ -1685,9 +1697,8 @@ impl Session {
             // 内容又盖掉（cancel 只是令牌，尽力而为；after_history_cut 里
             // 还会再喊一次，幂等）。
             self.tasks.cancel_all();
-            let baselines = self.file_state.baselines();
-            let paths: Vec<std::path::PathBuf> = baselines.iter().map(|(p, _)| p.clone()).collect();
-            let files = crate::checkpoint::capture(paths).await;
+            let files = crate::checkpoint::capture(&dir, self.baseline_paths()).await;
+            let baselines = crate::checkpoint::store_baselines(&dir, &self.file_state.baselines());
             let cut = self.cut_history_to(message_id).await?;
             if let Err(e) = crate::checkpoint::push_redo(
                 &dir,
@@ -1700,7 +1711,7 @@ impl Session {
             ) {
                 tracing::warn!(error = %e, "redo 栈没写上盘，这次回退将无法 Redo");
             }
-            let mut result = self.apply_snapshot(&snap).await;
+            let mut result = self.apply_snapshot(&dir, &snap).await;
             // head 是脏检查的对照。回退刚把磁盘换成切片，不刷的话下一次
             // 预览会把这次回退本身当成"用户手改过"报出来。
             self.write_head_checkpoint().await;
@@ -1724,24 +1735,22 @@ impl Session {
             let Some(dump) = crate::checkpoint::pop_redo(&dir) else {
                 return Err(SessionError::invalid(ui_error!("kernel.history.noRedo")));
             };
-            let mut result = self.apply_snapshot(&dump.files).await;
+            let mut result = self.apply_snapshot(&dir, &dump.files).await;
             // 回退时被 forget 掉的基线（切片之后新建的文件）补回来，不然
             // 文件在盘上、改动栏里却没了。`note_baseline` 只补空缺，已有的
             // 不会被盖；只挑缺的补是为了少写几次基线 sidecar。
             {
-                let have: std::collections::HashSet<std::path::PathBuf> = self
-                    .file_state
-                    .baselines()
-                    .into_iter()
-                    .map(|(p, _)| p)
-                    .collect();
+                let have: std::collections::HashSet<std::path::PathBuf> =
+                    self.baseline_paths().into_iter().collect();
                 let cache = self.file_state_for_tools();
-                for (path, before) in dump.baselines {
+                for (path, before) in crate::checkpoint::resolve_baselines(&dir, &dump.baselines) {
                     if !have.contains(&path) {
                         cache.note_baseline(path, before);
                     }
                 }
             }
+            // `[约束]` 必须在上面读完这层的正文和 v0 之后：弹掉的层不再被
+            // redo.json 引用，这里面的 gc 会把只有它引用的 blob 删掉。
             self.write_head_checkpoint().await;
             {
                 let mut live = self.history.lock().await;
@@ -7956,6 +7965,64 @@ mod tests {
         );
         assert!(s.redo_available(), "校验失败不能顺手把 Redo 栈清了");
         assert!(s.running.lock().await.is_none(), "running 要放开");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)]
+    async fn 切片按内容去重_gc只清没人引用的blob() {
+        let (s, dir) = compact_session();
+        let ck = s.checkpoints_dir().expect("有持久化就有检查点目录");
+        let blobs = |ck: &std::path::Path| {
+            std::fs::read_dir(ck.join(crate::checkpoint::BLOBS_DIR))
+                .map(|rd| rd.flatten().count())
+                .unwrap_or(0)
+        };
+        let a = dir.path().join("a.rs");
+        tokio::fs::write(&a, "v1\n").await.unwrap();
+        s.file_state.note_baseline(a.clone(), Some("v0\n".into()));
+        if let Some(p) = &s.persist {
+            p.log.append(&hist_user("u1", "A"));
+            p.log.append(&hist_assistant("a1", "答 A"));
+            p.log.append(&hist_user("u2", "B"));
+            p.log.append(&hist_assistant("a2", "答 B"));
+            p.log.append(&hist_user("u3", "C"));
+            p.log.append(&hist_assistant("a3", "答 C"));
+            p.log.flush().await;
+        }
+
+        // 三条提问、一次 head，文件一直没变：正文只占一个 blob。
+        s.capture_checkpoint("u1").await;
+        s.capture_checkpoint("u2").await;
+        s.capture_checkpoint("u3").await;
+        s.write_head_checkpoint().await;
+        assert_eq!(blobs(&ck), 1, "同一份内容不管多少切片引用只存一次");
+
+        tokio::fs::write(&a, "v2\n").await.unwrap();
+        s.write_head_checkpoint().await;
+        assert_eq!(blobs(&ck), 2, "内容变了才多一份");
+
+        // 回退：redo 层带上当前正文 v2 和基线 v0。
+        s.restore("u2").await.expect("restore");
+        assert_eq!(tokio::fs::read_to_string(&a).await.unwrap(), "v1\n");
+        assert_eq!(blobs(&ck), 3, "v1 / v2 / v0 都还有人引用，gc 不能动");
+
+        // 前进：redo 层弹掉，v0 再没人引用；v2 回到 head 里仍被引用。
+        s.redo().await.expect("redo");
+        assert_eq!(tokio::fs::read_to_string(&a).await.unwrap(), "v2\n");
+        assert_eq!(
+            blobs(&ck),
+            2,
+            "只有弹掉的 redo 层引用的 v0 被清掉：{:?}",
+            {
+                std::fs::read_dir(ck.join(crate::checkpoint::BLOBS_DIR))
+                    .map(|rd| rd.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
+                    .unwrap_or_default()
+            }
+        );
+        assert!(
+            crate::checkpoint::load_snapshot(&crate::checkpoint::slice_path(&ck, "u1")).is_some(),
+            "切片文件本身不受 gc 影响"
+        );
     }
 
     #[tokio::test]
