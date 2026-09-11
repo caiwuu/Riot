@@ -349,6 +349,13 @@ export type AskPreview =
       truncated: boolean;
     }
   | {
+      kind: "file_delete";
+      lines: number;
+      path: string;
+      preview: string;
+      truncated: boolean;
+    }
+  | {
       kind: "network_fetch";
       url: string;
     }

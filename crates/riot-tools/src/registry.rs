@@ -192,6 +192,7 @@ mod tests {
             "Read",
             "Write",
             "Edit",
+            "Delete",
             "Bash",
             "Grep",
             "Glob",

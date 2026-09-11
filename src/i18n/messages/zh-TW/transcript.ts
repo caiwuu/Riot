@@ -39,7 +39,7 @@ export default {
   "transcript.restore.dirty": "上次完成後磁碟又被改過，這些手改也會被覆蓋。",
   "transcript.restore.afterSlice": "另有 {count} 個檔案是這則之後才第一次改到的，會回到工作階段開始時或刪除。",
   "transcript.restore.skipped": "跳過：{files}。",
-  "transcript.restore.bashNote": "用終端機改過的檔案這次回退看不到。",
+  "transcript.restore.bashNote": "用終端機改過、新建或刪掉的檔案這次回退看不到，只有 Write / Edit / Delete 動過的算。",
   "transcript.restore.previewFail": "沒辦法預覽這次回退。",
   "transcript.restore.redo": "恢復到回退前",
   "transcript.restore.partialFail": "有些檔案沒寫回去：{files}",
@@ -163,6 +163,8 @@ export default {
   "transcript.preview.writeFile": "寫入檔案（{lines} 行 · {bytes} 位元組）",
   "transcript.preview.truncated": "… 共 {count} 行，僅顯示前段",
   "transcript.preview.editFile": "修改 {path}",
+  "transcript.preview.deleteFile": "刪除檔案（{lines} 行）",
+  "transcript.preview.deleteFileNoCount": "刪除檔案",
   "transcript.preview.network": "存取網路",
 
   "transcript.ask.ariaLabel": "需要你決定",

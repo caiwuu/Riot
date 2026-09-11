@@ -82,6 +82,8 @@ export default {
   "tools.edit.any": "修改文件",
   "tools.write.file": "写入 {path}",
   "tools.write.any": "写入文件",
+  "tools.delete.file": "删除 {path}",
+  "tools.delete.any": "删除文件",
   "tools.glob.in": "在 {path} 里查找 {pattern}",
   "tools.glob.find": "查找 {pattern}",
   "tools.grep.in": "在 {glob} 里搜索 {pattern}",

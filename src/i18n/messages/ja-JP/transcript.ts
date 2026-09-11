@@ -41,7 +41,8 @@ export default {
   "transcript.restore.afterSlice":
     "この質問の後に初めて触ったファイルが {count} 個あり、セッション開始時に戻すか削除します。",
   "transcript.restore.skipped": "スキップ：{files}。",
-  "transcript.restore.bashNote": "ターミナル経由の変更はこの回退では見えません。",
+  "transcript.restore.bashNote":
+    "ターミナル経由で変更・作成・削除したファイルはこの回退では見えません。対象は Write / Edit / Delete が触ったものだけです。",
   "transcript.restore.previewFail": "この回退をプレビューできませんでした。",
   "transcript.restore.redo": "回退前に戻す",
   "transcript.restore.partialFail": "書き戻せなかったファイルがあります：{files}",
@@ -165,6 +166,8 @@ export default {
   "transcript.preview.writeFile": "ファイルを書き込み（{lines} 行 · {bytes} バイト）",
   "transcript.preview.truncated": "… 全 {count} 行、先頭のみ表示",
   "transcript.preview.editFile": "{path} を変更",
+  "transcript.preview.deleteFile": "ファイルを削除（{lines} 行）",
+  "transcript.preview.deleteFileNoCount": "ファイルを削除",
   "transcript.preview.network": "ネットワークアクセス",
 
   "transcript.ask.ariaLabel": "あなたの判断が必要です",

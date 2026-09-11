@@ -77,6 +77,8 @@ export default {
   "tools.edit.any": "Edit a file",
   "tools.write.file": "Write {path}",
   "tools.write.any": "Write a file",
+  "tools.delete.file": "Delete {path}",
+  "tools.delete.any": "Delete a file",
   "tools.glob.in": "Find {pattern} in {path}",
   "tools.glob.find": "Find {pattern}",
   "tools.grep.in": "Search for {pattern} in {glob}",

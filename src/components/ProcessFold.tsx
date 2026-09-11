@@ -28,7 +28,15 @@ export type Block =
  * CreatePlan 同理：计划卡是打开计划面板的入口，也是"这一轮产出了什么"
  * 的答案 —— 规划轮里它前面往往是几十步只读侦察，折进去就没了。
  */
-const KEEP_VISIBLE = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit", "Task", PLAN_TOOL]);
+const KEEP_VISIBLE = new Set([
+  "Edit",
+  "Write",
+  "Delete",
+  "MultiEdit",
+  "NotebookEdit",
+  "Task",
+  PLAN_TOOL,
+]);
 
 function foldable(it: Item): it is FoldItem {
   if (it.kind === "thinking") return true;

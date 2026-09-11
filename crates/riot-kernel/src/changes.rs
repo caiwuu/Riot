@@ -337,6 +337,9 @@ impl FileStateCache for SubagentFileState {
 /// Edit / Write 都要求先 Read，所以第一次改之前的 Read 结果就是基线。
 /// 压缩把结果清掉之后，新建文件还能从「已创建」认出来；覆盖/编辑就
 /// 只能对着磁盘反推，推不出就跳过，不强行编一份假 diff。
+///
+/// Delete 不要求先 Read：有 Read 就拿它当基线，没有就只能跳过 —— 文件
+/// 已经不在盘上，没有第二个地方能反推出它删前的样子。
 pub fn reconstruct_baselines(cwd: &Path, messages: &[Message]) -> Vec<(PathBuf, Option<String>)> {
     let mut pending: HashMap<ToolUseId, PendingUse> = HashMap::new();
     let mut last_read: HashMap<PathBuf, String> = HashMap::new();
@@ -347,7 +350,7 @@ pub fn reconstruct_baselines(cwd: &Path, messages: &[Message]) -> Vec<(PathBuf, 
             Message::Assistant { content, .. } => {
                 for c in content {
                     if let AssistantContent::ToolUse { id, name, input } = c
-                        && matches!(name.as_str(), "Read" | "Write" | "Edit")
+                        && matches!(name.as_str(), "Read" | "Write" | "Edit" | "Delete")
                     {
                         pending.insert(
                             id.clone(),
@@ -407,6 +410,17 @@ pub fn reconstruct_baselines(cwd: &Path, messages: &[Message]) -> Vec<(PathBuf, 
                                 continue;
                             }
                             first.insert(path, before);
+                        }
+                        "Delete" => {
+                            if first.contains_key(&path) {
+                                continue;
+                            }
+                            // 没读过就没有基线可捞。记成 None 的话改动栏会把一个
+                            // 已经不存在的文件算成"建了又删"直接吞掉，还不如不记。
+                            let Some(before) = last_read.get(&path).cloned() else {
+                                continue;
+                            };
+                            first.insert(path, Some(before));
                         }
                         _ => {}
                     }
@@ -728,6 +742,25 @@ mod tests {
         assert_eq!(
             got,
             vec![(PathBuf::from("/work/a.rs"), Some("first\n".into()))]
+        );
+    }
+
+    #[test]
+    fn 删除前读过的文件能从对话恢复基线_没读过的跳过() {
+        let cwd = Path::new("/work");
+        let msgs = [
+            msg_use("r1", "Read", serde_json::json!({ "path": "old.rs" })),
+            msg_result("r1", "     1\tgone\n"),
+            msg_use("d1", "Delete", serde_json::json!({ "path": "old.rs" })),
+            msg_result("d1", "已删除 old.rs（1 行）。"),
+            // 没读过就删：盘上已经没有，反推不出删前的样子，宁缺毋假
+            msg_use("d2", "Delete", serde_json::json!({ "path": "blind.rs" })),
+            msg_result("d2", "已删除 blind.rs（3 行）。"),
+        ];
+        let got = reconstruct_baselines(cwd, &msgs);
+        assert_eq!(
+            got,
+            vec![(PathBuf::from("/work/old.rs"), Some("gone\n".into()))]
         );
     }
 }

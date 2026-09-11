@@ -515,11 +515,11 @@ AgentEvent::RequestStart { turn: u32, model: String, after: Option<Transition> }
 
 这是整个主循环里最容易改错的地方。**两类计数器的重置规则不同**,写在一起会让其中一类失效:
 
-| 计数器 | 防什么 | 何时重置 |
-|--------|--------|---------|
-| `attempted_reactive_compact` | 单轮内「压缩 → 还是溢出 → 又压缩」死循环 | `advance_turn()`,即正常推进下一轮时 |
-| `output_limit_recovery_count` | 单轮内无限对半砍输出上限 | 同上 |
-| `compact_failure_streak` | **跨会话**反复压缩失败 | 只在压缩真正成功时清零 |
+| 计数器                        | 防什么                                   | 何时重置                            |
+| ----------------------------- | ---------------------------------------- | ----------------------------------- |
+| `attempted_reactive_compact`  | 单轮内「压缩 → 还是溢出 → 又压缩」死循环 | `advance_turn()`,即正常推进下一轮时 |
+| `output_limit_recovery_count` | 单轮内无限对半砍输出上限                 | 同上                                |
+| `compact_failure_streak`      | **跨会话**反复压缩失败                   | 只在压缩真正成功时清零              |
 
 `[约束]` 重置只能发生在 `AgentState::advance_turn()` 里。恢复重试路径(`continue` 回循环开头)绝不能调它。
 
@@ -656,10 +656,10 @@ async fn call(&self, input: Value, ctx: ToolContext) -> ToolOutcome {
 
 同一个工具结果走两条完全独立的路径:
 
-| 通道 | 方法 | 例(Read 工具) |
-|------|------|---------------|
-| 给模型 | `ToolOutcome::Ok.model_content` | 带行号的文件内容 + system-reminder |
-| 给 UI | `ToolOutcome::Ok.ui_payload` | `{ kind: "file_read", path, line_count: 42 }` |
+| 通道   | 方法                            | 例(Read 工具)                                 |
+| ------ | ------------------------------- | --------------------------------------------- |
+| 给模型 | `ToolOutcome::Ok.model_content` | 带行号的文件内容 + system-reminder            |
+| 给 UI  | `ToolOutcome::Ok.ui_payload`    | `{ kind: "file_read", path, line_count: 42 }` |
 
 `[约束]` **UI payload 是结构化数据,不是渲染好的字符串。**渲染在 React 侧做。
 
@@ -706,7 +706,7 @@ pub enum UiPayload {
 The required parameter `command` is missing</tool_use_error>
 ```
 
-`[约束]` 不要把 serde 的原始错误(`missing field \`command\` at line 1 column 42`)直接喂给模型。要转成祈使句。Claude Code 源码里的原话:*"surprisingly, the model is not great at generating valid input"*——这一层翻译的投入回报很高。
+`[约束]` 不要把 serde 的原始错误(`missing field \`command\` at line 1 column 42`)直接喂给模型。要转成祈使句。Claude Code 源码里的原话:_"surprisingly, the model is not great at generating valid input"_——这一层翻译的投入回报很高。
 
 ### 6.6 先读后写协议
 
@@ -733,6 +733,14 @@ Write 仍要求先 Read：全量覆盖会盖掉没看到的内容。`Partial` �
 
 `[约束]` `validate_input` 和 `call()` 里的检查都要有,不是冗余。执行管线是 `validate_input → 权限决策(可能弹窗等用户)→ call`,弹窗那段时间没有上界。前者给模型早反馈省一轮往返,后者是唯一真正拦得住 TOCTOU 的地方。写测试时要有绕过 `validate_input` 直接调 `call` 的用例,否则删掉 `call` 里的检查不会有任何测试失败(§VERIFICATION 5.5 就是这么发现的)。
 
+**Delete 是第三个会记基线的文件工具。** 它存在不是因为模型删不了文件(Bash 的 `rm` 一直可以),而是 `rm` 不记基线 —— 改动栏看不见、检查点回退找不回(§8.6)。Delete 在删之前把正文原样读下来 `note_baseline`,之后走的就是 Write 新建文件那条路的镜像。
+
+- 只删**单个文本文件**。目录、二进制一律拒绝并指回 Bash,同时明说那条路不进回退:基线是 `Option<String>`,二进制塞不进去,塞 lossy 文本进去回退写回的就是坏文件;目录递归删掉的东西一层都记不下来。
+- 基线记**磁盘原样**(含 BOM、保留 CRLF),不是解码归一化后的文本。回退时 v0 会被原样写回,归一化过的写回去等于把 CRLF 文件改成了 LF。
+- 不要求先 Read。删除是整文件粒度,用户在弹窗里看到的路径 + 正文前若干行就是要批的全部;`AskPreview::FileDelete` 要带正文,所以权限闸持有一份 `FileSystem` 去读盘 —— 只给路径等于让用户盲签一次删除。
+- **不归入 acceptEdits 的自动放行**(`chain::is_edit_tool` 刻意不含它)。用户开 acceptEdits 想的是"改动别一条条问",不是"文件消失也别问";Cursor 的自动运行同样把删除单独保护。要免问得自己写 allow 规则。
+- `FileSystem::remove_file` 只删文件,目录报错不递归。`Delete` 是 `is_destructive`。
+
 ### 6.6.1 编码与换行:保不住就拒绝
 
 读-改-写链路上,工具收到的是字符串,写回去的是字节。这中间任何一次有损转换都会永久毁掉用户的文件,而且**不报任何错**。
@@ -753,23 +761,23 @@ Write 仍要求先 Read：全量覆盖会盖掉没看到的内容。`Partial` �
 
 匹配失败时的错误消息要区分原因。"没找到"对模型没有任何指引,它会原样重试:
 
-| 情况 | 给模型的话 |
-|------|-----------|
-| `old_string` 带行号前缀 | 指出 Read 的行号是显示用的,不是文件内容 |
-| trim 后能匹配上 | 指出是缩进或行尾空白对不上 |
-| 只有换行风格不同 | 指出文件用的是 CRLF |
-| 匹配到多处 | 给出出现次数,建议扩大上下文或用 `replace_all` |
+| 情况                    | 给模型的话                                    |
+| ----------------------- | --------------------------------------------- |
+| `old_string` 带行号前缀 | 指出 Read 的行号是显示用的,不是文件内容       |
+| trim 后能匹配上         | 指出是缩进或行尾空白对不上                    |
+| 只有换行风格不同        | 指出文件用的是 CRLF                           |
+| 匹配到多处              | 给出出现次数,建议扩大上下文或用 `replace_all` |
 
 `[约束]` 拒绝的**理由**要精确,不能只表达"拒绝了"。"文件被改了"和"你还没读过"对模型是两条完全不同的指令 —— 前者让它重读确认,后者让它先读。给错了它会空转一轮。
 
 ### 6.7 结果体积的多层防线
 
-| 层 | 机制 | 参数 |
-|----|------|------|
-| 工具自限 | Read 超行数/字节上限直接 `Failed`,逼模型缩小范围 | 2000 行 / 256KB |
-| 单结果落盘 | 超 `max_result_size_chars` → 写文件,模型收到路径 + 前 2KB 预览 | 50k 字符 |
-| 单消息聚合 | 并行 N 个工具结果合计超限 → 按 tool_use_id 稳定替换 | 200k 字符 |
-| 历史清理 | 旧轮次结果被 microcompact 清成占位符 | 见 §10 |
+| 层         | 机制                                                           | 参数            |
+| ---------- | -------------------------------------------------------------- | --------------- |
+| 工具自限   | Read 超行数/字节上限直接 `Failed`,逼模型缩小范围               | 2000 行 / 256KB |
+| 单结果落盘 | 超 `max_result_size_chars` → 写文件,模型收到路径 + 前 2KB 预览 | 50k 字符        |
+| 单消息聚合 | 并行 N 个工具结果合计超限 → 按 tool_use_id 稳定替换            | 200k 字符       |
+| 历史清理   | 旧轮次结果被 microcompact 清成占位符                           | 见 §10          |
 
 `[约束]` Read 工具的 `max_result_size_chars` 必须是 `ResultBudget::Unlimited`。否则会产生"Read → 结果落盘成文件 → 模型又去 Read 那个文件"的循环。
 
@@ -782,6 +790,7 @@ Write 仍要求先 Read：全量覆盖会盖掉没看到的内容。`Partial` �
 `[约束]` 收口在调度器的 `split_outcome`(Ok / Failed 的文本都过),不散到各工具 —— 新接的工具(含 MCP)自动被覆盖,忘不掉。
 
 三条刻意的边界:
+
 - 只遮**模型自主读到的**。用户 `@` 引用、粘贴进输入框的内容不动 —— 那是他明确的选择;
 - 只认**厂商前缀的高置信度特征**,不做熵检测/JWT —— 开发场景遍地长随机串,误报几次这层就会被要求加开关,而窄而准的层不需要开关;
 - UiPayload 不经过遮蔽,界面照常显示原文 —— 对用户遮他自己的文件毫无意义。
@@ -804,13 +813,13 @@ Write 仍要求先 Read：全量覆盖会盖掉没看到的内容。`Partial` �
 
 `[约束]` 必须注入非交互环境变量。agent 执行 shell 最常见的挂死原因是交互式命令:`git commit`(无 `-m`)开编辑器,`git log` 开分页器,两者都在等一个永远不会来的按键。
 
-| 变量 | 值 | 挡住什么 |
-|------|----|---------|
-| `GIT_EDITOR` / `EDITOR` / `VISUAL` | `true` | 编辑器等待保存退出 |
-| `GIT_PAGER` / `PAGER` | `cat` | 分页器等待翻页按键 |
-| `NO_COLOR` | `1` | ANSI 转义序列(对模型是纯噪音,还占 token) |
-| `GIT_TERMINAL_PROMPT` | `0` | git 去开 `/dev/tty` 要用户名（无 TTY 时报 Device not configured） |
-| `SSH_ASKPASS_REQUIRE` | `force` | OpenSSH 在无 TTY 时改走 `SSH_ASKPASS`，而不是挂死 |
+| 变量                               | 值      | 挡住什么                                                          |
+| ---------------------------------- | ------- | ----------------------------------------------------------------- |
+| `GIT_EDITOR` / `EDITOR` / `VISUAL` | `true`  | 编辑器等待保存退出                                                |
+| `GIT_PAGER` / `PAGER`              | `cat`   | 分页器等待翻页按键                                                |
+| `NO_COLOR`                         | `1`     | ANSI 转义序列(对模型是纯噪音,还占 token)                          |
+| `GIT_TERMINAL_PROMPT`              | `0`     | git 去开 `/dev/tty` 要用户名（无 TTY 时报 Device not configured） |
+| `SSH_ASKPASS_REQUIRE`              | `force` | OpenSSH 在无 TTY 时改走 `SSH_ASKPASS`，而不是挂死                 |
 
 `GIT_ASKPASS` / `SSH_ASKPASS` 由宿主在启动时注入（`gui_env` 吸入登录 shell 的 `SSH_AUTH_SOCK` 等变量，`askpass` 再挂上助手）。助手把提问转到宿主弹窗，和 VS Code Git 扩展同一条路。Bash 工具本身不覆盖这两项 —— 没装助手时 git 立刻失败，不假装能提问。
 
@@ -924,13 +933,13 @@ Bash 工具失败 → 取消同批次所有兄弟。Read / Grep 等失败 → **
 
 调度器里有五条路径能让它断掉,每条都要显式补结果:
 
-| 路径 | 处理 |
-|------|------|
-| 工具未注册 | 返回带可用工具列表的错误结果,让模型能改 |
-| 工具 panic | `catch_unwind` 兜住,转成失败结果 |
-| 级联跳过 | 补一条"同批次其它工具失败,已跳过" |
-| 用户中断 | 剩余批次**继续遍历**补结果,不能 `break` |
-| 取消 | `ToolOutcome::Cancelled` 也要转成 tool_result |
+| 路径       | 处理                                          |
+| ---------- | --------------------------------------------- |
+| 工具未注册 | 返回带可用工具列表的错误结果,让模型能改       |
+| 工具 panic | `catch_unwind` 兜住,转成失败结果              |
+| 级联跳过   | 补一条"同批次其它工具失败,已跳过"             |
+| 用户中断   | 剩余批次**继续遍历**补结果,不能 `break`       |
+| 取消       | `ToolOutcome::Cancelled` 也要转成 tool_result |
 
 第四条特别容易写错:中断后直觉是跳出循环,但那样后面批次的 `tool_use` 就全成了孤儿。
 
@@ -944,12 +953,12 @@ LLM 还在输出后续内容时,先到达的 `tool_use` 已经开始执行。收
 
 Task 工具就是**再跑一遍主循环**(`riot_kernel::subagent`):独立 system、独立工具集、独立上下文,跑完把最后一条 assistant 文本交回。它的每个工具调用走和父完全相同的调度器和权限闸。在这个基础上有四种跑法,差别只在"谁等它、结果交给谁":
 
-| 跑法 | 触发 | 结果去处 |
-|---|---|---|
-| 同步 | 默认 | 作为这次 Task 调用的 tool_result 回给父 |
-| 后台 | `run_in_background: true` | 立刻返回 agent id;跑完合成一条**完成通知**交给父会话 |
-| 续接 | `resume: <agent id>` | 带着那个子 agent 的全部历史再跑一段,同步或后台 |
-| 分叉 | `resume: "self"` | 把父复制成后台子 agent:同 system、同工具清单、到此为止的全部历史 |
+| 跑法 | 触发                      | 结果去处                                                         |
+| ---- | ------------------------- | ---------------------------------------------------------------- |
+| 同步 | 默认                      | 作为这次 Task 调用的 tool_result 回给父                          |
+| 后台 | `run_in_background: true` | 立刻返回 agent id;跑完合成一条**完成通知**交给父会话             |
+| 续接 | `resume: <agent id>`      | 带着那个子 agent 的全部历史再跑一段,同步或后台                   |
+| 分叉 | `resume: "self"`          | 把父复制成后台子 agent:同 system、同工具清单、到此为止的全部历史 |
 
 **完成通知**(`riot_kernel::tasks::notice_message`)是一条 user 消息:正文在 `SystemReminder` 附件里给模型读,`MessageMeta::task_notice` 给界面画成卡片、给轮边界判定(`Message::is_user_prompt` 视它为一轮的起点)。投递(`Session::deliver_task_notice`)在 `running` 锁下三选一:父在跑 → 进插话队列,内核在安全点注入(队列条目 `input: None`,排队面板看不见、删不到);父空闲 → **用上一轮的配置唤起新的一轮**(`LastTurn`,见下);会话在关 → 丢弃。这就是 Cursor "委派完结束回合、完成即通知"的后半段 —— 父 agent 不 await、不轮询。
 
@@ -1115,7 +1124,9 @@ pub enum InterruptBehavior {
 
 **正文不内联，按内容寻址。** 切片按提问拍，而两条提问之间绝大多数基线文件根本没动；内联的话会话摸过 50 个文件、聊了 200 轮就是上百 MB 一模一样的文本。所以切片 / head / redo 层里只记 `(路径, 哈希)`，正文按哈希存一份（基线表里的 v0 也一样）；切片文件本身只有几 KB。blob 只增不改，删靠 `checkpoint::gc`：扫目录里所有 JSON 收集引用，没人引用的（和半截 `.tmp`）删掉；任何一个 JSON 读不出来就整轮放弃 —— 漏删没有代价，误删会让回退莫名失败。gc 挂在 `write_head_checkpoint` 里，即轮次结束、Restore、Redo 之后，都在 `running` 下，和拍切片串行。`[约束]` Redo 里读正文 / 解析 v0 必须在 gc 之前：弹掉的层不再被引用，gc 会把只有它引用的 blob 删掉。老格式（正文内联的 `text` 条目）只读不写。
 
-每文件状态：`blob` / `text`（老格式）/ `missing` / `skipped`（二进制或超过 1MiB，或正文没存进 blob 库）。范围只覆盖当前会话基线（Edit / Write / 子 agent 记到父会话的那些），**不解析 Bash、不扫整仓**。跳过的文件必须报出来，不能假装回退成功；写回时 blob 找不到了报 `blob_missing`，同样进 `failed`。
+每文件状态：`blob` / `text`（老格式）/ `missing` / `skipped`（二进制或超过 1MiB，或正文没存进 blob 库）。范围只覆盖当前会话基线（Edit / Write / Delete / 子 agent 记到父会话的那些），**不解析 Bash、不扫整仓、不监听文件系统**。跳过的文件必须报出来，不能假装回退成功；写回时 blob 找不到了报 `blob_missing`，同样进 `failed`。
+
+`[取舍]` **拦截工具的写，而不是监视磁盘。** 这和 Cursor 的检查点是同一条路：只有 Agent 编辑器工具（我们是 Write / Edit / Delete）碰过的文件进切片，终端里的 `rm` / `mv` / `npm install`、用户在 IDE 外的手改、数据库 migration 这类副作用一律不覆盖，真正的托底是 git。曾考虑轮次期间 watch 工作区补上 Bash 的增删，否掉了：一次 `npm install` 是几万个事件，得维护一份和 gitignore 几乎重复又永远赶不上的排除表；监控到的"新建"分不清是 Agent 写的、用户手建的还是构建产物；回退时若跟着这些走，会去动不该动的树。补漏洞的正解是**把删除也做成工具**：`Delete` 记下删前正文作基线，改动栏于是能显示「已删除」，Restore 把它写回来、Redo 再删掉 —— 和 Write 新建的文件走的是同一条 `note_baseline` 路，检查点这边不用为删除加任何特例。`Delete` 只删单个文本文件（目录 / 二进制指回 Bash，并明说那样不进回退）；界面的回退确认框把「终端里改、建、删的文件这次看不到」写死在文案里。
 
 写回：切片内按条目应用（磁盘已一致的不重写、不计数，和预览的 `files` 同口径）；切片之后才第一次动到的文件回到会话 v0，或删除（v0 为 `None`），并 `forget_baseline` + `invalidate`。Redo 把文件写回来之后要按层里的基线表把 forget 掉的基线补回去 —— 只写文件不补基线，改动栏里它就永远消失了。Restore / Redo 写完盘都要刷 `head.json`，否则下一次预览会把这次回退本身当成"用户手改"报出来。
 
@@ -1196,10 +1207,10 @@ pub enum DecisionReason {
 
 `[约束]` Bash 命令分析产出的 `Ask` 分两档,分档标准是**分析器确实发现了危险**,还是**它只是不敢断言**:
 
-| 判定 | `DecisionReason` | 对 bypass | 例子 |
-|------|------------------|-----------|------|
-| 看不懂 | `Unverifiable` | 让步 | `echo $HOME`、`$(git rev-parse HEAD)`、`for` 循环、`cargo test > /tmp/out.log` |
-| 确实危险 | `SafetyCheck` | 免疫 | `eval "$CMD"`、`LD_PRELOAD=`、`echo x >> ~/.zshrc` |
+| 判定     | `DecisionReason` | 对 bypass | 例子                                                                           |
+| -------- | ---------------- | --------- | ------------------------------------------------------------------------------ |
+| 看不懂   | `Unverifiable`   | 让步      | `echo $HOME`、`$(git rev-parse HEAD)`、`for` 循环、`cargo test > /tmp/out.log` |
+| 确实危险 | `SafetyCheck`    | 免疫      | `eval "$CMD"`、`LD_PRELOAD=`、`echo x >> ~/.zshrc`                             |
 
 两档混为一谈的后果是**行为倒置**:第二档在正常开发里几乎不出现,第一档遍地都是(模型干活必然用变量和管道)。全标成安全发现的话,「全部放行」变成一个 `echo $HOME` 都跑不过去的模式,而同一时刻 `rm -rf node_modules` 却静默放行 —— 用户看到的是"越放行越难用"。
 
@@ -1468,12 +1479,12 @@ UI 的上下文占用环用的是同一个口径(最后一条 usage 的 `total()
 
 能便宜解决就不用贵的。第 1 层在**工具执行时**就发生(riot-tools),后两层在**压缩触发时**执行(riot-core 的 compactor):
 
-| 层 | 机制 | 在哪 | 信息损失 |
-|----|------|------|---------|
-| 1. 结果落盘 | 超 64KiB 的文本结果写进工件目录,消息里换成头尾预览 + 路径(`Spilled`) | riot-tools `scheduler.rs::spill_oversized`,执行后统一收口 | 无(按路径可重读) |
-| 2. 聚合预算 | 单消息内并行结果合计超限 → 替换 | **未实现**(见下) | — |
-| 3. 清旧结果 | 旧 tool_result 清成占位符,只留最近 **8** 个(`ClearOldResults`,原设计写 5,实现取 8) | riot-core `compactor.rs` | 中 |
-| 4. 总结 | LLM 总结替换历史,最后一条用户提问起的尾巴(≤20k)原样保留 | riot-core `compactor.rs` | 高 |
+| 层          | 机制                                                                               | 在哪                                                      | 信息损失         |
+| ----------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------- | ---------------- |
+| 1. 结果落盘 | 超 64KiB 的文本结果写进工件目录,消息里换成头尾预览 + 路径(`Spilled`)               | riot-tools `scheduler.rs::spill_oversized`,执行后统一收口 | 无(按路径可重读) |
+| 2. 聚合预算 | 单消息内并行结果合计超限 → 替换                                                    | **未实现**(见下)                                          | —                |
+| 3. 清旧结果 | 旧 tool_result 清成占位符,只留最近 **8** 个(`ClearOldResults`,原设计写 5,实现取 8) | riot-core `compactor.rs`                                  | 中               |
+| 4. 总结     | LLM 总结替换历史,最后一条用户提问起的尾巴(≤20k)原样保留                            | riot-core `compactor.rs`                                  | 高               |
 
 `[约束]` 反应式(413)压缩改写的是主循环自己的 `state.messages`,事件里**不带新历史**。宿主必须把产物接回来(`RecordingCompactor` 截留 + `Session::absorb_reactive_compaction` 落地:内存历史、transcript 边界、界面归档、环境基线),否则宿主历史和 transcript 仍是压缩前的全量 —— 本轮后续消息叠在全量上,下一轮开工再发全量,再 413,再花一次总结;界面上划了"已压缩"的线,实际什么都没变。
 
@@ -1511,11 +1522,11 @@ UI 的上下文占用环用的是同一个口径(最后一条 usage 的 `total()
 
 三层分工:
 
-| 层 | 在哪 | 职责 |
-|----|------|------|
+| 层   | 在哪                    | 职责                                                                                                                                                                                                      |
+| ---- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 文件 | riot-store `digests.rs` | 项目键(路径 slug + SHA-256 前 8 位,防 `code/riot` 与 `code-riot` 撞车)、`<sessions>/digests/<键>/<会话>.md` 与 `INDEX.md`、front matter 读写、原子写(临时文件 + rename)、宽容地从宿主 `index.json` 读标题 |
-| 渲染 | riot-core `archive.rs` | 一条消息一个 `## [n] 角色 (id) 时间` 小节,思考丢弃,工具结果留头 8k(按"同会话找报错原文"定的,跨会话读者顺带受益),调用参数留 2k |
-| 编排 | riot-kernel `digest.rs` | 活会话从内存(界面归档 + 活历史)渲染,非活会话从 `load_parts` 回放渲染(回放已应用全部编辑/删除,摘录天然只含用户保留的内容);每项目一把锁,快照在锁**里**取;启动对账(缺失/过期/版本不符重建,孤儿删除) |
+| 渲染 | riot-core `archive.rs`  | 一条消息一个 `## [n] 角色 (id) 时间` 小节,思考丢弃,工具结果留头 8k(按"同会话找报错原文"定的,跨会话读者顺带受益),调用参数留 2k                                                                             |
+| 编排 | riot-kernel `digest.rs` | 活会话从内存(界面归档 + 活历史)渲染,非活会话从 `load_parts` 回放渲染(回放已应用全部编辑/删除,摘录天然只含用户保留的内容);每项目一把锁,快照在锁**里**取;启动对账(缺失/过期/版本不符重建,孤儿删除)          |
 
 触发点:一轮结束、上下文编辑/删除、压缩落地(三条路,在换完历史之后)、改标题、删会话。轮**中**的普通消息不触发(O(n²),且轮中没人需要它);压缩是例外 —— 续接消息刚指了路,文件得在模型下一步去读之前是新的。空历史不写文件;最后一个摘录删掉时目录一并收掉。
 
@@ -1619,12 +1630,12 @@ Retry-After 响应头优先
 
 ### 11.5 Prompt caching
 
-| 位置 | 策略 |
-|------|------|
-| system 静态段 | 全局缓存断点,跨会话共享 |
-| system 动态段 | 不打全局断点 |
-| 工具 schema | 会话级缓存序列化结果,排序稳定 |
-| messages | **整个请求恰好一个断点**,打在最后一条消息 |
+| 位置          | 策略                                      |
+| ------------- | ----------------------------------------- |
+| system 静态段 | 全局缓存断点,跨会话共享                   |
+| system 动态段 | 不打全局断点                              |
+| 工具 schema   | 会话级缓存序列化结果,排序稳定             |
+| messages      | **整个请求恰好一个断点**,打在最后一条消息 |
 
 `[约束]` system prompt 必须分成静态段和动态段,中间用一个显式的边界常量分隔。静态段里不允许放任何会在会话中途变化的内容(feature flag、时间、MCP 工具列表)——一旦变化就打碎缓存,而这个损失是跨用户的,不只影响自己。
 
@@ -1779,6 +1790,7 @@ Composer 发出去的标记和 Transcript 画回来的块靠同一份规则对�
 `[现状]` 状态管理就是 `useSession` + 本地 state,**没有状态库**(zustand 依赖已删)。等出现"多个不相关组件要读同一份会话状态"这类真实痛点再引入,不为将来可能的需求先付一层间接。
 
 长会话的渲染预算分三层,各管一段(都已落地):
+
 1. **懒解析**——视口外的正文按纯文本占位,进视野(±1200px)再走 ReactMarkdown + highlight(`LazyMarkdown`;贴底 12 块立即解析,⌘F 查找时全量水合);
 2. **VDOM**——`Row` / `ProcessGroup` 都是 `memo`,流式期间每帧重渲染不触碰历史行;
 3. **排版绘制**——块按**轮**收进 `.turn`(`groupTurns`),`content-visibility: auto` + `contain-intrinsic-size: auto 240px` 挂在那一层,离屏的轮浏览器直接跳过 layout/paint(样式文件里有取舍注释:为什么选它而不是 virtuoso 类窗口化列表——贴底/恢复那套滚动逻辑是按真实 DOM 高度调校的)。
@@ -1855,22 +1867,22 @@ loop {
 
 给实现者的速查表。左列是 Claude Code 一类实现里的 TS 形态,右列是本项目的 Rust 形态。
 
-| TS 形态 | Rust 形态 | 备注 |
-|---------|-----------|------|
-| `async function*` | `async_stream::stream!` | 块必须返回 `()` |
-| `AsyncGenerator<E, T>` 的 return 值 | `AgentEvent::Done` 变体 | §4.2 |
-| `yield*` 委托 | `for await` in `stream!` 或手动 `while let Some(x) = s.next().await` | |
-| discriminated union | `enum` + `#[serde(tag = "type")]` | 编译器强制穷尽匹配 |
-| zod schema | `schemars::JsonSchema` derive | 同样一处定义拿到校验 + JSON Schema |
-| `buildTool()` 补默认值 | trait 默认方法 | 更强:无默认值的方法编译器强制实现 |
-| `ToolResult` + throw | `ToolOutcome` enum(含 `Failed` 变体) | 类型层面禁止错误抛穿 |
-| `AbortController` + 手写链接 | `CancellationToken::child_token()` | 父子语义内置 |
-| `abort(reason)` | token + 旁挂 `OnceLock<CancelReason>` | token 本身不带 reason |
-| `Promise.all` | `FuturesOrdered` | **不是** `FuturesUnordered`,§7.3 |
-| `renderToolResultMessage()` 返回组件 | `UiPayload` 结构化数据 | 内核不依赖 UI |
-| `setTimeout` / `Date.now()` | `Clock` trait | 测试要能快进时间 |
-| 字符串 ID | newtype `struct XxxId(String)` | |
-| `try/catch` 兜底 | `JoinHandle` 捕获 panic | §6.4 第 10 步 |
+| TS 形态                              | Rust 形态                                                            | 备注                               |
+| ------------------------------------ | -------------------------------------------------------------------- | ---------------------------------- |
+| `async function*`                    | `async_stream::stream!`                                              | 块必须返回 `()`                    |
+| `AsyncGenerator<E, T>` 的 return 值  | `AgentEvent::Done` 变体                                              | §4.2                               |
+| `yield*` 委托                        | `for await` in `stream!` 或手动 `while let Some(x) = s.next().await` |                                    |
+| discriminated union                  | `enum` + `#[serde(tag = "type")]`                                    | 编译器强制穷尽匹配                 |
+| zod schema                           | `schemars::JsonSchema` derive                                        | 同样一处定义拿到校验 + JSON Schema |
+| `buildTool()` 补默认值               | trait 默认方法                                                       | 更强:无默认值的方法编译器强制实现  |
+| `ToolResult` + throw                 | `ToolOutcome` enum(含 `Failed` 变体)                                 | 类型层面禁止错误抛穿               |
+| `AbortController` + 手写链接         | `CancellationToken::child_token()`                                   | 父子语义内置                       |
+| `abort(reason)`                      | token + 旁挂 `OnceLock<CancelReason>`                                | token 本身不带 reason              |
+| `Promise.all`                        | `FuturesOrdered`                                                     | **不是** `FuturesUnordered`,§7.3   |
+| `renderToolResultMessage()` 返回组件 | `UiPayload` 结构化数据                                               | 内核不依赖 UI                      |
+| `setTimeout` / `Date.now()`          | `Clock` trait                                                        | 测试要能快进时间                   |
+| 字符串 ID                            | newtype `struct XxxId(String)`                                       |                                    |
+| `try/catch` 兜底                     | `JoinHandle` 捕获 panic                                              | §6.4 第 10 步                      |
 
 ### 14.1 已知的翻译陷阱
 
@@ -1907,11 +1919,11 @@ loop {
 
 都复用已有机制,不新增架构:
 
-| 线 | 机制 | 位置 |
-|----|------|------|
-| Skills | 技能发现多一个"能力包"层 | `skills::discover`,优先级 项目 > 全局 > **能力包** > 内置 |
-| MCP | 按已装的包重建配置里属于包的那些条目,再 `reconcile_mcp` | `packs::sync_mcp` |
-| PATH | `DocPackRunner` 装饰器,和 `VenvRunner` 同一条链 | `session::build_scheduler` |
+| 线     | 机制                                                    | 位置                                                      |
+| ------ | ------------------------------------------------------- | --------------------------------------------------------- |
+| Skills | 技能发现多一个"能力包"层                                | `skills::discover`,优先级 项目 > 全局 > **能力包** > 内置 |
+| MCP    | 按已装的包重建配置里属于包的那些条目,再 `reconcile_mcp` | `packs::sync_mcp`                                         |
+| PATH   | `DocPackRunner` 装饰器,和 `VenvRunner` 同一条链         | `session::build_scheduler`                                |
 
 能力包排在全局技能**后面**:用户想改包里带的技能时,在全局目录放一个同名的就能盖掉,不必去改包内容(那会在下次升级时被覆盖)。
 

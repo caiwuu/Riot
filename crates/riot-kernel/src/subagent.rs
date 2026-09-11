@@ -403,6 +403,9 @@ fn tools_for(kind: Kind) -> Vec<Arc<dyn Tool>> {
             Arc::new(tools::Read),
             Arc::new(tools::Edit),
             Arc::new(tools::Write),
+            // 子 agent 删的文件也要进父会话的基线（SubagentFileState 转交），
+            // 不给的话它只能 rm，改动栏和回退都看不见。
+            Arc::new(tools::Delete),
             Arc::new(tools::Bash),
             Arc::new(tools::Grep),
             Arc::new(tools::Glob),
@@ -1640,7 +1643,7 @@ mod tests {
             reqs[0]
                 .tools
                 .iter()
-                .all(|t| t.name != "Write" && t.name != "Bash"),
+                .all(|t| t.name != "Write" && t.name != "Bash" && t.name != "Delete"),
             "explore 不能有写工具"
         );
         assert!(

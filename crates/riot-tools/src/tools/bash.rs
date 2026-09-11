@@ -19,7 +19,9 @@ use riot_protocol::tool::{
 use riot_protocol::ui_text;
 use serde::Deserialize;
 
-use super::names::{BASH, EDIT, GLOB, GREP, READ, Siblings, TERMINAL_KILL, TERMINAL_OUTPUT, WRITE};
+use super::names::{
+    BASH, DELETE, EDIT, GLOB, GREP, READ, Siblings, TERMINAL_KILL, TERMINAL_OUTPUT, WRITE,
+};
 
 /// 默认超时。
 ///
@@ -140,6 +142,17 @@ impl Tool for Bash {
                  rejected or based on content you never saw.\n"
             ),
         );
+        // 单文件删除同理：shell 的 rm 不记基线，改动栏看不见、回退找不回。
+        // 目录 / 二进制 / 批量仍是 rm 的活 —— Delete 自己的描述里说清了。
+        let delete_note = sib.line(
+            DELETE,
+            format!(
+                "- Deleting a single source file. Use {DELETE}: it records the content \
+                 so the removal shows in the change list and is undone by a restore. \
+                 A shell `rm` is invisible to both. `rm` remains the tool for \
+                 directories, binaries, build output, and bulk removal.\n"
+            ),
+        );
         format!(
             "Runs one shell command in the working directory.\n\
              {sandbox}\
@@ -168,6 +181,7 @@ impl Tool for Bash {
              \n\
              {search_note}\
              {file_note}\
+             {delete_note}\
              - Talking to the user. NEVER `echo` explanations, progress, or plans; \
              write them in your reply instead.\n\
              - Destructive or irreversible operations the user did not ask for: \

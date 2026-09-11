@@ -1,4 +1,4 @@
-//! Read / Write / Edit 的测试。
+//! Read / Write / Edit / Delete 的测试。
 
 use std::sync::Arc;
 
@@ -8,7 +8,7 @@ use riot_protocol::tool::{FileStateCache, FileView, Tool, ToolContext, ToolOutco
 use tokio_util::sync::CancellationToken;
 
 use super::memfs::{MemFileState, MemFs};
-use super::{Edit, Read, Write};
+use super::{Delete, Edit, Read, Write};
 
 struct Harness {
     fs: Arc<MemFs>,
@@ -81,6 +81,21 @@ async fn edit(h: &Harness, args: serde_json::Value) -> ToolOutcome {
         return ToolOutcome::failed(e.to_string());
     }
     Edit.call(args, h.ctx.clone()).await
+}
+
+async fn delete(h: &Harness, args: serde_json::Value) -> ToolOutcome {
+    if let Err(e) = Delete.validate_input(&args, &h.ctx).await {
+        return ToolOutcome::failed(e.to_string());
+    }
+    Delete.call(args, h.ctx.clone()).await
+}
+
+fn baseline_of(h: &Harness, path: &str) -> Option<Option<String>> {
+    h.state
+        .baselines()
+        .into_iter()
+        .find(|(p, _)| p == std::path::Path::new(path))
+        .map(|(_, b)| b)
 }
 
 // ── Read ──────────────────────────────────────────────
@@ -985,6 +1000,160 @@ async fn 项目目录之外也能改() {
 
     assert!(is_ok(&out), "{}", text_of(&out));
     assert_eq!(h.fs.text("/etc/hosts").as_deref(), Some("0.0.0.1"));
+}
+
+// ── Delete ────────────────────────────────────────────
+
+#[tokio::test]
+async fn 删除文本文件_记基线并清缓存() {
+    let h = harness(base_fs().with_file("/work/old.rs", "fn gone() {}\n"));
+    read(&h, serde_json::json!({ "path": "old.rs" })).await;
+
+    let out = delete(&h, serde_json::json!({ "path": "old.rs" })).await;
+
+    assert!(is_ok(&out), "{}", text_of(&out));
+    assert!(text_of(&out).contains("已删除 old.rs"), "{}", text_of(&out));
+    assert_eq!(h.fs.content("/work/old.rs"), None, "文件要真的没了");
+    // 这是它相对 rm 存在的理由：改动栏和回退都靠这条基线认出"删了什么"
+    assert_eq!(
+        baseline_of(&h, "/work/old.rs"),
+        Some(Some("fn gone() {}\n".into()))
+    );
+    assert!(
+        h.state.get(std::path::Path::new("/work/old.rs")).is_none(),
+        "先读后写缓存里不能留着一个已经不存在的文件"
+    );
+}
+
+#[tokio::test]
+async fn 删除不要求先读() {
+    // 删除是整文件粒度的操作；用户在弹窗里看到的路径 + 正文就是要批的全部
+    let h = harness(base_fs().with_file("/work/a.txt", "x"));
+    let out = delete(&h, serde_json::json!({ "path": "a.txt" })).await;
+    assert!(is_ok(&out), "{}", text_of(&out));
+    assert_eq!(baseline_of(&h, "/work/a.txt"), Some(Some("x".into())));
+}
+
+#[tokio::test]
+async fn 基线记磁盘原样_保留_crlf_和_bom() {
+    // 回退时 v0 会被原样写回。记归一化过的文本，CRLF 文件回来就成了 LF
+    let raw = b"\xEF\xBB\xBFa\r\nb\r\n";
+    let h = harness(base_fs().with_file("/work/a.txt", raw));
+
+    let out = delete(&h, serde_json::json!({ "path": "a.txt" })).await;
+    assert!(is_ok(&out), "{}", text_of(&out));
+    assert_eq!(
+        baseline_of(&h, "/work/a.txt")
+            .flatten()
+            .map(String::into_bytes),
+        Some(raw.to_vec())
+    );
+}
+
+#[tokio::test]
+async fn 先改过再删_基线仍是最初那份() {
+    // "这次会话到底动了什么"要回答的是相对最初的差异，不是相对上一步
+    let h = harness(base_fs().with_file("/work/a.rs", "v0"));
+    read(&h, serde_json::json!({ "path": "a.rs" })).await;
+    let out = write(&h, serde_json::json!({ "path": "a.rs", "content": "v1" })).await;
+    assert!(is_ok(&out), "{}", text_of(&out));
+
+    let out = delete(&h, serde_json::json!({ "path": "a.rs" })).await;
+    assert!(is_ok(&out), "{}", text_of(&out));
+    assert_eq!(baseline_of(&h, "/work/a.rs"), Some(Some("v0".into())));
+}
+
+#[tokio::test]
+async fn 不存在的文件在校验阶段就拒绝() {
+    let h = harness(base_fs());
+    let out = delete(&h, serde_json::json!({ "path": "nope.rs" })).await;
+
+    assert!(!is_ok(&out));
+    assert!(text_of(&out).contains("不存在"), "{}", text_of(&out));
+    assert_eq!(baseline_of(&h, "/work/nope.rs"), None, "没删成不算改动");
+}
+
+#[tokio::test]
+async fn 目录拒绝_并指回_bash() {
+    let h = harness(base_fs().with_file("/work/src/main.rs", "fn main() {}"));
+    let out = delete(&h, serde_json::json!({ "path": "src" })).await;
+
+    assert!(!is_ok(&out));
+    let t = text_of(&out);
+    assert!(t.contains("是目录"), "{t}");
+    assert!(t.contains("Bash"), "要指出替代路径：{t}");
+    assert!(t.contains("回退"), "要说明那条路不进回退：{t}");
+    assert!(
+        h.fs.content("/work/src/main.rs").is_some(),
+        "目录里的东西一样不能动"
+    );
+}
+
+#[tokio::test]
+async fn 二进制拒绝_文件不动() {
+    // 基线是 Option<String>，二进制放不进去；塞 lossy 文本进去，回退写回的
+    // 就是一份坏文件。宁可拒绝。
+    let h = harness(base_fs().with_file("/work/a.png", b"\x89PNG\0\0\0\r"));
+    let out = delete(&h, serde_json::json!({ "path": "a.png" })).await;
+
+    assert!(!is_ok(&out));
+    assert!(text_of(&out).contains("二进制"), "{}", text_of(&out));
+    assert!(
+        h.fs.content("/work/a.png").is_some(),
+        "拒绝之后文件不能被删掉"
+    );
+    assert_eq!(baseline_of(&h, "/work/a.png"), None);
+}
+
+#[tokio::test]
+async fn delete_的_call_独立拦住目录和二进制() {
+    // call 不能依赖 validate_input 已经查过：中间隔着权限弹窗，而且工具
+    // 可能被直接调用。
+    let h = harness(
+        base_fs()
+            .with_file("/work/src/main.rs", "fn main() {}")
+            .with_file("/work/a.png", b"\x89PNG\0\0"),
+    );
+
+    let out = Delete
+        .call(serde_json::json!({ "path": "src" }), h.ctx.clone())
+        .await;
+    assert!(!is_ok(&out));
+    assert!(h.fs.content("/work/src/main.rs").is_some());
+
+    let out = Delete
+        .call(serde_json::json!({ "path": "a.png" }), h.ctx.clone())
+        .await;
+    assert!(!is_ok(&out));
+    assert!(h.fs.content("/work/a.png").is_some());
+}
+
+#[tokio::test]
+async fn delete_的_call_独立拦住可疑路径() {
+    let h = harness(base_fs().with_file("/work/evil.txt", "x"));
+
+    let out = Delete
+        .call(
+            serde_json::json!({ "path": "/work/evil.txt:ads" }),
+            h.ctx.clone(),
+        )
+        .await;
+
+    assert!(!is_ok(&out));
+    assert!(h.fs.content("/work/evil.txt").is_some());
+}
+
+#[test]
+fn delete_是破坏性写操作_目标路径给权限层() {
+    let input = serde_json::json!({ "path": "src/a.rs" });
+    assert!(!Delete.is_read_only(&input));
+    assert!(Delete.is_destructive(&input));
+    assert!(!Delete.is_concurrency_safe(&input));
+    // 敏感路径检查（.git/、.zshrc）靠它拿到目标
+    assert_eq!(
+        Delete.target_path(&input),
+        Some(std::path::PathBuf::from("src/a.rs"))
+    );
 }
 
 // ── call() 自己就是一道关口 ────────────────────────────

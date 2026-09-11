@@ -487,6 +487,37 @@
           "type": "object"
         },
         {
+          "description": "删整个文件。和 [`Self::FileWrite`] 同一个理由带正文前若干行：\n用户要批的是\"这份东西没了\"，只给路径他得先去翻一遍文件才敢点。\n读不到正文时（刚被别人删掉、太大不值得读）`lines` 为 0、\n`preview` 为空，界面只显示路径。",
+          "properties": {
+            "kind": {
+              "const": "file_delete",
+              "type": "string"
+            },
+            "lines": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "path": {
+              "type": "string"
+            },
+            "preview": {
+              "type": "string"
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "path",
+            "preview",
+            "lines",
+            "truncated"
+          ],
+          "type": "object"
+        },
+        {
           "properties": {
             "kind": {
               "const": "network_fetch",

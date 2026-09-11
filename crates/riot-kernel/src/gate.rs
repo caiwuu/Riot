@@ -24,7 +24,7 @@ use riot_protocol::permission::{
     PermissionRule, SafetyVerdict,
 };
 use riot_protocol::text::UiText;
-use riot_protocol::tool::Tool;
+use riot_protocol::tool::{FileSystem, Tool};
 use riot_protocol::ui_text;
 
 use crate::session::SessionSink;
@@ -166,6 +166,9 @@ pub(crate) struct HostGate {
     /// [`riot_protocol::permission::NoClassifier`]（永远 Hold），
     /// Auto 模式于是退化成 Default —— 不会静默放行。
     pub(crate) classifier: Arc<dyn riot_protocol::permission::SafetyClassifier>,
+    /// 弹窗预览要读盘：Delete 的预览是**要删掉的正文**前若干行，只给
+    /// 路径等于让用户盲签。和工具用的是同一个抽象，不在这里直接碰 std::fs。
+    pub(crate) fs: Arc<dyn FileSystem>,
 }
 
 #[async_trait::async_trait]
@@ -418,7 +421,7 @@ impl HostGate {
             // 后台子 agent 的工具带归属（见 subagent::Attributed）；前端拿它
             // 画"后台任务「x」"前缀。summary 是词典键，拼不进去。
             agent_label: tool.agent_label().map(str::to_owned),
-            preview: preview_of(tool, input, &self.cwd),
+            preview: preview_of(tool, input, &self.cwd, self.fs.as_ref()).await,
             suggestions: spec.suggestions,
             reason: spec.reason,
         };
@@ -637,10 +640,14 @@ impl HostGate {
 }
 
 /// 弹窗预览：把工具入参变成用户看得懂的形状。
-pub(crate) fn preview_of(
+///
+/// 只有 Delete 一支要读盘（要删的正文还在磁盘上，入参里没有）；其余都从
+/// 入参现算。读不到就退回只有路径的预览，不因此拒绝弹窗。
+pub(crate) async fn preview_of(
     tool: &dyn Tool,
     input: &serde_json::Value,
     cwd: &std::path::Path,
+    fs: &dyn FileSystem,
 ) -> AskPreview {
     match tool.name() {
         "Bash" => AskPreview::Command {
@@ -656,20 +663,39 @@ pub(crate) fn preview_of(
                 .get("content")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            // 前 40 行够看清"要写个什么东西"，又不至于把整个文件铺进弹窗。
-            const MAX_LINES: usize = 40;
-            let total = content.lines().count();
-            let truncated = total > MAX_LINES;
-            let preview = content
-                .lines()
-                .take(MAX_LINES)
-                .collect::<Vec<_>>()
-                .join("\n");
+            let (preview, lines, truncated) = head_lines(content);
             AskPreview::FileWrite {
                 path: tool.target_path(input).unwrap_or_default(),
                 bytes: content.len() as u64,
                 preview,
-                lines: total as u64,
+                lines,
+                truncated,
+            }
+        }
+        // 要删的正文不在入参里，得去盘上读。读不到（刚被别人删了、超过
+        // 切片上限不值得读、二进制）就只给路径 —— 工具的 validate_input
+        // 本来会把目录 / 二进制拦在弹窗之前，这里只是兜底。
+        name if name == riot_tools::tools::names::DELETE => {
+            let path = tool.target_path(input).unwrap_or_default();
+            let abs = if path.is_absolute() {
+                path.clone()
+            } else {
+                cwd.join(&path)
+            };
+            let content = match fs.metadata(&abs).await {
+                Ok(m) if !m.is_dir && m.len <= crate::checkpoint::MAX_SNAPSHOT_BYTES as u64 => fs
+                    .read(&abs)
+                    .await
+                    .ok()
+                    .and_then(|b| String::from_utf8(b).ok())
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            let (preview, lines, truncated) = head_lines(&content);
+            AskPreview::FileDelete {
+                path,
+                preview,
+                lines,
                 truncated,
             }
         }
@@ -715,4 +741,19 @@ pub(crate) fn preview_of(
             text: tool.describe(input),
         },
     }
+}
+
+/// 正文前若干行给弹窗：`(预览, 总行数, 是否截断)`。
+///
+/// 前 40 行够看清"是个什么东西"，又不至于把整个文件铺进弹窗。Write 和
+/// Delete 共用 —— 两边的口径（行数怎么数、截到哪）必须一致。
+fn head_lines(content: &str) -> (String, u64, bool) {
+    const MAX_LINES: usize = 40;
+    let total = content.lines().count();
+    let preview = content
+        .lines()
+        .take(MAX_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
+    (preview, total as u64, total > MAX_LINES)
 }

@@ -9,6 +9,7 @@
 pub mod ask;
 pub mod bash;
 pub mod browser;
+pub mod delete;
 pub mod diagnostics;
 pub mod edit;
 #[cfg(any(test, feature = "testing"))]
@@ -37,6 +38,7 @@ pub mod web;
 pub mod write;
 
 pub use bash::Bash;
+pub use delete::Delete;
 pub use edit::Edit;
 pub use glob::Glob;
 pub use grep::Grep;
@@ -91,6 +93,9 @@ pub fn builtin() -> Vec<Arc<dyn Tool>> {
     // 增减，理由见 plan.rs 模块文档），追加在末尾，不动前缀。
     tools.push(Arc::new(mode::SwitchMode));
     tools.push(Arc::new(plan::CreatePlan));
+    // 删文件。和 Write / Edit 一样记基线，回退 / 改动栏才看得见删除 ——
+    // Bash 的 rm 看不见。追加在末尾，不动前缀。
+    tools.push(Arc::new(Delete));
     tools
 }
 

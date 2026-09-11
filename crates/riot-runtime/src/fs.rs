@@ -98,6 +98,12 @@ impl FileSystem for SystemFs {
     async fn canonicalize(&self, path: &Path) -> std::io::Result<PathBuf> {
         tokio::fs::canonicalize(path).await
     }
+
+    async fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+        // 各平台的 remove_file 对目录都报错（Linux EISDIR、macOS EPERM、
+        // Windows 拒绝访问），不会悄悄删空目录 —— 这里不再多判一次。
+        tokio::fs::remove_file(path).await
+    }
 }
 
 async fn existing_mode(path: &Path) -> Option<u32> {
@@ -309,6 +315,24 @@ mod tests {
         assert!(!m.is_dir);
         assert_eq!(m.len, 1);
         assert!(m.mtime_ms > 0, "先读后写协议依赖 mtime");
+    }
+
+    #[tokio::test]
+    async fn 删文件后就不在了_目录不删() {
+        let d = tmpdir();
+        let f = d.join("a.txt");
+        let fs = SystemFs::new();
+        fs.write(&f, b"x").await.expect("写");
+
+        fs.remove_file(&f).await.expect("删");
+        assert!(!f.exists());
+
+        // 目录不该被这条接口删掉 —— 递归删的东西记不进基线
+        fs.remove_file(&d).await.expect_err("目录要报错");
+        assert!(d.exists(), "目录还在");
+
+        let e = fs.remove_file(&f).await.expect_err("再删要报不存在");
+        assert_eq!(e.kind(), std::io::ErrorKind::NotFound);
     }
 
     #[tokio::test]

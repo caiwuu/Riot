@@ -3455,6 +3455,7 @@ impl Session {
             ),
             hooks: Arc::clone(&hook_engine),
             classifier: Arc::clone(&caps.classifier),
+            fs: Arc::new(SystemFs::new()),
         });
 
         // 本轮的工具 = 内置 + 子 agent + 外部（MCP、Skill）。
@@ -4432,8 +4433,8 @@ mod tests {
     ///
     /// 退回 Plain 的话界面上是一行 describe 文本、没有按钮 —— 用户只能
     /// 点"跳过"，而模型在等一个选择。
-    #[test]
-    fn 提问工具的预览是带选项的_choice() {
+    #[tokio::test]
+    async fn 提问工具的预览是带选项的_choice() {
         let input = serde_json::json!({
             "question": "缓存放哪？",
             "options": [
@@ -4446,7 +4447,9 @@ mod tests {
             &riot_tools::tools::ask::AskUserQuestion,
             &input,
             std::path::Path::new("/tmp"),
-        );
+            &SystemFs::new(),
+        )
+        .await;
         let AskPreview::Choice {
             question,
             options,
@@ -4907,6 +4910,7 @@ mod tests {
             ask_timeout: Duration::from_secs(2),
             hooks: Arc::new(crate::hooks::HookEngine::from_config_json(hooks, &s.cwd)),
             classifier: Arc::new(riot_protocol::permission::NoClassifier),
+            fs: Arc::new(SystemFs::new()),
         }
     }
 
@@ -5318,6 +5322,7 @@ mod tests {
             ask_timeout: Duration::from_secs(60),
             hooks: Arc::new(crate::hooks::HookEngine::empty()),
             classifier: Arc::new(riot_protocol::permission::NoClassifier),
+            fs: Arc::new(SystemFs::new()),
         });
 
         let scheduler = s.build_scheduler(
@@ -7517,8 +7522,8 @@ mod tests {
         assert_eq!(title_excerpt(&long).map(|t| t.chars().count()), Some(40));
     }
 
-    #[test]
-    fn bash_的预览是命令本身() {
+    #[tokio::test]
+    async fn bash_的预览是命令本身() {
         let tools = riot_tools::tools::builtin();
         let bash = tools
             .iter()
@@ -7529,10 +7534,63 @@ mod tests {
             bash.as_ref(),
             &serde_json::json!({ "command": "rm -rf build" }),
             std::path::Path::new("/w"),
-        );
+            &SystemFs::new(),
+        )
+        .await;
         match p {
             AskPreview::Command { command, .. } => assert_eq!(command, "rm -rf build"),
             other => panic!("弹窗必须显示完整命令，否则用户是在盲签：{other:?}"),
+        }
+    }
+
+    /// 删文件的弹窗要把**要删掉的正文**摆出来。入参里只有路径，正文得
+    /// 去盘上读 —— 只显示路径等于让用户盲签一次删除。
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)]
+    async fn delete_的预览带正文前几行() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let file = dir.path().join("old.rs");
+        tokio::fs::write(&file, "fn a() {}\nfn b() {}\nfn c() {}\n")
+            .await
+            .expect("写");
+
+        let p = preview_of(
+            &riot_tools::tools::Delete,
+            &serde_json::json!({ "path": "old.rs" }),
+            dir.path(),
+            &SystemFs::new(),
+        )
+        .await;
+        match p {
+            AskPreview::FileDelete {
+                path,
+                preview,
+                lines,
+                truncated,
+            } => {
+                assert_eq!(path, std::path::PathBuf::from("old.rs"));
+                assert_eq!(lines, 3);
+                assert!(!truncated);
+                assert!(preview.contains("fn b() {}"), "{preview}");
+            }
+            other => panic!("该是 FileDelete：{other:?}"),
+        }
+
+        // 文件已经不在了：不因此拒绝弹窗，退回只有路径的预览
+        tokio::fs::remove_file(&file).await.expect("删");
+        let p = preview_of(
+            &riot_tools::tools::Delete,
+            &serde_json::json!({ "path": "old.rs" }),
+            dir.path(),
+            &SystemFs::new(),
+        )
+        .await;
+        match p {
+            AskPreview::FileDelete { lines, preview, .. } => {
+                assert_eq!(lines, 0);
+                assert!(preview.is_empty());
+            }
+            other => panic!("该是 FileDelete：{other:?}"),
         }
     }
 
@@ -7876,6 +7934,81 @@ mod tests {
                 .iter()
                 .any(|(p, b)| p == &n && b.is_none()),
             "前进要把回退时摘掉的基线补回来，不然改动栏里它没了：{:?}",
+            s.file_state.baselines()
+        );
+    }
+
+    /// Delete 工具删掉的文件要能回退回来、再前进又删掉 —— 这就是它相对
+    /// `rm` 存在的全部理由。两条路都走：切片里有它（早先轮次碰过）和
+    /// 切片里没有它（这一轮第一次碰就是删）。
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)]
+    async fn delete_工具删的文件能回退也能前进() {
+        let (s, dir) = compact_session();
+        // 工具记基线用的是 canonicalize 过的路径（macOS 的 /var → /private/var），
+        // 这里的期望值要按同一口径拼，否则比的是两个字面不同的同一文件。
+        let root = tokio::fs::canonicalize(dir.path()).await.unwrap();
+        let seen = root.join("seen.rs");
+        let fresh = root.join("fresh.rs");
+        tokio::fs::write(&seen, "seen-c\n").await.unwrap();
+        tokio::fs::write(&fresh, "fresh-v0\n").await.unwrap();
+        // seen.rs 早先轮次改过：有基线，进 u1 的切片
+        s.file_state
+            .note_baseline(seen.clone(), Some("seen-v0\n".into()));
+        if let Some(p) = &s.persist {
+            p.log.append(&hist_user("u1", "C"));
+            p.log.append(&hist_assistant("a1", "答 C"));
+            p.log.append(&hist_user("u2", "D"));
+            p.log.flush().await;
+        }
+        s.capture_checkpoint("u1").await;
+
+        // 用真的 Delete 工具删两个文件，文件状态用会话那份
+        let ctx = riot_protocol::tool::ToolContext {
+            cwd: root.clone(),
+            file_state: s.file_state_for_tools(),
+            ..tool_ctx()
+        };
+        for f in ["seen.rs", "fresh.rs"] {
+            let out = riot_tools::tools::Delete
+                .call(serde_json::json!({ "path": f }), ctx.clone())
+                .await;
+            assert!(!out.is_error(), "{out:?}");
+        }
+        assert!(!seen.exists() && !fresh.exists());
+        assert!(
+            s.file_state
+                .baselines()
+                .iter()
+                .any(|(p, b)| p == &fresh && b.as_deref() == Some("fresh-v0\n")),
+            "删除要把删前正文记成基线：{:?}",
+            s.file_state.baselines()
+        );
+
+        let result = s.restore("u1").await.expect("restore");
+        assert!(result.failed.is_empty(), "{result:?}");
+        assert_eq!(
+            tokio::fs::read_to_string(&seen).await.unwrap(),
+            "seen-c\n",
+            "切片里的文件回到提问时的样子"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(&fresh).await.unwrap(),
+            "fresh-v0\n",
+            "切片之后才第一次碰到的文件回到会话 v0"
+        );
+        assert!(s.redo_available());
+
+        let redone = s.redo().await.expect("redo");
+        assert!(redone.failed.is_empty(), "{redone:?}");
+        assert!(!seen.exists(), "前进要把删除重做回去");
+        assert!(!fresh.exists(), "前进要把删除重做回去");
+        assert!(
+            s.file_state
+                .baselines()
+                .iter()
+                .any(|(p, b)| p == &fresh && b.as_deref() == Some("fresh-v0\n")),
+            "前进后基线还在，改动栏才继续显示「已删除」：{:?}",
             s.file_state.baselines()
         );
     }

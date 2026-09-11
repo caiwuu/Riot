@@ -267,7 +267,8 @@ const PlainToolCard = memo(function PlainToolCard({
   const [near, setNear] = useState(eager);
   // 图片结果（截图、读图）默认展开：截图的意义就是给人看，藏在"展开"
   // 后面的话用户不知道图已经在这里了，会转头让模型"把图贴出来"。
-  // Edit / Write 也默认展开：用户要看的就是改了什么、写了什么。
+  // Edit / Write 也默认展开：用户要看的就是改了什么、写了什么。Delete 同理，
+  // 一个文件没了不该藏在折叠后面。
   // 文本结果维持默认折叠 —— 一次 cargo build 的输出会把对话冲走。
   //
   // TodoWrite 刻意**不**默认展开：进度由输入框上方的常驻面板就地更新，
@@ -278,7 +279,8 @@ const PlainToolCard = memo(function PlainToolCard({
     userToggle ??
     (Boolean(tool.resultImage || tool.resultImagePath) ||
       tool.name === "Edit" ||
-      tool.name === "Write");
+      tool.name === "Write" ||
+      tool.name === "Delete");
   const detail = hasDetail(tool);
   const summary = summarize(tool);
 
@@ -406,6 +408,7 @@ export function summarize(tool: Tool): string {
     case "Read":
     case "Write":
     case "Edit":
+    case "Delete":
     case "PreviewFile":
       return short(str("path") || str("file_path"));
     case "Grep":

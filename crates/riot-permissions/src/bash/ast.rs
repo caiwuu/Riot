@@ -126,7 +126,7 @@ impl ComplexReason {
 ///
 /// `[约束]` 往这里加节点前先问:这个节点的内容在**解析时**就完全确定吗?
 /// 只要答案是"取决于运行时环境",就不能加。
-static ALLOWED_NODES: &[&str] = &[
+pub(super) static ALLOWED_NODES: &[&str] = &[
     "program",
     "command",
     "command_name",
@@ -164,7 +164,7 @@ static ALLOWED_NODES: &[&str] = &[
 ///
 /// `&`（后台执行）**不在**这里 —— 它是匿名的,漏掉它的话
 /// `npm test &` 会被当成普通的 `npm test`。
-static ALLOWED_ANON: &[&str] = &["&&", "||", "|", ";", ";;", "\n", "\"", "'", "=", "|&"];
+pub(super) static ALLOWED_ANON: &[&str] = &["&&", "||", "|", ";", ";;", "\n", "\"", "'", "=", "|&"];
 
 /// 会改变动态链接、命令查找或分词行为的环境变量。
 ///
@@ -618,7 +618,10 @@ fn snippet(node: tree_sitter::Node, src: &[u8]) -> String {
 ///
 /// 这个函数的正确性依赖于 `scan_forbidden` 已经拦掉了所有控制流结构。
 /// 往 [`ALLOWED_NODES`] 加节点时要重新想一遍这条依赖。
-fn collect_commands(
+///
+/// `effects` 也用它（自己先做等价的白名单扫描）—— 那边要的是带重定向的
+/// 命令里的子命令，而 [`analyze`] 对普通重定向整体返回 `TooComplex`。
+pub(super) fn collect_commands(
     node: tree_sitter::Node,
     src: &[u8],
     out: &mut Vec<SubCommand>,

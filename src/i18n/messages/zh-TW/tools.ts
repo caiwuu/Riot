@@ -77,6 +77,8 @@ export default {
   "tools.edit.any": "修改檔案",
   "tools.write.file": "寫入 {path}",
   "tools.write.any": "寫入檔案",
+  "tools.delete.file": "刪除 {path}",
+  "tools.delete.any": "刪除檔案",
   "tools.glob.in": "在 {path} 裡尋找 {pattern}",
   "tools.glob.find": "尋找 {pattern}",
   "tools.grep.in": "在 {glob} 裡搜尋 {pattern}",

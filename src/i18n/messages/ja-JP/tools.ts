@@ -76,6 +76,8 @@ export default {
   "tools.edit.any": "ファイルを変更",
   "tools.write.file": "{path} を書き込み",
   "tools.write.any": "ファイルを書き込み",
+  "tools.delete.file": "{path} を削除",
+  "tools.delete.any": "ファイルを削除",
   "tools.glob.in": "{path} 内で {pattern} を検索",
   "tools.glob.find": "{pattern} を検索",
   "tools.grep.in": "{glob} 内で {pattern} を検索",

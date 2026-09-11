@@ -367,6 +367,33 @@ function Preview({ preview }: { preview: PermissionAsk["preview"] }) {
         </div>
       );
 
+    case "file_delete":
+      return (
+        <div className="preview">
+          <div className="preview-label">
+            {preview.lines > 0
+              ? t("transcript.preview.deleteFile", { lines: preview.lines })
+              : t("transcript.preview.deleteFileNoCount")}
+          </div>
+          <pre className="preview-cmd">{preview.path}</pre>
+          {/* 要删掉的正文前 N 行，整段标红 —— 只给路径等于让用户盲签一次删除。 */}
+          {preview.preview ? (
+            <pre className="preview-diff">
+              {preview.preview.split("\n").map((line, i) => (
+                <div key={i} className="del">
+                  - {line}
+                </div>
+              ))}
+              {preview.truncated ? (
+                <div className="preview-more">
+                  {tn("transcript.preview.truncated", preview.lines)}
+                </div>
+              ) : null}
+            </pre>
+          ) : null}
+        </div>
+      );
+
     case "file_edit":
       return (
         <div className="preview">

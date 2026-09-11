@@ -160,12 +160,28 @@ impl FileSystem for MemFs {
         }
         Err(not_found(path))
     }
+
+    async fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+        let mut g = self.inner.lock().expect("锁未中毒");
+        // 和真实文件系统一致：目录报错，不递归
+        if g.dirs.iter().any(|d| d == path) {
+            return Err(std::io::Error::other(format!("{} 是目录", path.display())));
+        }
+        if g.files.remove(path).is_none() {
+            return Err(not_found(path));
+        }
+        Ok(())
+    }
 }
 
 /// 内存版 [`FileStateCache`]。
+///
+/// 基线也记：Write / Edit / Delete 的测试要断言"改动前的样子记对了没有"，
+/// 而 trait 的默认实现是空的。规矩和宿主那份一样 —— 只有第一次算数。
 #[derive(Default)]
 pub struct MemFileState {
     inner: Mutex<Vec<(PathBuf, FileState)>>,
+    baseline: Mutex<Vec<(PathBuf, Option<String>)>>,
 }
 
 impl MemFileState {
@@ -175,6 +191,24 @@ impl MemFileState {
 }
 
 impl FileStateCache for MemFileState {
+    fn note_baseline(&self, path: PathBuf, before: Option<String>) {
+        let mut g = self.baseline.lock().expect("锁未中毒");
+        if !g.iter().any(|(p, _)| p == &path) {
+            g.push((path, before));
+        }
+    }
+
+    fn baselines(&self) -> Vec<(PathBuf, Option<String>)> {
+        self.baseline.lock().expect("锁未中毒").clone()
+    }
+
+    fn forget_baseline(&self, path: &Path) {
+        self.baseline
+            .lock()
+            .expect("锁未中毒")
+            .retain(|(p, _)| p != path);
+    }
+
     fn get(&self, path: &Path) -> Option<FileState> {
         self.inner
             .lock()

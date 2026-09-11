@@ -266,6 +266,12 @@ function sessionListEq(a: SessionInfo[], b: SessionInfo[]): boolean {
 }
 
 /** 两个字符串集合装的是不是同一批东西。 */
+/** 会落基线、改动条要跟着重算的三个文件工具。Bash 刻意不在：它的写入
+ *  / rm 内核本来就看不见，重算一次也是空。 */
+function isFileTool(name: unknown): boolean {
+  return name === "Edit" || name === "Write" || name === "Delete";
+}
+
 function sameSet(a: Set<string>, b: Set<string>): boolean {
   return a.size === b.size && [...a].every((x) => b.has(x));
 }
@@ -2354,19 +2360,13 @@ function Chat({
   // 每有一次编辑工具落盘就递增,改动条跟着重新比对 —— 跑轮当中改动
   // 也要实时长出来,不能等轮子结束才一次性冒出一排文件。
   const editCount = useMemo(
-    () =>
-      session.items.filter(
-        (it) =>
-          it.kind === "tool" &&
-          it.status === "ok" &&
-          (it.name === "Edit" || it.name === "Write"),
-      ).length,
+    () => session.items.filter((it) => it.kind === "tool" && it.status === "ok" && isFileTool(it.name)).length,
     [session.items],
   );
   // 改动条的刷新键。主 agent 的编辑之外还要盯子 agent：它们改的文件也算
-  // 这个会话的（内核把基线记到父会话头上），但它们的 Edit / Write 不进主
-  // 会话的 items —— 主会话只看得到 Task 卡片收尾、后台完成通知，以及任务
-  // 面板里"正在调哪个工具"那一行。只在那一行是 Edit / Write 时把调用计数
+  // 这个会话的（内核把基线记到父会话头上），但它们的 Edit / Write / Delete
+  // 不进主会话的 items —— 主会话只看得到 Task 卡片收尾、后台完成通知，以及
+  // 任务面板里"正在调哪个工具"那一行。只在那一行是文件工具时把调用计数
   // 掺进来：子 agent 翻代码时的几十次 Read 不值得每次都去重算 diff。
   const changesKey = useMemo(() => {
     let n = editCount;
@@ -2376,8 +2376,7 @@ function Chat({
     let sub = "";
     for (const t of session.tasks) {
       const a = t.activity;
-      const editing =
-        a.key === "kernel.task.activity.tool" && (a.args?.name === "Edit" || a.args?.name === "Write");
+      const editing = a.key === "kernel.task.activity.tool" && isFileTool(a.args?.name);
       sub += `${t.id}:${t.status}:${editing ? t.tool_uses : 0};`;
     }
     return `${n}|${sub}`;

@@ -76,6 +76,8 @@ export default {
   "tools.edit.any": "파일 수정",
   "tools.write.file": "{path} 쓰기",
   "tools.write.any": "파일 쓰기",
+  "tools.delete.file": "{path} 삭제",
+  "tools.delete.any": "파일 삭제",
   "tools.glob.in": "{path}에서 {pattern} 찾기",
   "tools.glob.find": "{pattern} 찾기",
   "tools.grep.in": "{glob}에서 {pattern} 검색",

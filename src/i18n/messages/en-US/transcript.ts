@@ -42,7 +42,8 @@ export default {
   "transcript.restore.afterSlice":
     "{count} file(s) were first touched after this prompt and will revert to the session baseline or be deleted.",
   "transcript.restore.skipped": "Skipped: {files}.",
-  "transcript.restore.bashNote": "Files changed via the terminal are not covered.",
+  "transcript.restore.bashNote":
+    "Files changed, created, or deleted via the terminal are not covered — only Write / Edit / Delete are.",
   "transcript.restore.previewFail": "Couldn't preview this restore.",
   "transcript.restore.redo": "Restore to before undo",
   "transcript.restore.partialFail": "Some files could not be written back: {files}",
@@ -185,6 +186,8 @@ export default {
   "transcript.preview.writeFile": "Write file ({lines} lines · {bytes} bytes)",
   "transcript.preview.truncated": "… {count} lines total, showing the beginning",
   "transcript.preview.editFile": "Edit {path}",
+  "transcript.preview.deleteFile": "Delete file ({lines} lines)",
+  "transcript.preview.deleteFileNoCount": "Delete file",
   "transcript.preview.network": "Network access",
 
   "transcript.ask.ariaLabel": "Your decision is needed",

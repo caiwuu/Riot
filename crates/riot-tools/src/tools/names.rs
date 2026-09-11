@@ -13,6 +13,7 @@
 pub const READ: &str = "Read";
 pub const WRITE: &str = "Write";
 pub const EDIT: &str = "Edit";
+pub const DELETE: &str = "Delete";
 pub const GREP: &str = "Grep";
 pub const GLOB: &str = "Glob";
 
@@ -128,6 +129,7 @@ mod tests {
             READ,
             WRITE,
             EDIT,
+            DELETE,
             GREP,
             GLOB,
             BASH,

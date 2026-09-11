@@ -278,6 +278,9 @@ impl FileSystem for NullFs {
     async fn canonicalize(&self, _path: &Path) -> std::io::Result<PathBuf> {
         refuse("解析路径")
     }
+    async fn remove_file(&self, _path: &Path) -> std::io::Result<()> {
+        refuse("删文件")
+    }
 }
 
 pub struct NullProc;

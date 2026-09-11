@@ -226,6 +226,12 @@ pub enum UiPayload {
         bytes: u64,
         created: bool,
     },
+    /// 删掉了一个文件。`lines` 是删之前的行数 —— 改动栏 / 回退按基线
+    /// 还能找回它，这里只给界面一个量级。
+    FileDelete {
+        path: PathBuf,
+        lines: usize,
+    },
     BashOutput {
         stdout: String,
         stderr: String,
@@ -447,6 +453,9 @@ pub trait FileSystem: Send + Sync {
     async fn metadata(&self, path: &std::path::Path) -> std::io::Result<FileMeta>;
     async fn read_dir(&self, path: &std::path::Path) -> std::io::Result<Vec<PathBuf>>;
     async fn canonicalize(&self, path: &std::path::Path) -> std::io::Result<PathBuf>;
+    /// 删一个**文件**。目录要报错（`IsADirectory` 或平台等价物），不递归 ——
+    /// 递归删掉的东西没有任何一层能记进基线，回退找不回来。
+    async fn remove_file(&self, path: &std::path::Path) -> std::io::Result<()>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

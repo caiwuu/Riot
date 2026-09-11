@@ -359,6 +359,16 @@ pub enum AskPreview {
         lines: u64,
         truncated: bool,
     },
+    /// 删整个文件。和 [`Self::FileWrite`] 同一个理由带正文前若干行：
+    /// 用户要批的是"这份东西没了"，只给路径他得先去翻一遍文件才敢点。
+    /// 读不到正文时（刚被别人删掉、太大不值得读）`lines` 为 0、
+    /// `preview` 为空，界面只显示路径。
+    FileDelete {
+        path: PathBuf,
+        preview: String,
+        lines: u64,
+        truncated: bool,
+    },
     NetworkFetch {
         url: String,
     },

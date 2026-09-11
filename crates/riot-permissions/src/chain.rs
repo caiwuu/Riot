@@ -337,6 +337,11 @@ fn coerce_ask(result: PermissionResult, ctx: &PermissionContext) -> PermissionRe
     }
 }
 
+/// acceptEdits 自动放行的那一档：改内容、建文件。
+///
+/// `Delete` 刻意不在这里。删文件比改文件重一档 —— 用户开 acceptEdits 想的
+/// 是"改动别一条条问我"，不是"文件消失也别问"。Cursor 的自动运行模式同样
+/// 把删除单独保护。要免问得用户自己写 allow 规则。
 fn is_edit_tool(tool: &dyn Tool) -> bool {
     matches!(tool.name(), "Edit" | "Write" | "MultiEdit" | "NotebookEdit")
 }
@@ -997,7 +1002,12 @@ mod tests {
             ("Write", "/work/.riot/hooks.json"),
             ("Bash", "/work/.riot/plans/x.md"),
         ] {
-            let r = decide(&PermTool::writer(tool), &input(path), &ctx, &RuleSet::default());
+            let r = decide(
+                &PermTool::writer(tool),
+                &input(path),
+                &ctx,
+                &RuleSet::default(),
+            );
             assert_ne!(behavior(&r), "allow", "{tool} {path} 不该放行：{r:?}");
         }
     }
@@ -1038,6 +1048,18 @@ mod tests {
             )),
             "ask",
             "acceptEdits 是自动接受编辑，不是自动接受一切"
+        );
+        // 删文件比改文件重一档。用户开 acceptEdits 想的是"改动别一条条问我"，
+        // 不是"文件消失也别问" —— Cursor 的自动运行同样把删除单独保护。
+        assert_eq!(
+            behavior(&decide(
+                &PermTool::writer("Delete"),
+                &input("/work/a.rs"),
+                &ctx,
+                &RuleSet::default()
+            )),
+            "ask",
+            "acceptEdits 不放行 Delete"
         );
     }
 
