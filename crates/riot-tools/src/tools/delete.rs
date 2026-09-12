@@ -1,10 +1,12 @@
 //! Delete 工具。
 //!
 //! 删除一个文件。它存在的理由不是"模型没法删文件"—— Bash 的 `rm` 一直
-//! 可以 —— 而是**回退**：检查点切片、改动栏、Restore / Redo 都只认工具层
-//! 记下的基线（[`FileStateCache::note_baseline`]），`rm` 走 shell，那边
-//! 看不见。照 Cursor 的做法：编辑器工具（Write / Edit / Delete）碰过的
-//! 文件进检查点，终端里的增删明确不覆盖，也不去监控整个工作区补漏。
+//! 可以 —— 而是**回退**和**确认**：检查点切片、改动栏、Restore / Redo 都
+//! 认工具层记下的基线（[`FileStateCache::note_baseline`]）；`rm` 只有按
+//! 字面写出路径时才被 `bash_effects` 顺带记上，而且弹窗里只有一行命令，
+//! acceptEdits 下还可能被规则放行。Delete 把要删的正文摆进弹窗、永不自动
+//! 放行。照 Cursor 的做法：编辑器工具（Write / Edit / Delete）碰过的文件
+//! 进检查点，终端改动只做字面比对，不监控整个工作区补漏。
 //!
 //! `[约束]` 只删**单个文本文件**，不删目录、不删二进制。基线是
 //! `Option<String>`，二进制放不进去；塞一份 lossy 文本进去，回退写回的
@@ -64,8 +66,8 @@ impl Tool for Delete {
              - Deletes exactly one existing **text file**. Directories and binary files \
              are rejected; the call fails and nothing is removed.\n\
              - The file's content is recorded before deletion, so the deletion shows up \
-             in the session's change list and is undone by a checkpoint restore. A \
-             shell `rm` is invisible to both.\n\
+             in the session's change list and is undone by a checkpoint restore. The \
+             user is shown the content being removed and must approve it.\n\
              - No prior read is required, but do not delete a file you have not looked \
              at unless the user explicitly named it.\n\
              \n\

@@ -42,7 +42,7 @@ export default {
     "この質問の後に初めて触ったファイルが {count} 個あり、セッション開始時に戻すか削除します。",
   "transcript.restore.skipped": "スキップ：{files}。",
   "transcript.restore.bashNote":
-    "ターミナル経由で変更・作成・削除したファイルはこの回退では見えません。対象は Write / Edit / Delete が触ったものだけです。",
+    "ターミナルコマンドはパスを明示した cp / mv / rm / touch / リダイレクトのみ対象です。スクリプトやジェネレーター、npm install が変更したファイルはこの回退では見えません。",
   "transcript.restore.previewFail": "この回退をプレビューできませんでした。",
   "transcript.restore.redo": "回退前に戻す",
   "transcript.restore.partialFail": "書き戻せなかったファイルがあります：{files}",

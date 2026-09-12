@@ -618,10 +618,7 @@ fn snippet(node: tree_sitter::Node, src: &[u8]) -> String {
 ///
 /// 这个函数的正确性依赖于 `scan_forbidden` 已经拦掉了所有控制流结构。
 /// 往 [`ALLOWED_NODES`] 加节点时要重新想一遍这条依赖。
-///
-/// `effects` 也用它（自己先做等价的白名单扫描）—— 那边要的是带重定向的
-/// 命令里的子命令，而 [`analyze`] 对普通重定向整体返回 `TooComplex`。
-pub(super) fn collect_commands(
+fn collect_commands(
     node: tree_sitter::Node,
     src: &[u8],
     out: &mut Vec<SubCommand>,
@@ -643,7 +640,9 @@ pub(super) fn collect_commands(
     Ok(())
 }
 
-fn parse_command(node: tree_sitter::Node, src: &[u8]) -> Result<SubCommand, Complexity> {
+/// 一个 `command` 节点 → 子命令。`effects` 也用它（自己先做等价的白名单
+/// 扫描）—— 那边要按位置和重定向配对，所以自己遍历、只借这一步。
+pub(super) fn parse_command(node: tree_sitter::Node, src: &[u8]) -> Result<SubCommand, Complexity> {
     let mut assignments = Vec::new();
     let mut name = String::new();
     let mut args: Vec<String> = Vec::new();

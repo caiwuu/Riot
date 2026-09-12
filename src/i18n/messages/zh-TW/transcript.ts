@@ -39,7 +39,8 @@ export default {
   "transcript.restore.dirty": "上次完成後磁碟又被改過，這些手改也會被覆蓋。",
   "transcript.restore.afterSlice": "另有 {count} 個檔案是這則之後才第一次改到的，會回到工作階段開始時或刪除。",
   "transcript.restore.skipped": "跳過：{files}。",
-  "transcript.restore.bashNote": "用終端機改過、新建或刪掉的檔案這次回退看不到，只有 Write / Edit / Delete 動過的算。",
+  "transcript.restore.bashNote":
+    "終端機命令只認寫明路徑的 cp / mv / rm / touch / 重新導向；腳本、產生器、npm install 之類改的檔案這次回退看不到。",
   "transcript.restore.previewFail": "沒辦法預覽這次回退。",
   "transcript.restore.redo": "恢復到回退前",
   "transcript.restore.partialFail": "有些檔案沒寫回去：{files}",

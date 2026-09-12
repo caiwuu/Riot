@@ -15,7 +15,13 @@
 //! | `cp` / `mv` 的源和目标 | 变量、命令替换、进程替换 |
 //! | `touch` / `tee` / `sed -i` 的文件参数 | 未加引号的 glob / `~`（只放弃那一条子命令）|
 //! | `rm` 的参数 | 控制流、函数、后台 `&` |
-//! | `>` / `>>` / `&>` / `2>` 的目标 | `cd`（相对路径的基准变了）|
+//! | `>` / `>>` / `&>` / `2>` 的目标 | `pushd` / `popd`、带选项或无参数的 `cd` |
+//! | 字面路径的 `cd`：之后的相对路径都拼上它 | |
+//!
+//! `cd <目录> && cmd` 是模型最常用的写法之一（它不信任工作目录），整条放弃
+//! 的话这一大类命令全漏。所以按出现顺序维护一个"当前目录"：`cd` 的参数
+//! 是字面量就接上去，后面命令和重定向里的相对路径都以它为基准。`cd` 带
+//! 选项、没参数（回家）、`cd -`、`pushd` / `popd` 仍然整条放弃。
 //!
 //! `[约束]` 宁可漏记，不能记错。记错一条基线，回退会按它去改一个不该动的
 //! 文件；漏记只是回到"终端改动看不见"的老样子。所以任何一个看不懂的结构
@@ -75,8 +81,8 @@ const REDIRECT_NODES: &[&str] = &[
     "<<<",
 ];
 
-/// 会改变相对路径基准的内建命令。出现就整条放弃。
-const CWD_CHANGERS: &[&str] = &["cd", "pushd", "popd"];
+/// 一条命令最多拆多少个子命令。和 [`ast::analyze`] 同一个上限。
+const MAX_SUB_COMMANDS: usize = 50;
 
 /// 一条命令的候选文件效应。看不懂就是空。
 pub fn file_effects(command: &str) -> Vec<FileOp> {
@@ -99,32 +105,106 @@ pub fn file_effects(command: &str) -> Vec<FileOp> {
     }
     let src = command.as_bytes();
 
-    let mut redirects = Vec::new();
-    if !scan(root, src, &mut redirects) {
+    // 子命令和重定向按在命令文本里的位置排成一列：`cd` 只影响它后面的。
+    let mut events = Vec::new();
+    if !scan(root, src, &mut events) {
         return Vec::new();
     }
-
-    let mut subs = Vec::new();
-    if ast::collect_commands(root, src, &mut subs).is_err() {
-        return Vec::new();
-    }
-    if subs
+    if events
         .iter()
-        .any(|s| CWD_CHANGERS.contains(&basename(&ast::unquote(&s.name))))
+        .filter(|(_, e)| matches!(e, Event::Cmd(_)))
+        .count()
+        > MAX_SUB_COMMANDS
     {
         return Vec::new();
     }
+    events.sort_by_key(|(pos, _)| *pos);
 
-    let mut ops: Vec<FileOp> = redirects.into_iter().map(FileOp::Write).collect();
-    for sub in &subs {
-        ops.extend(ops_of(sub));
+    let mut base: Option<String> = None;
+    let mut ops = Vec::new();
+    for (_, ev) in events {
+        match ev {
+            Event::Redirect(target) => ops.push(FileOp::Write(rebase(base.as_deref(), &target))),
+            Event::Cmd(sub) => {
+                let name = ast::unquote(&sub.name);
+                match basename(&name) {
+                    "cd" => match cd_target(&sub) {
+                        Some(dir) => base = Some(rebase(base.as_deref(), &dir)),
+                        None => return Vec::new(),
+                    },
+                    "pushd" | "popd" => return Vec::new(),
+                    _ => ops.extend(
+                        ops_of(&sub)
+                            .into_iter()
+                            .map(|op| op.rebased(base.as_deref())),
+                    ),
+                }
+            }
+        }
     }
     ops
 }
 
-/// 全树白名单扫描（含匿名节点），顺手收集写文件的重定向目标。
-/// 返回 false = 有看不懂的结构，整条放弃。
-fn scan(root: tree_sitter::Node, src: &[u8], redirects: &mut Vec<String>) -> bool {
+enum Event {
+    Cmd(SubCommand),
+    Redirect(String),
+}
+
+impl FileOp {
+    fn rebased(self, base: Option<&str>) -> FileOp {
+        match self {
+            FileOp::Write(p) => FileOp::Write(rebase(base, &p)),
+            FileOp::Remove(p) => FileOp::Remove(rebase(base, &p)),
+            FileOp::Transfer {
+                sources,
+                dest,
+                moves,
+            } => FileOp::Transfer {
+                sources: sources.iter().map(|s| rebase(base, s)).collect(),
+                dest: rebase(base, &dest),
+                moves,
+            },
+        }
+    }
+}
+
+/// 相对路径拼上当前 `cd` 到的目录；绝对路径和没 `cd` 过的原样。
+fn rebase(base: Option<&str>, path: &str) -> String {
+    match base {
+        Some(b) if !is_absolute(path) => {
+            let sep = if b.ends_with('/') || b.ends_with('\\') {
+                ""
+            } else {
+                "/"
+            };
+            format!("{b}{sep}{path}")
+        }
+        _ => path.to_owned(),
+    }
+}
+
+fn is_absolute(p: &str) -> bool {
+    p.starts_with('/')
+        || p.starts_with('\\')
+        // `D:/proj`、`D:\proj`（Git Bash 两种都收）
+        || (p.len() >= 2 && p.as_bytes()[1] == b':' && p.as_bytes()[0].is_ascii_alphabetic())
+}
+
+/// `cd` 的字面目标。带选项、没参数（回家）、`cd -`、多个参数都看不懂。
+fn cd_target(sub: &SubCommand) -> Option<String> {
+    if sub.has_unquoted_glob {
+        return None;
+    }
+    let args: Vec<String> = sub.args.iter().map(|a| ast::unquote(a)).collect();
+    match args.as_slice() {
+        [dir] if !dir.is_empty() && !dir.starts_with('-') => Some(dir.clone()),
+        _ => None,
+    }
+}
+
+/// 全树白名单扫描（含匿名节点），顺手把子命令和写文件的重定向按位置
+/// 收起来。返回 false = 有看不懂的结构，整条放弃。
+fn scan(root: tree_sitter::Node, src: &[u8], events: &mut Vec<(usize, Event)>) -> bool {
     let mut stack = vec![root];
     let mut cur = root.walk();
     while let Some(node) = stack.pop() {
@@ -137,14 +217,25 @@ fn scan(root: tree_sitter::Node, src: &[u8], redirects: &mut Vec<String>) -> boo
         if !allowed {
             return false;
         }
-        if kind == "file_redirect" {
-            match redirect_target(node, src) {
-                Ok(Some(target)) => redirects.push(target),
-                Ok(None) => {}
-                Err(()) => return false,
+        match kind {
+            "file_redirect" => {
+                match redirect_target(node, src) {
+                    Ok(Some(target)) => events.push((node.start_byte(), Event::Redirect(target))),
+                    Ok(None) => {}
+                    Err(()) => return false,
+                }
+                // 子节点已经在 redirect_target 里看过了
+                continue;
             }
-            // 子节点已经在 redirect_target 里看过了
-            continue;
+            "command" => {
+                // `eval` / `source` 这类在这里被拒。子节点仍要压栈：参数里的
+                // 展开、替换要靠白名单扫描拦下来。
+                match ast::parse_command(node, src) {
+                    Ok(sub) => events.push((node.start_byte(), Event::Cmd(sub))),
+                    Err(_) => return false,
+                }
+            }
+            _ => {}
         }
         for c in node.children(&mut cur) {
             stack.push(c);
@@ -461,18 +552,66 @@ mod tests {
         );
     }
 
+    /// 模型最常用的写法之一：先 `cd` 到项目目录再干活。后面的相对路径
+    /// 都要拼上它，否则这一大类命令全漏。截图里那条清理命令就是这个形状。
+    #[test]
+    fn 字面_cd_之后的相对路径拼上目录() {
+        assert_eq!(
+            file_effects("cd /Users/u/code && rm -f _a.js _b.txt && echo cleaned"),
+            vec![rm("/Users/u/code/_a.js"), rm("/Users/u/code/_b.txt")]
+        );
+        assert_eq!(
+            file_effects("cd sub && cp a b && echo x > log.txt"),
+            vec![cp(&["sub/a"], "sub/b"), w("sub/log.txt")]
+        );
+        assert_eq!(
+            file_effects("cp a b && cd sub && cp c d"),
+            vec![cp(&["a"], "b"), cp(&["sub/c"], "sub/d")],
+            "cd 只影响它后面的"
+        );
+        assert_eq!(
+            file_effects("cd a && cd b && touch f"),
+            vec![w("a/b/f")],
+            "连续 cd 叠加"
+        );
+        assert_eq!(
+            file_effects("cd sub && cp a /abs/b"),
+            vec![cp(&["sub/a"], "/abs/b")],
+            "绝对路径不拼"
+        );
+        assert_eq!(
+            file_effects("cd 'my dir/' && rm x"),
+            vec![rm("my dir/x")],
+            "目录带尾斜杠不重复加"
+        );
+    }
+
+    #[test]
+    fn 看不懂的_cd_整条放弃() {
+        for cmd in [
+            "cd && rm x",
+            "cd - && rm x",
+            "cd -P sub && rm x",
+            "cd $DIR && rm x",
+            "cd ~/proj && rm x",
+            "pushd sub && rm x",
+        ] {
+            assert_eq!(file_effects(cmd), vec![], "{cmd} 该整条放弃");
+        }
+    }
+
     /// 宁可漏记，不能记错：任何看不懂的结构都让整条命令返回空。
     #[test]
     fn 看不懂的结构整条放弃() {
         for cmd in [
             "cp $SRC b",
             "cp a $(mktemp)",
-            "cp a b && cd sub && cp c d",
             "for f in a b; do cp $f d; done",
             "cp a b &",
             "if [ -f a ]; then cp a b; fi",
             "f() { cp a b; }; f",
             "cp a b > $LOG",
+            "eval 'cp a b'",
         ] {
             assert_eq!(file_effects(cmd), vec![], "{cmd} 该整条放弃");
         }

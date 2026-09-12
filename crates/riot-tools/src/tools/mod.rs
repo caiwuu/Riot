@@ -8,6 +8,7 @@
 
 pub mod ask;
 pub mod bash;
+pub(crate) mod bash_effects;
 pub mod browser;
 pub mod delete;
 pub mod diagnostics;

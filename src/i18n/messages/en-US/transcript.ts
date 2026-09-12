@@ -43,7 +43,7 @@ export default {
     "{count} file(s) were first touched after this prompt and will revert to the session baseline or be deleted.",
   "transcript.restore.skipped": "Skipped: {files}.",
   "transcript.restore.bashNote":
-    "Files changed, created, or deleted via the terminal are not covered — only Write / Edit / Delete are.",
+    "Terminal commands count only when the path is spelled out (cp / mv / rm / touch / redirects); files changed by scripts, generators, or npm install are not covered.",
   "transcript.restore.previewFail": "Couldn't preview this restore.",
   "transcript.restore.redo": "Restore to before undo",
   "transcript.restore.partialFail": "Some files could not be written back: {files}",

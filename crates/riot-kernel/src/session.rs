@@ -8014,6 +8014,170 @@ mod tests {
         );
     }
 
+    /// 用真的 Write 工具新建文件，走一遍真实的轮次收尾（刷 head + gc），
+    /// 再回退 / 前进。上面那条直接 `note_baseline` 的用例绕过了工具层和
+    /// 收尾，这里补的就是那两段。
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)]
+    async fn write_工具新建的文件能回退也能前进() {
+        let (s, dir) = compact_session();
+        let root = tokio::fs::canonicalize(dir.path()).await.unwrap();
+        let n = root.join("sub").join("n.rs");
+        if let Some(p) = &s.persist {
+            p.log.append(&hist_user("u1", "C"));
+            p.log.append(&hist_assistant("a1", "答 C"));
+            p.log.append(&hist_user("u2", "D"));
+            p.log.flush().await;
+        }
+        s.capture_checkpoint("u1").await;
+
+        let ctx = riot_protocol::tool::ToolContext {
+            cwd: root.clone(),
+            file_state: s.file_state_for_tools(),
+            ..tool_ctx()
+        };
+        tokio::fs::create_dir_all(root.join("sub")).await.unwrap();
+        let out = riot_tools::tools::Write
+            .call(
+                serde_json::json!({ "path": "sub/n.rs", "content": "new\n" }),
+                ctx.clone(),
+            )
+            .await;
+        assert!(!out.is_error(), "{out:?}");
+        assert_eq!(tokio::fs::read_to_string(&n).await.unwrap(), "new\n");
+        // 轮次收尾
+        s.write_head_checkpoint().await;
+
+        let result = s.restore("u1").await.expect("restore");
+        assert!(result.failed.is_empty(), "{result:?}");
+        assert!(!n.exists(), "切片之后新建的文件回退时要删掉");
+        assert!(s.redo_available());
+
+        let redone = s.redo().await.expect("redo");
+        assert!(redone.failed.is_empty(), "{redone:?}");
+        assert_eq!(
+            tokio::fs::read_to_string(&n).await.unwrap(),
+            "new\n",
+            "前进要把新建的文件写回来"
+        );
+        assert!(
+            s.file_state
+                .baselines()
+                .iter()
+                .any(|(p, b)| p == &n && b.is_none()),
+            "前进后基线要回来：{:?}",
+            s.file_state.baselines()
+        );
+    }
+
+    /// 用户撞上的原样：模型用 `cp` 复制文件，回退时副本要删掉、前进再回来。
+    /// 真跑 shell —— 被测的正是 Bash 工具前后比对那一段接进会话基线。
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)]
+    async fn bash_cp_出来的文件能回退也能前进() {
+        let (s, dir) = compact_session();
+        let root = tokio::fs::canonicalize(dir.path()).await.unwrap();
+        let src = root.join("caiwu.txt");
+        let copy = root.join("caiwu-copy.txt");
+        tokio::fs::write(&src, "riot-change-test\n").await.unwrap();
+        if let Some(p) = &s.persist {
+            p.log.append(&hist_user("u1", "copy 文件"));
+            p.log.append(&hist_assistant("a1", "已复制"));
+            p.log.append(&hist_user("u2", "D"));
+            p.log.flush().await;
+        }
+        s.capture_checkpoint("u1").await;
+
+        let ctx = riot_protocol::tool::ToolContext {
+            cwd: root.clone(),
+            file_state: s.file_state_for_tools(),
+            ..tool_ctx()
+        };
+        let out = riot_tools::tools::Bash
+            .call(
+                serde_json::json!({
+                    "command": "cp caiwu.txt caiwu-copy.txt && ls -la caiwu*.txt",
+                    "description": "复制"
+                }),
+                ctx,
+            )
+            .await;
+        assert!(!out.is_error(), "{out:?}");
+        assert!(copy.exists());
+        assert!(
+            s.file_state
+                .baselines()
+                .iter()
+                .any(|(p, b)| p == &copy && b.is_none()),
+            "cp 出来的副本要记成新增：{:?}",
+            s.file_state.baselines()
+        );
+        s.write_head_checkpoint().await;
+
+        let result = s.restore("u1").await.expect("restore");
+        assert!(result.failed.is_empty(), "{result:?}");
+        assert!(!copy.exists(), "回退到 cp 之前，副本要删掉");
+        assert!(src.exists(), "源文件没动过，不该受影响");
+
+        let redone = s.redo().await.expect("redo");
+        assert!(redone.failed.is_empty(), "{redone:?}");
+        assert_eq!(
+            tokio::fs::read_to_string(&copy).await.unwrap(),
+            "riot-change-test\n",
+            "前进要把副本写回来"
+        );
+    }
+
+    /// 截图里那条：Write 新建的临时文件被 `cd <目录> && rm -f` 清掉之后，
+    /// 改动栏不该再挂着「新增」。内核这侧的口径是「建了又删等于没动过」——
+    /// 界面那侧靠 Bash 跑完也刷新改动栏来对齐。
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)]
+    async fn write_新建再被_cd_rm_删掉_改动清单里不再有它() {
+        let (s, dir) = compact_session();
+        let root = tokio::fs::canonicalize(dir.path()).await.unwrap();
+        let ctx = riot_protocol::tool::ToolContext {
+            cwd: root.clone(),
+            file_state: s.file_state_for_tools(),
+            ..tool_ctx()
+        };
+        let out = riot_tools::tools::Write
+            .call(
+                serde_json::json!({ "path": "_scratch.js", "content": "tmp\n" }),
+                ctx.clone(),
+            )
+            .await;
+        assert!(!out.is_error(), "{out:?}");
+        assert_eq!(
+            crate::changes::collect(&root, s.file_state.baselines())
+                .await
+                .len(),
+            1,
+            "新建之后改动清单里有它"
+        );
+
+        let out = riot_tools::tools::Bash
+            .call(
+                serde_json::json!({
+                    "command": format!("cd {} && rm -f _scratch.js && echo cleaned", root.display()),
+                    "description": "清理"
+                }),
+                ctx,
+            )
+            .await;
+        assert!(!out.is_error(), "{out:?}");
+        assert!(!root.join("_scratch.js").exists());
+        assert!(
+            crate::changes::collect(&root, s.file_state.baselines())
+                .await
+                .is_empty(),
+            "建了又删等于没动过：{:?}",
+            s.file_state.baselines()
+        );
+    }
+
     #[tokio::test]
     #[allow(clippy::disallowed_methods)]
     async fn 回退后预览不把回退本身当成手改() {

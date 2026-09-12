@@ -142,15 +142,15 @@ impl Tool for Bash {
                  rejected or based on content you never saw.\n"
             ),
         );
-        // 单文件删除同理：shell 的 rm 不记基线，改动栏看不见、回退找不回。
-        // 目录 / 二进制 / 批量仍是 rm 的活 —— Delete 自己的描述里说清了。
+        // 单文件删除走 Delete：弹窗里能看到要删的正文，且 acceptEdits 不自动
+        // 放行。字面路径的 rm 现在也记基线（bash_effects），但目录 / 二进制 /
+        // 批量仍是 rm 的活 —— Delete 自己的描述里说清了。
         let delete_note = sib.line(
             DELETE,
             format!(
-                "- Deleting a single source file. Use {DELETE}: it records the content \
-                 so the removal shows in the change list and is undone by a restore. \
-                 A shell `rm` is invisible to both. `rm` remains the tool for \
-                 directories, binaries, build output, and bulk removal.\n"
+                "- Deleting a single source file. Use {DELETE}: the user sees exactly \
+                 what is being removed and it is never auto-approved. `rm` remains the \
+                 tool for directories, binaries, build output, and bulk removal.\n"
             ),
         );
         format!(
@@ -399,10 +399,20 @@ impl Tool for Bash {
             sandbox_exempt: parsed.sandbox == Some(false) || bash::escapes_sandbox(&parsed.command),
         };
 
+        // 命令按字面会碰的文件，执行前拍前像、执行后比对，变了的记进会话
+        // 基线 —— `cp` 出来的新文件才能进改动栏和回退（见 bash_effects）。
+        // 不看退出码：`cp a b && false` 文件照样已经在盘上。
+        let pre = super::bash_effects::capture(&parsed.command, &ctx).await;
+
         let out = match ctx.proc.run(spec, ctx.cancel.clone()).await {
             Ok(o) => o,
+            // 进程都没起来，什么都没发生
             Err(e) => return ToolOutcome::failed(spawn_hint(&e)),
         };
+
+        if !pre.is_empty() {
+            super::bash_effects::settle(pre, &ctx).await;
+        }
 
         let stdout = clamp_stream(&out.stdout);
         let stderr = clamp_stream(&out.stderr);

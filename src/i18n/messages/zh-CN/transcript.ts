@@ -46,7 +46,8 @@ export default {
   "transcript.restore.dirty": "上次完成后磁盘又被改过，这些手改也会被覆盖。",
   "transcript.restore.afterSlice": "另有 {count} 个文件是这条之后才第一次改到的，会回到会话开始时或删除。",
   "transcript.restore.skipped": "跳过：{files}。",
-  "transcript.restore.bashNote": "用终端改过、新建或删掉的文件这次回退看不到，只有 Write / Edit / Delete 动过的算。",
+  "transcript.restore.bashNote":
+    "终端命令只认写明路径的 cp / mv / rm / touch / 重定向；脚本、生成器、npm install 之类改的文件这次回退看不到。",
   "transcript.restore.previewFail": "没法预览这次回退。",
   "transcript.restore.redo": "恢复到回退前",
   "transcript.restore.partialFail": "有些文件没写回去：{files}",

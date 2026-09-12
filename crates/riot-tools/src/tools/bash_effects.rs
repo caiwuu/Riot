@@ -372,6 +372,23 @@ mod tests {
         assert_eq!(baseline(&h, "/work/a.txt"), Some(Some("v0".into())));
     }
 
+    /// 截图里那条：Write 新建的临时文件（基线 None）被 `cd <目录> && rm -f`
+    /// 清掉。基线要保持 None —— 这样改动栏按「建了又删」把它丢掉，回退时
+    /// 也不会试图写回一个本来就不该存在的文件。
+    #[tokio::test]
+    async fn write_新建再被_cd_rm_删掉_基线仍是新增() {
+        let h = harness(base().with_file("/work/_scratch.js", "tmp"));
+        h.state
+            .note_baseline(PathBuf::from("/work/_scratch.js"), None);
+        let pre = capture("cd /work && rm -f _scratch.js && echo cleaned", &h.ctx).await;
+        assert!(!pre.is_empty(), "字面 cd 之后的 rm 要认");
+        h.fs.remove_file(Path::new("/work/_scratch.js"))
+            .await
+            .unwrap();
+        settle(pre, &h.ctx).await;
+        assert_eq!(baseline(&h, "/work/_scratch.js"), Some(None));
+    }
+
     #[tokio::test]
     async fn 看不懂的命令不拍前像() {
         let h = harness(base().with_file("/work/a.txt", "x"));

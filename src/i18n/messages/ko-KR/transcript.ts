@@ -46,7 +46,7 @@ export default {
     "이 질문 이후에 처음 건드린 파일이 {count}개 있으며, 세션 시작 상태로 되돌리거나 삭제합니다.",
   "transcript.restore.skipped": "건너뜀: {files}.",
   "transcript.restore.bashNote":
-    "터미널로 바꾸거나 만들거나 지운 파일은 이번 되돌리기에 포함되지 않습니다. Write / Edit / Delete가 건드린 파일만 해당됩니다.",
+    "터미널 명령은 경로를 명시한 cp / mv / rm / touch / 리디렉션만 인식합니다. 스크립트, 생성기, npm install 등이 바꾼 파일은 이번 되돌리기에 포함되지 않습니다.",
   "transcript.restore.previewFail": "이번 되돌리기를 미리 볼 수 없습니다.",
   "transcript.restore.redo": "되돌리기 전으로",
   "transcript.restore.partialFail": "일부 파일을 다시 쓰지 못했습니다: {files}",
