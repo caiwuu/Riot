@@ -265,16 +265,17 @@ function loadTreeW(): number {
 }
 
 /**
- * 右侧抽屉里的预览面板：左边是当前文件（操作行 + 渲染区），右边一栏
- * 可收起的项目文件树（Codex 同款布局，见 FileTree）。
+ * 右侧抽屉里的预览面板：当前文件（操作行 + 渲染区）占满正文；项目
+ * 文件树（见 FileTree）在预览时浮在右侧，不进文档流 —— 开合不挤正文、
+ * 不重排渲染器。只有"文件"标签（active 为 null）时树才占一列，左边
+ * 是一句占位。
  *
  * 标签属于抽屉顶部的统一标签栏（见 Workbench）—— 每个文件是一个顶层
  * 工作台标签，和浏览器 / Git 改动平级。这里不再自带标签行，但仍然
  * 一次性挂着**全部**打开的文件（见下方保活注释），visible 只控 display：
  * 切去别的标签（哪怕是浏览器）再切回来，渲染器和滚动位置都在原地。
  *
- * "文件"标签（active 为 null）也落在这个面板上：树栏必显，左边是一句
- * 占位。树只有这一份实例，展开状态、滚动位置在两种标签之间共用。
+ * 树只有这一份实例，展开状态、滚动位置在两种标签之间共用。
  */
 export function FilePreviewPanel({
   sessionId,
@@ -326,6 +327,9 @@ export function FilePreviewPanel({
   };
 
   const showTree = active === null || tree;
+  /** 正在看文件时树盖在正文上；只有"文件"标签才跟占位并排，否则
+   *  占位那一列会被挤没、正文也会跟着重排。 */
+  const overlayTree = active !== null && tree;
 
   return (
     <div
@@ -372,7 +376,7 @@ export function FilePreviewPanel({
         </div>
       ) : null}
 
-      <div className="preview-split">
+      <div className={overlayTree ? "preview-split preview-split-overlay" : "preview-split"}>
         <div className="preview-main">
           {active ? null : (
             <div className="preview-panel-state">{t("panels.filePreview.pickOne")}</div>
@@ -390,7 +394,7 @@ export function FilePreviewPanel({
         </div>
 
         {showTree ? (
-          <>
+          <div className="file-tree-overlay" style={{ width: treeW }}>
             <Resizer
               axis="x"
               onStart={() => {
@@ -398,8 +402,8 @@ export function FilePreviewPanel({
                 dragLive.current = treeW;
               }}
               onDelta={(d) => {
-                // 拖的是树栏的左缘：往左（负位移）变宽。最多占面板六成，
-                // 编辑器那边总得剩下能读代码的宽度。
+                // 拖的是树栏的左缘：往左（负位移）变宽。浮层最多盖住
+                // 面板六成，左边总得露出一截正文。
                 const max = Math.max(
                   TREE_W.min,
                   (panelRef.current?.clientWidth ?? 600) * 0.6,
@@ -416,7 +420,7 @@ export function FilePreviewPanel({
                 localStorage.setItem(TREE_W_KEY, String(TREE_W.def));
               }}
             />
-            <div className="file-tree-col" style={{ width: treeW }}>
+            <div className="file-tree-col">
               <FileTree
                 sessionId={sessionId}
                 root={root}
@@ -428,7 +432,7 @@ export function FilePreviewPanel({
                 filterFocus={filterFocus}
               />
             </div>
-          </>
+          </div>
         ) : null}
       </div>
     </div>

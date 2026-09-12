@@ -5336,9 +5336,10 @@ body.file-dragging.file-drop-hot * {
 /* ── 文件预览（右侧抽屉） ────────────────────── */
 
 /* 和改动面板同一种壳：整列、左描边、聊天区同底。 */
-/* 预览面板：顶上一条横跨全宽的头部（面包屑 + 按钮贴右缘），下面一行
-   两列 —— 左边正文，右边文件树（可收）。树在右侧是 Codex 的布局：对话
-   在窗口中间，树靠外缘，眼睛从对话扫到文件内容不用跨过一列目录。 */
+/* 预览面板：顶上一条横跨全宽的头部（面包屑 + 按钮贴右缘），下面正文
+   撑满。看文件时树浮在右侧（.preview-split-overlay），不占文档流，
+   开合不挤正文。只有"文件"标签才跟占位并排。树靠外缘：对话在窗口
+   中间，眼睛从对话扫到文件内容不用跨过一列目录。 */
 .preview-panel {
   flex: 1;
   min-width: 0;
@@ -5354,6 +5355,7 @@ body.file-dragging.file-drop-hot * {
   min-height: 0;
   display: flex;
   flex-direction: row;
+  position: relative;
 }
 
 .preview-main {
@@ -5366,9 +5368,27 @@ body.file-dragging.file-drop-hot * {
 
 /* ── 文件树 ─────────────────────────────────── */
 
-/* 树栏的外壳：宽度由内联样式定（可拖）。 */
-.file-tree-col {
+/* 树栏外壳：宽度由内联样式定（可拖）。默认跟占位并排；看文件时
+   绝对定位到右缘，盖在正文上。 */
+.file-tree-overlay {
   flex-shrink: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+}
+
+.preview-split-overlay .file-tree-overlay {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: var(--z-panel);
+  box-shadow: -8px 0 24px var(--shadow-color);
+}
+
+.file-tree-col {
+  flex: 1;
+  min-width: 0;
   min-height: 0;
   display: flex;
 }

@@ -1459,13 +1459,14 @@ function RestoreIcon() {
   return (
     <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden>
       <path
-        d="M3.2 8A4.8 4.8 0 1 0 4.4 4.4"
+        d="M13 13.2V8A3.5 3.5 0 0 0 9.5 4.5H3"
         stroke="currentColor"
         strokeWidth="1.3"
         strokeLinecap="round"
+        strokeLinejoin="round"
       />
       <path
-        d="M3 2.6v2.6h2.6"
+        d="M6.2 7.7 3 4.5 6.2 1.3"
         stroke="currentColor"
         strokeWidth="1.3"
         strokeLinecap="round"
@@ -1479,13 +1480,14 @@ function RedoIcon() {
   return (
     <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden>
       <path
-        d="M12.8 8A4.8 4.8 0 1 1 11.6 4.4"
+        d="M3 13.2V8A3.5 3.5 0 0 1 6.5 4.5H13"
         stroke="currentColor"
         strokeWidth="1.3"
         strokeLinecap="round"
+        strokeLinejoin="round"
       />
       <path
-        d="M13 2.6v2.6H10.4"
+        d="M9.8 7.7 13 4.5 9.8 1.3"
         stroke="currentColor"
         strokeWidth="1.3"
         strokeLinecap="round"
