@@ -7,7 +7,7 @@ use std::sync::Arc;
 pub use riot_protocol::compact::Compactor;
 pub use riot_protocol::event::Transition;
 use riot_protocol::id::{IdGenerator, SessionId};
-use riot_protocol::message::Message;
+use riot_protocol::message::{AssistantContent, Message};
 use riot_protocol::provider::{Provider, ThinkingPolicy};
 use riot_protocol::tool::Clock;
 
@@ -103,12 +103,42 @@ impl AgentState {
     }
 
     /// 只发给模型的消息。System 消息在这里被过滤掉。
+    ///
+    /// 换模型后，不属于当前模型的 thinking signature 一并剥掉
+    /// （INV-9：签名与模型绑定，带着旧签名去请求会 400）。历史原文
+    /// 不动 —— 用户切回原来的模型时，签名还能用。
     pub fn model_messages(&self) -> Vec<Message> {
-        self.messages
+        let mut messages: Vec<Message> = self
+            .messages
             .iter()
             .filter(|m| m.goes_to_model())
             .cloned()
-            .collect()
+            .collect();
+        strip_foreign_thinking_signatures(&mut messages, &self.model);
+        messages
+    }
+}
+
+/// 剥掉不属于 `current_model` 的 thinking signature。
+///
+/// 只动副本。同模型是 no-op（前缀缓存按字节匹配，多改一个字节就 miss）。
+/// 块类型不改：OpenAI 兼容端不回传思考；Anthropic 的 wire 层会把无签
+/// 名 thinking 退化成 text。这里越权改成 Text，等于换到 grok / DeepSeek
+/// 时把旧模型的内心戏灌进正文。
+pub fn strip_foreign_thinking_signatures(messages: &mut [Message], current_model: &str) {
+    for m in messages {
+        let Message::Assistant { content, meta, .. } = m else {
+            continue;
+        };
+        let origin = meta.model_origin.as_deref().unwrap_or(current_model);
+        if origin == current_model {
+            continue;
+        }
+        for c in content {
+            if let AssistantContent::Thinking { signature, .. } = c {
+                *signature = None;
+            }
+        }
     }
 }
 
@@ -203,3 +233,128 @@ impl InputQueue for NoQueue {
 pub use riot_protocol::runner::{
     BatchContext, BatchEvent, BatchOutcome, BatchStream, ToolCall, ToolRunner,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use riot_protocol::id::MessageId;
+    use riot_protocol::message::MessageMeta;
+
+    fn assistant_thinking(origin: &str, sig: Option<&str>) -> Message {
+        Message::Assistant {
+            id: MessageId::from_raw("a1"),
+            content: vec![
+                AssistantContent::Thinking {
+                    text: "先想想".into(),
+                    signature: sig.map(str::to_owned),
+                },
+                AssistantContent::Text {
+                    text: "好的，马上生成。".into(),
+                },
+            ],
+            usage: None,
+            meta: MessageMeta {
+                model_origin: Some(origin.into()),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn 换模型时剥掉别人的_thinking_签名_历史原文不动() {
+        let original = assistant_thinking("anthropic/claude-fable-5.1", Some("sig"));
+        let state = AgentState::new(SessionId::from_raw("s"), "grok-4.6")
+            .with_messages(vec![original.clone()]);
+
+        let outgoing = state.model_messages();
+        match &outgoing[0] {
+            Message::Assistant { content, .. } => {
+                assert!(
+                    matches!(
+                        &content[0],
+                        AssistantContent::Thinking {
+                            signature: None,
+                            ..
+                        }
+                    ),
+                    "发给新模型的副本必须去掉旧签名"
+                );
+                assert!(
+                    matches!(&content[1], AssistantContent::Text { text } if text == "好的，马上生成。"),
+                    "正文和块类型都不动"
+                );
+            }
+            other => panic!("该是助手消息，得到 {other:?}"),
+        }
+
+        match &state.messages[0] {
+            Message::Assistant { content, .. } => {
+                assert!(
+                    matches!(
+                        &content[0],
+                        AssistantContent::Thinking {
+                            signature: Some(s),
+                            ..
+                        } if s == "sig"
+                    ),
+                    "历史原文留下签名，切回原模型还能用"
+                );
+            }
+            other => panic!("该是助手消息，得到 {other:?}"),
+        }
+
+        crate::invariants::check_thinking_signatures(&outgoing, "grok-4.6");
+        assert!(
+            crate::invariants::take_violations().is_empty(),
+            "剥完之后 INV-9 不该再响"
+        );
+    }
+
+    #[test]
+    fn 同一模型保留_thinking_签名() {
+        let origin = "anthropic/claude-fable-5.1";
+        let state = AgentState::new(SessionId::from_raw("s"), origin)
+            .with_messages(vec![assistant_thinking(origin, Some("sig"))]);
+        let outgoing = state.model_messages();
+        match &outgoing[0] {
+            Message::Assistant { content, .. } => {
+                assert!(
+                    matches!(
+                        &content[0],
+                        AssistantContent::Thinking {
+                            signature: Some(s),
+                            ..
+                        } if s == "sig"
+                    ),
+                    "没换模型就不该动签名，否则 Anthropic 缓存和续思考都会坏"
+                );
+            }
+            other => panic!("该是助手消息，得到 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn 没有_model_origin_的签名按当前模型保留() {
+        let mut m = assistant_thinking("unused", Some("sig"));
+        if let Message::Assistant { meta, .. } = &mut m {
+            meta.model_origin = None;
+        }
+        let state = AgentState::new(SessionId::from_raw("s"), "grok-4.6").with_messages(vec![m]);
+        let outgoing = state.model_messages();
+        match &outgoing[0] {
+            Message::Assistant { content, .. } => {
+                assert!(
+                    matches!(
+                        &content[0],
+                        AssistantContent::Thinking {
+                            signature: Some(s),
+                            ..
+                        } if s == "sig"
+                    ),
+                    "origin 缺失时 INV-9 把签名当成当前模型的，剥了反而误伤"
+                );
+            }
+            other => panic!("该是助手消息，得到 {other:?}"),
+        }
+    }
+}

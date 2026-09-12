@@ -130,11 +130,17 @@ pub async fn summarize_history(
     cancel: CancellationToken,
 ) -> Result<String, String> {
     let mut request_messages = match shape {
-        Some(_) => messages
-            .iter()
-            .filter(|m| m.goes_to_model())
-            .cloned()
-            .collect(),
+        Some(_) => {
+            // 同形状吃前缀缓存，消息原样。唯一例外：换模型后必须剥掉
+            // 别人的 thinking signature（INV-9）。同模型是 no-op，缓存不受影响。
+            let mut msgs: Vec<Message> = messages
+                .iter()
+                .filter(|m| m.goes_to_model())
+                .cloned()
+                .collect();
+            crate::state::strip_foreign_thinking_signatures(&mut msgs, model);
+            msgs
+        }
         None => strip_for_summary(messages),
     };
     request_messages.push(Message::User {
@@ -713,6 +719,75 @@ mod tests {
         assert!(
             !stripped.contains("ToolUse") && !stripped.contains("ToolResult"),
             "退回路径必须转文本（无 tools 的请求带工具块，Anthropic 400）：{stripped}"
+        );
+    }
+
+    #[tokio::test]
+    async fn 同形状路径换模型时剥掉_thinking_签名() {
+        use crate::testing::ScriptedProvider;
+        use riot_protocol::provider::ProviderEvent;
+
+        let history = vec![Message::Assistant {
+            id: MessageId::from_raw("a1"),
+            content: vec![
+                AssistantContent::Thinking {
+                    text: "内心戏".into(),
+                    signature: Some("sig".into()),
+                },
+                AssistantContent::Text {
+                    text: "回答正文".into(),
+                },
+            ],
+            usage: None,
+            meta: MessageMeta {
+                model_origin: Some("anthropic/claude-fable-5.1".into()),
+                ..Default::default()
+            },
+        }];
+        let provider =
+            std::sync::Arc::new(ScriptedProvider::new(vec![vec![ProviderEvent::Message(
+                Message::Assistant {
+                    id: MessageId::from_raw("s"),
+                    content: vec![AssistantContent::Text {
+                        text: "<summary>1. 总结</summary>".into(),
+                    }],
+                    usage: None,
+                    meta: MessageMeta::default(),
+                },
+            )]]));
+        let arc: std::sync::Arc<dyn Provider> = std::sync::Arc::clone(&provider) as _;
+        let shape = RequestShape {
+            system: "sys".into(),
+            tools: Vec::new(),
+        };
+        summarize_history(
+            &arc,
+            "grok-4.6",
+            &history,
+            Some(&shape),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("换模型后同形状总结仍应成功");
+
+        let req = &provider.requests()[0];
+        let signed = req.messages.iter().any(|m| match m {
+            Message::Assistant { content, .. } => content.iter().any(|c| {
+                matches!(
+                    c,
+                    AssistantContent::Thinking {
+                        signature: Some(_),
+                        ..
+                    }
+                )
+            }),
+            _ => false,
+        });
+        assert!(!signed, "同形状路径换模型也必须剥签名，否则 Anthropic 400");
+        let debug = format!("{:?}", req.messages);
+        assert!(
+            debug.contains("内心戏"),
+            "只剥签名，思考正文留给 wire 层决定去留：{debug}"
         );
     }
 

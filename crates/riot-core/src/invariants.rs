@@ -291,7 +291,8 @@ pub fn check_cache_breakpoints(marker_count: usize) {
 // thinking 签名与模型绑定，换模型重放会 400，而报错信息
 // 指向的字段与真正的原因无关。
 //
-// 检查点：模型降级切换后，下一次请求前。
+// 检查点：下一次请求前。用户换模型和自动降级都走这里。
+// 生产路径由 `AgentState::model_messages` 先剥再交给本函数核对。
 // ════════════════════════════════════════════════════════════
 
 pub fn check_thinking_signatures(messages: &[Message], current_model: &str) {
