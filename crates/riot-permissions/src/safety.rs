@@ -599,7 +599,10 @@ mod tests {
             "/work/.riot/commands/plans.md",
             "/work/plans/x.md",
         ] {
-            assert!(!is_plan_document(Path::new(not_plan)), "{not_plan} 不该算计划文件");
+            assert!(
+                !is_plan_document(Path::new(not_plan)),
+                "{not_plan} 不该算计划文件"
+            );
         }
         for still_config in [
             "/work/.riot/plans/run.sh",

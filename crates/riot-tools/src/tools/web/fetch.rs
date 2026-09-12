@@ -31,7 +31,7 @@ use url::Url;
 
 use super::cache::PageCache;
 use super::markdown::{self, MAX_CONTENT_CHARS};
-use super::pipeline::{self, FetchedImage, Fetched};
+use super::pipeline::{self, Fetched, FetchedImage};
 use super::preapproved;
 use super::url as weburl;
 use crate::tools::read::MAX_IMAGE_BYTES;

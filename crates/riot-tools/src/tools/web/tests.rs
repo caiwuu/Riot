@@ -29,7 +29,11 @@ struct Harness {
 }
 
 fn harness(web: FakeWeb) -> Harness {
-    harness_with(web, Arc::new(riot_protocol::vision::NoVision), Arc::new(NullFs))
+    harness_with(
+        web,
+        Arc::new(riot_protocol::vision::NoVision),
+        Arc::new(NullFs),
+    )
 }
 
 fn harness_with(web: FakeWeb, vision: Arc<dyn VisionAccess>, fs: Arc<dyn FileSystem>) -> Harness {
@@ -604,7 +608,9 @@ async fn 图片地址在能看图时直接给图片并落盘原图() {
     let path = path.expect("原图要落盘");
     assert_eq!(path, std::path::PathBuf::from("/artifacts/t1.png"));
     assert_eq!(
-        FileSystem::read(fs.as_ref(), &path).await.expect("读得回来"),
+        FileSystem::read(fs.as_ref(), &path)
+            .await
+            .expect("读得回来"),
         raw
     );
     // 卡片上要有一句说明，用户知道这张图从哪来
@@ -669,7 +675,10 @@ async fn 图片地址在看不了图时走视觉兼容转述() {
     let out = fetch_tool().call(image_args(), h.ctx.clone()).await;
 
     let ToolOutcome::Ok {
-        model_content: ToolResultContent::DescribedImage { text, data, path, .. },
+        model_content:
+            ToolResultContent::DescribedImage {
+                text, data, path, ..
+            },
         ..
     } = out
     else {
@@ -720,7 +729,11 @@ async fn 超过单张上限的图片直接拒绝() {
 #[tokio::test]
 async fn 模型不收的图片类型要说清楚() {
     let h = harness_with(
-        FakeWeb::new().bytes("https://img.example/a.bmp", "image/bmp", vec![0x42, 0x4D, 0, 0]),
+        FakeWeb::new().bytes(
+            "https://img.example/a.bmp",
+            "image/bmp",
+            vec![0x42, 0x4D, 0, 0],
+        ),
         Arc::new(FakeVision::Direct),
         Arc::new(NullFs),
     );

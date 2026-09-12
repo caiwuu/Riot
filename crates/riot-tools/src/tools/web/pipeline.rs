@@ -365,10 +365,7 @@ mod tests {
 
     #[test]
     fn 没有类型或_octet_stream_时按文件头认() {
-        assert_eq!(
-            image_media_type("", PNG_HEAD),
-            Some("image/png".to_owned())
-        );
+        assert_eq!(image_media_type("", PNG_HEAD), Some("image/png".to_owned()));
         assert_eq!(
             image_media_type("application/octet-stream", PNG_HEAD),
             Some("image/png".to_owned())
