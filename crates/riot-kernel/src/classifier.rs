@@ -81,8 +81,8 @@ impl HostClassifier {
     /// 用户少配一次，而这两件事要的正好是同一种模型（便宜、够用、可降级）。
     ///
     /// 没配便宜档返回 None，调用方装 `NoClassifier`。
-    pub fn from_config(config: &crate::config::AppConfig) -> Option<Self> {
-        let cheap = crate::subagent::CheapModel::from_config(config)?;
+    pub fn from_config(config: &crate::config::AppConfig, session_id: &str) -> Option<Self> {
+        let cheap = crate::subagent::CheapModel::from_config(config, session_id)?;
         Some(Self {
             provider: cheap.provider,
             model: cheap.model,
@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn 没配便宜档时装不出分类器() {
         let cfg = crate::config::AppConfig::default();
-        assert!(HostClassifier::from_config(&cfg).is_none());
+        assert!(HostClassifier::from_config(&cfg, "ses_test").is_none());
     }
 
     #[tokio::test]

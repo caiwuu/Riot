@@ -70,7 +70,11 @@ impl std::fmt::Debug for AnthropicConfig {
             .field("retry", &self.retry)
             .field("is_subscription", &self.is_subscription)
             .field("sampling", &self.sampling)
-            .field("extra_headers", &self.extra_headers)
+            // 只露名字：值可能是网关 token 一类凭据
+            .field(
+                "extra_headers",
+                &crate::headers::header_names(&self.extra_headers),
+            )
             .finish()
     }
 }
@@ -738,11 +742,16 @@ mod tests {
         // 在 review 里看起来毫无问题。
         let cfg = AnthropicConfig {
             api_key: "sk-ant-绝密".into(),
+            extra_headers: vec![("x-gateway-token".into(), "gw-绝密".into())],
             ..Default::default()
         };
         let printed = format!("{cfg:?}");
         assert!(!printed.contains("sk-ant-绝密"), "{printed}");
         assert!(printed.contains("<redacted>"), "{printed}");
+        assert!(
+            !printed.contains("gw-绝密") && printed.contains("x-gateway-token"),
+            "额外头只露名字不露值：{printed}"
+        );
         assert!(
             printed.contains("api.anthropic.com"),
             "非密字段要照常打出来，否则调试时这个 Debug 没用：{printed}"

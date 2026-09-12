@@ -135,7 +135,10 @@ impl CheapModel {
     /// `[取舍]` 这里刻意不报错。便宜档是个纯省钱的可选项，配坏了该悄悄失效：
     /// 用户加它是为了少花钱，不该因此给自己多一个"发消息没反应"的故障点。
     /// 代价是配错了不容易发现 —— 由进度行里的模型名兜住（见 [`TaskTool::call`]）。
-    pub fn from_config(config: &crate::config::AppConfig) -> Option<Self> {
+    ///
+    /// `session_id` 是装它的那个会话 —— 额外请求头里的 `${session_id}` 按它
+    /// 展开，子 agent 的请求在网关那边才归到同一条对话下。
+    pub fn from_config(config: &crate::config::AppConfig, session_id: &str) -> Option<Self> {
         let (provider_id, model) = config.subagent_target()?;
         let resolved = match config.resolve_named(provider_id, model) {
             Ok(r) => r,
@@ -144,7 +147,7 @@ impl CheapModel {
                 return None;
             }
         };
-        match crate::models::provider_for(&resolved) {
+        match crate::models::provider_for(&resolved, session_id) {
             Ok(provider) => Some(Self {
                 provider,
                 model: resolved.model,

@@ -128,6 +128,8 @@ export default {
     "One Name=Value per line. Use {session} for the current conversation ID (stable for the whole chat). Auth headers cannot be overridden here.",
   "settings.provider.editor.headers.placeholder": "e.g.\nx-opencode-session=${session_id}",
   "settings.provider.editor.headers.format": "Headers must be written as Name=Value: “{line}”",
+  "settings.provider.editor.headers.invalid":
+    "Invalid header: “{line}”. Names may only use letters, digits and !#$%&'*+-.^_`|~; values must not contain control characters.",
   "settings.provider.editor.key": "Key",
   "settings.provider.editor.key.saved": "Saved.",
   "settings.provider.editor.key.env": "Using environment variable {env}.",

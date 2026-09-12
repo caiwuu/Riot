@@ -100,6 +100,9 @@ fn is_false(b: &bool) -> bool {
 /// 设置页「测试连接 / 拉模型清单」没有真实会话，用这个占位符展开
 /// `${session_id}`。OpenCode 一类网关要的是「有 ID」，不是「必须是用户
 /// 点开的那条聊天」。
+///
+/// `[约束]` 只给探测用。会话内建 provider（主模型、子 agent 便宜档、视觉
+/// 转述、网页摘要）都要带真实会话 ID —— 见 `models::provider_for` 的说明。
 pub const PROBE_SESSION_ID: &str = "ses_connection_test";
 
 /// 把 header 值里的会话占位符换成真实 ID。

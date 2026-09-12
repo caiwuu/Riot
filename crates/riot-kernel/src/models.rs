@@ -52,10 +52,14 @@ impl From<ProviderSetupError> for UiError {
 
 /// 按配置构建 provider。会话和"测试连接"共用 —— 两处各写一遍的话，
 /// 测试通过而正式请求失败（或反过来）这种事迟早发生。
-pub fn provider_for(model: &ResolvedModel) -> Result<Arc<dyn Provider>, String> {
-    let endpoint = model
-        .to_endpoint(crate::config::PROBE_SESSION_ID)
-        .map_err(|e| e.to_string())?;
+///
+/// `session_id` 用来展开 `extra_headers` 里的 `${session_id}`。设置页的探测
+/// 传 [`crate::config::PROBE_SESSION_ID`]；会话内的调用（子 agent 便宜档、
+/// 视觉转述、网页摘要）必须传真实会话 ID —— 网关按这个头分会话、限流、
+/// 计费，全传占位符等于把所有会话揉成一个。做成参数而不是在这里写死，
+/// 就是不让"探测用的占位符"悄悄流进正式请求。
+pub fn provider_for(model: &ResolvedModel, session_id: &str) -> Result<Arc<dyn Provider>, String> {
+    let endpoint = model.to_endpoint(session_id).map_err(|e| e.to_string())?;
     provider_from_endpoint(&endpoint).map_err(|e| e.to_string())
 }
 
@@ -330,7 +334,7 @@ async fn fetch_models(req: reqwest::RequestBuilder) -> Result<Vec<String>, Strin
 pub async fn test_connection(model: &ResolvedModel) -> Result<String, String> {
     use riot_protocol::provider::{ProviderEvent, ProviderRequest};
 
-    let provider = provider_for(model)?;
+    let provider = provider_for(model, crate::config::PROBE_SESSION_ID)?;
     let req = ProviderRequest {
         model: model.model.clone(),
         messages: vec![Message::User {

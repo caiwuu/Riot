@@ -31,16 +31,27 @@ function headersToText(h?: Record<string, string> | null): string {
     .join("\n");
 }
 
+/** 头名得是 RFC 7230 的 token；值不能带控制字符。和内核 `headers::validate_header`
+ *  同一口径 —— 这里拦是为了当场提示，那边拦是配置文件手改过也不至于拖垮请求。 */
+const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+// eslint-disable-next-line no-control-regex
+const HEADER_VALUE_BAD = /[\u0000-\u0008\u000a-\u001f\u007f]/;
+
 function parseHeaders(
   text: string,
-): { ok: true; value: Record<string, string> } | { ok: false; line: string } {
+): { ok: true; value: Record<string, string> } | { ok: false; line: string; reason: "format" | "invalid" } {
   const map: Record<string, string> = {};
   for (const line of text.split("\n")) {
     const item = line.trim();
     if (!item) continue;
     const eq = item.indexOf("=");
-    if (eq <= 0) return { ok: false, line: item };
-    map[item.slice(0, eq).trim()] = item.slice(eq + 1).trim();
+    if (eq <= 0) return { ok: false, line: item, reason: "format" };
+    const name = item.slice(0, eq).trim();
+    const value = item.slice(eq + 1).trim();
+    if (!HEADER_NAME.test(name) || HEADER_VALUE_BAD.test(value)) {
+      return { ok: false, line: item, reason: "invalid" };
+    }
+    map[name] = value;
   }
   return { ok: true, value: map };
 }
@@ -155,7 +166,14 @@ export function ProviderEditor({
   const commitHeaders = () => {
     const parsed = parseHeaders(headersDraft);
     if (!parsed.ok) {
-      onError(t("settings.provider.editor.headers.format", { line: parsed.line }));
+      onError(
+        t(
+          parsed.reason === "format"
+            ? "settings.provider.editor.headers.format"
+            : "settings.provider.editor.headers.invalid",
+          { line: parsed.line },
+        ),
+      );
       setHeadersDraft(headersToText(p.extraHeaders));
       return;
     }

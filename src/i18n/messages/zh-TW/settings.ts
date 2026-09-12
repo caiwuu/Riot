@@ -120,6 +120,8 @@ export default {
     "一行一個 Name=Value。可用 {session}（目前對話 ID，整段對話保持不變）。驗證標頭不能從這裡改。",
   "settings.provider.editor.headers.placeholder": "例如：\nx-opencode-session=${session_id}",
   "settings.provider.editor.headers.format": "請求標頭要寫成 Name=Value：「{line}」",
+  "settings.provider.editor.headers.invalid":
+    "請求標頭不合法：「{line}」。名稱只能用字母、數字和 !#$%&'*+-.^_`|~，值裡不能有控制字元。",
   "settings.provider.editor.key": "金鑰",
   "settings.provider.editor.key.saved": "已儲存。",
   "settings.provider.editor.key.env": "正在使用環境變數 {env}。",

@@ -35,10 +35,13 @@ fn cfg(web: WebConfig) -> AppConfig {
 
 #[tokio::test]
 async fn 关掉抓取之后抓取报未配置() {
-    let w = HostWeb::from_config(&cfg(WebConfig {
-        fetch_enabled: false,
-        ..Default::default()
-    }));
+    let w = HostWeb::from_config(
+        &cfg(WebConfig {
+            fetch_enabled: false,
+            ..Default::default()
+        }),
+        "ses_test",
+    );
     let e = w
         .get(
             WebRequest {
@@ -56,11 +59,14 @@ async fn 关掉抓取之后抓取报未配置() {
 
 #[test]
 fn 开关开着空地址装配内置搜索() {
-    let w = HostWeb::from_config(&cfg(WebConfig {
-        search_enabled: true,
-        searxng_url: "   ".into(),
-        ..Default::default()
-    }));
+    let w = HostWeb::from_config(
+        &cfg(WebConfig {
+            search_enabled: true,
+            searxng_url: "   ".into(),
+            ..Default::default()
+        }),
+        "ses_test",
+    );
     assert_eq!(
         w.search_base(),
         Some(crate::config::BUILTIN_SEARXNG_URL),
@@ -81,11 +87,14 @@ fn 内核setup空地址也走内置() {
 
 #[tokio::test]
 async fn 填了地址但开关没开也不搜() {
-    let w = HostWeb::from_config(&cfg(WebConfig {
-        search_enabled: false,
-        searxng_url: "http://127.0.0.1:8080".into(),
-        ..Default::default()
-    }));
+    let w = HostWeb::from_config(
+        &cfg(WebConfig {
+            search_enabled: false,
+            searxng_url: "http://127.0.0.1:8080".into(),
+            ..Default::default()
+        }),
+        "ses_test",
+    );
     let e = w
         .search(SearchQuery::default(), &CancellationToken::new())
         .await
@@ -96,7 +105,7 @@ async fn 填了地址但开关没开也不搜() {
 #[tokio::test]
 async fn 没配辅助模型时蒸馏报未配置而不是panic() {
     // 调用方（WebFetch）必须能据此降级成截断原文
-    let w = HostWeb::from_config(&cfg(WebConfig::default()));
+    let w = HostWeb::from_config(&cfg(WebConfig::default()), "ses_test");
     let e = w
         .distill(
             DistillRequest {
@@ -114,10 +123,13 @@ async fn 没配辅助模型时蒸馏报未配置而不是panic() {
 #[test]
 fn 辅助模型指向不存在的provider时只是不蒸馏() {
     // 配置写坏了不该连带把抓取也搞挂 —— 每一块独立降级
-    let w = HostWeb::from_config(&cfg(WebConfig {
-        distill_model: "不存在的家伙/some-model".into(),
-        ..Default::default()
-    }));
+    let w = HostWeb::from_config(
+        &cfg(WebConfig {
+            distill_model: "不存在的家伙/some-model".into(),
+            ..Default::default()
+        }),
+        "ses_test",
+    );
     assert!(w.distiller.is_none());
     assert!(w.fetch.is_some(), "蒸馏配坏了，抓取必须照常能用");
 }
@@ -183,11 +195,14 @@ const OK_JSON: &str = r#"{"results":[
 ]}"#;
 
 fn web(base_url: &str) -> HostWeb {
-    HostWeb::from_config(&cfg(WebConfig {
-        search_enabled: true,
-        searxng_url: base_url.to_owned(),
-        ..Default::default()
-    }))
+    HostWeb::from_config(
+        &cfg(WebConfig {
+            search_enabled: true,
+            searxng_url: base_url.to_owned(),
+            ..Default::default()
+        }),
+        "ses_test",
+    )
 }
 
 fn query(q: &str) -> SearchQuery {
@@ -220,7 +235,7 @@ async fn 抓取走的客户端仍然拦内网() {
     // 也一样能测过。
     let (base, _) = fake_server(OK_JSON, "application/json").await;
 
-    let e = HostWeb::from_config(&cfg(WebConfig::default()))
+    let e = HostWeb::from_config(&cfg(WebConfig::default()), "ses_test")
         .get(
             WebRequest {
                 url: format!("{base}/"),

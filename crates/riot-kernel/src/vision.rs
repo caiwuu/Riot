@@ -66,15 +66,16 @@ struct Aux {
 }
 
 impl HostVision {
-    /// 按当前配置装一套图片能力。
-    pub fn from_config(cfg: &AppConfig) -> Self {
+    /// 按当前配置装一套图片能力。`session_id` 是装它的那个会话（展开额外
+    /// 请求头里的 `${session_id}`）。
+    pub fn from_config(cfg: &AppConfig, session_id: &str) -> Self {
         let accepts = cfg.active_takes_images();
         let aux = cfg.vision_target().and_then(|(pid, model)| {
             let resolved = cfg
                 .resolve_named(pid, model)
                 .inspect_err(|e| tracing::warn!(error = %e, "视觉兼容模型解析失败"))
                 .ok()?;
-            crate::models::provider_for(&resolved)
+            crate::models::provider_for(&resolved, session_id)
                 .inspect_err(|e| tracing::warn!(error = %e, "视觉兼容模型的 provider 建不出来"))
                 .ok()
                 .map(|provider| Aux {

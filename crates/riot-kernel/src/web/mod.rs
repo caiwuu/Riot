@@ -56,7 +56,10 @@ impl HostWeb {
     ///
     /// 不返回 `Result`：任何一块配坏了都只让那一块变成"未配置"，其余的
     /// 照常能用。搜索地址填错不该连带着让 WebFetch 也用不了。
-    pub fn from_config(cfg: &AppConfig) -> Self {
+    ///
+    /// `session_id` 是装它的那个会话（展开辅助模型额外请求头里的
+    /// `${session_id}`）。
+    pub fn from_config(cfg: &AppConfig, session_id: &str) -> Self {
         let fetch = cfg
             .web
             .fetch_enabled
@@ -76,7 +79,7 @@ impl HostWeb {
                 .resolve_named(pid, model)
                 .inspect_err(|e| tracing::warn!(error = %e, "辅助模型解析失败"))
                 .ok()?;
-            crate::models::provider_for(&resolved)
+            crate::models::provider_for(&resolved, session_id)
                 .inspect_err(|e| tracing::warn!(error = %e, "辅助模型的 provider 建不出来"))
                 .ok()
                 .map(|p| Distiller::new(p, resolved.model))

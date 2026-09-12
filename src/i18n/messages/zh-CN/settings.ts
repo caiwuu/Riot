@@ -121,6 +121,8 @@ export default {
     "一行一个 Name=Value。可用 {session}（当前对话 ID，整段对话保持不变）。认证头不能从这里改。",
   "settings.provider.editor.headers.placeholder": "例如：\nx-opencode-session=${session_id}",
   "settings.provider.editor.headers.format": "请求头要写成 Name=Value：「{line}」",
+  "settings.provider.editor.headers.invalid":
+    "请求头不合法：「{line}」。名字只能用字母、数字和 !#$%&'*+-.^_`|~，值里不能有控制字符。",
   "settings.provider.editor.key": "密钥",
   "settings.provider.editor.key.saved": "已保存。",
   "settings.provider.editor.key.env": "正在使用环境变量 {env}。",

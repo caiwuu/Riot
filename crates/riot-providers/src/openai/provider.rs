@@ -86,7 +86,11 @@ impl std::fmt::Debug for OpenAiConfig {
             .field("idle_timeout", &self.idle_timeout)
             .field("retry", &self.retry)
             .field("sampling", &self.sampling)
-            .field("extra_headers", &self.extra_headers)
+            // 只露名字：值可能是 Azure `api-key`、网关 token 一类凭据
+            .field(
+                "extra_headers",
+                &crate::headers::header_names(&self.extra_headers),
+            )
             .finish()
     }
 }
@@ -435,10 +439,17 @@ mod giveup_tests {
         // 现在没有打印点，所以这不是现实泄漏 —— 但只要 Debug 存在，
         // 哪天有人加一句 `tracing::debug!(?config)` 就够了，而那行代码
         // 在 review 里看起来毫无问题。
-        let cfg = OpenAiConfig::deepseek("sk-绝密");
+        let cfg = OpenAiConfig {
+            extra_headers: vec![("api-key".into(), "azure-绝密".into())],
+            ..OpenAiConfig::deepseek("sk-绝密")
+        };
         let printed = format!("{cfg:?}");
         assert!(!printed.contains("sk-绝密"), "{printed}");
         assert!(printed.contains("<redacted>"), "{printed}");
+        assert!(
+            !printed.contains("azure-绝密") && printed.contains("api-key"),
+            "额外头只露名字不露值：{printed}"
+        );
         assert!(
             printed.contains("api.deepseek.com"),
             "非密字段要照常打出来，否则调试时这个 Debug 没用：{printed}"

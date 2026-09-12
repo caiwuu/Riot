@@ -122,6 +122,8 @@ export default {
     "한 줄에 Name=Value 하나씩. {session}은 현재 대화 ID입니다(같은 대화에서는 바뀌지 않습니다). 인증 헤더는 여기서 덮어쓸 수 없습니다.",
   "settings.provider.editor.headers.placeholder": "예:\nx-opencode-session=${session_id}",
   "settings.provider.editor.headers.format": "헤더는 Name=Value 형식이어야 합니다: “{line}”",
+  "settings.provider.editor.headers.invalid":
+    "잘못된 헤더입니다: “{line}”. 이름에는 영문, 숫자, !#$%&'*+-.^_`|~만 쓸 수 있고 값에는 제어 문자를 넣을 수 없습니다.",
   "settings.provider.editor.key": "키",
   "settings.provider.editor.key.saved": "저장되었습니다.",
   "settings.provider.editor.key.env": "환경 변수 {env}을(를) 사용하고 있습니다.",
