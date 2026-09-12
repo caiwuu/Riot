@@ -70,15 +70,17 @@ Agent 的正确性大部分体现在**编译器检查不到的地方**:中断后
 │  · 内核进程生命周期管理(spawn / 健康检查 / 优雅关闭)          │
 │  · RPC 路由:renderer ←→ kernel                              │
 │  · OS 能力:keychain、文件对话框、通知、PTY、编辑器唤起        │
-│  · UI 状态持久化(SQLite:窗口布局、会话列表、自动化调度)      │
+│  · 会话索引 index.json、定时任务 schedules.json               │
 └───────────────────────────┬──────────────────────────────────┘
                             │  JSON-RPC over stdio (newline-delimited)
 ┌───────────────────────────┴──────────────────────────────────┐
 │  Kernel (独立 Rust 进程,一个会话一个或多会话共享一个)         │
 │  · 主循环 · 工具执行 · 权限决策 · 上下文管理 · Provider 调用   │
-│  · 会话数据持久化(SQLite:消息、工具结果、token 账本)          │
+│  · 会话 transcript:每会话一份 JSONL(riot-store)               │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+`[取舍]` **会话不走 SQLite**(早期稿两边都标过)。正文是每会话一份 append-only JSONL(`riot-store`):首行 `Record::Meta`,之后每行一条进历史的消息,后台任务边产生边追加。索引是宿主的 `index.json`(侧栏元数据 + 权限/模型等可变状态),定时任务是旁边的 `schedules.json`,窗口布局在渲染进程的 `localStorage`。索引损坏从 transcript 首行重建;要检索再在旁边补索引,正文格式不用动。文件天然 append-only、可 grep、可单独备份,也没有 schema 迁移。Codex 是「JSONL 正文 + SQLite 索引」;Riot 把索引收成一个小 JSON。
 
 ### 2.1 为什么内核要独立进程
 
