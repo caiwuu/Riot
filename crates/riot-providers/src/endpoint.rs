@@ -61,6 +61,19 @@ pub fn api_url_with(base: &str, path: &str, default_version: &str, tail: &str) -
     )
 }
 
+/// OpenAI 对话地址：路径填了就照填；空着才按形态补默认尾巴。
+///
+/// `[约束]` 形态只影响空路径时的尾巴，不根据路径反推形态。供应商完全
+/// 可能把 Responses 挂在 `/openai/deployments/x/responses` 这种不是
+/// `/v1/responses` 的地址上。
+pub fn openai_conversation_url(base: &str, path: &str, api: riot_protocol::OpenaiApi) -> String {
+    let tail = match api {
+        riot_protocol::OpenaiApi::ChatCompletions => "chat/completions",
+        riot_protocol::OpenaiApi::Responses => "responses",
+    };
+    api_url_with(base, path, "v1", tail)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,6 +134,50 @@ mod tests {
         assert_eq!(
             api_url("https://gateway.test/anthropic", "v1", "messages"),
             "https://gateway.test/anthropic/messages"
+        );
+    }
+
+    #[test]
+    fn openai_空路径按形态补尾巴() {
+        use riot_protocol::OpenaiApi;
+        assert_eq!(
+            openai_conversation_url("https://api.openai.com", "", OpenaiApi::ChatCompletions),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            openai_conversation_url("https://api.openai.com", "", OpenaiApi::Responses),
+            "https://api.openai.com/v1/responses"
+        );
+        // base 已带路径时不双补 /v1。
+        assert_eq!(
+            openai_conversation_url(
+                "https://open.bigmodel.cn/api/paas/v4",
+                "",
+                OpenaiApi::Responses
+            ),
+            "https://open.bigmodel.cn/api/paas/v4/responses"
+        );
+    }
+
+    #[test]
+    fn openai_填了路径就照填不管形态() {
+        use riot_protocol::OpenaiApi;
+        assert_eq!(
+            openai_conversation_url(
+                "https://gw.test",
+                "/openai/deployments/x/responses",
+                OpenaiApi::Responses
+            ),
+            "https://gw.test/openai/deployments/x/responses"
+        );
+        // 形态是 Responses、路径却写成 completions：听用户的，不改。
+        assert_eq!(
+            openai_conversation_url(
+                "https://gw.test",
+                "/v1/chat/completions",
+                OpenaiApi::Responses
+            ),
+            "https://gw.test/v1/chat/completions"
         );
     }
 }

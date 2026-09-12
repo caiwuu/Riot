@@ -86,8 +86,7 @@ export default {
   "settings.provider.empty.hint": "Add a provider and enter its API key to start chatting.",
   "settings.provider.add": "Add provider",
   "settings.provider.roles": "Global model roles",
-  "settings.provider.list.desc": "Pick the provider to edit. The dot marks the one the current conversation is using.",
-  "settings.provider.inUse": "In use",
+  "settings.provider.list.desc": "Pick the provider to edit.",
   "settings.provider.vision": "Vision fallback",
   "settings.provider.vision.desc":
     "Only applies to models without “Vision” checked: the model chosen here looks at the image and describes it in text, which is then handed to the main model. Models that accept images get the original directly. The description is lossy; don't rely on it for pixel-precise judgments.",
@@ -114,6 +113,11 @@ export default {
   "settings.provider.editor.protocol.desc":
     "Determines the request format and auth header. The wrong one gets rejected by the provider.",
   "settings.provider.editor.protocol.openai": "OpenAI-compatible",
+  "settings.provider.editor.openaiApi": "API style",
+  "settings.provider.editor.openaiApi.desc":
+    "Chooses the request format, not the URL. A vendor can host Responses at any path.",
+  "settings.provider.editor.openaiApi.chat": "Chat Completions",
+  "settings.provider.editor.openaiApi.responses": "Responses",
   "settings.provider.editor.baseUrl": "API host",
   "settings.provider.editor.apiPath": "API path",
   "settings.provider.editor.apiPath.desc":

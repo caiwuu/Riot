@@ -12,11 +12,13 @@ use std::time::Duration;
 use async_stream::stream;
 use async_trait::async_trait;
 use futures::StreamExt;
+use riot_protocol::OpenaiApi;
 use riot_protocol::message::Message;
 use riot_protocol::provider::{
     Provider, ProviderError, ProviderEvent, ProviderRequest, ProviderStream,
 };
 use riot_protocol::tool::Clock;
+use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use super::decode::StreamDecoder;
@@ -36,6 +38,8 @@ pub struct OpenAiConfig {
     /// 可配置的理由:各家的根路径对不上，猜不全。智谱的对话在
     /// `/api/paas/v4/chat/completions`，中转和自建网关的花样更多。
     pub api_path: String,
+    /// Chat Completions 还是 Responses。决定报文，不决定路径。
+    pub openai_api: OpenaiApi,
     pub api_key: String,
     /// 连续过载时切过去的模型。
     pub fallback_model: Option<String>,
@@ -54,6 +58,7 @@ impl Default for OpenAiConfig {
             // 空 = 按 base 猜。默认不写死路径:写死之后"用户没配"和
             // "用户配的正好等于默认值"就分不开了。
             api_path: String::new(),
+            openai_api: OpenaiApi::ChatCompletions,
             api_key: String::new(),
             fallback_model: None,
             idle_timeout: DEFAULT_IDLE,
@@ -75,6 +80,7 @@ impl std::fmt::Debug for OpenAiConfig {
         f.debug_struct("OpenAiConfig")
             .field("base_url", &self.base_url)
             .field("api_path", &self.api_path)
+            .field("openai_api", &self.openai_api)
             .field("api_key", &"<redacted>")
             .field("fallback_model", &self.fallback_model)
             .field("idle_timeout", &self.idle_timeout)
@@ -131,24 +137,23 @@ impl OpenAiProvider {
 struct Endpoint {
     base_url: String,
     api_path: String,
+    openai_api: OpenaiApi,
     api_key: String,
     extra_headers: Vec<(String, String)>,
 }
 
-fn build_http_request(
-    wire: &super::wire::WireRequest,
-    endpoint: &Endpoint,
-) -> Result<HttpRequest, HttpError> {
-    let body = serde_json::to_vec(wire)
-        .map_err(|e| HttpError::transport(format!("failed to serialize request: {e}")))?;
+fn serialize_body<T: Serialize>(wire: &T) -> Result<Vec<u8>, HttpError> {
+    serde_json::to_vec(wire)
+        .map_err(|e| HttpError::transport(format!("failed to serialize request: {e}")))
+}
 
-    Ok(HttpRequest {
-        // 路径优先用用户配的；空着才按 base 猜。见 endpoint 模块。
-        url: crate::endpoint::api_url_with(
+fn build_http_request(body: Vec<u8>, endpoint: &Endpoint) -> HttpRequest {
+    HttpRequest {
+        // 路径优先用用户配的；空着才按形态补尾巴。形态不根据路径反推。
+        url: crate::endpoint::openai_conversation_url(
             &endpoint.base_url,
             &endpoint.api_path,
-            "v1",
-            "chat/completions",
+            endpoint.openai_api,
         ),
         headers: crate::headers::merge_headers(
             vec![
@@ -162,7 +167,7 @@ fn build_http_request(
             &endpoint.extra_headers,
         ),
         body,
-    })
+    }
 }
 
 #[async_trait]
@@ -179,6 +184,7 @@ impl Provider for OpenAiProvider {
         let endpoint = Endpoint {
             base_url: self.config.base_url.clone(),
             api_path: self.config.api_path.clone(),
+            openai_api: self.config.openai_api,
             api_key: self.config.api_key.clone(),
             extra_headers: self.config.extra_headers.clone(),
         };
@@ -193,15 +199,28 @@ impl Provider for OpenAiProvider {
                     return;
                 }
 
-                let mut wire = build_request(&req, &system, &retry_ctx);
-                wire.temperature = sampling.temperature;
-                wire.top_p = sampling.top_p;
                 // top_k 刻意不注入：OpenAI 官方端点会以 400 拒绝未知参数
-                let http_req = match build_http_request(&wire, &endpoint) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        yield ProviderEvent::Error(ProviderError::transport(e));
-                        return;
+                let http_req = if endpoint.openai_api.is_responses() {
+                    let mut wire = super::responses::build_request(&req, &system, &retry_ctx);
+                    wire.temperature = sampling.temperature;
+                    wire.top_p = sampling.top_p;
+                    match serialize_body(&wire) {
+                        Ok(body) => build_http_request(body, &endpoint),
+                        Err(e) => {
+                            yield ProviderEvent::Error(ProviderError::transport(e));
+                            return;
+                        }
+                    }
+                } else {
+                    let mut wire = build_request(&req, &system, &retry_ctx);
+                    wire.temperature = sampling.temperature;
+                    wire.top_p = sampling.top_p;
+                    match serialize_body(&wire) {
+                        Ok(body) => build_http_request(body, &endpoint),
+                        Err(e) => {
+                            yield ProviderEvent::Error(ProviderError::transport(e));
+                            return;
+                        }
                     }
                 };
 
@@ -245,15 +264,26 @@ impl Provider for OpenAiProvider {
                 // ── 流阶段：不再重试 ─────────────────────────
                 // 理由见 anthropic/provider.rs 的模块文档 —— UI 已经渲染了
                 // 吐出去的内容，重试会让同一段文字出现两次。
-                let decoded = decode_stream(byte_stream);
-                let guarded = with_idle_watchdog(decoded, idle, Arc::clone(&clock));
-                futures::pin_mut!(guarded);
-
-                while let Some(ev) = guarded.next().await {
-                    if cancel.is_cancelled() {
-                        return;
+                if endpoint.openai_api.is_responses() {
+                    let decoded = super::responses::decode_stream(byte_stream);
+                    let guarded = with_idle_watchdog(decoded, idle, Arc::clone(&clock));
+                    futures::pin_mut!(guarded);
+                    while let Some(ev) = guarded.next().await {
+                        if cancel.is_cancelled() {
+                            return;
+                        }
+                        yield ev;
                     }
-                    yield ev;
+                } else {
+                    let decoded = decode_stream(byte_stream);
+                    let guarded = with_idle_watchdog(decoded, idle, Arc::clone(&clock));
+                    futures::pin_mut!(guarded);
+                    while let Some(ev) = guarded.next().await {
+                        if cancel.is_cancelled() {
+                            return;
+                        }
+                        yield ev;
+                    }
                 }
                 return;
             }
@@ -272,7 +302,12 @@ impl Provider for OpenAiProvider {
 
     fn estimate_tokens_of(&self, messages: &[Message]) -> u32 {
         let (images, b64) = riot_protocol::provider::wire_images(messages);
-        riot_protocol::provider::estimate_tokens(wire_bytes(messages).saturating_sub(b64))
+        let bytes = if self.config.openai_api.is_responses() {
+            super::responses::wire_bytes(messages)
+        } else {
+            wire_bytes(messages)
+        };
+        riot_protocol::provider::estimate_tokens(bytes.saturating_sub(b64))
             + riot_protocol::provider::estimate_image_tokens(images)
     }
 }
@@ -484,5 +519,64 @@ mod header_tests {
                 .iter()
                 .any(|(k, v)| k == "authorization" && v == "Bearer sk-test")
         );
+    }
+
+    #[tokio::test]
+    async fn responses_空路径走默认尾巴且_body_是_input() {
+        let t = Arc::new(ScriptedTransport::new(vec![ScriptedResponse::Fail(
+            HttpError::status(400, "no"),
+        )]));
+        let p = OpenAiProvider::new(
+            Arc::clone(&t) as Arc<dyn HttpTransport>,
+            Arc::new(TokioClock),
+            Vec::new(),
+            OpenAiConfig {
+                base_url: "https://api.openai.com".into(),
+                openai_api: OpenaiApi::Responses,
+                api_key: "sk-test".into(),
+                ..Default::default()
+            },
+        );
+        let _ = p
+            .stream(ping(), CancellationToken::new())
+            .collect::<Vec<_>>()
+            .await;
+
+        let r = &t.requests()[0];
+        assert_eq!(r.url, "https://api.openai.com/v1/responses");
+        let body: serde_json::Value = serde_json::from_slice(&r.body).expect("json");
+        assert!(body.get("input").is_some(), "{body}");
+        assert!(body.get("messages").is_none(), "{body}");
+        assert_eq!(body["store"], false);
+    }
+
+    #[tokio::test]
+    async fn responses_自定义路径原样用() {
+        let t = Arc::new(ScriptedTransport::new(vec![ScriptedResponse::Fail(
+            HttpError::status(400, "no"),
+        )]));
+        let p = OpenAiProvider::new(
+            Arc::clone(&t) as Arc<dyn HttpTransport>,
+            Arc::new(TokioClock),
+            Vec::new(),
+            OpenAiConfig {
+                base_url: "https://gw.test".into(),
+                api_path: "/openai/deployments/x/responses".into(),
+                openai_api: OpenaiApi::Responses,
+                api_key: "sk-test".into(),
+                ..Default::default()
+            },
+        );
+        let _ = p
+            .stream(ping(), CancellationToken::new())
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(
+            t.requests()[0].url,
+            "https://gw.test/openai/deployments/x/responses"
+        );
+        let body: serde_json::Value = serde_json::from_slice(&t.requests()[0].body).expect("json");
+        assert!(body.get("input").is_some(), "{body}");
     }
 }

@@ -4,6 +4,7 @@ import {
   type AppConfig,
   type ConfigStatus,
   type ModelConfig,
+  type OpenaiApi,
   type Protocol,
   type ProviderConfig,
   listModels,
@@ -48,9 +49,10 @@ function sameHeaders(a?: Record<string, string> | null, b?: Record<string, strin
   return JSON.stringify(Object.entries(a ?? {}).sort()) === JSON.stringify(Object.entries(b ?? {}).sort());
 }
 
-/** 路径留空时实际会用的默认值。两个协议各不同。 */
-function defaultPath(protocol: Protocol): string {
-  return protocol === "anthropic" ? "/v1/messages" : "/v1/chat/completions";
+/** 路径留空时实际会用的默认值。协议和 OpenAI 形态各自决定尾巴。 */
+function defaultPath(protocol: Protocol, openaiApi?: OpenaiApi): string {
+  if (protocol === "anthropic") return "/v1/messages";
+  return openaiApi === "responses" ? "/v1/responses" : "/v1/chat/completions";
 }
 
 /**
@@ -284,6 +286,28 @@ export function ProviderEditor({
               ))}
             </div>
           </Row>
+          {p.protocol === "openai" && (
+            <Row
+              title={t("settings.provider.editor.openaiApi")}
+              desc={t("settings.provider.editor.openaiApi.desc")}
+            >
+              <div className="radio-row" role="radiogroup" aria-label={t("settings.provider.editor.openaiApi")}>
+                {(["chat_completions", "responses"] as OpenaiApi[]).map((api) => (
+                  <button
+                    key={api}
+                    role="radio"
+                    aria-checked={(p.openaiApi ?? "chat_completions") === api}
+                    className={(p.openaiApi ?? "chat_completions") === api ? "radio-pill active" : "radio-pill"}
+                    onClick={() => void onPatch({ openaiApi: api })}
+                  >
+                    {api === "responses"
+                      ? t("settings.provider.editor.openaiApi.responses")
+                      : t("settings.provider.editor.openaiApi.chat")}
+                  </button>
+                ))}
+              </div>
+            </Row>
+          )}
           <Row title={t("settings.provider.editor.baseUrl")}>
             <input
               value={baseUrl}
@@ -306,7 +330,7 @@ export function ProviderEditor({
               onChange={(e) => setApiPath(e.target.value)}
               onBlur={blurCommit}
               onKeyDown={blurOnEnter}
-              placeholder={defaultPath(p.protocol)}
+              placeholder={defaultPath(p.protocol, p.openaiApi)}
               spellCheck={false}
               aria-label={t("settings.provider.editor.apiPath")}
             />
@@ -316,7 +340,7 @@ export function ProviderEditor({
           <CardBlock className="url-preview-block">
             <span className="set-row-title">{t("settings.provider.editor.urlPreview")}</span>
             <p className="url-preview">
-              {joinUrl(baseUrl, apiPath.trim() || defaultPath(p.protocol))}
+              {joinUrl(baseUrl, apiPath.trim() || defaultPath(p.protocol, p.openaiApi))}
             </p>
           </CardBlock>
           <Row

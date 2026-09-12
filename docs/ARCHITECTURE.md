@@ -1575,20 +1575,29 @@ pub struct ProviderCapabilities {
 
 `[约束]` 内部规范格式贴 Anthropic 的 `content_block` 结构(`tool_use` / `tool_result` / `thinking`),OpenAI 兼容协议通过适配器转换。理由:thinking、prompt caching、并行工具调用这些设计都基于这套结构,反过来转换会丢信息。
 
-#### 11.1.1 OpenAI 兼容适配层的四条硬规矩
+#### 11.1.1 OpenAI 兼容适配层的硬规矩
 
-DeepSeek、Kimi、Qwen、OpenRouter、vLLM、Ollama 共用 `/v1/chat/completions`。适配写在 `openai/`,复用 SSE 解析、重试、看门狗 —— 那些只跟 HTTP 状态码有关,跟报文格式无关。
+DeepSeek、Kimi、Qwen、OpenRouter、vLLM、Ollama 共用 Chat Completions。官方 Responses 和任意供应商路径走另一套报文。适配都写在 `openai/`,复用 SSE 解析、重试、看门狗 —— 那些只跟 HTTP 状态码有关,跟报文格式无关。
 
-翻译时有四条不能违反的规矩。违反了服务端只回一句 `invalid request`,不告诉你是哪个字段:
+`[约束]` 形态由配置字段 `openaiApi`（`chat_completions` / `responses`）显式选择,不要用路径后缀猜。路径只负责拼 URL：官方是 `/v1/responses`,中转和 Azure 可以是任何尾巴。猜错的表现是语焉不详的 400。
+
+Chat Completions 翻译时有四条不能违反的规矩。违反了服务端只回一句 `invalid request`,不告诉你是哪个字段:
 
 1. **`role=tool` 必须紧跟带 `tool_calls` 的 assistant 消息**,且每个 `tool_call_id` 恰好一条。内部一条 User 消息里可能既有工具结果又有用户新说的话(用户在工具跑的时候插了一句),转换时工具结果要**先出**。
 2. **`content` 不能是空字符串**。压缩清理过历史之后会真的出现空消息。
 3. **`tool_calls[].function.arguments` 是 JSON 字符串**,不是对象。
 4. **`reasoning_content` 不能回传**。DeepSeek 的文档明确要求,带上会 400。
 
-`[约束]` 请求里必须带 `stream_options.include_usage`。不带的话流式响应没有 usage,上下文管理层就没有数据决定何时压缩 —— 而那个缺失不会报错,只会表现为"压缩从来不触发,然后某天突然撞上溢出"。
+`[约束]` Chat Completions 请求里必须带 `stream_options.include_usage`。不带的话流式响应没有 usage,上下文管理层就没有数据决定何时压缩 —— 而那个缺失不会报错,只会表现为"压缩从来不触发,然后某天突然撞上溢出"。Responses 没有这个字段,usage 来自 `response.completed`。
 
-`[取舍]` `finish_reason == "length"` 报成 `ProviderError::OutputLimit`(可恢复),而不是正常结束。当成正常结束的话,模型的回答会缺一截而没有任何人知道。
+Responses 另有几条:
+
+1. **不要带 Chat Completions 字段**（`messages` / `max_tokens` / `stream_options` / `reasoning_effort`）。官方端点对未知字段 400。
+2. **工具是扁平的** `{type:"function", name, parameters}`,`function_call` / `function_call_output` 用 `call_id` 配对,工具结果要先于同批用户插话。
+3. **`store: false`**,不设 `previous_response_id`。历史由 Riot 每轮重放。推理模型要把 `encrypted_content` 放回 `input`。
+4. **`incomplete_details.reason == "max_output_tokens"`** 报成 `ProviderError::OutputLimit`。
+
+`[取舍]` Chat Completions 的 `finish_reason == "length"` 报成 `ProviderError::OutputLimit`(可恢复),而不是正常结束。当成正常结束的话,模型的回答会缺一截而没有任何人知道。
 
 ### 11.2 请求组装收敛成一个函数
 

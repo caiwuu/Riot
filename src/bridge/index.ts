@@ -42,6 +42,7 @@ import type {
   AgentError,
   AgentEvent,
   ApiProtocol,
+  OpenaiApi as GeneratedOpenaiApi,
   BackgroundTaskStatus as GeneratedBackgroundTaskStatus,
   BackgroundTaskView as GeneratedBackgroundTaskView,
   FileChange,
@@ -193,6 +194,9 @@ function invoke<T>(
  * 这边不会有任何报错，只会在运行时变成一个"未知协议"。 */
 export type Protocol = ApiProtocol;
 
+/** OpenAI 协议下的接口形态。生成类型的别名，同 Protocol 的理由。 */
+export type OpenaiApi = GeneratedOpenaiApi;
+
 /**
  * 采样参数。每个字段三态，和宿主的 `config::Sampling` 逐字段对应：
  *
@@ -229,6 +233,11 @@ export interface ProviderConfig {
   id: string;
   name: string;
   protocol: Protocol;
+  /**
+   * OpenAI 下的接口形态。缺省 = Chat Completions。Anthropic 忽略。
+   * 形态决定报文，路径只负责拼 URL。
+   */
+  openaiApi?: OpenaiApi;
   /** 接口主机，可以带前缀路径。 */
   baseUrl: string;
   /**

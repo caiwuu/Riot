@@ -113,6 +113,7 @@ pub fn provider_from_endpoint(
         OpenAiConfig {
             base_url: model.base_url.clone(),
             api_path: model.api_path.clone(),
+            openai_api: model.openai_api,
             api_key: key,
             fallback_model: model.fallback_model.clone(),
             sampling,
@@ -257,7 +258,7 @@ fn strip_endpoint_tail(api_path: &str) -> Option<&str> {
     if p.is_empty() {
         return None;
     }
-    for tail in ["chat/completions", "messages", "completions"] {
+    for tail in ["chat/completions", "messages", "completions", "responses"] {
         if let Some(rest) = p.strip_suffix(tail) {
             return Some(rest.trim_end_matches('/'));
         }
@@ -416,6 +417,9 @@ mod tests {
     #[test]
     fn 配了路径时清单跟着同一层去问() {
         let urls = model_list_urls("https://gw.test", "/openai/v1/chat/completions");
+        assert_eq!(urls[0], "https://gw.test/openai/v1/models");
+
+        let urls = model_list_urls("https://gw.test", "/openai/v1/responses");
         assert_eq!(urls[0], "https://gw.test/openai/v1/models");
         // 后面两条兜底照旧留着 —— 有些网关的清单确实不在那一层。
         assert!(urls.contains(&"https://gw.test/v1/models".to_owned()));

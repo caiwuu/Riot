@@ -85,8 +85,7 @@ export default {
   "settings.provider.empty.hint": "제공자를 추가하고 API key를 입력하면 대화를 시작할 수 있습니다.",
   "settings.provider.add": "제공자 추가",
   "settings.provider.roles": "전역 모델 역할",
-  "settings.provider.list.desc": "편집할 제공자를 선택하세요. 점이 있는 것이 현재 대화에서 사용 중인 제공자입니다.",
-  "settings.provider.inUse": "사용 중",
+  "settings.provider.list.desc": "편집할 제공자를 선택하세요.",
   "settings.provider.vision": "비전 대체",
   "settings.provider.vision.desc":
     "「비전」이 체크되지 않은 모델에만 적용됩니다. 여기서 설정한 모델이 먼저 이미지를 보고 텍스트로 옮긴 뒤 메인 모델에 전달합니다. 메인 모델이 이미지를 받을 수 있으면 원본을 그대로 보냅니다. 옮기는 과정에서 손실이 있으므로 정밀한 픽셀 판단에는 의존하지 마세요.",
@@ -109,6 +108,11 @@ export default {
   "settings.provider.editor.protocol": "프로토콜",
   "settings.provider.editor.protocol.desc": "요청 형식과 인증 헤더를 결정합니다. 잘못 선택하면 제공자가 거부합니다.",
   "settings.provider.editor.protocol.openai": "OpenAI 호환",
+  "settings.provider.editor.openaiApi": "API 형태",
+  "settings.provider.editor.openaiApi.desc":
+    "요청 형식을 정하며 경로와는 별개입니다. 공급자는 Responses를 아무 주소에나 둘 수 있습니다.",
+  "settings.provider.editor.openaiApi.chat": "Chat Completions",
+  "settings.provider.editor.openaiApi.responses": "Responses",
   "settings.provider.editor.baseUrl": "API 호스트",
   "settings.provider.editor.apiPath": "API 경로",
   "settings.provider.editor.apiPath.desc": "비워 두면 호스트에서 추정합니다. 엔드포인트가 일반적인 위치에 없을 때(예: Zhipu의 {example}) 여기에 입력하세요.",

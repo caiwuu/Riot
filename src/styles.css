@@ -7708,13 +7708,6 @@ button.ta-resize-grip:hover:not(:disabled),
   font-size: 14px;
 }
 
-.prov-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--ok);
-}
-
 .radio-row {
   display: flex;
   gap: 6px;

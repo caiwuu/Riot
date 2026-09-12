@@ -150,9 +150,6 @@ export function ProviderPane({
               }}
             >
               {p.name}
-              {p.id === cfg.activeProvider ? (
-                <span className="prov-dot" title={t("settings.provider.inUse")} />
-              ) : null}
             </button>
           ))}
           <button className="prov-tab add" onClick={addProvider} title={t("settings.provider.add")}>

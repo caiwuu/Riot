@@ -884,6 +884,13 @@ export type RpcRequest =
       method: "kernel.shutdown";
     };
 /**
+ * OpenAI 协议下的接口形态。路径只负责拼 URL，形态决定报文。
+ *
+ * `[约束]` 不要用路径后缀猜。官方是 `/v1/responses`，中转和 Azure 可以
+ * 是任何尾巴；猜错的表现是语焉不详的 400。
+ */
+export type OpenaiApi = "chat_completions" | "responses";
+/**
  * 说话用的协议。决定请求格式与认证头。
  *
  * 和宿主 `config` 里的 `Protocol` 同构 —— 那个是配置侧(会序列化进
@@ -1482,6 +1489,13 @@ export interface ModelEndpoint {
   };
   fallback_model?: string | null;
   model: string;
+  /**
+   * OpenAI 下选 Chat Completions 还是 Responses。Anthropic 忽略。
+   *
+   * 缺字段必须能读：老宿主发的 `ModelEndpoint` 没有这一项，按
+   * Chat Completions 走 —— 那是缺省之前唯一的 OpenAI 形态。
+   */
+  openai_api?: OpenaiApi;
   protocol: ApiProtocol;
   sampling?: EndpointSampling;
 }

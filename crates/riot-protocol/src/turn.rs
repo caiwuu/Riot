@@ -24,10 +24,30 @@ use crate::provider::ThinkingPolicy;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiProtocol {
-    /// OpenAI Chat Completions 兼容。
+    /// OpenAI 兼容（Chat Completions 或 Responses，见 [`OpenaiApi`]）。
     Openai,
     /// Anthropic Messages。
     Anthropic,
+}
+
+/// OpenAI 协议下的接口形态。路径只负责拼 URL，形态决定报文。
+///
+/// `[约束]` 不要用路径后缀猜。官方是 `/v1/responses`，中转和 Azure 可以
+/// 是任何尾巴；猜错的表现是语焉不详的 400。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenaiApi {
+    /// `/v1/chat/completions` 那套 `messages` + SSE chunk。
+    #[default]
+    ChatCompletions,
+    /// `/v1/responses` 那套 `input` + 命名 SSE 事件。
+    Responses,
+}
+
+impl OpenaiApi {
+    pub fn is_responses(self) -> bool {
+        matches!(self, Self::Responses)
+    }
 }
 
 /// 采样参数。`None` = 用端点默认。
@@ -72,11 +92,25 @@ pub struct ModelEndpoint {
     /// 不能因此整轮解析失败。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra_headers: BTreeMap<String, String>,
+    /// OpenAI 下选 Chat Completions 还是 Responses。Anthropic 忽略。
+    ///
+    /// 缺字段必须能读：老宿主发的 `ModelEndpoint` 没有这一项，按
+    /// Chat Completions 走 —— 那是缺省之前唯一的 OpenAI 形态。
+    #[serde(default, skip_serializing_if = "is_chat_completions")]
+    pub openai_api: OpenaiApi,
+}
+
+fn is_chat_completions(api: &OpenaiApi) -> bool {
+    *api == OpenaiApi::ChatCompletions
 }
 
 impl ModelEndpoint {
     pub fn is_anthropic(&self) -> bool {
         self.protocol == ApiProtocol::Anthropic
+    }
+
+    pub fn is_openai_responses(&self) -> bool {
+        self.protocol == ApiProtocol::Openai && self.openai_api.is_responses()
     }
 }
 
@@ -286,6 +320,11 @@ mod tests {
         }))
         .expect("缺 extra_headers 不能让整轮解析失败");
         assert!(v.extra_headers.is_empty());
+        assert_eq!(
+            v.openai_api,
+            OpenaiApi::ChatCompletions,
+            "老端点没有 openai_api，必须当 Chat Completions"
+        );
     }
 
     #[test]

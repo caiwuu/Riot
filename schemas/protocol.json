@@ -379,7 +379,7 @@
       "oneOf": [
         {
           "const": "openai",
-          "description": "OpenAI Chat Completions 兼容。",
+          "description": "OpenAI 兼容（Chat Completions 或 Responses，见 [`OpenaiApi`]）。",
           "type": "string"
         },
         {
@@ -1652,6 +1652,14 @@
         "model": {
           "type": "string"
         },
+        "openai_api": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/OpenaiApi"
+            }
+          ],
+          "description": "OpenAI 下选 Chat Completions 还是 Responses。Anthropic 忽略。\n\n缺字段必须能读：老宿主发的 `ModelEndpoint` 没有这一项，按\nChat Completions 走 —— 那是缺省之前唯一的 OpenAI 形态。"
+        },
         "protocol": {
           "$ref": "#/$defs/ApiProtocol"
         },
@@ -1689,6 +1697,21 @@
         {
           "const": "build_in_parallel",
           "description": "「并行构建」：按计划里 todo 的依赖分层，每层一个后台子 agent，\n能并行的并行；末尾的测试留给最后一个测试 agent。",
+          "type": "string"
+        }
+      ]
+    },
+    "OpenaiApi": {
+      "description": "OpenAI 协议下的接口形态。路径只负责拼 URL，形态决定报文。\n\n`[约束]` 不要用路径后缀猜。官方是 `/v1/responses`，中转和 Azure 可以\n是任何尾巴；猜错的表现是语焉不详的 400。",
+      "oneOf": [
+        {
+          "const": "chat_completions",
+          "description": "`/v1/chat/completions` 那套 `messages` + SSE chunk。",
+          "type": "string"
+        },
+        {
+          "const": "responses",
+          "description": "`/v1/responses` 那套 `input` + 命名 SSE 事件。",
           "type": "string"
         }
       ]

@@ -5883,6 +5883,7 @@ mod tests {
     fn test_model() -> riot_protocol::ModelEndpoint {
         riot_protocol::ModelEndpoint {
             protocol: riot_protocol::ApiProtocol::Openai,
+            openai_api: riot_protocol::OpenaiApi::ChatCompletions,
             base_url: "https://api.deepseek.com".into(),
             api_path: String::new(),
             // 空 key:让 provider_from_endpoint 立即失败,不真打网络。这些测试

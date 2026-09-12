@@ -1,11 +1,14 @@
 //! OpenAI 兼容适配。
 //!
-//! 覆盖 DeepSeek、Kimi、Qwen、OpenRouter、vLLM、Ollama —— 它们用的都是
-//! `/v1/chat/completions` 这套报文，差别只在 base URL 和模型名。
+//! Chat Completions（DeepSeek、Kimi、Qwen、中转）和 Responses（官方
+//! `/v1/responses` 及任意供应商路径）共用这一层。形态由
+//! [`riot_protocol::OpenaiApi`] 决定，路径只负责拼 URL。
 
 pub mod decode;
 pub mod provider;
 pub mod request;
+pub mod responses;
+pub(crate) mod text;
 pub mod wire;
 
 pub use provider::{OpenAiConfig, OpenAiProvider};

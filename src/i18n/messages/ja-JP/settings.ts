@@ -85,8 +85,7 @@ export default {
   "settings.provider.empty.hint": "プロバイダーを追加して API key を入力すれば、会話を始められます。",
   "settings.provider.add": "プロバイダーを追加",
   "settings.provider.roles": "グローバルなモデルの役割",
-  "settings.provider.list.desc": "編集するプロバイダーを切り替えます。丸印が付いているのは現在の会話で使用中のものです。",
-  "settings.provider.inUse": "使用中",
+  "settings.provider.list.desc": "編集するプロバイダーを切り替えます。",
   "settings.provider.vision": "ビジョン代替",
   "settings.provider.vision.desc":
     "「ビジョン」にチェックのないモデルにのみ適用されます。まずここで設定したモデルが画像を見てテキストに変換し、それをメインモデルに渡します。メインモデル自身が画像対応なら原画像を直接送ります。変換は不可逆なので、ピクセル単位の正確な判断には頼らないでください。",
@@ -109,6 +108,11 @@ export default {
   "settings.provider.editor.protocol": "プロトコル",
   "settings.provider.editor.protocol.desc": "リクエスト形式と認証ヘッダーを決めます。間違えるとプロバイダーに拒否されます。",
   "settings.provider.editor.protocol.openai": "OpenAI 互換",
+  "settings.provider.editor.openaiApi": "API 形態",
+  "settings.provider.editor.openaiApi.desc":
+    "リクエスト形式を決めます。パスとは別です。Responses の URL は提供者が自由に決められます。",
+  "settings.provider.editor.openaiApi.chat": "Chat Completions",
+  "settings.provider.editor.openaiApi.responses": "Responses",
   "settings.provider.editor.baseUrl": "API ホスト",
   "settings.provider.editor.apiPath": "API パス",
   "settings.provider.editor.apiPath.desc": "空欄ならホストから推測します。エンドポイントが標準的な場所にない場合（例：Zhipu の {example}）にここで指定します。",

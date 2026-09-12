@@ -18,6 +18,7 @@ use riot_protocol::message::{
 };
 use riot_protocol::provider::{ProviderRequest, ThinkingConfig, ThinkingEffort};
 
+use super::text::{assemble_system, data_url, render_attachment, render_result};
 use super::wire::{
     StreamOptions, WireFunctionCall, WireImageUrl, WireMessage, WirePart, WireRequest,
     WireThinkingToggle, WireTool, WireToolCall, WireToolFunction,
@@ -31,6 +32,8 @@ pub struct RetryContext {
     pub model_override: Option<String>,
     /// 上下文溢出恢复时调低。
     pub max_tokens_override: Option<u32>,
+    /// 换模型时剥掉思考签名。Chat Completions 不回传思考，这只对 Responses 有意义。
+    pub strip_thinking_signatures: bool,
 }
 
 impl RetryContext {
@@ -41,6 +44,7 @@ impl RetryContext {
     pub fn fallback_to(model: impl Into<String>) -> Self {
         Self {
             model_override: Some(model.into()),
+            strip_thinking_signatures: true,
             ..Self::default()
         }
     }
@@ -53,31 +57,7 @@ pub fn build_request(
 ) -> WireRequest {
     let mut messages = Vec::new();
 
-    // OpenAI 只有一条 system 消息，没有分段缓存的概念。
-    // 段落拼起来时保持顺序 —— 前缀稳定，服务端的自动前缀缓存才有得命中。
-    let system_text = system
-        .iter()
-        .map(|s| s.text.as_str())
-        .filter(|t| !t.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-
-    // 分段边界只对 Anthropic 的分块缓存有意义，这边一条 system 消息装完，
-    // 把两段原序接回去 —— 顺序不能动，服务端的自动前缀缓存靠稳定前缀命中。
-    // 不切的话那个标记会原样念给模型听。
-    let (stable, project) = crate::anthropic::request::split_request_system(&req.system);
-    let req_system = if project.is_empty() {
-        stable.to_owned()
-    } else {
-        format!("{stable}\n\n{project}")
-    };
-
-    let full_system = match (system_text.is_empty(), req_system.is_empty()) {
-        (true, true) => String::new(),
-        (true, false) => req_system,
-        (false, true) => system_text,
-        (false, false) => format!("{system_text}\n\n{req_system}"),
-    };
+    let full_system = assemble_system(system, &req.system);
     if !full_system.is_empty() {
         messages.push(WireMessage::System {
             content: full_system,
@@ -282,87 +262,7 @@ pub fn convert_messages(messages: &[Message]) -> Vec<WireMessage> {
 fn image_part(media_type: &str, data: &str) -> WirePart {
     WirePart::ImageUrl {
         image_url: WireImageUrl {
-            url: format!("data:{media_type};base64,{data}"),
+            url: data_url(media_type, data),
         },
     }
-}
-
-fn render_result(content: &ToolResultContent, is_error: bool) -> String {
-    let body = match content {
-        ToolResultContent::Text { text } => text.clone(),
-        ToolResultContent::Spilled {
-            path,
-            preview,
-            total_bytes,
-        } => format!(
-            "Result too large ({total_bytes} bytes); written to {}. First part:\n{preview}",
-            path.display()
-        ),
-        ToolResultContent::Cleared => "[result cleared to save context]".to_owned(),
-        // 图片本身跟在这条 tool 消息后面的那条 user 消息里（见
-        // convert_messages）。这里留一句话是因为 tool 消息不能为空 ——
-        // 空结果会让一部分模型误判任务结束。
-        ToolResultContent::Image { media_type, .. } => {
-            format!("(the {media_type} image is in the next message)")
-        }
-        // 转述代替图片。图片是给界面的，不随请求发 —— 这个变体本来就
-        // 产生于"模型看不了图"的会话（见协议注释）。
-        ToolResultContent::DescribedImage { text, .. } => text.clone(),
-        // 图跟在下一条 user 消息里（见 convert_messages 的 tool_images）；
-        // 这里给配套文字 + 一句指路，tool 消息不能为空。措辞保持中性 ——
-        // 这个变体不只装 Set-of-Marks 截图，也装 MCP 的图文混合结果。
-        ToolResultContent::MarkedImage {
-            media_type, text, ..
-        } => {
-            format!(
-                "{text}\n(the image accompanying this result is in the next message, {media_type})"
-            )
-        }
-    };
-
-    // 空的 tool 结果会让部分模型误判任务结束。见 ARCHITECTURE.md §6.7
-    let body = if body.trim().is_empty() {
-        "(completed with no output)".to_owned()
-    } else {
-        body
-    };
-
-    if is_error {
-        format!("Error: {body}")
-    } else {
-        body
-    }
-}
-
-/// 附件转成给模型的文字。和 Anthropic 那条路（`convert_attachment`）保持
-/// 同一套措辞 —— 模型换协议不该看到两种不同的注入格式。
-///
-/// 以前这里直接 `serde_json::to_string`，模型读到的是一坨
-/// `{"type":"attachment","kind":...}` 的字面 JSON。
-fn render_attachment(a: &riot_protocol::message::Attachment) -> Option<String> {
-    use riot_protocol::message::Attachment;
-    Some(match a {
-        Attachment::Memory { path, content } => format!(
-            "<system-reminder>\nProject memory {}:\n{content}\n</system-reminder>",
-            path.display()
-        ),
-        Attachment::RestoredFile { path, content } => format!(
-            "<system-reminder>\nYou read {} before compaction:\n{content}\n</system-reminder>",
-            path.display()
-        ),
-        Attachment::UserFile { path, content } => format!(
-            "<system-reminder>\nThe user referenced {} in their message; its contents \
-             follow:\n{content}\n</system-reminder>",
-            path.display()
-        ),
-        Attachment::Environment { text } | Attachment::SystemReminder { text } => {
-            format!("<system-reminder>\n{text}\n</system-reminder>")
-        }
-        // 视觉兼容：模型读转述，图片本体（`data`）只给界面，不发出去。
-        Attachment::DescribedImage { text, .. } => {
-            format!("<system-reminder>\n{text}\n</system-reminder>")
-        }
-        // 图片由调用方单独走内容块，不在这里变成文字。
-        Attachment::Image { .. } => return None,
-    })
 }

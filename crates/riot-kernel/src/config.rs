@@ -22,6 +22,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
+use riot_protocol::OpenaiApi;
 use riot_protocol::text::UiError;
 use riot_protocol::ui_error;
 use serde::{Deserialize, Serialize};
@@ -45,6 +46,11 @@ pub struct ProviderConfig {
     /// 显示名。
     pub name: String,
     pub protocol: Protocol,
+    /// OpenAI 下的接口形态。Anthropic 忽略。缺省 = Chat Completions。
+    ///
+    /// 和 `api_path` 无关：形态决定报文，路径只负责拼 URL。
+    #[serde(default, skip_serializing_if = "is_chat_completions")]
+    pub openai_api: OpenaiApi,
     /// 接口主机（可以带前缀路径），如 `https://api.deepseek.com`。
     pub base_url: String,
     /// 接口路径，如 `/v1/chat/completions`。
@@ -89,6 +95,10 @@ pub struct ProviderConfig {
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+fn is_chat_completions(api: &OpenaiApi) -> bool {
+    *api == OpenaiApi::ChatCompletions
 }
 
 /// 设置页「测试连接 / 拉模型清单」没有真实会话，用这个占位符展开
@@ -1266,6 +1276,7 @@ impl AppConfig {
         let mc = p.model(model);
         Ok(ResolvedModel {
             protocol: p.protocol,
+            openai_api: p.openai_api,
             base_url: p.base_url.clone(),
             api_path: p.api_path.clone(),
             api_key_env: p.api_key_env.clone(),
@@ -1300,6 +1311,7 @@ impl AppConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedModel {
     pub protocol: Protocol,
+    pub openai_api: OpenaiApi,
     pub base_url: String,
     /// 接口路径。空 = 按主机猜。
     pub api_path: String,
@@ -1358,6 +1370,7 @@ impl ResolvedModel {
                 Protocol::Openai => riot_protocol::ApiProtocol::Openai,
                 Protocol::Anthropic => riot_protocol::ApiProtocol::Anthropic,
             },
+            openai_api: self.openai_api,
             base_url: self.base_url.clone(),
             api_path: self.api_path.clone(),
             api_key: self.api_key()?,
@@ -1789,6 +1802,7 @@ fn migrate(old: LegacyConfig) -> AppConfig {
         id: old.provider.clone(),
         name: old.provider.clone(),
         protocol,
+        openai_api: OpenaiApi::ChatCompletions,
         base_url: old.base_url,
         api_key_env: old.api_key_env,
         models: vec![ModelConfig::new(old.model.clone())],
@@ -1862,6 +1876,7 @@ mod tests {
                 id: "acme".into(),
                 name: "Acme".into(),
                 protocol: Protocol::Openai,
+                openai_api: OpenaiApi::ChatCompletions,
                 base_url: "https://api.acme.test".into(),
                 api_key_env: "ACME_API_KEY".into(),
                 models: vec![ModelConfig::new("m1")],
@@ -1902,6 +1917,11 @@ mod tests {
         // 老格式里没有能力信息，一律按"不能看图"读 —— 猜"能"的代价是
         // 每次带图的请求都被服务方拒。
         assert!(c.providers[0].models.iter().all(|m| !m.vision));
+        assert_eq!(
+            c.providers[0].openai_api,
+            OpenaiApi::ChatCompletions,
+            "老配置没有 openaiApi，必须当 Chat Completions"
+        );
     }
 
     /// 短暂存在过的"服务方级 vision"要铺到它的每个模型上。
@@ -2962,6 +2982,7 @@ mod tests {
             id: "x".into(),
             name: "x".into(),
             protocol: Protocol::Openai,
+            openai_api: OpenaiApi::ChatCompletions,
             base_url: "https://x".into(),
             api_key_env: "DEFINITELY_NOT_SET_XYZ".into(),
             models: vec![],
@@ -2984,6 +3005,7 @@ mod tests {
             id: "x".into(),
             name: "x".into(),
             protocol: Protocol::Openai,
+            openai_api: OpenaiApi::ChatCompletions,
             base_url: "https://x".into(),
             api_key_env: "RIOT_TEST_BLANK".into(),
             models: vec![],
@@ -3013,6 +3035,7 @@ mod tests {
             id: "t".into(),
             name: "t".into(),
             protocol: Protocol::Openai,
+            openai_api: OpenaiApi::ChatCompletions,
             base_url: "https://x".into(),
             api_key_env: env.into(),
             models: vec![],
