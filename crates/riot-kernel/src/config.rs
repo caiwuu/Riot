@@ -49,7 +49,7 @@ pub struct ProviderConfig {
     /// OpenAI 下的接口形态。Anthropic 忽略。缺省 = Chat Completions。
     ///
     /// 和 `api_path` 无关：形态决定报文，路径只负责拼 URL。
-    #[serde(default, skip_serializing_if = "is_chat_completions")]
+    #[serde(default, skip_serializing_if = "OpenaiApi::is_chat_completions")]
     pub openai_api: OpenaiApi,
     /// 接口主机（可以带前缀路径），如 `https://api.deepseek.com`。
     pub base_url: String,
@@ -95,10 +95,6 @@ pub struct ProviderConfig {
 
 fn is_false(b: &bool) -> bool {
     !*b
-}
-
-fn is_chat_completions(api: &OpenaiApi) -> bool {
-    *api == OpenaiApi::ChatCompletions
 }
 
 /// 设置页「测试连接 / 拉模型清单」没有真实会话，用这个占位符展开

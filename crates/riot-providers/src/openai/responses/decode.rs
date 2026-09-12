@@ -65,8 +65,17 @@ impl StreamDecoder {
             }
         };
 
+        // 出错事件有两种形态（见 `WireEvent`）：嵌套的 `error` 对象，或者
+        // 文档写的扁平 `code` / `message`。任一命中都算出错。
         if let Some(err) = ev.error {
             self.note_error(err);
+            return Vec::new();
+        }
+        if ev.kind == "error" {
+            self.note_error(WireStreamError {
+                message: ev.message.unwrap_or_default(),
+                kind: ev.code,
+            });
             return Vec::new();
         }
 
@@ -94,8 +103,8 @@ impl StreamDecoder {
                     Vec::new()
                 }
             }
-            "response.failed" | "error" => Vec::new(),
-            "response.incomplete" => Vec::new(),
+            // `response.failed` 的错误在 `response.error` 里，上面 ingest_response
+            // 已经记下；`error` 在更上面拦掉了。
             _ => Vec::new(),
         }
     }

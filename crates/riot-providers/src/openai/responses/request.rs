@@ -8,7 +8,10 @@
 //! 1. `function_call_output` 必须紧跟对应的 `function_call`，`call_id` 配对；
 //! 2. `arguments` 是 JSON **字符串**，不是对象；
 //! 3. 不要带 Chat Completions 字段（`messages` / `max_tokens` / `stream_options`）；
-//! 4. `store: false` 时推理项必须把 `encrypted_content` 放回 input。
+//! 4. `store: false` 时推理项必须把 `encrypted_content` 放回 input；
+//! 5. 回传的推理项 `id` / `summary` 必填（空也发 `[]`），且后面必须紧跟它
+//!    配套的 message 或 function_call —— 单独一个推理项服务端拒收
+//!    （`provided without its required following item`）。
 
 use riot_protocol::message::{
     AssistantContent, Attachment, Message, ToolResultContent, UserContent,
@@ -42,12 +45,23 @@ pub fn build_request(
         .collect();
     tools.sort_by(|a, b| a.name.cmp(&b.name));
 
+    // 开了档位就顺手要摘要（`summary: "auto"`）和加密推理：前者让界面能
+    // 展示思考过程，后者是下一轮回传的凭据。
     let (reasoning, include) = match req.thinking {
         ThinkingConfig::Off => (None, Vec::new()),
-        ThinkingConfig::Disabled => (Some(WireReasoning { effort: "none" }), Vec::new()),
+        // `"none"` 只有 gpt-5.1 起认，gpt-5 / o 系列会 400。`Disabled` 只能
+        // 来自用户显式选择（见 `ThinkingConfig` 的约束），这里不替它兜。
+        ThinkingConfig::Disabled => (
+            Some(WireReasoning {
+                effort: "none",
+                summary: None,
+            }),
+            Vec::new(),
+        ),
         ThinkingConfig::Effort { level } => (
             Some(WireReasoning {
                 effort: level.as_openai_str(),
+                summary: Some("auto"),
             }),
             vec!["reasoning.encrypted_content"],
         ),
@@ -58,6 +72,7 @@ pub fn build_request(
                     4_097..=16_384 => ThinkingEffort::Medium.as_openai_str(),
                     _ => ThinkingEffort::High.as_openai_str(),
                 },
+                summary: Some("auto"),
             }),
             vec!["reasoning.encrypted_content"],
         ),
@@ -187,7 +202,9 @@ pub fn convert_input(messages: &[Message], strip_thinking_signatures: bool) -> V
                     }
                 }
 
-                if text.trim().is_empty() && calls.is_empty() && reasonings.is_empty() {
+                if text.trim().is_empty() && calls.is_empty() {
+                    // 只剩推理项（比如输出撞上限时被截断的那一轮）。单独回传
+                    // 服务端拒收（规矩 5），整条丢掉。
                     continue;
                 }
 
@@ -223,8 +240,11 @@ fn reasoning_item(signature: Option<&str>, text: &str) -> Option<WireInputItem> 
     if sig.encrypted_content.is_empty() {
         return None;
     }
+    // 没有 id 的推理项发出去也是 400（规矩 5），不如不发 —— 少一段推理
+    // 上下文，比整轮被拒好。
+    let id = sig.id.filter(|s| !s.is_empty())?;
     Some(WireInputItem::Reasoning {
-        id: sig.id,
+        id,
         encrypted_content: sig.encrypted_content,
         summary: if text.trim().is_empty() {
             Vec::new()

@@ -48,6 +48,12 @@ impl OpenaiApi {
     pub fn is_responses(self) -> bool {
         matches!(self, Self::Responses)
     }
+
+    /// 缺省形态。配置和端点序列化时用它跳过默认值
+    /// （`skip_serializing_if`），老文件 / 老宿主才读得回来。
+    pub fn is_chat_completions(&self) -> bool {
+        matches!(self, Self::ChatCompletions)
+    }
 }
 
 /// 采样参数。`None` = 用端点默认。
@@ -96,21 +102,13 @@ pub struct ModelEndpoint {
     ///
     /// 缺字段必须能读：老宿主发的 `ModelEndpoint` 没有这一项，按
     /// Chat Completions 走 —— 那是缺省之前唯一的 OpenAI 形态。
-    #[serde(default, skip_serializing_if = "is_chat_completions")]
+    #[serde(default, skip_serializing_if = "OpenaiApi::is_chat_completions")]
     pub openai_api: OpenaiApi,
-}
-
-fn is_chat_completions(api: &OpenaiApi) -> bool {
-    *api == OpenaiApi::ChatCompletions
 }
 
 impl ModelEndpoint {
     pub fn is_anthropic(&self) -> bool {
         self.protocol == ApiProtocol::Anthropic
-    }
-
-    pub fn is_openai_responses(&self) -> bool {
-        self.protocol == ApiProtocol::Openai && self.openai_api.is_responses()
     }
 }
 

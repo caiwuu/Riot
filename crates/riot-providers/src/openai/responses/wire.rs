@@ -34,6 +34,10 @@ pub struct WireRequest {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WireReasoning {
     pub effort: &'static str,
+    /// `"auto"` = 让服务端回推理摘要。不带的话响应里的 reasoning 项
+    /// `summary` 永远是空的，界面上看不到模型在想什么。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -61,12 +65,13 @@ pub enum WireInputItem {
     },
     #[serde(rename = "function_call_output")]
     FunctionCallOutput { call_id: String, output: String },
+    /// `[约束]` `id` 和 `summary` 在 input 侧是**必填**，`summary` 为空也
+    /// 要发 `[]`。省掉任一个服务端回 `400 Missing required parameter:
+    /// 'input[N].summary'`，而且只在第二轮才暴露 —— 第一轮没有历史推理项。
     #[serde(rename = "reasoning")]
     Reasoning {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
+        id: String,
         encrypted_content: String,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
         summary: Vec<WireSummary>,
     },
 }
@@ -125,8 +130,16 @@ pub struct WireEvent {
     pub item: Option<WireOutputItem>,
     #[serde(default)]
     pub response: Option<WireResponse>,
+    /// 嵌套形态：`{"type":"error","error":{"message":..}}`。服务端实际
+    /// 常发这种（Azure 也是），虽然文档写的是下面那种。
     #[serde(default)]
     pub error: Option<WireStreamError>,
+    /// 扁平形态：`{"type":"error","code":..,"message":..}`，文档定义的样子。
+    /// 两种都得认 —— 漏一种的后果是出错后半截正文被当成正常回答定稿。
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
