@@ -19,7 +19,7 @@
 //!
 //! 不变的约束：key 绝不进日志、事件、错误消息，绝不返回给前端。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use riot_protocol::text::UiError;
@@ -71,6 +71,15 @@ pub struct ProviderConfig {
     /// 改成"不发"（见 [`Sampling`] 的三态）。
     #[serde(default)]
     pub sampling: Sampling,
+    /// 每次请求额外带上的 HTTP 头。值里的 `${session_id}` /
+    /// `${conversation_id}` 会在发请求时换成当前会话 ID。
+    ///
+    /// 做成通用表而不是 `if provider == opencode`：OpenCode Go 要
+    /// `x-opencode-session`，OpenRouter 要 `HTTP-Referer` / `X-Title`，
+    /// 以后别的服务方还会要别的。认证头（Authorization / x-api-key）
+    /// 不能从这里改，见 `riot_providers::headers`。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra_headers: BTreeMap<String, String>,
     /// **已废弃**：视觉能力按模型记（[`ModelConfig::vision`]）。字段保留只为
     /// 读懂短暂存在过的"按服务方"格式 —— 加载时 [`normalize`] 会把它铺到这个
     /// 服务方的所有模型上然后清空。
@@ -80,6 +89,32 @@ pub struct ProviderConfig {
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+/// 设置页「测试连接 / 拉模型清单」没有真实会话，用这个占位符展开
+/// `${session_id}`。OpenCode 一类网关要的是「有 ID」，不是「必须是用户
+/// 点开的那条聊天」。
+pub const PROBE_SESSION_ID: &str = "ses_connection_test";
+
+/// 把 header 值里的会话占位符换成真实 ID。
+///
+/// 只认 `${session_id}` 和 `${conversation_id}`（同义）。其它 `${...}`
+/// 原样留下，免得用户配了尚未支持的变量，请求默默带上空值，排查比
+/// 「没替换」难得多。
+pub fn expand_header_templates(
+    headers: &BTreeMap<String, String>,
+    session_id: &str,
+) -> BTreeMap<String, String> {
+    headers
+        .iter()
+        .map(|(k, v)| (k.clone(), expand_header_value(v, session_id)))
+        .collect()
+}
+
+fn expand_header_value(value: &str, session_id: &str) -> String {
+    value
+        .replace("${session_id}", session_id)
+        .replace("${conversation_id}", session_id)
 }
 
 /// 一个模型的配置。
@@ -1245,6 +1280,7 @@ impl AppConfig {
             // state.rs 的 send_turn）—— 越具体的赢，这条链任何一环反了都
             // 会表现为"我明明设了 temperature，它没生效"。
             sampling: mc.map_or(p.sampling, |m| m.sampling.or(p.sampling)),
+            extra_headers: p.extra_headers.clone(),
         })
     }
 
@@ -1273,6 +1309,8 @@ pub struct ResolvedModel {
     /// 这个模型的上下文窗口。`None` = 用户没填。
     pub context_window: Option<u32>,
     pub sampling: Sampling,
+    /// 模板尚未展开。见 [`ProviderConfig::extra_headers`]。
+    pub extra_headers: BTreeMap<String, String>,
 }
 
 impl ResolvedModel {
@@ -1311,7 +1349,10 @@ impl ResolvedModel {
     /// 解析成跨进程传输的端点:协议、采样转成 protocol 类型,并把明文 key
     /// 一并解析出来。拆进程后内核拿不到 auth.json,key 必须在宿主这一侧
     /// 解析完再随 RPC 传进内核(见 riot_protocol::turn 模块文档)。
-    pub fn to_endpoint(&self) -> Result<riot_protocol::ModelEndpoint, ConfigError> {
+    pub fn to_endpoint(
+        &self,
+        session_id: &str,
+    ) -> Result<riot_protocol::ModelEndpoint, ConfigError> {
         Ok(riot_protocol::ModelEndpoint {
             protocol: match self.protocol {
                 Protocol::Openai => riot_protocol::ApiProtocol::Openai,
@@ -1323,6 +1364,7 @@ impl ResolvedModel {
             model: self.model.clone(),
             fallback_model: self.fallback_model.clone(),
             sampling: self.sampling.effective(),
+            extra_headers: expand_header_templates(&self.extra_headers, session_id),
         })
     }
 }
@@ -1754,6 +1796,7 @@ fn migrate(old: LegacyConfig) -> AppConfig {
         sampling: Sampling::default(),
         vision: false,
         api_path: String::new(),
+        extra_headers: BTreeMap::new(),
     }];
 
     AppConfig {
@@ -1826,6 +1869,7 @@ mod tests {
                 sampling: Sampling::default(),
                 vision: false,
                 api_path: String::new(),
+                extra_headers: BTreeMap::new(),
             }],
             active_provider: "acme".into(),
             active_model: "m1".into(),
@@ -2151,6 +2195,50 @@ mod tests {
             !json.contains("contextWindow"),
             "没填就不该出现这个键：{json}"
         );
+    }
+
+    /// 没有 `extraHeaders` 的存量配置要照常读成空表。
+    #[test]
+    fn 老配置缺_extra_headers_也能读() {
+        let json = r#"{
+            "providers": [{
+                "id": "acme", "name": "Acme", "protocol": "openai",
+                "baseUrl": "https://api.acme.test", "apiKeyEnv": "K",
+                "models": [{ "id": "m1" }]
+            }],
+            "activeProvider": "acme",
+            "activeModel": "m1"
+        }"#;
+        let c = parse(json);
+        assert!(c.providers[0].extra_headers.is_empty());
+        assert!(
+            !serde_json::to_string(&c)
+                .expect("序列化")
+                .contains("extraHeaders"),
+            "空表不该写进 config.json"
+        );
+    }
+
+    #[test]
+    fn header_模板把会话_id_展开() {
+        let mut headers = BTreeMap::new();
+        headers.insert("x-opencode-session".into(), "${session_id}".into());
+        headers.insert("x-title".into(), "Riot ${conversation_id}".into());
+        headers.insert("plain".into(), "keep".into());
+        let out = expand_header_templates(&headers, "ses_abc");
+        assert_eq!(out["x-opencode-session"], "ses_abc");
+        assert_eq!(out["x-title"], "Riot ses_abc");
+        assert_eq!(out["plain"], "keep");
+    }
+
+    #[test]
+    fn resolve_带上_extra_headers_模板() {
+        let mut c = one_provider();
+        c.providers[0]
+            .extra_headers
+            .insert("x-opencode-session".into(), "${session_id}".into());
+        let r = c.resolve().expect("解析");
+        assert_eq!(r.extra_headers["x-opencode-session"], "${session_id}");
     }
 
     /// 主模型自己能看图时不该再走兼容模型。
@@ -2881,6 +2969,7 @@ mod tests {
             sampling: Sampling::default(),
             vision: false,
             api_path: String::new(),
+            extra_headers: BTreeMap::new(),
         };
         let e = p.api_key().expect_err("应该缺失");
         assert!(e.to_string().contains("DEFINITELY_NOT_SET_XYZ"));
@@ -2902,6 +2991,7 @@ mod tests {
             sampling: Sampling::default(),
             vision: false,
             api_path: String::new(),
+            extra_headers: BTreeMap::new(),
         };
         assert!(p.api_key().is_err());
         unsafe { std::env::remove_var("RIOT_TEST_BLANK") };
@@ -2930,6 +3020,7 @@ mod tests {
             sampling: Sampling::default(),
             vision: false,
             api_path: String::new(),
+            extra_headers: BTreeMap::new(),
         }
     }
 

@@ -43,6 +43,8 @@ pub struct OpenAiConfig {
     pub retry: RetryPolicy,
     /// 采样参数。top_k 在这个协议下**不发送**，见 [`crate::SamplingParams`]。
     pub sampling: crate::SamplingParams,
+    /// 用户配置的额外请求头（模板已在宿主展开）。
+    pub extra_headers: Vec<(String, String)>,
 }
 
 impl Default for OpenAiConfig {
@@ -57,6 +59,7 @@ impl Default for OpenAiConfig {
             idle_timeout: DEFAULT_IDLE,
             retry: RetryPolicy::default(),
             sampling: crate::SamplingParams::default(),
+            extra_headers: Vec::new(),
         }
     }
 }
@@ -77,6 +80,7 @@ impl std::fmt::Debug for OpenAiConfig {
             .field("idle_timeout", &self.idle_timeout)
             .field("retry", &self.retry)
             .field("sampling", &self.sampling)
+            .field("extra_headers", &self.extra_headers)
             .finish()
     }
 }
@@ -128,6 +132,7 @@ struct Endpoint {
     base_url: String,
     api_path: String,
     api_key: String,
+    extra_headers: Vec<(String, String)>,
 }
 
 fn build_http_request(
@@ -145,14 +150,17 @@ fn build_http_request(
             "v1",
             "chat/completions",
         ),
-        headers: vec![
-            ("content-type".into(), "application/json".into()),
-            ("accept".into(), "text/event-stream".into()),
-            (
-                "authorization".into(),
-                format!("Bearer {}", endpoint.api_key),
-            ),
-        ],
+        headers: crate::headers::merge_headers(
+            vec![
+                ("content-type".into(), "application/json".into()),
+                ("accept".into(), "text/event-stream".into()),
+                (
+                    "authorization".into(),
+                    format!("Bearer {}", endpoint.api_key),
+                ),
+            ],
+            &endpoint.extra_headers,
+        ),
         body,
     })
 }
@@ -172,6 +180,7 @@ impl Provider for OpenAiProvider {
             base_url: self.config.base_url.clone(),
             api_path: self.config.api_path.clone(),
             api_key: self.config.api_key.clone(),
+            extra_headers: self.config.extra_headers.clone(),
         };
 
         Box::pin(stream! {
@@ -401,5 +410,79 @@ mod giveup_tests {
             map_giveup(GiveUpReason::NotRetryable, &e),
             ProviderError::ContextOverflow { .. }
         ));
+    }
+}
+
+#[cfg(test)]
+mod header_tests {
+    use std::sync::Arc;
+
+    use futures::StreamExt;
+    use riot_protocol::id::MessageId;
+    use riot_protocol::message::{Message, MessageMeta, UserContent};
+    use riot_protocol::provider::{Provider, ProviderRequest, ThinkingConfig};
+    use tokio_util::sync::CancellationToken;
+
+    use super::*;
+    use crate::transport::{ScriptedResponse, ScriptedTransport};
+    use crate::watchdog::TokioClock;
+
+    fn ping() -> ProviderRequest {
+        ProviderRequest {
+            model: "m".into(),
+            messages: vec![Message::User {
+                id: MessageId::from_raw("u1"),
+                content: vec![UserContent::Text {
+                    text: "ping".into(),
+                }],
+                meta: MessageMeta::default(),
+            }],
+            system: String::new(),
+            tools: vec![],
+            max_output_tokens: Some(16),
+            thinking: ThinkingConfig::Off,
+        }
+    }
+
+    #[tokio::test]
+    async fn 额外头和默认_ua_会发出去() {
+        let t = Arc::new(ScriptedTransport::new(vec![ScriptedResponse::Fail(
+            HttpError::status(400, "no"),
+        )]));
+        let p = OpenAiProvider::new(
+            Arc::clone(&t) as Arc<dyn HttpTransport>,
+            Arc::new(TokioClock),
+            Vec::new(),
+            OpenAiConfig {
+                extra_headers: vec![("x-opencode-session".into(), "ses_abc".into())],
+                api_key: "sk-test".into(),
+                ..Default::default()
+            },
+        );
+        let _ = p
+            .stream(ping(), CancellationToken::new())
+            .collect::<Vec<_>>()
+            .await;
+
+        let r = &t.requests()[0];
+        assert!(
+            r.headers
+                .iter()
+                .any(|(k, v)| k == "x-opencode-session" && v == "ses_abc"),
+            "{:?}",
+            r.headers
+        );
+        assert!(
+            r.headers
+                .iter()
+                .any(|(k, v)| k.eq_ignore_ascii_case("user-agent") && v.starts_with("Riot/")),
+            "{:?}",
+            r.headers
+        );
+        assert!(
+            r.headers
+                .iter()
+                .any(|(k, v)| k == "authorization" && v == "Bearer sk-test")
+        );
     }
 }

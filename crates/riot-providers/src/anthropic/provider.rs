@@ -50,6 +50,8 @@ pub struct AnthropicConfig {
     pub is_subscription: bool,
     /// 采样参数。这个协议原生支持 top_k。
     pub sampling: crate::SamplingParams,
+    /// 用户配置的额外请求头（模板已在宿主展开）。
+    pub extra_headers: Vec<(String, String)>,
 }
 
 /// `[约束]` 手写而不是 derive：这个结构体里有明文 API key，而 `Debug`
@@ -68,6 +70,7 @@ impl std::fmt::Debug for AnthropicConfig {
             .field("retry", &self.retry)
             .field("is_subscription", &self.is_subscription)
             .field("sampling", &self.sampling)
+            .field("extra_headers", &self.extra_headers)
             .finish()
     }
 }
@@ -84,6 +87,7 @@ impl Default for AnthropicConfig {
             retry: RetryPolicy::default(),
             is_subscription: false,
             sampling: crate::SamplingParams::default(),
+            extra_headers: Vec::new(),
         }
     }
 }
@@ -141,12 +145,15 @@ fn build_http_request(
             "v1",
             "messages",
         ),
-        headers: vec![
-            ("content-type".into(), "application/json".into()),
-            ("accept".into(), "text/event-stream".into()),
-            ("x-api-key".into(), endpoint.api_key.clone()),
-            ("anthropic-version".into(), endpoint.api_version.clone()),
-        ],
+        headers: crate::headers::merge_headers(
+            vec![
+                ("content-type".into(), "application/json".into()),
+                ("accept".into(), "text/event-stream".into()),
+                ("x-api-key".into(), endpoint.api_key.clone()),
+                ("anthropic-version".into(), endpoint.api_version.clone()),
+            ],
+            &endpoint.extra_headers,
+        ),
         body,
     })
 }
@@ -158,6 +165,7 @@ struct Endpoint {
     api_path: String,
     api_key: String,
     api_version: String,
+    extra_headers: Vec<(String, String)>,
 }
 
 #[async_trait]
@@ -177,6 +185,7 @@ impl Provider for AnthropicProvider {
             api_path: self.config.api_path.clone(),
             api_key: self.config.api_key.clone(),
             api_version: self.config.api_version.clone(),
+            extra_headers: self.config.extra_headers.clone(),
         };
 
         Box::pin(stream! {
@@ -713,6 +722,58 @@ mod tests {
         let names: Vec<&str> = r.headers.iter().map(|(k, _)| k.as_str()).collect();
         assert!(names.contains(&"x-api-key"));
         assert!(names.contains(&"anthropic-version"), "缺版本头会被拒");
+        assert!(
+            r.headers
+                .iter()
+                .any(|(k, v)| k.eq_ignore_ascii_case("user-agent") && v.starts_with("Riot/")),
+            "默认要带 Riot UA，不能是 reqwest 那个：{names:?}"
+        );
         assert!(r.url.ends_with("/v1/messages"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn 额外头会发出去_认证头不能被覆盖() {
+        let t = Arc::new(ScriptedTransport::new(vec![ScriptedResponse::Chunks(
+            ok_chunks(),
+        )]));
+        let p = AnthropicProvider::new(
+            Arc::clone(&t) as Arc<dyn HttpTransport>,
+            Arc::new(TokioClock),
+            sections(),
+            AnthropicConfig {
+                extra_headers: vec![
+                    ("x-opencode-session".into(), "ses_abc".into()),
+                    ("x-api-key".into(), "stolen".into()),
+                    ("User-Agent".into(), "my-agent/1.0".into()),
+                ],
+                api_key: "sk-ant-real".into(),
+                ..Default::default()
+            },
+        );
+        collect(&p).await;
+
+        let r = &t.requests()[0];
+        assert!(
+            r.headers
+                .iter()
+                .any(|(k, v)| k == "x-opencode-session" && v == "ses_abc"),
+            "{:?}",
+            r.headers
+        );
+        assert_eq!(
+            r.headers
+                .iter()
+                .find(|(k, _)| k == "x-api-key")
+                .map(|(_, v)| v.as_str()),
+            Some("sk-ant-real")
+        );
+        assert_eq!(
+            r.headers
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+                .map(|(_, v)| v.as_str())
+                .collect::<Vec<_>>(),
+            vec!["my-agent/1.0"]
+        );
     }
 }

@@ -119,6 +119,11 @@ export default {
   "settings.provider.editor.apiPath.desc":
     "Leave empty to infer from the host. Fill it in when the endpoint is somewhere unusual (e.g. Zhipu's {example}).",
   "settings.provider.editor.urlPreview": "Effective request URL",
+  "settings.provider.editor.headers": "Request headers",
+  "settings.provider.editor.headers.desc":
+    "One Name=Value per line. Use {session} for the current conversation ID (stable for the whole chat). Auth headers cannot be overridden here.",
+  "settings.provider.editor.headers.placeholder": "e.g.\nx-opencode-session=${session_id}",
+  "settings.provider.editor.headers.format": "Headers must be written as Name=Value: “{line}”",
   "settings.provider.editor.key": "Key",
   "settings.provider.editor.key.saved": "Saved.",
   "settings.provider.editor.key.env": "Using environment variable {env}.",

@@ -20,8 +20,33 @@ import {
 } from "../../lib/sampling";
 import { SamplingSliders } from "../FieldSlider";
 import { ModelDialog } from "../ModelDialog";
+import { ResizableTextarea } from "../ResizableTextarea";
 import { Card, CardBlock, Group, Row } from "./layout";
 import { type AskConfirm, blurOnEnter } from "./shared";
+
+function headersToText(h?: Record<string, string> | null): string {
+  return Object.entries(h ?? {})
+    .map(([k, v]) => `${k}=${v}`)
+    .join("\n");
+}
+
+function parseHeaders(
+  text: string,
+): { ok: true; value: Record<string, string> } | { ok: false; line: string } {
+  const map: Record<string, string> = {};
+  for (const line of text.split("\n")) {
+    const item = line.trim();
+    if (!item) continue;
+    const eq = item.indexOf("=");
+    if (eq <= 0) return { ok: false, line: item };
+    map[item.slice(0, eq).trim()] = item.slice(eq + 1).trim();
+  }
+  return { ok: true, value: map };
+}
+
+function sameHeaders(a?: Record<string, string> | null, b?: Record<string, string> | null): boolean {
+  return JSON.stringify(Object.entries(a ?? {}).sort()) === JSON.stringify(Object.entries(b ?? {}).sort());
+}
 
 /** 路径留空时实际会用的默认值。两个协议各不同。 */
 function defaultPath(protocol: Protocol): string {
@@ -88,6 +113,7 @@ export function ProviderEditor({
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [sampDraft, setSampDraft] = useState<SamplingDraft>(() => samplingDraft(p.sampling));
+  const [headersDraft, setHeadersDraft] = useState(() => headersToText(p.extraHeaders));
   /**
    * 「测试连接」拿哪个模型发请求。只是这个编辑器里的一次挑选：不落配置、
    * 不碰对话在用的模型 —— 换对话用的模型在输入框上换。早先这里的圆点
@@ -121,6 +147,19 @@ export function ProviderEditor({
         setBaseUrl(p.baseUrl);
         setApiPath(p.apiPath ?? "");
       }
+    });
+  };
+
+  const commitHeaders = () => {
+    const parsed = parseHeaders(headersDraft);
+    if (!parsed.ok) {
+      onError(t("settings.provider.editor.headers.format", { line: parsed.line }));
+      setHeadersDraft(headersToText(p.extraHeaders));
+      return;
+    }
+    if (sameHeaders(parsed.value, p.extraHeaders)) return;
+    void onPatch({ extraHeaders: parsed.value }).then((ok) => {
+      if (!ok) setHeadersDraft(headersToText(p.extraHeaders));
     });
   };
 
@@ -280,6 +319,24 @@ export function ProviderEditor({
               {joinUrl(baseUrl, apiPath.trim() || defaultPath(p.protocol))}
             </p>
           </CardBlock>
+          <Row
+            title={t("settings.provider.editor.headers")}
+            desc={tx("settings.provider.editor.headers.desc", {
+              session: <code>{"${session_id}"}</code>,
+            })}
+            stack
+          >
+            <ResizableTextarea
+              className="paths-input"
+              value={headersDraft}
+              onChange={(e) => setHeadersDraft(e.target.value)}
+              onBlur={commitHeaders}
+              placeholder={t("settings.provider.editor.headers.placeholder")}
+              rows={2}
+              spellCheck={false}
+              aria-label={t("settings.provider.editor.headers")}
+            />
+          </Row>
         </Card>
       </Group>
 

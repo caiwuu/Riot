@@ -53,7 +53,9 @@ impl From<ProviderSetupError> for UiError {
 /// 按配置构建 provider。会话和"测试连接"共用 —— 两处各写一遍的话，
 /// 测试通过而正式请求失败（或反过来）这种事迟早发生。
 pub fn provider_for(model: &ResolvedModel) -> Result<Arc<dyn Provider>, String> {
-    let endpoint = model.to_endpoint().map_err(|e| e.to_string())?;
+    let endpoint = model
+        .to_endpoint(crate::config::PROBE_SESSION_ID)
+        .map_err(|e| e.to_string())?;
     provider_from_endpoint(&endpoint).map_err(|e| e.to_string())
 }
 
@@ -94,6 +96,11 @@ pub fn provider_from_endpoint(
                 api_key: key,
                 fallback_model: model.fallback_model.clone(),
                 sampling,
+                extra_headers: model
+                    .extra_headers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
                 ..Default::default()
             },
         )));
@@ -109,6 +116,11 @@ pub fn provider_from_endpoint(
             api_key: key,
             fallback_model: model.fallback_model.clone(),
             sampling,
+            extra_headers: model
+                .extra_headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
             ..Default::default()
         },
     )))
@@ -172,6 +184,7 @@ pub async fn list_models(p: &crate::config::ProviderConfig) -> Result<Vec<String
                 .header("x-api-key", key.clone())
                 .header("anthropic-version", "2023-06-01"),
         };
+        let req = apply_extra_headers(req, &p.extra_headers);
         match fetch_models(req).await {
             Ok(found) => ids.extend(found),
             Err(e) => {
@@ -250,6 +263,25 @@ fn strip_endpoint_tail(api_path: &str) -> Option<&str> {
         }
     }
     p.rsplit_once('/').map(|(head, _)| head)
+}
+
+/// 把服务方配置的额外头（含默认 User-Agent）接到清单请求上。
+///
+/// 和对话请求同一套合并规则：认证头不能被覆盖，没配 User-Agent 就带
+/// `Riot/{version}`。模板用探测会话 ID 展开 —— 拉清单没有真实对话。
+fn apply_extra_headers(
+    mut req: reqwest::RequestBuilder,
+    extra: &std::collections::BTreeMap<String, String>,
+) -> reqwest::RequestBuilder {
+    let expanded = crate::config::expand_header_templates(extra, crate::config::PROBE_SESSION_ID);
+    let merged = riot_providers::headers::merge_headers(
+        Vec::new(),
+        &expanded.into_iter().collect::<Vec<_>>(),
+    );
+    for (k, v) in merged {
+        req = req.header(k, v);
+    }
+    req
 }
 
 /// 发一次清单请求。

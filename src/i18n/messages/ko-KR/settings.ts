@@ -113,6 +113,11 @@ export default {
   "settings.provider.editor.apiPath": "API 경로",
   "settings.provider.editor.apiPath.desc": "비워 두면 호스트에서 추정합니다. 엔드포인트가 일반적인 위치에 없을 때(예: Zhipu의 {example}) 여기에 입력하세요.",
   "settings.provider.editor.urlPreview": "실제 요청 주소",
+  "settings.provider.editor.headers": "요청 헤더",
+  "settings.provider.editor.headers.desc":
+    "한 줄에 Name=Value 하나씩. {session}은 현재 대화 ID입니다(같은 대화에서는 바뀌지 않습니다). 인증 헤더는 여기서 덮어쓸 수 없습니다.",
+  "settings.provider.editor.headers.placeholder": "예:\nx-opencode-session=${session_id}",
+  "settings.provider.editor.headers.format": "헤더는 Name=Value 형식이어야 합니다: “{line}”",
   "settings.provider.editor.key": "키",
   "settings.provider.editor.key.saved": "저장되었습니다.",
   "settings.provider.editor.key.env": "환경 변수 {env}을(를) 사용하고 있습니다.",

@@ -1691,7 +1691,7 @@ impl AppState {
         model: crate::config::ResolvedModel,
         session_id: &str,
     ) -> HostResult<riot_protocol::TurnConfig> {
-        let endpoint = model.to_endpoint()?;
+        let endpoint = model.to_endpoint(session_id)?;
 
         // 可选的辅助端点:解析失败一律降级成 None(它们都是省钱/增强的
         // 可选项,配坏了不该挡住主流程),内核侧各有兜底。
@@ -1701,7 +1701,7 @@ impl AppState {
                 .resolve_named(pid, m)
                 .inspect_err(|e| tracing::warn!(error = %e, "辅助模型解析失败"))
                 .ok()?
-                .to_endpoint()
+                .to_endpoint(session_id)
                 .inspect_err(|e| tracing::warn!(error = %e, "辅助模型缺密钥"))
                 .ok()
         };
@@ -1852,7 +1852,7 @@ impl AppState {
         let (_config, _provider, model) = self.session_endpoint(session_id).await?;
         self.kernel_call(RpcRequest::SessionCompact {
             session_id: sid(session_id),
-            model: Box::new(model.to_endpoint()?),
+            model: Box::new(model.to_endpoint(session_id)?),
         })
         .await?;
         Ok(())

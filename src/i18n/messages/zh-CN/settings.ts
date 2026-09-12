@@ -113,6 +113,11 @@ export default {
   "settings.provider.editor.apiPath": "API 路径",
   "settings.provider.editor.apiPath.desc": "留空按主机猜。接口不在常规位置时（如智谱的 {example}）在这里填。",
   "settings.provider.editor.urlPreview": "实际请求地址",
+  "settings.provider.editor.headers": "请求头",
+  "settings.provider.editor.headers.desc":
+    "一行一个 Name=Value。可用 {session}（当前对话 ID，整段对话保持不变）。认证头不能从这里改。",
+  "settings.provider.editor.headers.placeholder": "例如：\nx-opencode-session=${session_id}",
+  "settings.provider.editor.headers.format": "请求头要写成 Name=Value：「{line}」",
   "settings.provider.editor.key": "密钥",
   "settings.provider.editor.key.saved": "已保存。",
   "settings.provider.editor.key.env": "正在使用环境变量 {env}。",

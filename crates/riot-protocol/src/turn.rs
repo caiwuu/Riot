@@ -8,6 +8,8 @@
 //! `[约束]` 明文 `api_key` 只在本地进程间(stdio)传输。它不落盘、不进日志、
 //! 不进事件 —— 和宿主 `auth.json` 的处理同一条线。
 
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -64,6 +66,12 @@ pub struct ModelEndpoint {
     pub fallback_model: Option<String>,
     #[serde(default)]
     pub sampling: EndpointSampling,
+    /// 已经展开过模板的额外请求头。空 = 只发协议自己的头 + 默认 User-Agent。
+    ///
+    /// 缺字段必须能读：老宿主发的 `ModelEndpoint` 没有这一项，新内核
+    /// 不能因此整轮解析失败。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra_headers: BTreeMap<String, String>,
 }
 
 impl ModelEndpoint {
@@ -264,6 +272,20 @@ mod tests {
         .expect("缺字段不能让整条请求解析失败");
         assert_eq!(v.scheduled, None);
         assert_eq!(v.nudge, None);
+    }
+
+    /// 老宿主发的端点没有 `extra_headers`，新内核必须照常读成空表。
+    #[test]
+    fn 老宿主发的_model_endpoint_缺_extra_headers_也能读() {
+        let v: ModelEndpoint = serde_json::from_value(serde_json::json!({
+            "protocol": "openai",
+            "base_url": "https://example.com",
+            "api_path": "",
+            "api_key": "k",
+            "model": "t"
+        }))
+        .expect("缺 extra_headers 不能让整轮解析失败");
+        assert!(v.extra_headers.is_empty());
     }
 
     #[test]

@@ -1471,6 +1471,15 @@ export interface ModelEndpoint {
    */
   api_path: string;
   base_url: string;
+  /**
+   * 已经展开过模板的额外请求头。空 = 只发协议自己的头 + 默认 User-Agent。
+   *
+   * 缺字段必须能读：老宿主发的 `ModelEndpoint` 没有这一项，新内核
+   * 不能因此整轮解析失败。
+   */
+  extra_headers?: {
+    [k: string]: string;
+  };
   fallback_model?: string | null;
   model: string;
   protocol: ApiProtocol;

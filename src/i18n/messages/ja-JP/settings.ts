@@ -113,6 +113,11 @@ export default {
   "settings.provider.editor.apiPath": "API パス",
   "settings.provider.editor.apiPath.desc": "空欄ならホストから推測します。エンドポイントが標準的な場所にない場合（例：Zhipu の {example}）にここで指定します。",
   "settings.provider.editor.urlPreview": "実際のリクエスト URL",
+  "settings.provider.editor.headers": "リクエストヘッダー",
+  "settings.provider.editor.headers.desc":
+    "1 行に 1 つ、Name=Value 形式。{session} は現在の会話 ID（会話中は変わりません）。認証ヘッダーはここでは上書きできません。",
+  "settings.provider.editor.headers.placeholder": "例：\nx-opencode-session=${session_id}",
+  "settings.provider.editor.headers.format": "ヘッダーは Name=Value 形式で書いてください：「{line}」",
   "settings.provider.editor.key": "キー",
   "settings.provider.editor.key.saved": "保存済み。",
   "settings.provider.editor.key.env": "環境変数 {env} を使用中。",

@@ -246,6 +246,11 @@ export interface ProviderConfig {
   fallbackModel?: string | null;
   /** 这个服务方的采样参数。会话可以临时覆盖单个字段。 */
   sampling: Sampling;
+  /**
+   * 每次请求额外带上的 HTTP 头。值里的 `${session_id}` /
+   * `${conversation_id}` 会在发请求时换成当前会话 ID。
+   */
+  extraHeaders?: Record<string, string>;
 }
 
 /**

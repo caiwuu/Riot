@@ -112,6 +112,11 @@ export default {
   "settings.provider.editor.apiPath": "API 路徑",
   "settings.provider.editor.apiPath.desc": "留空則依主機推測。介面不在常規位置時（如智譜的 {example}）在這裡填。",
   "settings.provider.editor.urlPreview": "實際請求網址",
+  "settings.provider.editor.headers": "請求標頭",
+  "settings.provider.editor.headers.desc":
+    "一行一個 Name=Value。可用 {session}（目前對話 ID，整段對話保持不變）。驗證標頭不能從這裡改。",
+  "settings.provider.editor.headers.placeholder": "例如：\nx-opencode-session=${session_id}",
+  "settings.provider.editor.headers.format": "請求標頭要寫成 Name=Value：「{line}」",
   "settings.provider.editor.key": "金鑰",
   "settings.provider.editor.key.saved": "已儲存。",
   "settings.provider.editor.key.env": "正在使用環境變數 {env}。",

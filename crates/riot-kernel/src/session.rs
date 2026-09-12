@@ -5891,6 +5891,7 @@ mod tests {
             model: "deepseek-chat".into(),
             fallback_model: None,
             sampling: riot_protocol::EndpointSampling::default(),
+            extra_headers: Default::default(),
         }
     }
 
