@@ -92,6 +92,17 @@ struct Entry {
 /// 模型这一轮加载过的工具，下一轮不该要求它再加载一遍。
 pub struct DeferredPool {
     entries: Vec<Entry>,
+    /// 不延迟的工具的名字 —— 它们一直在 tools 数组里，本来就能直接调。
+    ///
+    /// `[约束]` 这份名单必须留着，否则 `select:` 一个常驻工具只会撞上
+    /// "没找到" 加一份**延迟**工具清单，而模型据此判定那个工具不存在。
+    /// 真实发生过一次：`BrowserNavigate` 的描述指路 `ShowBrowser`，而模型
+    /// 刚用 ToolSearch 捞过整组 `Browser*`，于是顺手也来 select 它 ——
+    /// `ShowBrowser` 不在池里（名字不以 `Browser` 开头，也不 `should_defer`），
+    /// 报错读起来就是"没有这个工具"。模型放弃调用，浏览器面板一次都没弹出来。
+    ///
+    /// 只存名字，不存描述 —— 省下的那份上下文正是这套机制的全部意义。
+    resident: Vec<String>,
     discovered: Arc<RwLock<HashSet<String>>>,
 }
 
@@ -102,25 +113,28 @@ impl DeferredPool {
         ctx: &PromptContext,
         discovered: Arc<RwLock<HashSet<String>>>,
     ) -> Self {
-        let entries = tools
-            .iter()
-            .filter(|t| t.should_defer() || in_deferred_group(t.name()))
-            .map(|t| {
-                let name = t.name().to_owned();
-                let description = t.prompt(ctx);
-                let schema_json =
-                    serde_json::to_string(&t.input_schema()).unwrap_or_else(|_| "{}".into());
-                Entry {
-                    search_name_parts: split_name(&name),
-                    search_description: description.to_lowercase(),
-                    name,
-                    description,
-                    schema_json,
-                }
-            })
-            .collect();
+        let mut entries = Vec::new();
+        let mut resident = Vec::new();
+        for t in tools {
+            let name = t.name().to_owned();
+            if !(t.should_defer() || in_deferred_group(&name)) {
+                resident.push(name);
+                continue;
+            }
+            let description = t.prompt(ctx);
+            let schema_json =
+                serde_json::to_string(&t.input_schema()).unwrap_or_else(|_| "{}".into());
+            entries.push(Entry {
+                search_name_parts: split_name(&name),
+                search_description: description.to_lowercase(),
+                name,
+                description,
+                schema_json,
+            });
+        }
         Self {
             entries,
+            resident,
             discovered,
         }
     }
@@ -162,6 +176,17 @@ impl DeferredPool {
         self.entries
             .iter()
             .find(|e| e.name.eq_ignore_ascii_case(name))
+    }
+
+    /// 这个名字是常驻工具吗（一直在 tools 数组里，不需要加载）。
+    ///
+    /// 回的是**注册时的写法**，好在回话里照它的正式大小写说 —— 模型拿这句
+    /// 话去调用，名字差一个字母就是另一次失败。
+    fn resident_hit(&self, name: &str) -> Option<&str> {
+        self.resident
+            .iter()
+            .find(|n| n.eq_ignore_ascii_case(name))
+            .map(String::as_str)
     }
 }
 
@@ -305,6 +330,9 @@ impl Tool for ToolSearch {
         // 名字打错时报可用清单 —— 不报的话模型只会换个错法再试。
         if let Some(rest) = query.strip_prefix("select:") {
             let mut found: Vec<&str> = Vec::new();
+            // 常驻工具：不是"没找到"，是"不用找"。混进 missing 的后果见
+            // `DeferredPool::resident` 的说明。
+            let mut resident: Vec<&str> = Vec::new();
             let mut missing: Vec<&str> = Vec::new();
             for raw in rest.split(',') {
                 let raw = raw.trim();
@@ -313,24 +341,42 @@ impl Tool for ToolSearch {
                 }
                 match self.pool.get(raw) {
                     Some(e) => found.push(e.name.as_str()),
-                    None => missing.push(raw),
+                    None => match self.pool.resident_hit(raw) {
+                        Some(n) => resident.push(n),
+                        None => missing.push(raw),
+                    },
                 }
             }
-            if found.is_empty() {
+            if found.is_empty() && resident.is_empty() {
                 return ToolOutcome::failed(format!(
                     "没找到：{}。可用的延迟工具：{}",
                     missing.join("、"),
                     self.pool.names().join("、"),
                 ));
             }
-            let names: Vec<&str> = found.clone();
-            let mut text = self.render_matches(&names);
+            let mut text = if found.is_empty() {
+                String::new()
+            } else {
+                self.render_matches(&found)
+            };
+            if !resident.is_empty() {
+                if !text.is_empty() {
+                    text.push_str("\n\n");
+                }
+                text.push_str(&resident_note(&resident));
+            }
             if !missing.is_empty() {
                 text.push_str(&format!("\n\n（没找到：{}）", missing.join("、")));
             }
             return ToolOutcome::Ok {
                 ui_payload: Some(UiPayload::Message {
-                    text: loaded_message(&names),
+                    // 真加载了东西就照实说几个；一个都没加载（全是常驻的）
+                    // 时说"已加载 0 个工具"是句假话。
+                    text: if found.is_empty() {
+                        resident_message(&resident)
+                    } else {
+                        loaded_message(&found)
+                    },
                 }),
                 model_content: riot_protocol::message::ToolResultContent::text(text),
                 side_messages: Vec::new(),
@@ -347,6 +393,21 @@ impl Tool for ToolSearch {
                     text: loaded_message(&[name.as_str()]),
                 }),
                 model_content: riot_protocol::message::ToolResultContent::text(text),
+                side_messages: Vec::new(),
+            };
+        }
+
+        // 裸名字命中一个常驻工具。同上一条快速通道的理由，只是答案是
+        // "它本来就在"。放在关键词搜索之前：整名精确相等不会误伤搜索
+        // （搜 "browser" 不等于 "ShowBrowser"）。
+        if let Some(name) = self.pool.resident_hit(query) {
+            return ToolOutcome::Ok {
+                ui_payload: Some(UiPayload::Message {
+                    text: resident_message(&[name]),
+                }),
+                model_content: riot_protocol::message::ToolResultContent::text(resident_note(&[
+                    name,
+                ])),
                 side_messages: Vec::new(),
             };
         }
@@ -423,6 +484,27 @@ fn loaded_message(names: &[&str]) -> UiText {
     )
 }
 
+/// 卡片上那句"这些工具本来就能用"。
+fn resident_message(names: &[&str]) -> UiText {
+    ui_text!(
+        "tools.toolSearch.resident",
+        count = names.len(),
+        names = names.join(", ")
+    )
+}
+
+/// 回给模型的那句"不用加载"。
+///
+/// 要把话说满：光说"已经加载过了"会被读成"你上一轮加载的，但我不记得了"，
+/// 模型于是再搜一次。说清它**从头到尾都在**，下一步才会直接调。
+fn resident_note(names: &[&str]) -> String {
+    format!(
+        "{} 不需要加载：它们从会话开始就在你的工具列表里，现在就能直接调用。\
+         ToolSearch 只负责那些还没加载的工具。",
+        names.join("、"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,14 +514,15 @@ mod tests {
     use riot_protocol::tool::ProgressSink;
     use std::path::PathBuf;
 
-    /// 一个可配置的假延迟工具。
-    struct Deferred {
+    /// 一个可配置的假工具。`defer` 决定它进池还是进常驻名单。
+    struct Fake {
         name: String,
         desc: String,
+        defer: bool,
     }
 
     #[async_trait]
-    impl Tool for Deferred {
+    impl Tool for Fake {
         fn name(&self) -> &str {
             &self.name
         }
@@ -453,7 +536,7 @@ mod tests {
             UiText::new("d")
         }
         fn should_defer(&self) -> bool {
-            true
+            self.defer
         }
         fn check_permissions(
             &self,
@@ -468,9 +551,19 @@ mod tests {
     }
 
     fn tool(name: &str, desc: &str) -> Arc<dyn Tool> {
-        Arc::new(Deferred {
+        Arc::new(Fake {
             name: name.into(),
             desc: desc.into(),
+            defer: true,
+        })
+    }
+
+    /// 一直在 tools 数组里的工具 —— 不进池，模型无需加载就能调。
+    fn resident(name: &str) -> Arc<dyn Tool> {
+        Arc::new(Fake {
+            name: name.into(),
+            desc: "常驻".into(),
+            defer: false,
         })
     }
 
@@ -560,6 +653,136 @@ mod tests {
         );
         assert!(!p.is_hidden("mcp__a__x"));
         assert!(p.is_hidden("mcp__b__y"), "没选的不该被顺带发现");
+    }
+
+    /// select 一个常驻工具，不能报"没找到"。
+    ///
+    /// 盯着的是一次真实事故：`BrowserNavigate` 的描述末尾写着"想让用户看到
+    /// 页面就调 ShowBrowser"，而模型刚用 ToolSearch 把整组 `Browser*` 捞出来，
+    /// 于是顺手也 select 了 `ShowBrowser`。它不在池里（名字不以 `Browser`
+    /// 开头），旧代码回的是"没找到：ShowBrowser。可用的延迟工具：Browser…"
+    /// —— 模型把这句读成"这个工具不存在"，再没调过它，浏览器面板于是
+    /// 一次都没弹出来，而用户要的正是"在浏览器里打开给我看"。
+    #[tokio::test]
+    async fn select_常驻工具时说清它本来就能调() {
+        let tools = [tool("BrowserNavigate", "开页"), resident("ShowBrowser")];
+        let ts = ToolSearch::new(pool(&tools));
+
+        let text = ok_text(
+            ts.call(serde_json::json!({ "query": "select:ShowBrowser" }), ctx())
+                .await,
+        );
+        assert!(text.contains("ShowBrowser"), "要点名：{text}");
+        assert!(
+            text.contains("不需要加载") && text.contains("直接调用"),
+            "要说清它本来就能调，否则模型只会换个法子再找一遍：{text}"
+        );
+        assert!(
+            !text.contains("没找到"),
+            "一个能调的工具被说成没找到，模型就当它不存在了：{text}"
+        );
+    }
+
+    /// 一半要加载、一半本来就在：两件事都要说，而且分得清。
+    #[tokio::test]
+    async fn select_混着延迟和常驻时两边都交代() {
+        let tools = [tool("BrowserNavigate", "开页"), resident("ShowBrowser")];
+        let p = pool(&tools);
+        let ts = ToolSearch::new(Arc::clone(&p));
+
+        let text = ok_text(
+            ts.call(
+                serde_json::json!({ "query": "select:BrowserNavigate,ShowBrowser" }),
+                ctx(),
+            )
+            .await,
+        );
+        assert!(text.contains("开页"), "延迟的那个要给出定义：{text}");
+        assert!(text.contains("不需要加载"), "常驻的那个要交代：{text}");
+        assert!(!p.is_hidden("BrowserNavigate"), "取回后不再隐藏");
+    }
+
+    /// 常驻名单不能把真正的错名也一起兜住 —— 打错字还是要报错指路。
+    #[tokio::test]
+    async fn select_不存在的名字照旧报清单() {
+        let tools = [tool("BrowserNavigate", "开页"), resident("ShowBrowser")];
+        let ts = ToolSearch::new(pool(&tools));
+        match ts
+            .call(serde_json::json!({ "query": "select:ShowBowser" }), ctx())
+            .await
+        {
+            ToolOutcome::Failed {
+                error_for_model, ..
+            } => assert!(
+                error_for_model.contains("BrowserNavigate"),
+                "要带清单：{error_for_model}"
+            ),
+            other => panic!("拼错的名字该失败：{other:?}"),
+        }
+    }
+
+    /// 不带 `select:` 前缀直接给常驻工具名，走同一条答案。
+    #[tokio::test]
+    async fn 裸名字命中常驻工具也说清() {
+        let tools = [tool("BrowserNavigate", "开页"), resident("ShowBrowser")];
+        let ts = ToolSearch::new(pool(&tools));
+        let text = ok_text(
+            ts.call(serde_json::json!({ "query": "ShowBrowser" }), ctx())
+                .await,
+        );
+        assert!(text.contains("不需要加载"), "{text}");
+    }
+
+    /// 常驻名单只按整名匹配，不能把关键词搜索劫走。
+    #[tokio::test]
+    async fn 关键词不会被常驻名单劫持() {
+        let tools = [tool("BrowserNavigate", "开页"), resident("ShowBrowser")];
+        let ts = ToolSearch::new(pool(&tools));
+        let text = ok_text(
+            ts.call(serde_json::json!({ "query": "browser" }), ctx())
+                .await,
+        );
+        assert!(
+            text.contains("BrowserNavigate"),
+            "「browser」是搜索词，不是 ShowBrowser 这个名字：{text}"
+        );
+    }
+
+    /// 拿**真实**的内建工具集走一遍。
+    ///
+    /// 假工具测的是分支逻辑，测不出配置漂移：哪天有人给 `ShowBrowser` 改个
+    /// 名字、或者给某个常驻工具加上 `Browser` 前缀，它就会悄悄掉进延迟池，
+    /// 而这条链路上没有任何编译错误。这里点名的三个都是**延迟工具的描述里
+    /// 提到过**的（`BrowserNavigate` 指路 `ShowBrowser` 和 `WebFetch`），
+    /// 也就是模型最可能顺手去 select 的那几个。
+    #[tokio::test]
+    async fn 真实工具集里被指路的常驻工具都答得上来() {
+        let tools = crate::tools::builtin();
+        let ts = ToolSearch::new(pool(&tools));
+
+        for name in ["ShowBrowser", "WebFetch", "PreviewFile"] {
+            let text = ok_text(
+                ts.call(
+                    serde_json::json!({ "query": format!("select:{name}") }),
+                    ctx(),
+                )
+                .await,
+            );
+            assert!(
+                text.contains("不需要加载"),
+                "{name} 一直在工具列表里，不能被说成没找到：{text}"
+            );
+        }
+
+        // 反过来：真正延迟的那组照旧要能取回完整定义。
+        let text = ok_text(
+            ts.call(
+                serde_json::json!({ "query": "select:BrowserNavigate" }),
+                ctx(),
+            )
+            .await,
+        );
+        assert!(text.contains("properties"), "延迟工具要给出 schema：{text}");
     }
 
     #[tokio::test]

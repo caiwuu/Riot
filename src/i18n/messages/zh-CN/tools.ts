@@ -116,6 +116,7 @@ export default {
   "tools.skill.loaded": "已加载技能「{name}」（{count} 字符）",
   "tools.toolSearch.query": "查找工具：{query}",
   "tools.toolSearch.loaded": "已加载 {count} 个工具：{names}",
+  "tools.toolSearch.resident": "{names} 本来就能直接调用，无需加载",
   "tools.schedule.create": "创建定时任务「{name}」",
   "tools.schedule.createAny": "创建定时任务",
   "tools.schedule.list": "查看定时任务",

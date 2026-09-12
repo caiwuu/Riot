@@ -110,6 +110,7 @@ export default {
   "tools.skill.loaded": "スキル「{name}」を読み込みました（{count} 文字）",
   "tools.toolSearch.query": "ツールを検索：{query}",
   "tools.toolSearch.loaded": "{count} 個のツールを読み込みました：{names}",
+  "tools.toolSearch.resident": "{names} は最初から呼び出せます。読み込みは不要です",
   "tools.schedule.create": "スケジュールタスク「{name}」を作成",
   "tools.schedule.createAny": "スケジュールタスクを作成",
   "tools.schedule.list": "スケジュールタスクを表示",

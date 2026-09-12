@@ -110,6 +110,7 @@ export default {
   "tools.skill.loaded": "Skill 「{name}」을(를) 불러왔습니다({count}자)",
   "tools.toolSearch.query": "도구 찾기: {query}",
   "tools.toolSearch.loaded": "도구 {count}개를 불러왔습니다: {names}",
+  "tools.toolSearch.resident": "{names}은(는) 처음부터 호출할 수 있어 불러올 필요가 없습니다",
   "tools.schedule.create": "예약 작업 「{name}」 만들기",
   "tools.schedule.createAny": "예약 작업 만들기",
   "tools.schedule.list": "예약 작업 보기",

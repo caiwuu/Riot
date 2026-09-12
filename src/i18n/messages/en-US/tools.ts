@@ -111,6 +111,7 @@ export default {
   "tools.skill.loaded": "Loaded the \u201c{name}\u201d skill ({count} characters)",
   "tools.toolSearch.query": "Search tools for {query}",
   "tools.toolSearch.loaded": "Loaded {count} tools: {names}",
+  "tools.toolSearch.resident": "{names} was already callable; nothing to load",
   "tools.schedule.create": "Create the scheduled task \u201c{name}\u201d",
   "tools.schedule.createAny": "Create a scheduled task",
   "tools.schedule.list": "List scheduled tasks",

@@ -111,6 +111,7 @@ export default {
   "tools.skill.loaded": "已載入技能「{name}」（{count} 字元）",
   "tools.toolSearch.query": "尋找工具：{query}",
   "tools.toolSearch.loaded": "已載入 {count} 個工具：{names}",
+  "tools.toolSearch.resident": "{names} 本來就能直接呼叫，不需載入",
   "tools.schedule.create": "建立排程任務「{name}」",
   "tools.schedule.createAny": "建立排程任務",
   "tools.schedule.list": "查看排程任務",
