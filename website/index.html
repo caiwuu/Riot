@@ -4,15 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#fafafa" />
-    <title>Riot · 跑在本机的 AI Agent</title>
+    <title>Riot · Codex 的开源替代</title>
     <meta
       name="description"
-      content="Riot 是跑在本机的 AI Agent。把对话、代码、终端、浏览器和文档放进同一个工作空间。Rust 独立内核，自选模型，支持 macOS 与 Windows。"
+      content="Riot 是 Codex 的开源替代：独立 Rust 内核，本地执行。兼顾 Cursor 的工作台，与 Claude Code 的权限、Skills 和 Hooks。自选模型，支持 macOS 与 Windows。"
     />
-    <meta property="og:title" content="Riot · 跑在本机的 AI Agent" />
+    <meta property="og:title" content="Riot · Codex 的开源替代" />
     <meta
       property="og:description"
-      content="你的模型，你的工作空间。用 Riot 在本机完成代码、浏览器与文档任务。"
+      content="Codex 的开源替代。Cursor 的工作台，Claude Code 的权限与扩展。模型是你的，执行在本机。"
     />
     <meta property="og:type" content="website" />
     <link rel="icon" href="assets/riot-logo.png" />
@@ -72,19 +72,19 @@
       <section class="hero" aria-labelledby="hero-title">
         <div class="container">
           <div class="hero-topline">
-            <span>独立内核 · 本地执行</span><span>macOS / Windows</span>
+            <span>开源替代 Codex</span><span>macOS / Windows</span>
           </div>
           <div class="hero-copy">
             <p class="eyebrow">
-              <span class="accent-mark" aria-hidden="true"></span> YOUR MACHINE.
-              YOUR AGENT.
+              <span class="accent-mark" aria-hidden="true"></span> OPEN
+              ALTERNATIVE TO CODEX
             </p>
             <h1 id="hero-title">Riot<span class="brand-period">.</span></h1>
-            <p class="hero-heading">跑在本机的 AI Agent</p>
+            <p class="hero-heading">Codex 的开源替代</p>
             <p class="hero-sub">
-              从一个想法，到一次交付。<br
+              兼顾 Cursor 的工作台，与 Claude Code 的权限和扩展。<br
                 class="mobile-break"
-              />代码、浏览器、终端与文档，在同一处协作。
+              />模型是你的，执行在本机。
             </p>
             <div class="hero-actions">
               <a
@@ -147,42 +147,43 @@
       >
         <div class="container">
           <div class="section-heading">
-            <p class="eyebrow">01 / 工作空间</p>
+            <p class="eyebrow">01 / 定位</p>
             <div>
-              <h2 id="product-title">从理解上下文，<br />到完成下一步。</h2>
+              <h2 id="product-title">独立内核。<br />一扇窗口。权限由你定。</h2>
               <p class="section-sub">
-                打开项目，交代任务。Riot
-                读取文件、编写代码、运行命令，让思考与执行留在同一个工作空间。
+                打开项目，交代任务。内核在本机跑，工作台按 Cursor
+                摊开，权限和扩展按 Claude Code 收住。
               </p>
             </div>
           </div>
           <div class="pillars">
             <article class="pillar">
               <span class="pillar-index">01</span>
-              <h3>上下文，连在一起</h3>
+              <h3>开源替代 Codex</h3>
               <p>
-                对话、终端、浏览器和代码变更共享环境。用
-                <code>@</code> 引用文件，或直接拖入附件。
+                宿主与内核分进程，崩溃不拖垮窗口。读仓库、改文件、跑命令、写
+                Word / Excel / PPT / PDF，都在你的机器上。模型用你自己的
+                API，不绑一家云。
               </p>
-              <span class="pillar-foot">一个窗口 · 持续协作</span>
+              <span class="pillar-foot">独立内核 · 本地执行</span>
             </article>
             <article class="pillar">
               <span class="pillar-index">02</span>
-              <h3>执行，发生在本机</h3>
+              <h3>Cursor 的工作台</h3>
               <p>
-                Rust
-                内核独立运行，与桌面界面分离。读取仓库、修改文件和运行工具，都在你的机器上完成。
+                对话、终端、浏览器和 Git
+                改动在同一扇窗口。规划写成文件，点「构建」才动手；多任务把活分给后台子
+                agent。<code>@</code> 引用，或直接拖入附件。
               </p>
-              <span class="pillar-foot">Rust 内核 · 进程隔离</span>
+              <span class="pillar-foot">一扇窗口 · 规划与多任务</span>
             </article>
             <article class="pillar">
               <span class="pillar-index">03</span>
-              <h3>节奏，由你掌握</h3>
+              <h3>Claude Code 的扩展</h3>
               <p>
-                先审阅计划，再开始构建。通过六档权限模式，按任务需要决定 Agent
-                的自主程度。
+                Skills、斜杠命令、Hooks、MCP、项目记忆。六档权限，从每次询问到无人值守。敏感操作始终先问。
               </p>
-              <span class="pillar-foot">任务规划 · 权限控制</span>
+              <span class="pillar-foot">Skills · Hooks · 分档权限</span>
             </article>
           </div>
         </div>
@@ -197,13 +198,13 @@
             <p class="eyebrow">02 / 核心能力</p>
             <div>
               <h2 id="features-title">
-                一个工作空间，<br /><span class="muted-heading"
-                  >更多种可能。</span
+                工作台之外，<br /><span class="muted-heading"
+                  >这些也能做。</span
                 >
               </h2>
               <p class="section-sub">
                 远程接续、多 Agent
-                分工、定时执行。从浏览器操作到文档交付，让每一种能力都参与到实际工作中。
+                分工、定时执行。从浏览器操作到文档交付，都发生在你自己的机器上。
               </p>
             </div>
           </div>
@@ -447,9 +448,9 @@
           <div class="download-heading">
             <div>
               <p class="eyebrow">04 / 开始使用</p>
-              <h2 id="download-title">下一件事，<br />交给 Riot 一起做。</h2>
+              <h2 id="download-title">在自己的机器上，<br />跑起来。</h2>
             </div>
-            <p>你的模型，你的机器。<br />从这里开始。</p>
+            <p>开源替代 Codex。<br />模型是你的。</p>
           </div>
           <p class="download-detect" id="download-detect">
             选择适合你的桌面版本。
@@ -531,7 +532,7 @@
                 alt=""
               /><span>Riot</span></a
             >
-            <p>跑在本机，着眼下一步。</p>
+            <p>Codex 的开源替代。跑在本机。</p>
           </div>
           <nav aria-label="资源链接">
             <a
