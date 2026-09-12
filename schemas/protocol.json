@@ -1553,7 +1553,7 @@
           "type": "boolean"
         },
         "model_origin": {
-          "description": "产生这条消息的模型。thinking signature 与模型绑定，\n降级换模型时要靠这个字段找出需要剥离签名的消息。\n由 INV-9 断言保证。",
+          "description": "产生这条消息的模型。thinking signature 与模型绑定，\n降级换模型时要靠这个字段找出需要剥离签名的消息。\n由 INV-9 断言保证。\n\n`[约束]` 记的是 provider **发请求时用的** model 名（降级后是降级到的\n那个），不是服务端回显的。回显会把别名解析成带日期的快照\n（`gpt-5` → `gpt-5-2025-08-07`），和会话配的名字按字符串比就永远不等，\n自己的签名会被当成外模型的剥掉。",
           "type": [
             "string",
             "null"

@@ -17,6 +17,7 @@ pub(crate) mod errors;
 pub mod headers;
 pub mod http;
 pub mod openai;
+pub(crate) mod origin;
 pub mod retry;
 pub mod sse;
 pub mod transport;

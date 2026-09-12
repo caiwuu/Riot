@@ -199,6 +199,13 @@ impl Provider for OpenAiProvider {
                     return;
                 }
 
+                // 这一次真正发出去的 model 名，回来盖到助手消息上（见
+                // `crate::origin`）。降级后就是降级到的那个。
+                let sent_model = retry_ctx
+                    .model_override
+                    .clone()
+                    .unwrap_or_else(|| req.model.clone());
+
                 // top_k 刻意不注入：OpenAI 官方端点会以 400 拒绝未知参数
                 let http_req = if endpoint.openai_api.is_responses() {
                     let mut wire = super::responses::build_request(&req, &system, &retry_ctx);
@@ -272,7 +279,7 @@ impl Provider for OpenAiProvider {
                         if cancel.is_cancelled() {
                             return;
                         }
-                        yield ev;
+                        yield crate::origin::stamp_model_origin(ev, &sent_model);
                     }
                 } else {
                     let decoded = decode_stream(byte_stream);
@@ -282,7 +289,7 @@ impl Provider for OpenAiProvider {
                         if cancel.is_cancelled() {
                             return;
                         }
-                        yield ev;
+                        yield crate::origin::stamp_model_origin(ev, &sent_model);
                     }
                 }
                 return;
@@ -578,5 +585,67 @@ mod header_tests {
         );
         let body: serde_json::Value = serde_json::from_slice(&t.requests()[0].body).expect("json");
         assert!(body.get("input").is_some(), "{body}");
+    }
+
+    fn origin_of(events: &[ProviderEvent]) -> Option<String> {
+        events.iter().find_map(|e| match e {
+            ProviderEvent::Message(Message::Assistant { meta, .. }) => meta.model_origin.clone(),
+            _ => None,
+        })
+    }
+
+    /// OpenAI 把 `gpt-5` 回显成 `gpt-5-2025-08-07`。`model_origin` 得是请求名，
+    /// 否则同一会话的每条助手消息都被 INV-9 判成外模型。两种形态都盯。
+    #[tokio::test]
+    async fn 回显快照名时_model_origin_仍是请求的名字() {
+        let chat = concat!(
+            r#"data: {"id":"c1","model":"m-2026-01-01","choices":[{"delta":{"content":"hi"}}]}"#,
+            "\n\n",
+            "data: [DONE]\n\n",
+        );
+        let t = Arc::new(ScriptedTransport::new(vec![ScriptedResponse::Chunks(
+            vec![chat.as_bytes().to_vec()],
+        )]));
+        let p = OpenAiProvider::new(
+            Arc::clone(&t) as Arc<dyn HttpTransport>,
+            Arc::new(TokioClock),
+            Vec::new(),
+            OpenAiConfig {
+                api_key: "sk-test".into(),
+                ..Default::default()
+            },
+        );
+        let events = p
+            .stream(ping(), CancellationToken::new())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(origin_of(&events).as_deref(), Some("m"), "{events:?}");
+
+        let responses = concat!(
+            r#"data: {"type":"response.created","response":{"id":"resp_1","model":"m-2026-01-01"}}"#,
+            "\n\n",
+            r#"data: {"type":"response.output_text.delta","delta":"hi"}"#,
+            "\n\n",
+            r#"data: {"type":"response.completed","response":{"id":"resp_1","model":"m-2026-01-01","output":[{"type":"message","content":[{"type":"output_text","text":"hi"}]}]}}"#,
+            "\n\n",
+        );
+        let t = Arc::new(ScriptedTransport::new(vec![ScriptedResponse::Chunks(
+            vec![responses.as_bytes().to_vec()],
+        )]));
+        let p = OpenAiProvider::new(
+            Arc::clone(&t) as Arc<dyn HttpTransport>,
+            Arc::new(TokioClock),
+            Vec::new(),
+            OpenAiConfig {
+                openai_api: OpenaiApi::Responses,
+                api_key: "sk-test".into(),
+                ..Default::default()
+            },
+        );
+        let events = p
+            .stream(ping(), CancellationToken::new())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(origin_of(&events).as_deref(), Some("m"), "{events:?}");
     }
 }

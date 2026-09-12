@@ -265,7 +265,9 @@ impl Provider for AnthropicProvider {
                     if cancel.is_cancelled() {
                         return;
                     }
-                    yield ev;
+                    // 盖的是发出去的 model（降级后就是降级到的那个），不是
+                    // 服务端回显的别名解析结果。理由见 `crate::origin`。
+                    yield crate::origin::stamp_model_origin(ev, &wire.model);
                 }
                 return;
             }
@@ -630,11 +632,45 @@ mod tests {
             vec!["claude-x", "claude-x", "claude-x", "claude-haiku"],
             "连续 3 次过载后应该换模型，而不是继续等同一个过载的模型"
         );
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, ProviderEvent::Message(_)))
+        let origin = events.iter().find_map(|e| match e {
+            ProviderEvent::Message(Message::Assistant { meta, .. }) => meta.model_origin.clone(),
+            _ => None,
+        });
+        assert_eq!(
+            origin.as_deref(),
+            Some("claude-haiku"),
+            "降级后答的是 haiku，签名也是 haiku 的；下一轮回到主模型时要靠这个剥掉它"
         );
+    }
+
+    /// 别名请求、快照回显：`model_origin` 必须是**发出去的**名字。
+    ///
+    /// 用回显名的话，`claude-x` 的会话每条助手消息都被标成 `claude-x-20260101`，
+    /// INV-9 判成外模型，自己的 thinking signature 每轮被剥 —— 表现是思考退化
+    /// 成正文、缓存全 miss，开思考的工具续轮直接被 Anthropic 拒。
+    #[tokio::test(start_paused = true)]
+    async fn 服务端回显快照名时_model_origin_仍是请求的名字() {
+        let chunks = concat!(
+            r#"data: {"type":"message_start","message":{"id":"msg_1","model":"claude-x-20260101","usage":{"input_tokens":10,"output_tokens":1}}}"#,
+            "\n\n",
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            "\n\n",
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"好的"}}"#,
+            "\n\n",
+            r#"data: {"type":"content_block_stop","index":0}"#,
+            "\n\n",
+            r#"data: {"type":"message_stop"}"#,
+            "\n\n",
+        );
+        let (p, _t) = provider(vec![ScriptedResponse::Chunks(vec![
+            chunks.as_bytes().to_vec(),
+        ])]);
+        let events = collect(&p).await;
+        let origin = events.iter().find_map(|e| match e {
+            ProviderEvent::Message(Message::Assistant { meta, .. }) => meta.model_origin.clone(),
+            _ => None,
+        });
+        assert_eq!(origin.as_deref(), Some("claude-x"));
     }
 
     #[tokio::test(start_paused = true)]
