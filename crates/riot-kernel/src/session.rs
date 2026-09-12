@@ -1968,6 +1968,9 @@ impl Session {
     /// 生成截到助手消息前面那条提问、不改字；这里截到被编辑的提问本身、
     /// 换掉它的文字。`images` 为 `None` 时图片原位保留；`Some` 整表替换。
     /// `@` 引用不动。忙着的时候拒绝，理由同重新生成。
+    // 和 regenerate 同一组轮次参数（model / caps / sink / limits）再加上
+    // 编辑内容；打包成 struct 只是把 8 个参数换个地方数。
+    #[allow(clippy::too_many_arguments)]
     pub async fn resend_from(
         self: &Arc<Self>,
         message_id: &str,
